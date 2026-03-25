@@ -1,5 +1,10 @@
 import { Context } from 'hono';
-import { CONTENT_TYPES, HEADER_KEYS, POWERED_BY, VALID_PROVIDERS } from '../../globals';
+import {
+  CONTENT_TYPES,
+  HEADER_KEYS,
+  POWERED_BY,
+  VALID_PROVIDERS,
+} from '../../globals';
 import { configSchema } from './schema/config';
 import { Environment } from '../../utils/env';
 
@@ -226,7 +231,7 @@ export const requestValidator = (c: Context, next: any) => {
       );
     }
   }
-  
+
   if (requestHeaders[HEADER_KEYS.FORWARD_HEADERS]) {
     const forwardHeaders: string[] =
       requestHeaders[HEADER_KEYS.FORWARD_HEADERS].split(',');
