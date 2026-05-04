@@ -1,0 +1,26 @@
+---
+title: SDK Overview
+description: Client libraries for the Prompt Shields Partner API
+---
+
+# SDKs
+
+Official client libraries for consuming the Partner API. These wrap authentication, pagination, and error handling so you can focus on your integration logic.
+
+<CardGroup cols={2}>
+  <Card title="Python" icon="python" href="/sdks/python">
+    `pip install prompt-shields-partner`
+  </Card>
+  <Card title="TypeScript" icon="js" href="/sdks/typescript">
+    `npm install @prompt-shields/partner`
+  </Card>
+</CardGroup>
+
+## When to Use an SDK vs Raw API
+
+| Use SDK when... | Use raw API when... |
+|-----------------|---------------------|
+| Building a custom integration | Using a no-code tool (Integration Builder) |
+| Need pagination helpers | Making a single test request |
+| Want typed responses | Your language isn't supported |
+| Need automatic token refresh | Debugging with curl |

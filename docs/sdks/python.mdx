@@ -1,0 +1,115 @@
+---
+title: Python SDK
+description: Python client for the Prompt Shields Partner API
+---
+
+# Python SDK
+
+## Installation
+
+```bash
+pip install prompt-shields-partner
+```
+
+## Quick Start
+
+```python
+from prompt_shields_partner import PartnerClient
+
+client = PartnerClient(
+    client_id="ps-partner-ardoq-abc123",
+    client_secret="sk-partner-secret-xyz789",
+    # Or use API key:
+    # api_key="ps-pk-your-key-here",
+)
+
+# List all assets
+assets = client.assets.list(business_unit="HR", confidence="high")
+for asset in assets:
+    print(f"{asset.vendor}/{asset.model} - {asset.use_case_name}")
+
+# Get changes since last sync
+changes = client.changes.list(since="2026-03-25T10:00:00Z")
+for change in changes:
+    print(f"{change.change_type}: {change.asset.use_case_name}")
+```
+
+## Authentication
+
+The SDK handles OAuth token management automatically:
+
+```python
+# OAuth (recommended) — tokens are cached and auto-refreshed
+client = PartnerClient(
+    client_id="ps-partner-ardoq-abc123",
+    client_secret="sk-partner-secret-xyz789",
+)
+
+# API key fallback
+client = PartnerClient(
+    api_key="ps-pk-your-key-here",
+)
+
+# Custom base URL (sandbox)
+client = PartnerClient(
+    client_id="...",
+    client_secret="...",
+    base_url="https://sandbox.api.promptshields.io",
+)
+```
+
+## Pagination
+
+The SDK auto-paginates. Use `list()` to iterate all results or `list_page()` for manual control:
+
+```python
+# Auto-pagination (iterates all pages)
+all_assets = list(client.assets.list(limit=200))
+
+# Manual pagination
+page = client.assets.list_page(limit=50)
+while page.meta.has_more:
+    for asset in page.data:
+        process(asset)
+    page = client.assets.list_page(limit=50, after=page.meta.next_cursor)
+```
+
+## Full Sync Example
+
+```python
+from prompt_shields_partner import PartnerClient
+
+client = PartnerClient(api_key="ps-pk-your-key-here")
+
+# Initial full export
+export = client.export.get()
+sync_token = export.meta.sync_token
+print(f"Exported {export.meta.total} assets")
+
+# Save sync_token for next run...
+
+# Delta sync (next run)
+changes = list(client.changes.list(since=sync_token))
+for change in changes:
+    if change.change_type == "created":
+        create_in_ea_tool(change.asset)
+    elif change.change_type == "updated":
+        update_in_ea_tool(change.asset, change.changed_fields)
+    elif change.change_type == "deactivated":
+        deactivate_in_ea_tool(change.asset)
+```
+
+## Error Handling
+
+```python
+from prompt_shields_partner import PartnerClient, APIError, RateLimitError
+
+client = PartnerClient(api_key="ps-pk-your-key-here")
+
+try:
+    asset = client.assets.get("019e1a2b-...")
+except RateLimitError as e:
+    print(f"Rate limited. Retry after {e.retry_after} seconds")
+except APIError as e:
+    print(f"API error {e.status}: {e.title} - {e.detail}")
+```

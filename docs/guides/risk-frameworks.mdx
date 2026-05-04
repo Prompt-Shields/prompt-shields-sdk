@@ -1,0 +1,66 @@
+---
+title: Risk Frameworks
+description: Mapping AI assets to governance frameworks
+---
+
+# Risk Frameworks
+
+Each AI asset can be mapped to one or more governance frameworks with a risk category and risk level.
+
+## Supported Frameworks
+
+| Framework | Description |
+|-----------|-------------|
+| `NIST_AI_RMF` | NIST AI Risk Management Framework |
+| `ISO_42001` | ISO/IEC 42001 AI Management System |
+| `EU_AI_ACT` | European Union AI Act |
+| `custom` | Organization-specific framework |
+
+## Risk Categories
+
+| Category | Description |
+|----------|-------------|
+| `strategic` | Risk to business strategy or competitive position |
+| `operational` | Risk to day-to-day operations or service delivery |
+| `compliance` | Risk of regulatory non-compliance |
+| `cyber` | Risk of data breach or security incident |
+| `reputational` | Risk to brand or public trust |
+
+## Risk Levels
+
+| Level | Meaning |
+|-------|---------|
+| `critical` | Immediate action required |
+| `high` | Action required within defined SLA |
+| `medium` | Monitor and plan remediation |
+| `low` | Acceptable risk, periodic review |
+
+## Example
+
+An AI asset using GPT-4o for interview screening with candidate PII:
+
+```json
+{
+  "data": [
+    {
+      "risk_category": "compliance",
+      "risk_level": "high",
+      "framework": "EU_AI_ACT"
+    },
+    {
+      "risk_category": "operational",
+      "risk_level": "medium",
+      "framework": "NIST_AI_RMF"
+    },
+    {
+      "risk_category": "reputational",
+      "risk_level": "high",
+      "framework": "ISO_42001"
+    }
+  ]
+}
+```
+
+## How Risks Map to Ardoq
+
+In Ardoq's metamodel, each risk mapping becomes a **Risk component** linked to the AI Use Case via a `has_risk` reference. This allows CISOs to filter the Ardoq landscape by risk level or framework.

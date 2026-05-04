@@ -1,0 +1,45 @@
+---
+title: LeanIX
+description: Integration guide for LeanIX EAM
+---
+
+# LeanIX Integration
+
+Connect Prompt Shields to LeanIX to enrich your IT landscape with discovered AI assets.
+
+<Info>
+  LeanIX integration is planned for Phase 2. This guide describes the
+  recommended approach using the Partner API.
+</Info>
+
+## Recommended Approach
+
+LeanIX supports REST API integrations via its **Integration Hub**. Use the Partner API to pull AI assets and map them to LeanIX Fact Sheets.
+
+### Mapping
+
+| PS Data | LeanIX Fact Sheet Type |
+|---------|----------------------|
+| AI Asset | IT Component |
+| AI Vendor | Provider |
+| Business Unit | Organization |
+| Data Flow | Data Flow (interface) |
+| Risk Mapping | Risk |
+
+### Authentication
+
+LeanIX Integration Hub supports OAuth 2.0 Client Credentials:
+
+```
+Token URL: https://api.promptshields.io/oauth/token
+Client ID: ps-partner-leanix-xxx
+Client Secret: sk-partner-secret-xxx
+Grant Type: client_credentials
+```
+
+### Sync Pattern
+
+1. Use `GET /partner/v1/export` for initial load
+2. Schedule `GET /partner/v1/changes?since={last_sync}` every 4 hours
+3. Map each asset to an IT Component Fact Sheet
+4. Create Provider relations from vendor data

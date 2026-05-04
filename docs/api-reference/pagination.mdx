@@ -1,0 +1,123 @@
+---
+title: Pagination
+description: Cursor-based pagination for list endpoints
+---
+
+# Pagination
+
+All list endpoints use **cursor-based pagination** for consistent, efficient paging through large result sets.
+
+## How It Works
+
+1. Make your first request (optionally with `limit`)
+2. Check `meta.has_more` in the response
+3. If `true`, pass `meta.next_cursor` as the `after` parameter in your next request
+4. Repeat until `has_more` is `false`
+
+## Parameters
+
+| Parameter | Type | Default | Max | Description |
+|-----------|------|---------|-----|-------------|
+| `limit` | integer | 50 | 200 | Records per page |
+| `after` | uuid | - | - | Cursor from `meta.next_cursor` of previous response |
+
+## Example
+
+**First page:**
+```bash
+GET /partner/v1/assets?limit=2
+```
+
+```json
+{
+  "data": [
+    { "id": "019e0001-...", "vendor": "openai", ... },
+    { "id": "019e0002-...", "vendor": "anthropic", ... }
+  ],
+  "meta": {
+    "total": 47,
+    "has_more": true,
+    "next_cursor": "019e0002-..."
+  }
+}
+```
+
+**Next page:**
+```bash
+GET /partner/v1/assets?limit=2&after=019e0002-...
+```
+
+```json
+{
+  "data": [
+    { "id": "019e0003-...", "vendor": "google", ... },
+    { "id": "019e0004-...", "vendor": "openai", ... }
+  ],
+  "meta": {
+    "total": 47,
+    "has_more": true,
+    "next_cursor": "019e0004-..."
+  }
+}
+```
+
+## Full Pagination Loop
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    import httpx
+
+    all_assets = []
+    cursor = None
+
+    while True:
+        params = {"limit": 200}
+        if cursor:
+            params["after"] = cursor
+
+        resp = httpx.get(
+            "https://api.promptshields.io/partner/v1/assets",
+            params=params,
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        body = resp.json()
+        all_assets.extend(body["data"])
+
+        if not body["meta"]["has_more"]:
+            break
+        cursor = body["meta"]["next_cursor"]
+
+    print(f"Fetched {len(all_assets)} assets")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const allAssets: Asset[] = [];
+    let cursor: string | null = null;
+
+    while (true) {
+      const params = new URLSearchParams({ limit: '200' });
+      if (cursor) params.set('after', cursor);
+
+      const resp = await fetch(
+        `https://api.promptshields.io/partner/v1/assets?${params}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const body = await resp.json();
+      allAssets.push(...body.data);
+
+      if (!body.meta.has_more) break;
+      cursor = body.meta.next_cursor;
+    }
+
+    console.log(`Fetched ${allAssets.length} assets`);
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+  **Why cursor-based?** Unlike offset-based pagination, cursors remain stable
+  when new assets are discovered between page requests. This prevents duplicate
+  or missing records during sync.
+</Info>

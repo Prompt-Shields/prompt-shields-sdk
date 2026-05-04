@@ -1,0 +1,60 @@
+---
+title: API Overview
+description: Partner API endpoints, versioning, and conventions
+---
+
+# API Overview
+
+Base URL: `https://api.promptshields.io`
+
+Sandbox: `https://sandbox.api.promptshields.io` (synthetic data, safe for testing)
+
+## Endpoint Groups
+
+| Group | Prefix | Description |
+|-------|--------|-------------|
+| **Assets** | `/partner/v1/assets` | AI asset registry (list, detail, data flows, risks) |
+| **Taxonomy** | `/partner/v1/vendors`, `/models`, `/business-units` | Distinct values for filtering |
+| **Sync** | `/partner/v1/changes`, `/export` | Delta feed and bulk export for EA tools |
+| **Auth** | `/oauth/token` | OAuth 2.0 token endpoint |
+| **Health** | `/partner/v1/health` | API health check (no auth required) |
+
+## Versioning
+
+The API is versioned via URL path (`/partner/v1/`). Breaking changes will increment the version number. Non-breaking additions (new fields, new endpoints) are released without version changes.
+
+## Request/Response Conventions
+
+**Content-Type:** All responses are `application/json`.
+
+**Response envelope:** All list endpoints return:
+```json
+{
+  "data": [...],
+  "meta": {
+    "total": 47,
+    "has_more": true,
+    "next_cursor": "019e1a2b..."
+  }
+}
+```
+
+**Single resource endpoints** return the object directly (no envelope).
+
+**Errors** follow [RFC 7807 Problem Details](https://www.rfc-editor.org/rfc/rfc7807):
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Asset not found"
+}
+```
+
+## Field Conventions
+
+- **IDs:** UUIDv7 format (time-sortable, globally unique)
+- **Timestamps:** ISO 8601 with timezone (`2026-03-25T14:22:00Z`)
+- **Nullable fields:** Returned as `null` when not available
+- **Arrays:** Empty arrays returned as `[]`, never `null`
+- **Enums:** Lowercase, snake_case (e.g., `browser_extension`, `under_review`)

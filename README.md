@@ -98,28 +98,70 @@ prompt-shields-sdk/
 
 ### Python SDK
 
-A drop-in replacement for the OpenAI client. Wraps every LLM call with structured telemetry — fail-open, so a collector outage never blocks a model call.
+Drop-in replacements for the OpenAI and Anthropic clients. Every LLM call is wrapped with structured telemetry — **fail-open**, so a collector outage never blocks a model call. Sync and async surfaces, PII detection, and cost estimation are all built in.
 
 ```python
-from prompt_shields import ShieldsClient
+from prompt_shields import ShieldsOpenAI
 
-client = ShieldsClient(
-    api_key="sk-...",                          # Your OpenAI API key
+client = ShieldsOpenAI(
+    api_key="sk-...",                          # OpenAI API key (hashed before send)
     ps_api_key="ps-...",                       # Prompt Shields tenant key
     ps_collector_url="http://localhost:8000",
     business_unit="HR",
     use_case="interview-screening",
     owner="jane.doe@acme.com",
     data_classification="confidential",
-    environment="production"
+    environment="production",
+    calling_service="hiring-service",
 )
 
-# Identical to openai.OpenAI().chat.completions.create(...)
 response = client.chat.completions.create(
     model="gpt-4o",
-    messages=[{"role": "user", "content": "Summarize this candidate..."}]
+    messages=[{"role": "user", "content": "Summarize this candidate..."}],
+    ps_metadata={
+        "data_sources": ["candidates_db"],
+        "output_destination": "hiring_dashboard",
+        "risk_tags": ["pii", "gdpr"],
+        "session_id": "review-2025-04-12-001",
+    },
 )
 ```
+
+**Anthropic, identical surface:**
+
+```python
+from prompt_shields import ShieldsAnthropic
+
+client = ShieldsAnthropic(api_key="sk-ant-...", ps_api_key="ps-...")
+response = client.chat.completions.create(
+    model="claude-sonnet-4-20250514",
+    messages=[{"role": "user", "content": "..."}],
+    max_tokens=1024,
+)
+```
+
+**Async variants** for FastAPI / asyncio agents:
+
+```python
+from prompt_shields import AsyncShieldsOpenAI
+
+client = AsyncShieldsOpenAI(api_key="sk-...", ps_api_key="ps-...")
+response = await client.chat.completions.create(model="gpt-4o", messages=[...])
+```
+
+**What ships in the SDK:**
+
+| Capability | Notes |
+|------------|-------|
+| OpenAI + Anthropic providers | Pluggable `providers.py` adapter layer; new vendors add ~20 lines |
+| Sync + async clients | `ShieldsClient` (threaded flush) and `AsyncShieldsClient` (native await) |
+| Tool/function call capture | OpenAI `tool_calls`, Anthropic `tool_use` blocks parsed automatically |
+| PII detection | Pattern-based: `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `health_data`, `financial_data` — categories only, never content |
+| Cost estimation | Built-in pricing table for OpenAI/Anthropic/Google models; `pricing_table=` override |
+| API key fingerprint | SHA-256 truncated identity, never the raw key |
+| `ps_metadata` per-request | `data_sources`, `output_destination`, `risk_tags`, `session_id`, `user_id` flow into events |
+| Privacy by default | `prompt_text` never sent unless `send_prompt_text=True` is explicitly opted in |
+| Fail-open buffering | 1000-event local buffer with exponential-backoff retry; oldest events drop on overflow |
 
 ### AI Gateway (zero code change)
 

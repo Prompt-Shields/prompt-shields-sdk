@@ -1,0 +1,135 @@
+---
+title: TypeScript SDK
+description: TypeScript client for the Prompt Shields Partner API
+---
+
+# TypeScript SDK
+
+## Installation
+
+```bash
+npm install @prompt-shields/partner
+```
+
+## Quick Start
+
+```typescript
+import { PartnerClient } from '@prompt-shields/partner';
+
+const client = new PartnerClient({
+  clientId: 'ps-partner-ardoq-abc123',
+  clientSecret: 'sk-partner-secret-xyz789',
+  // Or use API key:
+  // apiKey: 'ps-pk-your-key-here',
+});
+
+// List all assets
+const assets = await client.assets.list({ businessUnit: 'HR', confidence: 'high' });
+for (const asset of assets) {
+  console.log(`${asset.vendor}/${asset.model} - ${asset.useCaseName}`);
+}
+
+// Get changes since last sync
+const changes = await client.changes.list({ since: '2026-03-25T10:00:00Z' });
+for (const change of changes) {
+  console.log(`${change.changeType}: ${change.asset.useCaseName}`);
+}
+```
+
+## Authentication
+
+```typescript
+// OAuth (recommended)
+const client = new PartnerClient({
+  clientId: 'ps-partner-ardoq-abc123',
+  clientSecret: 'sk-partner-secret-xyz789',
+});
+
+// API key fallback
+const client = new PartnerClient({
+  apiKey: 'ps-pk-your-key-here',
+});
+
+// Sandbox
+const client = new PartnerClient({
+  clientId: '...',
+  clientSecret: '...',
+  baseUrl: 'https://sandbox.api.promptshields.io',
+});
+```
+
+## Pagination
+
+```typescript
+// Auto-pagination (async iterator)
+for await (const asset of client.assets.list({ limit: 200 })) {
+  process(asset);
+}
+
+// Collect all
+const allAssets = await client.assets.list({ limit: 200 }).toArray();
+
+// Manual pagination
+let page = await client.assets.listPage({ limit: 50 });
+while (page.meta.hasMore) {
+  for (const asset of page.data) {
+    process(asset);
+  }
+  page = await client.assets.listPage({ limit: 50, after: page.meta.nextCursor });
+}
+```
+
+## Full Sync Example
+
+```typescript
+import { PartnerClient } from '@prompt-shields/partner';
+
+const client = new PartnerClient({ apiKey: 'ps-pk-your-key-here' });
+
+// Initial full export
+const exportResult = await client.export.get();
+let syncToken = exportResult.meta.syncToken;
+console.log(`Exported ${exportResult.meta.total} assets`);
+
+// Delta sync (next run)
+const changes = await client.changes.list({ since: syncToken }).toArray();
+for (const change of changes) {
+  switch (change.changeType) {
+    case 'created':
+      await createInEATool(change.asset);
+      break;
+    case 'updated':
+      await updateInEATool(change.asset, change.changedFields);
+      break;
+    case 'deactivated':
+      await deactivateInEATool(change.asset);
+      break;
+  }
+}
+```
+
+## Error Handling
+
+```typescript
+import { PartnerClient, APIError, RateLimitError } from '@prompt-shields/partner';
+
+const client = new PartnerClient({ apiKey: 'ps-pk-your-key-here' });
+
+try {
+  const asset = await client.assets.get('019e1a2b-...');
+} catch (error) {
+  if (error instanceof RateLimitError) {
+    console.log(`Rate limited. Retry after ${error.retryAfter} seconds`);
+  } else if (error instanceof APIError) {
+    console.log(`API error ${error.status}: ${error.title} - ${error.detail}`);
+  }
+}
+```
+
+## Types
+
+The SDK exports full TypeScript types for all API objects:
+
+```typescript
+import type { AIAsset, DataFlow, RiskMapping, ChangeEvent, UsageSummary } from '@prompt-shields/partner';
+```

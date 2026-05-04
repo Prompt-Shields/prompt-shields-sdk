@@ -1,0 +1,141 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Prompt Shields",
+  "logo": {
+    "dark": "/images/logo-dark.svg",
+    "light": "/images/logo-light.svg"
+  },
+  "favicon": "/images/favicon.svg",
+  "colors": {
+    "primary": "#6C5CE7",
+    "light": "#A29BFE",
+    "dark": "#5A4BD1",
+    "anchors": {
+      "from": "#6C5CE7",
+      "to": "#00CEC9"
+    }
+  },
+  "topbarLinks": [
+    {
+      "name": "Dashboard",
+      "url": "https://app.promptshields.io"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "Get API Key",
+    "url": "https://app.promptshields.io/partners"
+  },
+  "tabs": [
+    {
+      "name": "API Reference",
+      "url": "api-reference"
+    },
+    {
+      "name": "SDKs",
+      "url": "sdks"
+    },
+    {
+      "name": "Integrations",
+      "url": "integrations"
+    }
+  ],
+  "anchors": [
+    {
+      "name": "Status",
+      "icon": "signal",
+      "url": "https://status.promptshields.io"
+    },
+    {
+      "name": "Changelog",
+      "icon": "list",
+      "url": "https://promptshields.io/changelog"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Getting Started",
+      "pages": [
+        "introduction",
+        "quickstart",
+        "authentication"
+      ]
+    },
+    {
+      "group": "Core Concepts",
+      "pages": [
+        "guides/ai-asset-registry",
+        "guides/discovery-sources",
+        "guides/data-flows",
+        "guides/risk-frameworks",
+        "guides/confidence-scoring"
+      ]
+    },
+    {
+      "group": "Partner API",
+      "pages": [
+        "api-reference/overview",
+        "api-reference/authentication",
+        "api-reference/rate-limits",
+        "api-reference/errors",
+        "api-reference/pagination"
+      ]
+    },
+    {
+      "group": "Assets",
+      "pages": [
+        "api-reference/assets/list-assets",
+        "api-reference/assets/get-asset",
+        "api-reference/assets/get-data-flows",
+        "api-reference/assets/get-risks",
+        "api-reference/assets/get-usage-summary"
+      ]
+    },
+    {
+      "group": "Taxonomy",
+      "pages": [
+        "api-reference/taxonomy/list-vendors",
+        "api-reference/taxonomy/list-models",
+        "api-reference/taxonomy/list-business-units"
+      ]
+    },
+    {
+      "group": "Sync",
+      "pages": [
+        "api-reference/sync/get-changes",
+        "api-reference/sync/export"
+      ]
+    },
+    {
+      "group": "SDKs",
+      "pages": [
+        "sdks/overview",
+        "sdks/python",
+        "sdks/typescript"
+      ]
+    },
+    {
+      "group": "Integrations",
+      "pages": [
+        "integrations/overview",
+        "integrations/ardoq",
+        "integrations/leanix",
+        "integrations/servicenow"
+      ]
+    }
+  ],
+  "openapi": "openapi.yaml",
+  "api": {
+    "baseUrl": "https://api.promptshields.io",
+    "auth": {
+      "method": "bearer",
+      "name": "Authorization"
+    },
+    "playground": {
+      "mode": "simple"
+    }
+  },
+  "footerSocials": {
+    "github": "https://github.com/promptshields",
+    "linkedin": "https://linkedin.com/company/promptshields"
+  }
+}

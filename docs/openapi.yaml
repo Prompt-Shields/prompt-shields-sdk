@@ -1,0 +1,840 @@
+openapi: 3.1.0
+info:
+  title: Prompt Shields Partner API
+  version: 1.0.0
+  description: |
+    The Prompt Shields Partner API provides read-only access to the AI Asset Registry.
+
+    Enterprise Architecture tools (Ardoq, LeanIX, ServiceNow) use this API to pull
+    discovered AI assets, data flows, risk mappings, and usage metadata into their
+    platforms for governance and strategic alignment.
+  contact:
+    name: Prompt Shields Developer Support
+    email: partners@promptshields.io
+    url: https://promptshields.io/partners
+  license:
+    name: Proprietary
+    url: https://promptshields.io/terms
+
+servers:
+  - url: https://api.promptshields.io
+    description: Production
+  - url: https://sandbox.api.promptshields.io
+    description: Sandbox (synthetic data)
+
+security:
+  - OAuth2: [registry:read]
+  - PartnerApiKey: []
+
+tags:
+  - name: Assets
+    description: AI asset discovery and registry
+  - name: Taxonomy
+    description: AI vendors, models, and business units
+  - name: Sync
+    description: Delta feeds and bulk export for EA tool integration
+  - name: Auth
+    description: OAuth 2.0 token management
+
+components:
+  securitySchemes:
+    OAuth2:
+      type: oauth2
+      description: |
+        OAuth 2.0 Client Credentials flow. Exchange your `client_id` and `client_secret`
+        for a short-lived access token.
+      flows:
+        clientCredentials:
+          tokenUrl: /oauth/token
+          scopes:
+            registry:read: Read AI assets, vendors, models, business units
+            data-flows:read: Read data flow lineage per asset
+            risks:read: Read risk mappings per asset
+            usage:read: Read aggregated usage statistics
+            export:read: Access bulk export endpoint
+            changes:read: Access delta feed endpoint
+
+    PartnerApiKey:
+      type: http
+      scheme: bearer
+      description: |
+        Fallback authentication using a Partner API Key. Use this when OAuth
+        is not supported by your integration tool (e.g., Ardoq Integration Builder).
+
+        Pass your API key as a Bearer token:
+        ```
+        Authorization: Bearer ps-pk-your-key-here
+        ```
+
+  schemas:
+    AIAsset:
+      type: object
+      description: A discovered AI use case within the organization
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier (UUIDv7, time-sortable)
+          example: "019e1a2b-3c4d-7000-8000-000000000001"
+        vendor:
+          type: string
+          description: AI provider name
+          example: "openai"
+          enum: [openai, anthropic, google, microsoft, meta, cohere, mistral, custom]
+        model:
+          type: string
+          description: Specific model identifier
+          example: "gpt-4o"
+          nullable: true
+        use_case_name:
+          type: string
+          description: Business name for this AI use case
+          example: "interview-screening"
+          nullable: true
+        business_unit:
+          type: string
+          description: Organizational unit using this AI
+          example: "HR"
+          nullable: true
+        owner_email:
+          type: string
+          format: email
+          description: Responsible person's email
+          example: "jane.doe@acme.com"
+          nullable: true
+        environment:
+          type: string
+          description: Deployment environment
+          enum: [production, staging, dev]
+          example: "production"
+          nullable: true
+        status:
+          type: string
+          description: Governance status
+          enum: [active, deprecated, under_review]
+          example: "active"
+        data_classification:
+          type: string
+          description: Highest data sensitivity level
+          enum: [public, internal, confidential, restricted]
+          example: "confidential"
+          nullable: true
+        discovery_source:
+          type: array
+          items:
+            type: string
+            enum: [sdk, gateway, browser_extension, macos_app, platform_signal, survey]
+          description: How this asset was discovered (multiple sources = higher confidence)
+          example: ["sdk", "browser_extension"]
+        confidence:
+          type: string
+          description: Discovery confidence level (based on number of corroborating sources)
+          enum: [low, medium, high, verified]
+          example: "verified"
+        first_seen:
+          type: string
+          format: date-time
+          description: When this asset was first discovered
+          example: "2026-03-01T10:00:00Z"
+        last_seen:
+          type: string
+          format: date-time
+          description: Most recent activity timestamp
+          example: "2026-03-25T14:22:00Z"
+      required:
+        - id
+        - vendor
+        - discovery_source
+        - confidence
+        - first_seen
+        - last_seen
+
+    DataFlow:
+      type: object
+      description: Data lineage record for an AI asset
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_system:
+          type: string
+          description: Where data comes from
+          example: "candidates_db"
+        destination_system:
+          type: string
+          description: Where output goes
+          example: "hiring_dashboard"
+        data_classification:
+          type: string
+          enum: [public, internal, confidential, restricted]
+          nullable: true
+        direction:
+          type: string
+          enum: [input, output]
+        detected_pii_types:
+          type: array
+          items:
+            type: string
+          description: PII categories detected in this data flow
+          example: ["name", "email", "phone"]
+          nullable: true
+      required:
+        - id
+        - source_system
+        - destination_system
+        - direction
+
+    RiskMapping:
+      type: object
+      description: Risk assessment linked to an AI asset
+      properties:
+        id:
+          type: string
+          format: uuid
+        risk_category:
+          type: string
+          enum: [strategic, operational, compliance, cyber, reputational]
+          example: "compliance"
+        risk_level:
+          type: string
+          enum: [critical, high, medium, low]
+          example: "high"
+        framework:
+          type: string
+          description: Governance framework this risk maps to
+          enum: [NIST_AI_RMF, ISO_42001, EU_AI_ACT, custom]
+          example: "EU_AI_ACT"
+          nullable: true
+      required:
+        - id
+        - risk_category
+        - risk_level
+
+    UsageSummary:
+      type: object
+      description: Aggregated usage statistics for an AI asset
+      properties:
+        total_requests:
+          type: integer
+          example: 15420
+        total_tokens_in:
+          type: integer
+          example: 3250000
+        total_tokens_out:
+          type: integer
+          example: 6100000
+        estimated_cost_usd:
+          type: number
+          format: float
+          example: 482.50
+        unique_sessions:
+          type: integer
+          example: 312
+        avg_latency_ms:
+          type: integer
+          example: 380
+        period:
+          type: string
+          description: Time period for this summary
+          example: "30d"
+
+    ChangeEvent:
+      type: object
+      description: A change to an AI asset (for delta sync)
+      properties:
+        change_type:
+          type: string
+          enum: [created, updated, deactivated]
+          description: Type of change
+        asset:
+          $ref: '#/components/schemas/AIAsset'
+        changed_at:
+          type: string
+          format: date-time
+        changed_fields:
+          type: array
+          items:
+            type: string
+          description: Which fields changed (null for created)
+          nullable: true
+          example: ["confidence", "discovery_source", "last_seen"]
+
+    PaginationMeta:
+      type: object
+      properties:
+        total:
+          type: integer
+          description: Total matching records
+        has_more:
+          type: boolean
+          description: Whether more pages exist
+        next_cursor:
+          type: string
+          description: Cursor for next page (pass as `after` parameter)
+          nullable: true
+        sync_token:
+          type: string
+          description: Token for delta sync (only on /changes endpoint)
+          nullable: true
+
+    Error:
+      type: object
+      description: RFC 7807 Problem Details error
+      properties:
+        type:
+          type: string
+          example: "about:blank"
+        title:
+          type: string
+          example: "Unauthorized"
+        status:
+          type: integer
+          example: 401
+        detail:
+          type: string
+          example: "Invalid or expired access token"
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access token
+        token_type:
+          type: string
+          example: "Bearer"
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds
+          example: 3600
+        scope:
+          type: string
+          example: "registry:read data-flows:read risks:read usage:read export:read changes:read"
+
+  parameters:
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Number of records per page (max 200)
+
+    AfterParam:
+      name: after
+      in: query
+      schema:
+        type: string
+        format: uuid
+      description: Cursor for pagination (UUIDv7 of last item from previous page)
+
+    BusinessUnitParam:
+      name: business_unit
+      in: query
+      schema:
+        type: string
+      description: Filter by business unit
+      example: "HR"
+
+    StatusParam:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum: [active, deprecated, under_review]
+      description: Filter by governance status
+
+    DiscoverySourceParam:
+      name: discovery_source
+      in: query
+      schema:
+        type: string
+        enum: [sdk, gateway, browser_extension, macos_app, platform_signal, survey]
+      description: Filter by discovery source
+
+    SinceParam:
+      name: since
+      in: query
+      schema:
+        type: string
+        format: date-time
+      description: Only return assets first seen after this timestamp
+      example: "2026-03-01T00:00:00Z"
+
+    VendorParam:
+      name: vendor
+      in: query
+      schema:
+        type: string
+      description: Filter by AI vendor
+      example: "openai"
+
+    ConfidenceParam:
+      name: confidence
+      in: query
+      schema:
+        type: string
+        enum: [low, medium, high, verified]
+      description: Filter by minimum confidence level
+
+    DataClassificationParam:
+      name: data_classification
+      in: query
+      schema:
+        type: string
+        enum: [public, internal, confidential, restricted]
+      description: Filter by data classification
+
+paths:
+  /oauth/token:
+    post:
+      operationId: createToken
+      tags: [Auth]
+      summary: Get access token
+      description: Exchange client credentials for a short-lived JWT access token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, client_id, client_secret]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [client_credentials]
+                client_id:
+                  type: string
+                  example: "ps-partner-ardoq-abc123"
+                client_secret:
+                  type: string
+                  example: "sk-partner-secret-xyz789"
+      responses:
+        '200':
+          description: Access token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /partner/v1/assets:
+    get:
+      operationId: listAssets
+      tags: [Assets]
+      summary: List AI assets
+      description: |
+        Returns a paginated list of discovered AI assets. Supports filtering
+        by business unit, vendor, status, confidence, data classification,
+        and discovery source.
+
+        **Typical use:** Ardoq Integration Builder polls this endpoint every
+        4 hours to sync the AI asset registry into the Ardoq metamodel.
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/AfterParam'
+        - $ref: '#/components/parameters/BusinessUnitParam'
+        - $ref: '#/components/parameters/StatusParam'
+        - $ref: '#/components/parameters/DiscoverySourceParam'
+        - $ref: '#/components/parameters/SinceParam'
+        - $ref: '#/components/parameters/VendorParam'
+        - $ref: '#/components/parameters/ConfidenceParam'
+        - $ref: '#/components/parameters/DataClassificationParam'
+      responses:
+        '200':
+          description: Paginated list of AI assets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AIAsset'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+              example:
+                data:
+                  - id: "019e1a2b-3c4d-7000-8000-000000000001"
+                    vendor: "openai"
+                    model: "gpt-4o"
+                    use_case_name: "interview-screening"
+                    business_unit: "HR"
+                    owner_email: "jane.doe@acme.com"
+                    environment: "production"
+                    status: "active"
+                    data_classification: "confidential"
+                    discovery_source: ["sdk", "browser_extension"]
+                    confidence: "verified"
+                    first_seen: "2026-03-01T10:00:00Z"
+                    last_seen: "2026-03-25T14:22:00Z"
+                meta:
+                  total: 47
+                  has_more: false
+                  next_cursor: null
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds until rate limit resets
+
+  /partner/v1/assets/{asset_id}:
+    get:
+      operationId: getAsset
+      tags: [Assets]
+      summary: Get asset details
+      description: Returns full details for a single AI asset by ID.
+      parameters:
+        - name: asset_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Asset details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIAsset'
+        '404':
+          description: Asset not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /partner/v1/assets/{asset_id}/data-flows:
+    get:
+      operationId: getAssetDataFlows
+      tags: [Assets]
+      summary: Get data flows
+      description: |
+        Returns data lineage records for an AI asset. Shows which systems
+        provide input data and where output goes, along with data classification
+        and detected PII types.
+      parameters:
+        - name: asset_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Data flows for the asset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DataFlow'
+              example:
+                data:
+                  - id: "019e1a2b-0000-7000-8000-000000000010"
+                    source_system: "candidates_db"
+                    destination_system: "hiring_dashboard"
+                    data_classification: "confidential"
+                    direction: "input"
+                    detected_pii_types: ["name", "email", "phone"]
+                  - id: "019e1a2b-0000-7000-8000-000000000011"
+                    source_system: "gpt-4o"
+                    destination_system: "hiring_dashboard"
+                    data_classification: "internal"
+                    direction: "output"
+                    detected_pii_types: null
+        '404':
+          description: Asset not found
+
+  /partner/v1/assets/{asset_id}/risks:
+    get:
+      operationId: getAssetRisks
+      tags: [Assets]
+      summary: Get risk mappings
+      description: |
+        Returns risk assessments for an AI asset, mapped to governance
+        frameworks (NIST AI RMF, ISO 42001, EU AI Act).
+      parameters:
+        - name: asset_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Risk mappings for the asset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RiskMapping'
+              example:
+                data:
+                  - id: "019e1a2b-0000-7000-8000-000000000020"
+                    risk_category: "compliance"
+                    risk_level: "high"
+                    framework: "EU_AI_ACT"
+                  - id: "019e1a2b-0000-7000-8000-000000000021"
+                    risk_category: "operational"
+                    risk_level: "medium"
+                    framework: "NIST_AI_RMF"
+        '404':
+          description: Asset not found
+
+  /partner/v1/assets/{asset_id}/usage-summary:
+    get:
+      operationId: getAssetUsageSummary
+      tags: [Assets]
+      summary: Get usage summary
+      description: |
+        Returns aggregated usage statistics for an AI asset over a time period.
+        Does not expose individual request data or prompt content.
+      parameters:
+        - name: asset_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 30d, 90d]
+            default: 30d
+          description: Time period for aggregation
+      responses:
+        '200':
+          description: Usage summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSummary'
+
+  /partner/v1/vendors:
+    get:
+      operationId: listVendors
+      tags: [Taxonomy]
+      summary: List AI vendors
+      description: Returns all distinct AI vendors found in the tenant's asset registry.
+      responses:
+        '200':
+          description: List of vendor names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: string
+              example:
+                data: ["openai", "anthropic", "google", "microsoft"]
+
+  /partner/v1/models:
+    get:
+      operationId: listModels
+      tags: [Taxonomy]
+      summary: List AI models
+      description: Returns all distinct AI models found in the tenant's asset registry.
+      responses:
+        '200':
+          description: List of model names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: string
+              example:
+                data: ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "gemini-1.5-pro"]
+
+  /partner/v1/business-units:
+    get:
+      operationId: listBusinessUnits
+      tags: [Taxonomy]
+      summary: List business units
+      description: Returns all distinct business units that have AI usage recorded.
+      responses:
+        '200':
+          description: List of business unit names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: string
+              example:
+                data: ["HR", "Legal", "Customer Service", "Claims", "Engineering"]
+
+  /partner/v1/changes:
+    get:
+      operationId: getChanges
+      tags: [Sync]
+      summary: Get change feed
+      description: |
+        Returns assets that were created, updated, or deactivated since a given
+        timestamp. Use this for efficient delta sync instead of re-fetching all assets.
+
+        **Recommended pattern:**
+        1. First sync: call `/partner/v1/export` for full data
+        2. Store `sync_token` from response meta
+        3. Subsequent syncs: call `/partner/v1/changes?since={sync_token}`
+        4. Update `sync_token` after each successful sync
+      parameters:
+        - name: since
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Return changes after this timestamp (use sync_token from previous response)
+          example: "2026-03-25T10:00:00Z"
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/AfterParam'
+      responses:
+        '200':
+          description: Change feed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ChangeEvent'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+              example:
+                data:
+                  - change_type: "created"
+                    asset:
+                      id: "019e1a2b-3c4d-7000-8000-000000000005"
+                      vendor: "anthropic"
+                      model: "claude-sonnet-4-20250514"
+                      use_case_name: "contract-review"
+                      business_unit: "Legal"
+                      confidence: "high"
+                      discovery_source: ["gateway"]
+                      first_seen: "2026-03-25T14:00:00Z"
+                      last_seen: "2026-03-25T14:00:00Z"
+                    changed_at: "2026-03-25T14:00:00Z"
+                    changed_fields: null
+                  - change_type: "updated"
+                    asset:
+                      id: "019e1a2b-3c4d-7000-8000-000000000001"
+                      vendor: "openai"
+                      model: "gpt-4o"
+                      use_case_name: "interview-screening"
+                      business_unit: "HR"
+                      confidence: "verified"
+                      discovery_source: ["sdk", "browser_extension"]
+                      first_seen: "2026-03-01T10:00:00Z"
+                      last_seen: "2026-03-25T15:01:00Z"
+                    changed_at: "2026-03-25T15:01:00Z"
+                    changed_fields: ["confidence", "discovery_source", "last_seen"]
+                meta:
+                  total: 2
+                  has_more: false
+                  next_cursor: null
+                  sync_token: "2026-03-25T15:01:00Z"
+
+  /partner/v1/export:
+    get:
+      operationId: exportRegistry
+      tags: [Sync]
+      summary: Export full registry
+      description: |
+        Returns the complete AI asset registry as a single JSON payload.
+        Use for initial sync or full refresh. For subsequent syncs, use
+        the `/changes` endpoint instead.
+
+        **Warning:** This endpoint may return large payloads. Use streaming
+        where supported by your HTTP client.
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json]
+            default: json
+          description: Export format
+      responses:
+        '200':
+          description: Full registry export
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AIAsset'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      exported_at:
+                        type: string
+                        format: date-time
+                      sync_token:
+                        type: string
+                        description: Use as `since` parameter for delta sync
+
+  /partner/v1/health:
+    get:
+      operationId: healthCheck
+      tags: [Sync]
+      summary: Health check
+      description: Returns API health status. Does not require authentication.
+      security: []
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  version:
+                    type: string
+                    example: "1.0.0"

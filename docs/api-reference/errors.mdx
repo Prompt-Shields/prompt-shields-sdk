@@ -1,0 +1,82 @@
+---
+title: Errors
+description: Error handling and RFC 7807 Problem Details
+---
+
+# Error Handling
+
+The Partner API uses [RFC 7807 Problem Details](https://www.rfc-editor.org/rfc/rfc7807) for all error responses.
+
+## Error Format
+
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Asset with ID 019e1a2b-0000-0000-0000-000000000099 not found"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | URI reference identifying the error type |
+| `title` | string | Short human-readable summary |
+| `status` | integer | HTTP status code |
+| `detail` | string | Specific explanation for this occurrence |
+
+## HTTP Status Codes
+
+| Status | Title | When |
+|--------|-------|------|
+| `200` | OK | Request succeeded |
+| `400` | Bad Request | Invalid query parameters or malformed request |
+| `401` | Unauthorized | Missing, invalid, or expired authentication |
+| `403` | Forbidden | Token lacks required scope |
+| `404` | Not Found | Resource doesn't exist or isn't accessible to this tenant |
+| `429` | Too Many Requests | Rate limit exceeded |
+| `500` | Internal Server Error | Unexpected server error |
+| `503` | Service Unavailable | Temporary maintenance or overload |
+
+## Handling Errors
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    import httpx
+
+    resp = httpx.get(
+        "https://api.promptshields.io/partner/v1/assets/invalid-id",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+
+    if resp.status_code == 401:
+        token = refresh_token()  # Re-authenticate
+        resp = httpx.get(url, headers={"Authorization": f"Bearer {token}"})
+    elif resp.status_code == 429:
+        retry_after = int(resp.headers.get("Retry-After", 60))
+        time.sleep(retry_after)
+    elif resp.status_code >= 400:
+        error = resp.json()
+        raise Exception(f"{error['title']}: {error['detail']}")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const resp = await fetch(
+      'https://api.promptshields.io/partner/v1/assets/invalid-id',
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    if (resp.status === 401) {
+      token = await refreshToken();
+    } else if (resp.status === 429) {
+      const retryAfter = parseInt(resp.headers.get('Retry-After') || '60');
+      await new Promise(r => setTimeout(r, retryAfter * 1000));
+    } else if (!resp.ok) {
+      const error = await resp.json();
+      throw new Error(`${error.title}: ${error.detail}`);
+    }
+    ```
+  </Tab>
+</Tabs>

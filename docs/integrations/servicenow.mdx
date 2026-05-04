@@ -1,0 +1,45 @@
+---
+title: ServiceNow
+description: Integration guide for ServiceNow CMDB
+---
+
+# ServiceNow Integration
+
+Connect Prompt Shields to ServiceNow to add AI assets to your CMDB.
+
+<Info>
+  ServiceNow integration is planned for Phase 3. This guide describes the
+  recommended approach using the Partner API.
+</Info>
+
+## Recommended Approach
+
+Use ServiceNow's **IntegrationHub** with a REST step to pull from the Partner API.
+
+### CMDB Mapping
+
+| PS Data | ServiceNow CI Class |
+|---------|-------------------|
+| AI Asset | cmdb_ci_ai_application (custom) |
+| AI Vendor | core_company |
+| Business Unit | cmdb_ci_business_unit |
+| Data Flow | cmdb_rel_ci (relationship) |
+| Risk Mapping | sn_risk_risk |
+
+### Authentication
+
+ServiceNow IntegrationHub supports OAuth 2.0:
+
+```
+Token URL: https://api.promptshields.io/oauth/token
+Client ID: ps-partner-servicenow-xxx
+Client Secret: sk-partner-secret-xxx
+Grant Type: client_credentials
+```
+
+### Sync Pattern
+
+1. Create a Scheduled IntegrationHub Flow
+2. REST step: `GET /partner/v1/changes?since={last_sync}`
+3. Transform step: Map PS fields to CI attributes
+4. CMDB step: Create/update CIs

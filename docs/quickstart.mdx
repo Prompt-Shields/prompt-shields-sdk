@@ -1,0 +1,108 @@
+---
+title: Quickstart
+description: Get your first API call working in 5 minutes
+---
+
+# Quickstart
+
+Get AI asset data from Prompt Shields into your system in three steps.
+
+## Step 1: Get Your Credentials
+
+<Steps>
+  <Step title="Log into Atlas AI Dashboard">
+    Go to [app.promptshields.io/partners](https://app.promptshields.io/partners) and navigate to **Partners > Add Integration**.
+  </Step>
+  <Step title="Select your partner type">
+    Choose your EA platform (Ardoq, LeanIX, ServiceNow, or Custom).
+  </Step>
+  <Step title="Copy credentials">
+    You'll receive:
+    - `client_id` — e.g., `ps-partner-ardoq-abc123`
+    - `client_secret` — shown once, save securely
+    - `api_key` — fallback key for simpler integrations
+  </Step>
+</Steps>
+
+## Step 2: Authenticate
+
+<Tabs>
+  <Tab title="OAuth 2.0 (Recommended)">
+    ```bash
+    curl -X POST https://api.promptshields.io/oauth/token \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "grant_type=client_credentials" \
+      -d "client_id=ps-partner-ardoq-abc123" \
+      -d "client_secret=sk-partner-secret-xyz789"
+    ```
+
+    Response:
+    ```json
+    {
+      "access_token": "eyJhbGciOiJSUzI1NiIs...",
+      "token_type": "Bearer",
+      "expires_in": 3600,
+      "scope": "registry:read data-flows:read risks:read"
+    }
+    ```
+  </Tab>
+  <Tab title="API Key (Fallback)">
+    Skip the token exchange and use your API key directly:
+
+    ```bash
+    curl https://api.promptshields.io/partner/v1/assets \
+      -H "Authorization: Bearer ps-pk-your-key-here"
+    ```
+  </Tab>
+</Tabs>
+
+## Step 3: Fetch AI Assets
+
+```bash
+curl https://api.promptshields.io/partner/v1/assets \
+  -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIs..."
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "019e1a2b-3c4d-7000-8000-000000000001",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "use_case_name": "interview-screening",
+      "business_unit": "HR",
+      "owner_email": "jane.doe@acme.com",
+      "environment": "production",
+      "status": "active",
+      "data_classification": "confidential",
+      "discovery_source": ["sdk", "browser_extension"],
+      "confidence": "verified",
+      "first_seen": "2026-03-01T10:00:00Z",
+      "last_seen": "2026-03-25T14:22:00Z"
+    }
+  ],
+  "meta": {
+    "total": 47,
+    "has_more": true,
+    "next_cursor": "019e1a2b-3c4d-7000-8000-000000000001"
+  }
+}
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="lock" href="/authentication">
+    Learn about OAuth scopes and token management
+  </Card>
+  <Card title="Delta Sync" icon="arrows-rotate" href="/api-reference/sync/get-changes">
+    Set up efficient ongoing sync with the changes endpoint
+  </Card>
+  <Card title="Ardoq Integration" icon="diagram-project" href="/integrations/ardoq">
+    Step-by-step Ardoq Integration Builder setup
+  </Card>
+  <Card title="API Reference" icon="book" href="/api-reference/overview">
+    Full endpoint documentation
+  </Card>
+</CardGroup>

@@ -1,0 +1,71 @@
+---
+title: Rate Limits
+description: API rate limiting and throttling
+---
+
+# Rate Limits
+
+All Partner API endpoints are rate-limited to protect service stability.
+
+## Current Limits
+
+| Tier | Limit | Scope |
+|------|-------|-------|
+| **All partners** | 1,000 requests/minute | Per partner credential |
+
+<Info>
+  Phase 1 applies flat rate limits to all partners. Tiered rate limiting
+  based on partnership level will be available in a future release.
+</Info>
+
+## Rate Limit Headers
+
+Every response includes rate limit headers:
+
+```
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 847
+X-RateLimit-Reset: 1711382460
+```
+
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Limit` | Maximum requests per minute |
+| `X-RateLimit-Remaining` | Requests remaining in current window |
+| `X-RateLimit-Reset` | Unix timestamp when the window resets |
+
+## Exceeding the Limit
+
+When you exceed the rate limit, the API returns:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 23
+Content-Type: application/json
+
+{
+  "type": "about:blank",
+  "title": "Too Many Requests",
+  "status": 429,
+  "detail": "Rate limit exceeded. Retry after 23 seconds."
+}
+```
+
+**Best practice:** Implement exponential backoff. Respect the `Retry-After` header value.
+
+## Tips for Staying Within Limits
+
+<CardGroup cols={2}>
+  <Card title="Use delta sync" icon="arrows-rotate">
+    Use `/partner/v1/changes` instead of re-fetching all assets. Fewer requests, same data.
+  </Card>
+  <Card title="Cache tokens" icon="database">
+    OAuth tokens last 1 hour. Don't request a new token per API call.
+  </Card>
+  <Card title="Use pagination wisely" icon="list">
+    Set `limit=200` (maximum) to reduce page count. Default is 50.
+  </Card>
+  <Card title="Poll sensibly" icon="clock">
+    Sync every 4 hours, not every minute. AI asset registries don't change that fast.
+  </Card>
+</CardGroup>

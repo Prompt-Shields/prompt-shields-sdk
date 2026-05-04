@@ -1,0 +1,112 @@
+---
+title: Authentication
+description: OAuth 2.0 and API key authentication for the Partner API
+---
+
+# Authentication
+
+The Partner API supports two authentication methods. Use whichever fits your integration.
+
+## OAuth 2.0 Client Credentials (Primary)
+
+Best for: Programmatic integrations, custom scripts, CI/CD pipelines.
+
+<Steps>
+  <Step title="Exchange credentials for a token">
+    ```bash
+    POST /oauth/token
+    Content-Type: application/x-www-form-urlencoded
+
+    grant_type=client_credentials
+    &client_id=ps-partner-ardoq-abc123
+    &client_secret=sk-partner-secret-xyz789
+    ```
+  </Step>
+  <Step title="Use the access token">
+    ```bash
+    GET /partner/v1/assets
+    Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+    ```
+  </Step>
+  <Step title="Refresh before expiry">
+    Tokens expire after **1 hour** (3600 seconds). Request a new token before the current one expires. There is no refresh token flow — simply call `/oauth/token` again.
+  </Step>
+</Steps>
+
+### Token Response
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `access_token` | string | JWT access token |
+| `token_type` | string | Always `"Bearer"` |
+| `expires_in` | integer | Seconds until expiry (3600) |
+| `scope` | string | Space-separated list of granted scopes |
+
+## Partner API Key (Fallback)
+
+Best for: Integration Builder tools (Ardoq, LeanIX) that don't support OAuth client credentials.
+
+```bash
+GET /partner/v1/assets
+Authorization: Bearer ps-pk-your-key-here
+```
+
+API keys don't expire but can be revoked from the Atlas AI Dashboard.
+
+<Warning>
+  API keys provide the same access as OAuth tokens but cannot be scoped or
+  time-limited. Use OAuth when possible.
+</Warning>
+
+## Scopes
+
+OAuth tokens are issued with scopes that control access:
+
+| Scope | Access |
+|-------|--------|
+| `registry:read` | AI assets, vendors, models, business units |
+| `data-flows:read` | Data flow lineage per asset |
+| `risks:read` | Risk mappings per asset |
+| `usage:read` | Aggregated usage statistics |
+| `export:read` | Bulk export endpoint |
+| `changes:read` | Delta feed endpoint |
+
+<Info>
+  **Phase 1:** All partners receive all scopes. Granular scope assignment
+  per partner will be available in a future release.
+</Info>
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Store credentials securely">
+    Never hardcode `client_secret` or `api_key` in source code. Use environment variables or a secrets manager (AWS Secrets Manager, Azure Key Vault, HashiCorp Vault).
+  </Accordion>
+  <Accordion title="Rotate keys periodically">
+    Generate new credentials from the Atlas AI Dashboard quarterly. Old keys can be revoked immediately.
+  </Accordion>
+  <Accordion title="Use TLS only">
+    All API traffic must use HTTPS. HTTP requests are rejected.
+  </Accordion>
+  <Accordion title="Cache tokens">
+    OAuth tokens are valid for 1 hour. Cache the token and reuse it for multiple requests instead of requesting a new token per API call.
+  </Accordion>
+</AccordionGroup>
+
+## Error Responses
+
+Authentication failures return RFC 7807 Problem Details:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Unauthorized",
+  "status": 401,
+  "detail": "Invalid or expired access token"
+}
+```
+
+| Status | Cause | Action |
+|--------|-------|--------|
+| `401` | Missing, invalid, or expired token | Re-authenticate |
+| `403` | Token lacks required scope | Request token with correct scopes |
