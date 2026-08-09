@@ -15,6 +15,8 @@ import { getRuntimeKey } from 'hono/adapter';
 import { requestValidator } from './middlewares/requestValidator';
 import { hooks } from './middlewares/hooks';
 import { memoryCache } from './middlewares/cache';
+import { psRouter } from './middlewares/router/hono';
+import { psTelemetry } from './middlewares/ps-telemetry';
 
 // Handlers
 import { proxyHandler } from './handlers/proxyHandler';
@@ -101,6 +103,19 @@ if (getRuntimeKey() === 'node') {
 
 // Support the /v1/models endpoint
 app.get('/v1/models', modelsHandler);
+
+// Prompt Shields cost-aware routing (opt-in). Runs before hooks and cache so
+// the resolved model flows into cache-key computation and downstream handlers.
+// Fail-open: non-JSON / unhinted requests pass through untouched.
+if (process.env.PS_ROUTER_ENABLED === 'true') {
+  app.use('*', psRouter());
+}
+
+// Prompt Shields discovery telemetry (opt-in). Mounted after psRouter so it can
+// fold the routing decision (c.get('psRoute')) into requested_model/served_model.
+if (process.env.PS_API_KEY) {
+  app.use('*', psTelemetry());
+}
 
 // Use hooks middleware for all routes
 app.use('*', hooks);

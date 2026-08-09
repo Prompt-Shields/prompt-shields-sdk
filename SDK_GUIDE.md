@@ -14,15 +14,16 @@ A walkthrough for engineers integrating the Prompt Shields Python SDK into a rea
 3. [How the SDK works](#3-how-the-sdk-works)
 4. [Client configuration](#4-client-configuration)
 5. [Per-request metadata](#5-per-request-metadata)
-6. [Provider switching (OpenAI, Anthropic)](#6-provider-switching)
-7. [Sync vs. async](#7-sync-vs-async)
-8. [PII detection](#8-pii-detection)
-9. [Cost estimation](#9-cost-estimation)
-10. [Privacy model](#10-privacy-model)
-11. [Fail-open behavior](#11-fail-open-behavior)
-12. [Debugging telemetry](#12-debugging-telemetry)
-13. [Production deployment patterns](#13-production-deployment-patterns)
-14. [Common questions](#14-common-questions)
+6. [Cost-aware routing (route hints)](#6-cost-aware-routing)
+7. [Provider switching (OpenAI, Anthropic)](#7-provider-switching)
+8. [Sync vs. async](#8-sync-vs-async)
+9. [PII detection](#9-pii-detection)
+10. [Cost estimation](#10-cost-estimation)
+11. [Privacy model](#11-privacy-model)
+12. [Fail-open behavior](#12-fail-open-behavior)
+13. [Debugging telemetry](#13-debugging-telemetry)
+14. [Production deployment patterns](#14-production-deployment-patterns)
+15. [Common questions](#15-common-questions)
 
 ---
 
@@ -142,7 +143,7 @@ client = ShieldsClient(vendor="openai", api_key=..., ps_api_key=...)
 | `calling_service` | str | no | Service/app name for dedup fallback when use_case isn't set. |
 | `scan_pii` | bool | no | Default `True`. Set `False` to disable local PII detection. |
 | `send_prompt_text` | bool | no | Default `False`. Set `True` to log full prompt content (requires explicit security review). |
-| `pricing_table` | dict | no | Override default token-to-USD pricing. See [Cost estimation](#9-cost-estimation). |
+| `pricing_table` | dict | no | Override default token-to-USD pricing. See [Cost estimation](#10-cost-estimation). |
 
 ### Why metadata at the client level?
 
@@ -198,7 +199,83 @@ All five are optional. Omit what you don't have.
 
 ---
 
-## 6. Provider switching
+## 6. Cost-aware routing
+
+Most requests are *over-served* — a trivial "classify this sentiment" prompt sent to a frontier model wastes 10–50× the tokens it needs. The SDK lets you attach an **intent hint** to a call. It does **not** pick a model itself; it emits the hint as `X-PS-*` headers, and the **gateway** decides which concrete model runs. This keeps the decision (and the model catalog, pricing, and policy) in one place instead of scattered across every service.
+
+> Routing only takes effect when your `api_key`/`base_url` points at the Prompt Shields gateway. Calling a provider directly still sends the headers, but there's nothing there to act on them — the hint is simply ignored, so it's always safe to add.
+
+### The `RouteHint` object
+
+```python
+from prompt_shields import RouteHint, ShieldsOpenAI
+
+client = ShieldsOpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    ps_api_key=os.environ["PS_API_KEY"],
+    base_url=os.environ["PS_GATEWAY_URL"],   # route through the gateway
+)
+
+# Transparent: no hint → the gateway's default policy chooses the model.
+client.chat.completions.create(model="auto", messages=[...])
+
+# Explicit hint: "this is throwaway — cheap is fine, cap the spend."
+client.chat.completions.create(
+    model="auto",
+    messages=[...],
+    route=RouteHint(quality="draft", max_cost=0.005),
+)
+
+# Per-route override: force the strong tier, skip the router entirely.
+client.chat.completions.create(
+    model="auto",
+    messages=[...],
+    route=RouteHint(model_group="frontier"),
+)
+```
+
+| Field | Type | Emits header | Meaning |
+|-------|------|--------------|---------|
+| `quality` | `"draft" \| "balanced" \| "critical"` | `X-PS-Quality` | Intent, **not** a model name. The gateway maps it to a model group. |
+| `max_cost` | float | `X-PS-Max-Cost` | Per-call USD ceiling. The gateway downgrades to stay under it. |
+| `model_group` | str | `X-PS-Route` | Explicit override — bypasses the router and pins a group. |
+| `allow_cache` | bool (default `True`) | `X-PS-Cache: off` when `False` | Opt a creative/non-deterministic call out of the gateway's semantic cache. |
+
+An empty `RouteHint()` emits no headers — behavior is identical to today.
+
+### Precedence
+
+The gateway resolves the model in this order:
+
+```
+model_group (explicit override)  >  quality / max_cost (hints)  >  gateway default policy (transparent)
+```
+
+So a `RouteHint(model_group="frontier")` always wins; a `quality`/`max_cost` hint steers within policy; and no hint at all leaves the gateway free to optimize transparently.
+
+### `model="auto"`
+
+Passing `model="auto"` is the signal that the gateway should choose. A concrete model name (e.g. `"gpt-4o"`) is treated as a *soft preference* — the router may still downgrade it to honor a `max_cost` ceiling.
+
+### Proving the savings
+
+Every event now records both **`requested_model`** (what you asked for — possibly `"auto"`) and **`served_model`** (what actually ran, read back from the gateway's response). Their divergence is what lets the Atlas dashboard quantify how much routing saved without any change to your application code.
+
+```python
+# Telemetry event excerpt:
+# {
+#   "requested_model": "auto",
+#   "served_model": "gpt-4o-mini",   ← gateway downgraded a simple prompt
+#   "cost": 0.0004,
+#   ...
+# }
+```
+
+Route hints work identically on the async clients (`AsyncShieldsOpenAI`, etc.).
+
+---
+
+## 7. Provider switching
 
 The SDK uses the same `chat.completions.create(...)` surface for every vendor, so swapping providers is a one-line change.
 
@@ -265,7 +342,7 @@ response = client.chat.completions.create(
 
 ---
 
-## 7. Sync vs. async
+## 8. Sync vs. async
 
 Use the async clients if your app already runs in an event loop (FastAPI, asyncio agents). They avoid the threaded fast-path the sync client uses for telemetry flush.
 
@@ -324,7 +401,7 @@ The sync client works fine inside async code — it spawns a daemon thread for t
 
 ---
 
-## 8. PII detection
+## 9. PII detection
 
 The SDK runs a **local pattern-based PII scanner** on every prompt before sending telemetry. Categories detected are sent as labels — actual content stays on your host.
 
@@ -385,7 +462,7 @@ scan_messages([
 
 ---
 
-## 9. Cost estimation
+## 10. Cost estimation
 
 The SDK estimates USD cost per call using a built-in pricing table covering common models from OpenAI, Anthropic, and Google.
 
@@ -422,7 +499,7 @@ Format: `{(vendor, model): (input_per_1k_tokens, output_per_1k_tokens)}`.
 
 ---
 
-## 10. Privacy model
+## 11. Privacy model
 
 ### What's sent by default
 
@@ -468,7 +545,7 @@ hashlib.sha256(b"sk-very-secret-key").hexdigest()[:16]
 
 ---
 
-## 11. Fail-open behavior
+## 12. Fail-open behavior
 
 The SDK is designed to never block your LLM calls due to telemetry issues.
 
@@ -510,7 +587,7 @@ The 5-second telemetry timeout is the only added latency in the worst case. Succ
 
 ---
 
-## 12. Debugging telemetry
+## 13. Debugging telemetry
 
 ### See what's being sent
 
@@ -582,7 +659,7 @@ curl -H "Authorization: Bearer ps-test" \
 
 ---
 
-## 13. Production deployment patterns
+## 14. Production deployment patterns
 
 ### Pattern 1: One client per service
 
@@ -662,7 +739,7 @@ The trade-off: gateway mode gives less control over event shape (no `ps_metadata
 
 ---
 
-## 14. Common questions
+## 15. Common questions
 
 ### Q: Does this slow down my LLM calls?
 

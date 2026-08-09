@@ -37,6 +37,8 @@ from prompt_shields.types import (
     DiscoverySource,
     PSConfig,
     PSMetadata,
+    Quality,
+    RouteHint,
     Vendor,
 )
 
@@ -54,6 +56,8 @@ __all__ = [
     # Types
     "PSMetadata",
     "PSConfig",
+    "RouteHint",
+    "Quality",
     "DataClassification",
     "DiscoverySource",
     "Vendor",
