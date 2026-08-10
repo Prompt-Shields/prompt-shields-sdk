@@ -16,7 +16,6 @@
       "apiKey": "..."
     }
   },
-  "cache": false,
   "integrations": [
     {
       "provider": "anthropic",

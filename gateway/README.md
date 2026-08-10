@@ -188,6 +188,18 @@ Works with Claude Desktop, Cursor, VS Code, and any MCP-compatible client. [Get 
 
 <br>
 
+## Caching (Prompt Shields)
+
+Prompt Shields owns an exact-match cache in this fork (Portkey's original simple/semantic caching was disabled — see note above). It short-circuits identical requests to the same endpoint and reports hit/miss telemetry via ps-telemetry (`cache_status`, `est_tokens_saved`).
+
+- **`X-PS-Cache` request header**: `on` (read from and write to the cache), `off` (bypass entirely), `refresh` (skip the read but repopulate the entry with the fresh response).
+- **`PS_CACHE_DEFAULT` env** (`on` / `off`, default `off`): behavior used when the header is omitted.
+- **`PS_CACHE_MAX_ENTRIES` env** (default `1000`): cap on the in-memory LRU cache.
+
+Notes: exact-match only (SHA-256 of request body + endpoint) — semantic caching is out of scope for now and planned as a separate sub-project; the cache is in-memory and per-instance (not shared across replicas); only non-streaming responses are cached; and cache failures fail open (the request still proceeds to the provider).
+
+<br>
+
 ## Core Features
 ### Reliable Routing
 - <a href="https://portkey.wiki/gh-37">**Fallbacks**</a>: Fallback to another provider or model on failed requests using the LLM gateway. You can specify the errors on which to trigger the fallback. Improves reliability of your application.
