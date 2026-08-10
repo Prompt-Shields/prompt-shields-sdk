@@ -95,17 +95,22 @@ export const memoryCache = () => {
     ) {
       requestOptions = requestOptions[0];
       if (requestOptions.cacheMode === 'simple') {
-        await putInCache(
-          null,
-          null,
-          requestOptions.transformedRequest.body,
-          await requestOptions.response.clone().json(),
-          requestOptions.providerOptions.rubeusURL,
-          '',
-          null,
-          new Date().getTime() +
-            (requestOptions.cacheMaxAge || 24 * 60 * 60 * 1000)
-        );
+        try {
+          const parsed = await requestOptions.response.clone().json();
+          await putInCache(
+            null,
+            null,
+            requestOptions.transformedRequest.body,
+            parsed,
+            requestOptions.providerOptions.rubeusURL,
+            '',
+            null,
+            new Date().getTime() +
+              (requestOptions.cacheMaxAge || 24 * 60 * 60 * 1000)
+          );
+        } catch (error) {
+          console.error('memoryCache write-back error (fail-open):', error);
+        }
       }
     }
   };
