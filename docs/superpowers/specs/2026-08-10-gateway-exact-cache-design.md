@@ -34,7 +34,7 @@ the store/telemetry plumbing that later sub-projects reuse.
 The Portkey cache pipeline is **present but dormant**, not deleted:
 
 - `src/middlewares/cache/index.ts` — `memoryCache()` middleware, `getFromCache`,
-  `putInCache`. Registered globally at `src/index.ts:124` (`app.use('*', memoryCache())`).
+  `putInCache`. Registered globally at `src/index.ts:109` (`app.use('*', memoryCache())`).
 - Store is a bare module-level object: `const inMemoryCache: any = {}` — **unbounded, no
   LRU, no size cap**, per-instance, wiped on restart. TTL is checked lazily on read only.
 - Key = `SHA-256(JSON.stringify(requestBody) + '-' + url)` — exact match. This matches the
@@ -48,7 +48,15 @@ The Portkey cache pipeline is **present but dormant**, not deleted:
   `cacheMaxAge` fields.
 - Config-disabled by default: `conf.example.json` has `"cache": false`.
 - Streaming responses are already excluded from caching (`putInCache` early-returns on
-  `requestBody.stream`).
+  `requestBody.stream`). **Quirk:** the middleware write guard is
+  `requestParams.stream === (false || undefined)`, i.e. `stream === undefined` — a request
+  that sends `stream: false` *explicitly* is currently **not** written to cache.
+- **`ps-telemetry` is defined but NOT wired.** `src/middlewares/ps-telemetry.ts` exports
+  `psTelemetryMiddleware` / `sendTelemetry` / `TelemetryEvent`, but nothing imports or
+  registers it anywhere in `src/`. Its functions take plain `{url, headers, body}` objects,
+  not a Hono `Context`, so as written it has no handle to the `cacheStatus` computed in the
+  request pipeline (`logsService.addCache`, called from `handlerUtils.ts`). Any telemetry
+  emission this spec relies on must be *newly wired*, not merely extended.
 
 ## Goal
 
@@ -101,27 +109,53 @@ A small, self-contained LRU + TTL store replacing the bare `inMemoryCache` objec
 ### Component 2 — Enable + header control
 
 - **`X-PS-Cache` header** parsed to drive `cacheConfig.mode`:
-  - `on` → `simple`
-  - `off` (or absent, when default is off) → `DISABLED`
-  - `refresh` → bypass read, then write fresh (maps to existing
-    `x-portkey-cache-force-refresh` REFRESH path in `getFromCache`).
+  - `on` → mode `simple` (read + write).
+  - `off` → mode `DISABLED`.
+  - `refresh` → mode `simple` **and** inject the existing `x-portkey-cache-force-refresh`
+    request header. Both are required: `getFromCache` returns REFRESH (skips the read) only
+    when that header is present (`index.ts:38-40`), while `putInCache` writes back only when
+    `cacheMode === 'simple'` (`index.ts:98`). So `refresh` = bypass read, still repopulate.
+  - malformed / unknown value → treated as the resolved default (below).
   Parsing lives alongside the other `X-PS-*` header handling; the resolved mode flows into
   `requestContext.cacheConfig` so the existing read/write path activates. This maps onto
   the SDK's existing contract: `RouteHint(allow_cache=False)` already emits `X-PS-Cache: off`.
-- **Default via env:** `PS_CACHE_DEFAULT` (`off` default) so caching is opt-in per
-  deployment. When `off`, a request with no `X-PS-Cache` header is not cached.
-- Streaming requests remain uncached regardless of header.
+- **Mode-resolution precedence** (highest wins) — pinned to remove ambiguity between the
+  three existing inputs and the new ones:
+  1. `X-PS-Cache` request header, if present and valid.
+  2. Else `PS_CACHE_DEFAULT` env (`on` | `off`, default `off`).
+  3. `providerOption.cache` (the config-file path via `requestContext.ts:163`) is honored as
+     today only when neither of the above applies; when it yields a mode we keep it.
+  The legacy top-level `conf` `"cache": false` boolean is **not** consulted by the read path
+  (only `providerOption.cache` is) and stays out of this resolution — noted so implementers
+  don't wire a dead flag.
+- **Streaming stays uncached** regardless of header. As part of this sub-project, fix the
+  write guard from `stream === (false || undefined)` to `stream !== true`, so an explicit
+  `stream: false` is cached like an absent field. (Without this, the "identical requests →
+  HIT" integration test is client-payload-dependent.)
+- **Default via env:** `PS_CACHE_DEFAULT` (`off` default) so caching is opt-in per deployment.
 
 ### Component 3 — Observability via `ps-telemetry`
 
-- The gateway already computes `cacheStatus` (HIT / MISS / SEMANTIC\* / REFRESH / DISABLED)
-  and threads it through `logsService`. Wire `src/middlewares/ps-telemetry.ts` to include:
+The gateway computes `cacheStatus` (HIT / MISS / SEMANTIC\* / REFRESH / DISABLED) and
+threads it through `logsService` (`addCache`). But `ps-telemetry.ts` is **not currently
+wired**, and its functions take plain objects with no handle to the Hono context where
+`cacheStatus` lives. This component therefore does real wiring, not a one-line extension:
+
+- **Emission point:** emit the cache event from where `cacheStatus` is already known — the
+  request handler / `logsService` path that calls `addCache` — rather than from the
+  context-less `ps-telemetry` functions. Concretely: register a telemetry emission seam
+  (Hono middleware or a `logsService` post-hook) that reads the resolved `cacheStatus` from
+  context and calls `sendTelemetry`. The plan must choose one of these two mechanisms
+  explicitly; the design constraint is only that the emitter has access to both the Hono
+  `Context` and the computed `cacheStatus`.
+- **New event fields** (extend `TelemetryEvent` in `ps-telemetry.ts` and the collector
+  contract):
   - `cache_status` — the resolved status string.
   - `est_tokens_saved` — on HIT only, estimated as `ceil(chars / 4)` over the request body
     (dependency-free rough estimate; good enough for relative savings roll-ups). MISS/other → 0.
-- Emission is **fail-open**: any telemetry/store error is swallowed and never blocks or
-  alters the proxied response. (Existing `getFromCache` already try/catches to MISS; the
-  store and telemetry additions follow the same rule.)
+- **Fail-open:** any telemetry/store error is swallowed and never blocks or alters the
+  proxied response. (Existing `getFromCache` already try/catches to MISS; the store and
+  telemetry additions follow the same rule.)
 
 ## Data flow
 
@@ -152,12 +186,16 @@ request → [X-PS-Cache parse → cacheConfig.mode]
 - `X-PS-Cache` mapping: `on`→simple, `off`/absent→DISABLED, `refresh`→REFRESH bypass;
   malformed→default.
 - Key stability: identical body+url → identical key; differing body → different key.
-- Stream bypass: `stream:true` never written.
+- Stream bypass: `stream:true` never written; `stream:false` **is** written (after the
+  `stream !== true` guard fix); absent `stream` is written.
 
 **Integration**
 - Two identical non-stream requests → 2nd is HIT, provider called once.
 - `X-PS-Cache: off` → always MISS, provider called each time.
-- `X-PS-Cache: refresh` → provider called, cache repopulated.
+- `X-PS-Cache: refresh` → read bypassed, provider called, cache repopulated (mode `simple`
+  + `x-portkey-cache-force-refresh` injected).
+- Mode precedence: header overrides `PS_CACHE_DEFAULT`; `PS_CACHE_DEFAULT=on` caches with no
+  header present.
 - Telemetry event carries `cache_status` and non-zero `est_tokens_saved` on HIT.
 
 ## Config summary (new env vars)
@@ -171,3 +209,5 @@ request → [X-PS-Cache parse → cacheConfig.mode]
 
 - Exact LRU data structure (ordered `Map` vs explicit list) — behavior fixed by tests.
 - Precise location of `X-PS-Cache` parsing relative to existing `X-PS-*` header handling.
+- Telemetry emission mechanism (Hono middleware vs `logsService` post-hook) — either is
+  acceptable per Component 3; pick one in the plan.
