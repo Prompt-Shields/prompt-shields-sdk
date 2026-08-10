@@ -37,6 +37,7 @@ import { PreRequestValidatorService } from './services/preRequestValidatorServic
 import { ProviderContext } from './services/providerContext';
 import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
+import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
 
 function constructRequestBody(
   requestContext: RequestContext,
@@ -378,6 +379,11 @@ export async function tryPost(
   logObject.addCache(
     cacheResponseObject.cacheStatus,
     cacheResponseObject.cacheKey
+  );
+  emitCacheTelemetry(
+    cacheResponseObject.cacheStatus,
+    requestContext.transformedRequestBody,
+    requestContext.provider || 'unknown'
   );
   if (cacheResponseObject.cacheResponse) {
     const { response, originalResponseJson } = await responseService.create({
