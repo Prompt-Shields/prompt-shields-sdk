@@ -673,11 +673,11 @@ describe('cache integration', () => {
   });
 
   it('X-PS-Cache: off resolves to DISABLED regardless of env', () => {
-    expect(resolveCacheMode({ 'x-ps-cache': 'off' }, { PS_CACHE_DEFAULT: 'on' }).mode).toBe('DISABLED');
+    expect(resolveCacheMode({ 'x-ps-cache': 'off' }, { PS_CACHE_DEFAULT: 'on' })!.mode).toBe('DISABLED');
   });
 
   it('PS_CACHE_DEFAULT=on caches when no header present', () => {
-    expect(resolveCacheMode({}, { PS_CACHE_DEFAULT: 'on' }).mode).toBe('simple');
+    expect(resolveCacheMode({}, { PS_CACHE_DEFAULT: 'on' })!.mode).toBe('simple');
   });
 
   it('refresh triggers force-refresh header behavior', async () => {
