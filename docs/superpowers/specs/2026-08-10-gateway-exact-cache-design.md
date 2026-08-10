@@ -125,9 +125,18 @@ A small, self-contained LRU + TTL store replacing the bare `inMemoryCache` objec
   2. Else `PS_CACHE_DEFAULT` env (`on` | `off`, default `off`).
   3. `providerOption.cache` (the config-file path via `requestContext.ts:163`) is honored as
      today only when neither of the above applies; when it yields a mode we keep it.
-  The legacy top-level `conf` `"cache": false` boolean is **not** consulted by the read path
-  (only `providerOption.cache` is) and stays out of this resolution — noted so implementers
-  don't wire a dead flag.
+- **Master gate — must be handled.** The top-level `conf` `"cache"` boolean is **not** a dead
+  flag: `src/index.ts:108` mounts `memoryCache()` only when `conf.cache === true`, and
+  `memoryCache()` is the sole thing that sets `getFromCache` on context — without it
+  `CacheService.getCachedResponse` bails (`cacheService.ts:89`). Since `conf.example.json`
+  ships `"cache": false`, the whole read/write path (and therefore all `X-PS-Cache` /
+  `PS_CACHE_DEFAULT` resolution above) is **inert by default**. This sub-project must make the
+  middleware always mount and move the on/off decision into per-request mode resolution:
+  **remove the `index.ts:108` `conf.cache` gate so `memoryCache()` mounts unconditionally**
+  (the store is cheap and idle when every request resolves to `DISABLED`). `conf.cache` is
+  then retired from the enablement path; `PS_CACHE_DEFAULT` becomes the deployment-level
+  default. (Alternative: keep the gate but default `conf.cache=true`; rejected because it
+  leaves two competing global switches — `conf.cache` and `PS_CACHE_DEFAULT`.)
 - **Streaming stays uncached** regardless of header. As part of this sub-project, fix the
   write guard from `stream === (false || undefined)` to `stream !== true`, so an explicit
   `stream: false` is cached like an absent field. (Without this, the "identical requests →
@@ -160,6 +169,7 @@ wired**, and its functions take plain objects with no handle to the Hono context
 ## Data flow
 
 ```
+memoryCache() mounts unconditionally (conf.cache gate removed)
 request → [X-PS-Cache parse → cacheConfig.mode]
         → CacheService.getCachedResponse()
              → getFromCache() → InMemoryLruStore.get()
@@ -202,8 +212,11 @@ request → [X-PS-Cache parse → cacheConfig.mode]
 
 | Var | Default | Purpose |
 |---|---|---|
-| `PS_CACHE_DEFAULT` | `off` | Default cache mode when no `X-PS-Cache` header. |
+| `PS_CACHE_DEFAULT` | `off` | Default cache mode when no `X-PS-Cache` header. Replaces `conf.cache` as the deployment default. |
 | `PS_CACHE_MAX_ENTRIES` | `1000` | LRU entry cap for the in-memory store. |
+
+The `conf.cache` boolean gate at `src/index.ts:108` is removed; `memoryCache()` mounts
+unconditionally and idles when requests resolve to `DISABLED`.
 
 ## Open questions for implementation (resolve in plan)
 
