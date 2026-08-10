@@ -17,6 +17,7 @@ export interface RetrySettings {
 export interface CacheSettings {
   mode: string;
   maxAge?: number;
+  forceRefresh?: boolean;
 }
 
 export enum StrategyModes {

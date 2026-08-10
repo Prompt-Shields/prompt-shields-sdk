@@ -12,6 +12,7 @@ import { HEADER_KEYS, RETRY_STATUS_CODES } from '../../globals';
 import { HookObject } from '../../middlewares/hooks/types';
 import { HooksManager } from '../../middlewares/hooks';
 import { transformToProviderRequest } from '../../services/transformToProviderRequest';
+import { resolveCacheMode } from '../../middlewares/cache/resolveMode';
 
 export class RequestContext {
   private _params: Params | null = null;
@@ -160,6 +161,17 @@ export class RequestContext {
   }
 
   get cacheConfig(): CacheSettings & { cacheStatus: string } {
+    const resolved = resolveCacheMode(this.requestHeaders, {
+      PS_CACHE_DEFAULT: process.env.PS_CACHE_DEFAULT,
+    });
+    if (resolved) {
+      return {
+        mode: resolved.mode,
+        maxAge: undefined,
+        cacheStatus: resolved.mode === 'DISABLED' ? 'DISABLED' : 'MISS',
+        forceRefresh: resolved.forceRefresh,
+      };
+    }
     const cacheConfig = this.providerOption?.cache;
     let cacheStatus = 'DISABLED';
     if (typeof cacheConfig === 'object' && cacheConfig?.mode) {
