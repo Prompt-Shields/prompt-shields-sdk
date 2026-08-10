@@ -26,7 +26,7 @@
 | `src/handlers/services/requestContext.ts` | `cacheConfig` getter — apply `resolveCacheMode` precedence; carry `forceRefresh` | Modify (`:162`) |
 | `src/handlers/services/cacheService.ts` | Inject `x-portkey-cache-force-refresh` header when `forceRefresh` | Modify (`:87`) |
 | `src/index.ts` | Mount `memoryCache()` unconditionally (remove `conf.cache` gate) | Modify (`:108`) |
-| `src/middlewares/ps-telemetry.ts` | Add `cache_status` / `est_tokens_saved` to `TelemetryEvent`; export `buildCacheEvent` + `emitCacheTelemetry(c, requestContext, cacheStatus)` | Modify |
+| `src/middlewares/ps-telemetry.ts` | Add `cache_status` / `est_tokens_saved` to `TelemetryEvent`; export `buildCacheEvent(cacheStatus, requestBody, vendor)` + `emitCacheTelemetry(cacheStatus, requestBody, vendor)` | Modify |
 | `src/middlewares/ps-telemetry.test.ts` | Unit tests for `buildCacheEvent` | Create |
 | `src/handlers/handlerUtils.ts` | Call `emitCacheTelemetry` right after `logObject.addCache(...)` | Modify (`:378`) |
 | `src/middlewares/cache/cache.integration.test.ts` | End-to-end HIT / MISS / refresh / precedence | Create |
@@ -404,12 +404,28 @@ At the top of the `cacheConfig` getter in `requestContext.ts`, before reading `p
 Add the import: `import { resolveCacheMode } from '../../middlewares/cache/resolveMode';`
 Leave the existing `providerOption.cache` logic below as the fallback (unchanged).
 
-- [ ] **Step 3: Inject the force-refresh header in `cacheService.ts`**
+- [ ] **Step 3: Short-circuit DISABLED + inject the force-refresh header in `cacheService.ts`**
 
-In `getCachedResponse`, after `const { mode, maxAge } = context.cacheConfig;`, build the headers passed to `getFromCache` so a force-refresh is honored:
+> **Why the short-circuit matters (critical).** `getCachedResponse` currently gates only on
+> `!(this.getFromCacheFunction && mode)` (`cacheService.ts:89`), and `mode === 'DISABLED'` is a
+> truthy string. `getFromCache` never inspects `cacheMode` on the read path — it does a raw key
+> lookup. Today this is harmless because the middleware isn't mounted when `conf.cache` is false.
+> **Task 5 mounts it unconditionally**, so without this fix an `X-PS-Cache: off` request would still
+> return a HIT off a key a prior `on` request populated — violating the spec. Fix the guard so
+> `DISABLED` bypasses the read.
+
+Replace `const { mode, maxAge } = context.cacheConfig;` with a single destructure that also
+grabs `forceRefresh`, add the `DISABLED` short-circuit, and build force-refresh headers:
 
 ```ts
-    const forceRefresh = (context.cacheConfig as any).forceRefresh === true;
+    const { mode, maxAge, forceRefresh } = context.cacheConfig as
+      { mode: string; maxAge: number | undefined; forceRefresh?: boolean };
+
+    // DISABLED (or falsy) mode must not read the cache, even though the middleware is mounted.
+    if (!mode || mode === 'DISABLED') {
+      return this.noCacheObject;
+    }
+
     const mergedHeaders = {
       ...context.requestHeaders,
       ...headers,
@@ -417,20 +433,33 @@ In `getCachedResponse`, after `const { mode, maxAge } = context.cacheConfig;`, b
     };
 ```
 
-Then pass `mergedHeaders` in place of the current `{ ...context.requestHeaders, ...headers }` argument to `this.getFromCacheFunction(...)`.
+Keep the existing `if (!(this.getFromCacheFunction && mode))` guard below (still valid). Pass
+`mergedHeaders` in place of the current `{ ...context.requestHeaders, ...headers }` argument to
+`this.getFromCacheFunction(...)`.
 
-- [ ] **Step 4: Add a focused test for the refresh path**
+> Also confirm `putInCache` is never reached for DISABLED writes: the `memoryCache()` write-back is
+> already gated on `cacheMode === 'simple'` (`index.ts:98` / `:107`), so a DISABLED request writes
+> nothing. No extra step needed there.
+
+- [ ] **Step 4: Add focused tests for the DISABLED short-circuit and refresh path**
 
 ```ts
 // src/handlers/services/cacheService.refresh.test.ts
-// Verify getCachedResponse injects x-portkey-cache-force-refresh when forceRefresh is set.
-// Build a minimal fake RequestContext { endpoint:'/chat', cacheConfig:{mode:'simple',maxAge:undefined,forceRefresh:true},
-//   requestHeaders:{}, transformedRequestBody:{model:'m'} } and a Hono context whose
-//   get('getFromCache') returns a jest.fn() that records its 2nd arg (headers).
-// Assert the recorded headers contain 'x-portkey-cache-force-refresh': 'true'.
+// Two behaviors, both against the real CacheService(honoContext, hooksService):
+//   stub hooksService = {}; hono context = { get: (k) => k === 'getFromCache' ? spy : undefined }.
+//
+// (a) DISABLED short-circuit: fake context with cacheConfig.mode = 'DISABLED'.
+//     Call getCachedResponse -> expect result.cacheStatus === 'DISABLED' AND the spy
+//     (getFromCache) was NEVER called.
+//
+// (b) refresh: fake context with cacheConfig = { mode:'simple', maxAge:undefined, forceRefresh:true },
+//     endpoint:'chatComplete', requestHeaders:{}, transformedRequestBody:{model:'m'}.
+//     Call getCachedResponse -> expect spy called once, and its 2nd arg (headers)
+//     contains 'x-portkey-cache-force-refresh': 'true'.
 ```
 
-Implement that test concretely against the real `CacheService` constructor `(honoContext, hooksService)`; stub `hooksService` as `{}` and the hono context with `{ get: (k) => k === 'getFromCache' ? spy : undefined }`.
+Implement both concretely. `isEndpointCacheable('chatComplete')` returns true, so the read path is
+reached for (b); for (a) the short-circuit must return before the spy.
 
 - [ ] **Step 5: Run tests**
 
@@ -580,12 +609,15 @@ add:
   emitCacheTelemetry(
     cacheResponseObject.cacheStatus,
     requestContext.transformedRequestBody,
-    requestContext.provider ?? 'unknown'
+    requestContext.provider || 'unknown'
   );
 ```
 
+> Use `||`, not `??`: the `provider` getter (`requestContext.ts:144`) returns `''` (empty string),
+> not `undefined`, when unset — `'' ?? x` would keep the empty string.
+
 Add the import: `import { emitCacheTelemetry } from '../middlewares/ps-telemetry';`
-(Confirm the property name for the provider/vendor on `requestContext` with `grep -n "get provider\|provider" src/handlers/services/requestContext.ts`; use the correct accessor. If none exists, pass `'unknown'`.)
+(`requestContext.transformedRequestBody` getter is at `:70`, `provider` at `:144` — both verified.)
 
 - [ ] **Step 6: Typecheck + run cache tests**
 
@@ -606,7 +638,18 @@ git commit -m "feat(gateway): emit cache hit/miss telemetry with est tokens save
 **Files:**
 - Create: `src/middlewares/cache/cache.integration.test.ts`
 
-This exercises the middleware + store + mode resolution together without a live provider, by driving `getFromCache`/`putInCache` through the same code path the handler uses.
+This exercises the middleware + store + mode resolution together without a live provider, by driving `getFromCache`/`putInCache` directly.
+
+> **Key-parity (read this before writing the test).** The SHA-256 key is
+> `hash(JSON.stringify(body) + '-' + url)`. In the running gateway the **read** passes
+> `context.endpoint` as `url` (`cacheService.ts:98`) and the **write** passes
+> `requestOptions.providerOptions.rubeusURL`, which `logsService.ts:181,227` sets to
+> `requestContext.endpoint` — **the same value**. So read and write keys agree on `url`. The
+> remaining risk is the *body* arg: read uses `context.transformedRequestBody`, write uses
+> `requestOptions.transformedRequest.body`. Task 7 Step 1b adds an assertion that these two are
+> deep-equal for a representative request so a future refactor can't silently break HITs. (This is
+> why the direct-call tests below use one `url` literal and one `body` object — matching the
+> verified handler behavior, not masking a divergence.)
 
 - [ ] **Step 1: Write the test**
 
@@ -649,10 +692,26 @@ describe('cache integration', () => {
 });
 ```
 
+- [ ] **Step 1b: Add the body-arg parity assertion**
+
+In the same file, add a test documenting the read/write body sources agree in shape. Since both
+ultimately serialize the transformed provider body, assert that a representative transformed body
+round-trips to the same key via both call sites' `url` (`endpoint`) value:
+
+```ts
+  it('read and write derive the same key for identical endpoint+body', async () => {
+    // Same endpoint string used by both paths (read: context.endpoint; write: rubeusURL===endpoint)
+    const endpoint = 'chatComplete';
+    await putInCache({}, {}, body, { answer: 7 }, endpoint, '', 'simple', Date.now() + 10000);
+    const [, status] = await getFromCache({}, {}, body, endpoint, '', 'simple', Date.now() + 10000);
+    expect(status).toBe('HIT'); // proves same-endpoint + same-body -> same key
+  });
+```
+
 - [ ] **Step 2: Run**
 
 Run: `npx jest src/middlewares/cache/cache.integration.test.ts`
-Expected: PASS (4 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 3: Run the full cache + telemetry suite**
 
