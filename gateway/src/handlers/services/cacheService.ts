@@ -84,16 +84,27 @@ export class CacheService {
     }
 
     const startTime = new Date();
-    const { mode, maxAge } = context.cacheConfig;
+    const { mode, maxAge, forceRefresh } = context.cacheConfig;
 
-    if (!(this.getFromCacheFunction && mode)) {
+    // DISABLED (or falsy) mode must not read the cache, even though the middleware is mounted.
+    if (!mode || mode === 'DISABLED') {
+      return this.noCacheObject;
+    }
+
+    const mergedHeaders = {
+      ...context.requestHeaders,
+      ...headers,
+      ...(forceRefresh ? { 'x-portkey-cache-force-refresh': 'true' } : {}),
+    };
+
+    if (!this.getFromCacheFunction) {
       return this.noCacheObject;
     }
 
     const [cacheResponse, cacheStatus, cacheKey] =
       await this.getFromCacheFunction(
         env(context.honoContext),
-        { ...context.requestHeaders, ...headers },
+        mergedHeaders,
         context.transformedRequestBody,
         context.endpoint,
         this.getCacheIdentifier,

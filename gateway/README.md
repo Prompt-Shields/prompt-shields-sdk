@@ -36,7 +36,7 @@ These features are deliberately removed or disabled. They belong to other produc
 |---------|-------------------|-----------------|
 | **Fallbacks & retries** | Reliability is the upstream gateway's job, not discovery's | Use [Portkey](https://portkey.ai) itself |
 | **Load balancing & weighted routing** | Same — not in discovery's lane | Portkey |
-| **Smart caching** (simple + semantic) | Cached calls hide real usage from discovery; intentionally disabled | Portkey |
+| **Smart caching** (Portkey simple + semantic) | Portkey's built-in caching is disabled; PS ships its own exact-match cache instead (see [What This Fork Adds](#what-this-fork-adds)) | Portkey |
 | **Guardrails engine** (40+ guardrails) | PS ships its own prompt improvement copilot via browser extensions | [Prompt Shields](https://promptshields.io) |
 | **Virtual keys / secure key management** | Enterprise customers manage LLM keys in their own vaults | Use existing vault |
 | **Role-based access control on the gateway** | RBAC lives in the Atlas AI dashboard (atlas.ai repo) | atlas.ai |
@@ -71,6 +71,25 @@ X-PS-Owner: jane.doe@acme.com
 X-PS-Data-Classification: confidential
 X-PS-Environment: production
 ```
+
+### Exact-match cache
+
+Prompt Shields owns an **exact-match** response cache in this fork (Portkey's simple/semantic caching is disabled). It short-circuits identical requests to the same endpoint and reports hit/miss telemetry through `ps-telemetry` (`cache_status`, `est_tokens_saved`).
+
+```bash
+PS_CACHE_DEFAULT=off        # on | off — behavior when the request header is omitted (default off)
+PS_CACHE_MAX_ENTRIES=1000   # cap on the in-memory LRU cache
+```
+
+Per-request control via the `X-PS-Cache` header:
+
+```
+X-PS-Cache: on        # read from and write to the cache
+X-PS-Cache: off       # bypass entirely
+X-PS-Cache: refresh   # skip the read, repopulate the entry with the fresh response
+```
+
+Notes: exact-match only (SHA-256 of request body + endpoint) — semantic caching is out of scope and planned as a separate sub-project; the cache is in-memory and per-instance (not shared across replicas); only non-streaming responses are cached; and cache failures fail open (the request still proceeds to the provider).
 
 ---
 
@@ -135,7 +154,7 @@ Both write to the same Prompt Shields collector — events are merged by the ded
 
 ## Versioning & upstream merges
 
-This fork tracks Portkey at a specific commit. Provider additions from upstream are cherry-picked as needed — routing/caching/guardrails additions are skipped.
+This fork tracks Portkey at a specific commit. Provider additions from upstream are cherry-picked as needed — routing/guardrails additions are skipped (PS ships its own exact-match cache — see [What This Fork Adds](#what-this-fork-adds)).
 
 See [`FORK_NOTICE.md`](./FORK_NOTICE.md) for the upstream base commit and modification log.
 

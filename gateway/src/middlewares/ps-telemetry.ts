@@ -21,6 +21,8 @@ interface TelemetryEvent {
   owner_email?: string;
   data_classification?: string;
   environment?: string;
+  cache_status?: string;
+  est_tokens_saved?: number;
 }
 
 const PS_COLLECTOR_URL = process.env.PS_COLLECTOR_URL || "http://localhost:8000";
@@ -70,6 +72,32 @@ async function sendTelemetry(event: TelemetryEvent): Promise<void> {
   } catch (err) {
     // Fail-open: never block LLM requests due to telemetry issues
     console.warn("[PS Telemetry] Failed to send event:", err);
+  }
+}
+
+export function buildCacheEvent(
+  cacheStatus: string,
+  requestBody: any,
+  vendor: string
+): TelemetryEvent {
+  const isHit = cacheStatus === 'HIT' || cacheStatus === 'SEMANTIC HIT';
+  const estTokens = isHit ? Math.ceil(JSON.stringify(requestBody ?? {}).length / 4) : 0;
+  return {
+    vendor,
+    model: requestBody?.model || 'unknown',
+    source: 'gateway',
+    cache_status: cacheStatus,
+    est_tokens_saved: estTokens,
+  };
+}
+
+// Fail-open emit from a spot that already knows cacheStatus (handlerUtils).
+export function emitCacheTelemetry(cacheStatus: string, requestBody: any, vendor: string): void {
+  try {
+    if (!cacheStatus || cacheStatus === 'DISABLED') return;
+    sendTelemetry(buildCacheEvent(cacheStatus, requestBody, vendor)).catch(() => {});
+  } catch {
+    /* fail-open */
   }
 }
 

@@ -1,6 +1,14 @@
 import { Context } from 'hono';
+import { InMemoryLruStore } from './store';
 
-const inMemoryCache: any = {};
+const store = new InMemoryLruStore({
+  maxEntries: parseInt(process.env.PS_CACHE_MAX_ENTRIES || '1000', 10),
+});
+
+// test-only hook
+export const __resetCacheForTests = () => {
+  store.clear();
+};
 
 const CACHE_STATUS = {
   HIT: 'HIT',
@@ -40,17 +48,9 @@ export const getFromCache = async (
   }
   try {
     const cacheKey = await getCacheKey(requestBody, url);
-
-    if (cacheKey in inMemoryCache) {
-      const cacheObject = inMemoryCache[cacheKey];
-      if (cacheObject.maxAge && cacheObject.maxAge < Date.now()) {
-        delete inMemoryCache[cacheKey];
-        return [null, CACHE_STATUS.MISS, null];
-      }
-      return [cacheObject.responseBody, CACHE_STATUS.HIT, cacheKey];
-    } else {
-      return [null, CACHE_STATUS.MISS, null];
-    }
+    const entry = await store.get(cacheKey);
+    if (entry) return [entry.responseBody, CACHE_STATUS.HIT, cacheKey];
+    return [null, CACHE_STATUS.MISS, null];
   } catch (error) {
     console.error('getFromCache error: ', error);
     return [null, CACHE_STATUS.MISS, null];
@@ -67,17 +67,16 @@ export const putInCache = async (
   cacheMode: string | null,
   cacheMaxAge: number | null
 ) => {
-  if (requestBody.stream) {
-    // Does not support caching of streams
+  if (requestBody.stream === true) {
+    // Do not cache streamed responses
     return;
   }
 
   const cacheKey = await getCacheKey(requestBody, url);
-
-  inMemoryCache[cacheKey] = {
+  await store.set(cacheKey, {
     responseBody: JSON.stringify(responseBody),
     maxAge: cacheMaxAge,
-  };
+  });
 };
 
 export const memoryCache = () => {
@@ -92,21 +91,26 @@ export const memoryCache = () => {
       requestOptions &&
       Array.isArray(requestOptions) &&
       requestOptions.length > 0 &&
-      requestOptions[0].requestParams.stream === (false || undefined)
+      requestOptions[0].requestParams.stream !== true
     ) {
       requestOptions = requestOptions[0];
       if (requestOptions.cacheMode === 'simple') {
-        await putInCache(
-          null,
-          null,
-          requestOptions.transformedRequest.body,
-          await requestOptions.response.clone().json(),
-          requestOptions.providerOptions.rubeusURL,
-          '',
-          null,
-          new Date().getTime() +
-            (requestOptions.cacheMaxAge || 24 * 60 * 60 * 1000)
-        );
+        try {
+          const parsed = await requestOptions.response.clone().json();
+          await putInCache(
+            null,
+            null,
+            requestOptions.transformedRequest.body,
+            parsed,
+            requestOptions.providerOptions.rubeusURL,
+            '',
+            null,
+            new Date().getTime() +
+              (requestOptions.cacheMaxAge || 24 * 60 * 60 * 1000)
+          );
+        } catch (error) {
+          console.error('memoryCache write-back error (fail-open):', error);
+        }
       }
     }
   };
