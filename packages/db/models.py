@@ -131,3 +131,62 @@ class RiskMapping(Base):
         Index("ix_risk_mappings_tenant_asset", "tenant_id", "asset_id"),
         Index("ix_risk_mappings_tenant_cat", "tenant_id", "risk_category"),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Partner API — credentials and audit log
+# ──────────────────────────────────────────────────────────────────────
+
+
+class PartnerCredential(Base):
+    """OAuth client + optional API key for EA partner integrations.
+
+    One row per (tenant, partner). `client_secret_hash` and `api_key_hash`
+    are bcrypt hashes — plaintext is shown only once on creation.
+    """
+
+    __tablename__ = "partner_credentials"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    partner_name = Column(Text, nullable=False)
+    client_id = Column(Text, nullable=False, unique=True)
+    client_secret_hash = Column(Text, nullable=False)
+    api_key_hash = Column(Text)
+    scopes = Column(ARRAY(Text), nullable=False, default=lambda: ["registry:read"])
+    rate_limit = Column(Integer, default=1000)
+    is_active = Column(Text, default="true")  # 'true' | 'false' — text for portability
+    partner_metadata = Column(JSONB, default=dict)
+    expires_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_partner_credentials_tenant", "tenant_id"),
+        Index("ix_partner_credentials_client_id", "client_id"),
+        Index("ix_partner_credentials_name", "partner_name"),
+    )
+
+
+class PartnerAuditLog(Base):
+    """Append-only log of every Partner API request.
+
+    Used for compliance, debugging, and tenant-visible activity feeds.
+    """
+
+    __tablename__ = "partner_audit_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=False)
+    endpoint = Column(Text, nullable=False)
+    method = Column(Text, nullable=False)
+    status_code = Column(Integer, nullable=False)
+    timestamp = Column(TIMESTAMP(timezone=True), default=utcnow)
+    response_count = Column(Integer)
+    ip_address = Column(Text)
+    user_agent = Column(Text)
+
+    __table_args__ = (
+        Index("ix_partner_audit_tenant_ts", "tenant_id", "timestamp"),
+        Index("ix_partner_audit_partner_ts", "partner_id", "timestamp"),
+    )

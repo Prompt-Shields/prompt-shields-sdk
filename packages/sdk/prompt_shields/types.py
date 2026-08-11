@@ -14,6 +14,8 @@ class PSMetadata(TypedDict, total=False):
 class PSConfig(TypedDict):
     ps_api_key: str
     ps_collector_url: str
+    atlas_url: NotRequired[str]
+    atlas_api_key: NotRequired[str]
     business_unit: NotRequired[str]
     use_case: NotRequired[str]
     owner: NotRequired[str]

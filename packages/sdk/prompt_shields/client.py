@@ -13,13 +13,18 @@ if telemetry delivery fails. See `telemetry.py` for buffering details.
 """
 
 import hashlib
+import os
 import time
 from typing import Any
 
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import estimate_cost
 from prompt_shields.providers import get_adapter
-from prompt_shields.telemetry import TelemetrySender
+from prompt_shields.telemetry import (
+    AtlasTelemetrySender,
+    TelemetrySender,
+    build_atlas_event,
+)
 from prompt_shields.types import PSMetadata
 
 
@@ -57,12 +62,26 @@ class ShieldsClient:
         scan_pii: bool = True,
         send_prompt_text: bool = False,
         pricing_table: dict | None = None,
+        # Optional atlas.ai sink (second destination; collector unchanged).
+        # Env fallback: PS_ATLAS_URL / PS_ATLAS_API_KEY. Inactive unless BOTH set.
+        atlas_url: str | None = None,
+        atlas_api_key: str | None = None,
         **provider_kwargs,
     ):
         self._vendor = vendor
         self._adapter = get_adapter(vendor)
         self._ps_api_key = ps_api_key
         self._telemetry = TelemetrySender(ps_collector_url, ps_api_key)
+        atlas_url = atlas_url if atlas_url is not None else os.environ.get("PS_ATLAS_URL")
+        atlas_api_key = (
+            atlas_api_key if atlas_api_key is not None
+            else os.environ.get("PS_ATLAS_API_KEY")
+        )
+        self._atlas: AtlasTelemetrySender | None = (
+            AtlasTelemetrySender(atlas_url, atlas_api_key)
+            if atlas_url and atlas_api_key
+            else None
+        )
         self._scan_pii = scan_pii
         self._send_prompt_text = send_prompt_text
         self._pricing_table = pricing_table
@@ -217,6 +236,10 @@ class _CompletionsNamespace:
         )
         self._parent._telemetry.enqueue(event)
         self._parent._telemetry.flush_sync()
+
+        if self._parent._atlas is not None:
+            self._parent._atlas.enqueue(build_atlas_event(event, messages))
+            self._parent._atlas.flush_sync()
 
         return response
 
