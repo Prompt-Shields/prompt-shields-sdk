@@ -20,7 +20,7 @@ from prompt_shields.telemetry import (
     TelemetrySender,
     build_atlas_event,
 )
-from prompt_shields.types import PSMetadata
+from prompt_shields.types import PSMetadata, RouteHint
 
 
 class AsyncShieldsClient:
@@ -99,9 +99,13 @@ class AsyncShieldsClient:
         tokens_in = adapter_fields.get("tokens_in")
         tokens_out = adapter_fields.get("tokens_out")
 
+        served_model = adapter_fields.get("served_model") or model
+
         event = {
             "vendor": self._vendor,
             "model": model,
+            "requested_model": model,
+            "served_model": served_model,
             "source": "sdk",
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
@@ -164,9 +168,16 @@ class _AsyncCompletionsNamespace:
         model: str,
         messages: list,
         ps_metadata: PSMetadata | None = None,
+        route: RouteHint | None = None,
         max_tokens: int | None = None,
         **kwargs,
     ):
+        if route is not None:
+            kwargs["extra_headers"] = {
+                **kwargs.get("extra_headers", {}),
+                **route.to_headers(),
+            }
+
         start = time.monotonic()
         response = await self._call_upstream(
             model=model, messages=messages, max_tokens=max_tokens, **kwargs

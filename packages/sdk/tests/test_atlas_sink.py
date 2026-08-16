@@ -251,8 +251,11 @@ from unittest.mock import MagicMock
 from prompt_shields import ShieldsClient
 
 
-def _mock_openai_response(prompt_tokens=10, completion_tokens=20):
+def _mock_openai_response(model="gpt-4o", prompt_tokens=10, completion_tokens=20):
     resp = MagicMock()
+    # A real OpenAI response echoes the served model as a string; the adapter
+    # reads it into served_model, which must stay JSON-serializable.
+    resp.model = model
     resp.usage.prompt_tokens = prompt_tokens
     resp.usage.completion_tokens = completion_tokens
     resp.choices = []

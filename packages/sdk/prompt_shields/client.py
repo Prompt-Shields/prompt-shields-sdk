@@ -25,7 +25,7 @@ from prompt_shields.telemetry import (
     TelemetrySender,
     build_atlas_event,
 )
-from prompt_shields.types import PSMetadata
+from prompt_shields.types import PSMetadata, RouteHint
 
 
 def _fingerprint(api_key: str) -> str:
@@ -128,9 +128,16 @@ class ShieldsClient:
         tokens_in = adapter_fields.get("tokens_in")
         tokens_out = adapter_fields.get("tokens_out")
 
+        # requested_model is what the caller asked for (may be "auto" when the
+        # gateway chooses); served_model is what actually ran. Their divergence
+        # is what lets the collector prove routing savings.
+        served_model = adapter_fields.get("served_model") or model
+
         event = {
             "vendor": self._vendor,
             "model": model,
+            "requested_model": model,
+            "served_model": served_model,
             "source": "sdk",
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
@@ -219,9 +226,18 @@ class _CompletionsNamespace:
         model: str,
         messages: list,
         ps_metadata: PSMetadata | None = None,
+        route: RouteHint | None = None,
         max_tokens: int | None = None,
         **kwargs,
     ):
+        # Route hints travel as X-PS-* headers; the gateway acts on them, the
+        # provider ignores them. Merge over any caller-supplied extra_headers.
+        if route is not None:
+            kwargs["extra_headers"] = {
+                **kwargs.get("extra_headers", {}),
+                **route.to_headers(),
+            }
+
         start = time.monotonic()
         response = self._call_upstream(model=model, messages=messages,
                                         max_tokens=max_tokens, **kwargs)

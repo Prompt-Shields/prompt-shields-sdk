@@ -6,9 +6,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **Cost-aware route hints (SDK)** — `RouteHint(quality=, max_cost=, model_group=, allow_cache=)` on `chat.completions.create(route=...)` for both sync and async clients. The SDK never routes; it emits `X-PS-Quality`, `X-PS-Max-Cost`, `X-PS-Route`, and `X-PS-Cache` headers that the gateway acts on (transparent-by-default, per-route override). An empty hint emits no headers.
+- **`requested_model` / `served_model` on every event** — the requested model (possibly `"auto"`) is captured alongside the model that actually ran (from the provider response / gateway `X-PS-Served-Model`), so routing savings are provable in Atlas.
+- **Gateway cost-aware router** (`gateway/src/middlewares/router/`) — pluggable `RouterStrategy` behind `resolveRoute` with a `HeuristicStrategy` (input-token/code-fence/JSON-schema difficulty → cheap vs. frontier group, `max_cost` budget-clamp across groups). `psRouterMiddleware` rewrites `model="auto"` (or any hinted request) to a concrete model; a concrete model with no hint is left untouched. Config-driven `RoutePolicy` (groups + pricing mirror the SDK) overridable per virtual-key. Fail-open. Telemetry now emits `requested_model`, `served_model`, `route_group`, `route_reason`, `route_est_cost`.
+- **Router wired into the gateway pipeline** — `router/hono.ts` exposes `psRouter()`, mounted in `gateway/src/index.ts` (`app.use('*', psRouter())`) ahead of hooks/cache, gated on `PS_ROUTER_ENABLED=true`. Because Hono 4.x re-parses the body per `c.req.json()`, the adapter overwrites `c.req.bodyCache.json` so the rewritten model reaches the handler, and exposes the decision on `c.get('psRoute')`.
+- **Telemetry wired into the gateway pipeline** — `ps-telemetry.ts` exposes `psTelemetry()`, a Hono middleware mounted after `psRouter` (gated on `PS_API_KEY`). It parses token usage + served model from the response, merges `X-PS-*` business headers, and folds in `c.get('psRoute')` so `requested_model`/`served_model`/`route_*` actually emit in production. Fire-and-forget, fail-open, POST-only; streaming responses emit without usage.
+
 ### Documentation
 
 - README updated to reflect SDK v0.2 capabilities (Anthropic, async, PII detection, cost estimation, API key fingerprinting, `ps_metadata` wiring).
+- Added SDK Guide section 6 "Cost-aware routing", `docs/sdks/python.mdx` routing reference, and the gateway routing-header contract + `ps-router.ts` spec in `gateway/src/middlewares/PS_README.md`.
 
 ## SDK [0.2.0] — 2026-04
 

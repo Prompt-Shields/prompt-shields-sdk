@@ -98,7 +98,7 @@ prompt-shields-sdk/
 
 ### Python SDK
 
-Drop-in replacements for the OpenAI and Anthropic clients. Every LLM call is wrapped with structured telemetry — **fail-open**, so a collector outage never blocks a model call. Sync and async surfaces, PII detection, and cost estimation are all built in.
+Drop-in replacements for the OpenAI and Anthropic clients. Every LLM call is wrapped with structured telemetry — **fail-open**, so a collector outage never blocks a model call. Sync and async surfaces, PII detection, cost estimation, and **cost-aware route hints** are all built in.
 
 > **Developer Guide:** For a deep-dive walkthrough — architecture, configuration, debugging, FastAPI patterns, and FAQ — see [`SDK_GUIDE.md`](SDK_GUIDE.md).
 
@@ -151,6 +151,22 @@ client = AsyncShieldsOpenAI(api_key="sk-...", ps_api_key="ps-...")
 response = await client.chat.completions.create(model="gpt-4o", messages=[...])
 ```
 
+**Cost-aware routing** — attach an intent hint and let the gateway pick the cheapest model that satisfies it. The SDK emits `X-PS-*` headers; the gateway decides (transparent-by-default, per-route override):
+
+```python
+from prompt_shields import RouteHint
+
+client = ShieldsOpenAI(api_key="sk-...", ps_api_key="ps-...", base_url=PS_GATEWAY_URL)
+
+# "Throwaway prompt — cheap is fine, cap the spend." Gateway downgrades the model.
+response = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Classify sentiment: ..."}],
+    route=RouteHint(quality="draft", max_cost=0.005),
+)
+# Event records requested_model="auto" vs served_model="gpt-4o-mini" → savings are provable.
+```
+
 **What ships in the SDK:**
 
 | Capability | Notes |
@@ -160,6 +176,7 @@ response = await client.chat.completions.create(model="gpt-4o", messages=[...])
 | Tool/function call capture | OpenAI `tool_calls`, Anthropic `tool_use` blocks parsed automatically |
 | PII detection | Pattern-based: `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `health_data`, `financial_data` — categories only, never content |
 | Cost estimation | Built-in pricing table for OpenAI/Anthropic/Google models; `pricing_table=` override |
+| Cost-aware route hints | `RouteHint(quality=, max_cost=, model_group=, allow_cache=)` → `X-PS-*` headers the gateway routes on; `requested_model` vs `served_model` captured per event |
 | API key fingerprint | SHA-256 truncated identity, never the raw key |
 | `ps_metadata` per-request | `data_sources`, `output_destination`, `risk_tags`, `session_id`, `user_id` flow into events |
 | Privacy by default | `prompt_text` never sent unless `send_prompt_text=True` is explicitly opted in |

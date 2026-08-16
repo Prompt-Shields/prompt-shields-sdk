@@ -46,6 +46,7 @@ class OpenAIAdapter(ProviderAdapter):
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "tool_calls_used": tool_calls or None,
+            "served_model": getattr(response, "model", None),
         }
 
 
@@ -72,6 +73,7 @@ class AnthropicAdapter(ProviderAdapter):
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "tool_calls_used": tool_calls or None,
+            "served_model": getattr(response, "model", None),
         }
 
 

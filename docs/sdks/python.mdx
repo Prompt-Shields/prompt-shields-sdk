@@ -137,6 +137,44 @@ response = client.chat.completions.create(
 | `session_id` | Groups related calls in a multi-turn conversation |
 | `user_id` | Opaque identifier (hash before passing if you need to anonymize) |
 
+## Cost-Aware Routing
+
+Attach a `RouteHint` to a call to express *intent*. The SDK emits `X-PS-*`
+headers; the **gateway** picks the cheapest model that satisfies the hint
+(transparent-by-default, with a per-route override). Calling a provider
+directly instead of the gateway simply ignores the headers, so hints are
+always safe to add.
+
+```python
+from prompt_shields import RouteHint, ShieldsOpenAI
+
+client = ShieldsOpenAI(api_key="sk-...", ps_api_key="ps-...", base_url=PS_GATEWAY_URL)
+
+# Cheap-and-capped for a throwaway prompt; gateway downgrades the model.
+client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Classify sentiment: ..."}],
+    route=RouteHint(quality="draft", max_cost=0.005),
+)
+
+# Force the strong tier, skipping the router entirely.
+client.chat.completions.create(
+    model="auto", messages=[...], route=RouteHint(model_group="frontier"),
+)
+```
+
+| Field | Type | Header | Meaning |
+|-------|------|--------|---------|
+| `quality` | `"draft" \| "balanced" \| "critical"` | `X-PS-Quality` | Intent, not a model name. |
+| `max_cost` | float | `X-PS-Max-Cost` | Per-call USD ceiling. |
+| `model_group` | str | `X-PS-Route` | Explicit override — bypasses the router. |
+| `allow_cache` | bool (default `True`) | `X-PS-Cache: off` when `False` | Opt out of the gateway's semantic cache. |
+
+Precedence: `model_group` > `quality`/`max_cost` > gateway default. An empty
+`RouteHint()` emits no headers (identical to today's behavior). Every event
+records `requested_model` (e.g. `"auto"`) vs `served_model` (what actually
+ran) so savings are provable. Works on the async clients too.
+
 ## Configuration Reference
 
 | Argument | Type | Default | Notes |
