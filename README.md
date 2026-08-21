@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B%20%2B%20pgvector-336791)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 Discover, classify, and govern every AI system running across your enterprise — whether sanctioned or shadow.
 
@@ -230,7 +230,7 @@ GET  /api/v1/registry/search?q=...              # Semantic search (pgvector)
 
 ```bash
 # 1. Clone
-git clone https://github.com/jun-bit-pulse-ai/prompt-shields-sdk.git
+git clone https://github.com/Bit-Pulse-AI/prompt-shields-sdk.git
 cd prompt-shields-sdk
 
 # 2. Start PostgreSQL with pgvector
@@ -297,8 +297,26 @@ PYTHONPATH=packages:packages/collector python3 -m pytest tests/ -v
 
 ---
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development workflow and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community
+expectations.
+
+## Security
+
+Report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Please do not
+open a public issue for a security problem.
+
 ## License
 
-The AI Gateway is forked from [Portkey AI Gateway](https://github.com/Portkey-AI/gateway) under the **MIT License** — see [`gateway/LICENSE`](gateway/LICENSE).
+Prompt Shields SDK, gateway extensions, collector, and connectors are licensed
+under the **Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Prompt Shields SDK, Collector, and all extensions to the gateway are proprietary. See [`gateway/FORK_NOTICE.md`](gateway/FORK_NOTICE.md) for details on modifications.
+The `gateway/` directory is a fork of the
+[Portkey AI Gateway](https://github.com/Portkey-AI/gateway), which is licensed
+under the **MIT License**. That license continues to govern the upstream code and
+is retained at [`gateway/LICENSE`](gateway/LICENSE); the modifications made for
+Prompt Shields are described in [`gateway/FORK_NOTICE.md`](gateway/FORK_NOTICE.md).
+MIT is compatible with Apache-2.0, so the combined work may be distributed under
+these terms provided both notices are preserved.

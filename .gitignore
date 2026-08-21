@@ -8,3 +8,29 @@ build/
 node_modules/
 gateway/dist/
 .worktrees/
+
+# --- BEGIN open-source hygiene (do not remove) ---
+.env
+.env.*
+!.env.example
+!.env.*.example
+secrets.json
+secrets.*.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+credentials.json
+service-account*.json
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Local research / teardown notes — not for publication
+docs/reasonblocks-teardown.md
+
+# Finder / sync duplicates ("file 2.ext")
+*\ [0-9].*
+# --- END open-source hygiene ---
