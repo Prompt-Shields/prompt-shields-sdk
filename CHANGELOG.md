@@ -6,9 +6,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **Missing initial migration.** Revision `002` declared `down_revision = '001'`, but revision `001` was absent, so `alembic upgrade head` failed with `KeyError: '001'` on any fresh database. Added `001_initial_schema.py`, creating `tenants`, `ai_assets`, `ai_usage_events`, `data_flows`, and `risk_mappings` with their indexes on stock PostgreSQL. `alembic check` now reports no drift against the models.
+- **Collector container could not import the database layer.** `packages/collector/Dockerfile` set `PYTHONPATH` to `/app/packages/db`, but the code imports `db.models`, which needs `/app/packages` on the path. The container failed at startup with `ModuleNotFoundError: No module named 'db'`.
+- **Test database lacked pgvector.** `scripts/init-test-db.sql` created `prompt_shields_test` without enabling the `vector` extension, so the collector suite failed at table creation. The extension is enabled per-database, so the script now connects to the test database and enables it.
+
 ### Documentation
 
-- README updated to reflect SDK v0.2 capabilities (Anthropic, async, PII detection, cost estimation, API key fingerprinting, `ps_metadata` wiring).
+- README rewritten for a security and governance audience: the problem statement, a verified five-command quickstart, an architecture diagram, definitions for each named concept, and an explicit limits section covering fail-open telemetry loss, PII heuristic error in both directions, the unwired gateway middleware, plaintext collector authentication, unenforced rate limiting, and predicate-based tenant isolation.
+- Added root `SECURITY.md` — reporting process, scope, and the known limitations that will not be treated as vulnerabilities.
+- Added root `CONTRIBUTING.md` — development setup, per-suite test invocation, migration workflow, and the fail-open and content-stays-local invariants.
+- Corrected the clone URL, which pointed at a personal fork rather than `Bit-Pulse-AI/prompt-shields-sdk`.
 
 ## SDK [0.2.0] — 2026-04
 
