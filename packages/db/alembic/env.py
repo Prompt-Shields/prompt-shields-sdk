@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -8,6 +9,12 @@ from db.models import Base
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# PS_DATABASE_URL wins over alembic.ini, so a host whose 5432 is already taken
+# can point at another port (see PS_DB_PORT in docker-compose.yml) without
+# editing a tracked file.
+if os.environ.get("PS_DATABASE_URL"):
+    config.set_main_option("sqlalchemy.url", os.environ["PS_DATABASE_URL"])
 
 target_metadata = Base.metadata
 
