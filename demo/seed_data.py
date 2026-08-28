@@ -1,10 +1,16 @@
 """Seed the database with synthetic AI assets for demo purposes."""
 import asyncio
+import os
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from db.models import Base, Tenant, AIAsset, DataFlow, RiskMapping
 from datetime import datetime, timezone
 
-DB_URL = "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields"
+# Same environment variable and default the collector uses, so a host that has
+# remapped the database port (PS_DB_PORT) does not have to edit this file.
+DB_URL = os.environ.get(
+    "PS_DATABASE_URL",
+    "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields",
+)
 
 
 async def seed():

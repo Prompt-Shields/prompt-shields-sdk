@@ -1,9 +1,16 @@
+import os
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from db.models import Base, Tenant
 
-TEST_DB_URL = "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields_test"
+# Overridable so a host that has remapped the database port (PS_DB_PORT) can
+# still run the integration tests without editing a tracked file.
+TEST_DB_URL = os.environ.get(
+    "PS_TEST_DATABASE_URL",
+    "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields_test",
+)
 
 
 @pytest_asyncio.fixture
