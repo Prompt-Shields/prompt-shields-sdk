@@ -5,6 +5,13 @@ This file is for the human operator. It is not read during a tick.
 ## 1. Prepare the repository
 
 - Create the labels listed in `config.md` (or let the first tick create them).
+- **Create the journal issue yourself:** an issue titled "Autopilot journal"
+  with the `autopilot:journal` label. Ticks refuse to run without exactly one,
+  so removing the label also stops the loop.
+- Recommended: give autopilot its own GitHub identity (a bot account or GitHub
+  App) and set `autopilot_login` in `config.md`. While it posts as a
+  maintainer, it cannot prove that a human added `autopilot:merge-ok` or
+  `autopilot:ready`; it is only forbidden from adding them itself.
 - Label a few small, well-specified issues `autopilot:ready`. Autopilot only
   ever picks up issues a human has labelled.
 - Recommended before relying on auto-merge: add a root CI workflow
@@ -63,5 +70,9 @@ Autopilot never merges changes to this directory itself.
   remove the label.
 - **Improve the loop:** review and merge (or close) the `autopilot:self-improve`
   PR. This is the only way the skill changes itself.
-- **Start slow:** consider running every 3 hours with `max_merges_per_tick: 0`
-  for the first few days, read the reviews it writes, then turn merging on.
+- **Start slow:** `max_merges_per_tick` ships as 0. Read the reviews it writes
+  for a few days. To turn merging on, first give autopilot its own GitHub
+  identity and set `autopilot_login`, then raise `max_merges_per_tick` (rule 11
+  keeps merging off without one). Overlapping ticks are prevented by the
+  journal `LOCK`; the dispatcher also tries to skip an hour while the previous
+  tick is still running, but the lock is the real guard.

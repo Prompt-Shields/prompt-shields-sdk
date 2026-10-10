@@ -11,7 +11,8 @@ docker compose up -d db 2>/dev/null && \
 (cd gateway && npm ci)
 ```
 
-Record in the journal which parts came up. If Docker is unavailable, the
+Run this only on `main` or on a trusted PR head (SKILL.md rule 10) — never on
+an untrusted fork's code. Record in the journal which parts came up. If Docker is unavailable, the
 integration suite is skipped; see `LEARNINGS.md` for what that blocks.
 
 ## Suites
@@ -19,7 +20,7 @@ integration suite is skipped; see `LEARNINGS.md` for what that blocks.
 | Area touched | Command |
 |---|---|
 | `packages/sdk/**` | `PYTHONPATH=packages/sdk python3 -m pytest packages/sdk/tests/ -q` |
-| `packages/collector/**`, `packages/db/**` | `PYTHONPATH=packages:packages/collector python3 -m pytest packages/collector/tests/ -q` and the integration suite |
+| `packages/collector/**`, `packages/db/**` | `PYTHONPATH=packages:packages/collector python3 -m pytest packages/collector/tests/ -q`, `PYTHONPATH=packages python3 -m pytest packages/db/ -q`, and the integration suite |
 | integration (needs DB) | `PYTHONPATH=packages:packages/collector python3 -m pytest tests/ -q` |
 | `gateway/**` | `cd gateway && npm run test:gateway && npm run test:plugins && npm run format:check` |
 | docs only | none, but check links and code samples still match the code |
@@ -47,13 +48,15 @@ After a new `sdk-v*` tag:
    /tmp/ps-qa/bin/pip install /tmp/ps-qa/dist/*.whl
    /tmp/ps-qa/bin/python -c "import prompt_shields, sys; print(prompt_shields.__name__)"
    ```
-2. Confirm the installed version matches the tag.
+2. Confirm `prompt_shields.__version__` and the installed distribution
+   version (`importlib.metadata.version("prompt-shields")`) both match the tag.
 3. Run the README quickstart end to end if Docker is available.
 4. Spot-check one example per public client in `SDK_GUIDE.md` against the
    installed wheel (import and construct; no real API keys).
 
 Any failure: open a `regression` + `priority:high` issue with the exact
-command and output, labelled `autopilot:ready` only if the fix is obvious.
+command and output. Never label it `autopilot:ready` yourself (SKILL.md rule 8);
+say in the issue whether the fix looks obvious.
 
 ## Hourly smoke (when nothing else ran QA this tick)
 

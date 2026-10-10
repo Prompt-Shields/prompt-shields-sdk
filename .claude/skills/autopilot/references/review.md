@@ -8,7 +8,14 @@ that did not write the code.
 Launch a **fresh subagent** per PR. Give it only:
 
 - the PR number, head SHA, and the linked issue text
-- the instruction to check out that SHA and read whatever it needs in the repo
+- whether the PR is **trusted** (author is trusted per SKILL.md rule 9 and the
+  head branch is in this repository, not a fork) or **untrusted**
+- for a trusted PR: the instruction to check out that SHA and read whatever it
+  needs in the repo
+- for an untrusted PR: the diff only, read through the GitHub API. **No
+  checkout, install, build or test run** — `npm ci` lifecycle scripts,
+  `conftest.py` and setup code would run with this session's push credentials
+  (SKILL.md rule 10)
 - the checklist below and the output format
 
 Do **not** pass it the author's plan, commit reasoning, or your opinion of the
@@ -24,8 +31,10 @@ The reviewer answers each with evidence (file:line, command output):
 2. **Correctness.** Trace at least one realistic input through the changed
    code. Look for unhandled `None`/empty cases, async misuse, off-by-one,
    wrong error handling (the gateway middlewares must fail open).
-3. **Tests.** Is there a test that fails without the change? Run the suites
-   for the touched area (see `qa.md`) on the head SHA and report results.
+3. **Tests.** Is there a test that fails without the change? For a trusted PR,
+   run the suites for the touched area (see `qa.md`) on the head SHA and report
+   results. For an untrusted PR, report `SUITES: not run (untrusted)` and
+   return `NEEDS_HUMAN` at best — it can never be `APPROVE`.
 4. **Privacy contract.** No prompt bodies, message contents or end-user
    identifiers sent to the collector; new telemetry fields described in the
    PR body (`CONTRIBUTING.md` → "Telemetry and privacy").
@@ -60,7 +69,15 @@ reviewer cannot verify.
 
 Post the result as one PR comment (you cannot formally approve a PR opened by
 the same GitHub account). Start it with `Autopilot review of <sha>` so later
-ticks can tell which head was reviewed. Inline comments for blocking findings
+ticks can tell which head was reviewed, and end it with
+`Tick: <link to this tick's TICK journal comment>` once the journal entry is
+posted (edit the comment in phase 7 to fill it in). The merge gate only counts
+a review whose author is trusted (and is `autopilot_login`, when set) and whose
+`Tick:` link resolves to a journal `TICK` entry that lists this PR and SHA
+under `Reviewed:`. A look-alike comment from anyone else is ignored. Because
+the `TICK` entry is only posted in phase 7, a review never satisfies the merge
+gate in the tick that wrote it; the earliest merge is the next tick. That is
+intended. Inline comments for blocking findings
 are welcome. For an autopilot PR with blocking findings, phase 1 of the next
 tick (or this one, if budget remains) fixes them; the new head then needs a
 fresh review before merge.
