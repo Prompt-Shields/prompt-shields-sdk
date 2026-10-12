@@ -24,6 +24,16 @@ This directory is a fork of the [Portkey AI Gateway](https://github.com/Portkey-
 
 Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b341133) (CrowdStrike AIDR guardrail metadata; guardrails are out of scope).
 
+### Ported from upstream `2.0.0` (U1)
+
+| Feature | Upstream files | Our adaptation |
+|---|---|---|
+| JSON payload-size limit (#62) | `src/middlewares/payloadSizeValidator.ts` | Limit read per request from `MAX_JSON_PAYLOAD_SIZE_IN_MB`; matches `application/json; charset=...`; Prometheus bookkeeping dropped |
+| `/v1/rerank` (#58) | `src/handlers/rerankHandler.ts`, `src/types/rerankRequestBody.ts`, `src/utils/idGenerator.ts`, `src/providers/{cohere,jina,voyage,bedrock}/rerank.ts` | Handler reads the body from the Hono request (our style); Bedrock routes rerank to `bedrock-agent-runtime` |
+| Databricks, Latitude, Pinecone providers (#57) | `src/providers/{databricks,latitude,pinecone}/` | Databricks workspace header plumbed through `constructConfigFromRequestHeaders` |
+
+Not ported: `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
+
 ### How to sync upstream
 
 ```bash
