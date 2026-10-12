@@ -152,3 +152,62 @@ async def test_async_create_forwards_route_headers():
     )
     _, kwargs = client._upstream.chat.completions.create.call_args
     assert kwargs["extra_headers"]["X-PS-Quality"] == "balanced"
+
+
+# --- cost is priced at the served model -----------------------------------
+
+
+def test_cost_priced_at_served_model_for_auto():
+    # "auto" has no price; the call must be priced at what actually ran.
+    client = ShieldsClient(api_key="sk-test", ps_api_key="ps-test")
+    event = client._build_event(
+        model="auto",
+        messages=[{"role": "user", "content": "hi"}],
+        response=_mock_openai_response(
+            model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=1000
+        ),
+        latency_ms=10,
+    )
+    # 1000 in @ 0.00015/1k + 1000 out @ 0.0006/1k
+    assert event["cost"] == 0.00075
+
+
+def test_cost_priced_at_served_model_on_downgrade():
+    # Gateway downgraded gpt-4o -> gpt-4o-mini; billing follows the served model.
+    client = ShieldsClient(api_key="sk-test", ps_api_key="ps-test")
+    event = client._build_event(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "hi"}],
+        response=_mock_openai_response(
+            model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=1000
+        ),
+        latency_ms=10,
+    )
+    assert event["cost"] == 0.00075
+
+
+def test_cost_priced_at_dated_snapshot_of_served_model():
+    # Providers echo dated snapshots (gpt-4o-2024-08-06); price the base model.
+    client = ShieldsClient(api_key="sk-test", ps_api_key="ps-test")
+    event = client._build_event(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "hi"}],
+        response=_mock_openai_response(
+            model="gpt-4o-2024-08-06", prompt_tokens=1000, completion_tokens=2000
+        ),
+        latency_ms=10,
+    )
+    assert event["cost"] == 0.0225
+
+
+def test_async_cost_priced_at_served_model_for_auto():
+    client = AsyncShieldsClient(api_key="sk-test", ps_api_key="ps-test")
+    event = client._build_event(
+        model="auto",
+        messages=[{"role": "user", "content": "hi"}],
+        response=_mock_openai_response(
+            model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=1000
+        ),
+        latency_ms=10,
+    )
+    assert event["cost"] == 0.00075

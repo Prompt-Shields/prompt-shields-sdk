@@ -18,6 +18,12 @@ class ProviderAdapter:
         """Return event-shaped fields parsed from a provider response."""
         raise NotImplementedError
 
+    @staticmethod
+    def _served_model(response: Any) -> str | None:
+        """Model name echoed by the provider; anything but a string is ignored."""
+        model = getattr(response, "model", None)
+        return model if isinstance(model, str) and model else None
+
 
 class OpenAIAdapter(ProviderAdapter):
     vendor = "openai"
@@ -46,7 +52,7 @@ class OpenAIAdapter(ProviderAdapter):
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "tool_calls_used": tool_calls or None,
-            "served_model": getattr(response, "model", None),
+            "served_model": self._served_model(response),
         }
 
 
@@ -73,7 +79,7 @@ class AnthropicAdapter(ProviderAdapter):
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "tool_calls_used": tool_calls or None,
-            "served_model": getattr(response, "model", None),
+            "served_model": self._served_model(response),
         }
 
 

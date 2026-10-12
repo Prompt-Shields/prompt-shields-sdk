@@ -223,7 +223,7 @@ Detected categories: `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban
 
 ## Cost Estimation
 
-Built-in pricing table for OpenAI, Anthropic, and Google models:
+Prices come from the bundled model catalog (`load_catalog()`). It covers OpenAI, Anthropic and Google, plus EU-hosted Mistral, Scaleway and OVHcloud models, sourced from the LiteLLM price map. Calls are priced at the model that served them.
 
 ```python
 from prompt_shields import estimate_cost

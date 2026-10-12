@@ -464,7 +464,9 @@ scan_messages([
 
 ## 10. Cost estimation
 
-The SDK estimates USD cost per call using a built-in pricing table covering common models from OpenAI, Anthropic, and Google.
+The SDK estimates USD cost per call from a bundled **model catalog** (`prompt_shields/catalog.json`). It covers current OpenAI, Anthropic and Google models, plus EU-hosted supply from Mistral, Scaleway and OVHcloud. Prices come from the [LiteLLM price map](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and are regenerated with `scripts/build_catalog.py`. `prompt_shields.pricing.PRICING_CATALOG_VERSION` gives the snapshot date.
+
+Calls are priced at the model that actually served them. Dated snapshots (`gpt-4o-2024-08-06`) are priced at their base model when the snapshot is not listed separately.
 
 ```python
 from prompt_shields import estimate_cost
@@ -496,6 +498,26 @@ client = ShieldsOpenAI(
 ```
 
 Format: `{(vendor, model): (input_per_1k_tokens, output_per_1k_tokens)}`.
+
+### The catalog
+
+`load_catalog()` exposes the full catalog. Beyond the base prices it has:
+
+- cache-read, cache-write, reasoning, long-context, batch, flex and priority prices, under LiteLLM's field names;
+- capabilities (tools, JSON schema, vision, reasoning, context window);
+- provider sovereignty metadata (jurisdiction, HQ country, US CLOUD Act exposure, ZDR, certifications).
+
+```python
+from prompt_shields import load_catalog
+
+catalog = load_catalog()
+m = catalog.get("anthropic", "claude-sonnet-4-5-20250929")   # alias lookup
+m.pricing["cache_read_input_token_cost"]                     # per token, USD
+m.supports("function_calling")                               # True
+m.provider.jurisdiction                                      # "US"
+```
+
+Sovereignty fields that have not been verified against a source are `None`. Anything enforcing a data policy must treat `None` as "not compliant".
 
 ---
 

@@ -49,3 +49,19 @@ def test_default_table_has_common_models():
     assert ("openai", "gpt-4o") in DEFAULT_PRICING
     assert ("anthropic", "claude-sonnet-4-20250514") in DEFAULT_PRICING
     assert ("google", "gemini-1.5-pro") in DEFAULT_PRICING
+
+
+def test_dated_openai_snapshot_priced_at_base_model():
+    assert estimate_cost("openai", "gpt-4o-2024-08-06",
+                         tokens_in=1000, tokens_out=2000) == 0.0225
+
+
+def test_exact_dated_entry_wins_over_base():
+    # Anthropic table keys are dated; an exact match must still be used as-is.
+    assert estimate_cost("anthropic", "claude-3-5-haiku-20241022",
+                         tokens_in=1000, tokens_out=1000) == 0.0048
+
+
+def test_undated_unknown_model_still_none():
+    assert estimate_cost("openai", "gpt-4o-audio-preview",
+                         tokens_in=100, tokens_out=200) is None

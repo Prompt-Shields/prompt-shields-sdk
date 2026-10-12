@@ -18,6 +18,7 @@ Public surface:
     Utilities:
         detect_pii_categories — pattern-based PII detection
         estimate_cost         — token-to-USD cost estimator
+        load_catalog          — model & provider catalog (prices, capabilities, sovereignty)
 """
 
 from prompt_shields.async_client import (
@@ -31,6 +32,7 @@ from prompt_shields.client import (
     ShieldsOpenAI,
 )
 from prompt_shields.pii import detect_pii_categories, scan_messages
+from prompt_shields.catalog import Catalog, ModelInfo, ProviderInfo, load_catalog
 from prompt_shields.pricing import estimate_cost
 from prompt_shields.types import (
     DataClassification,
@@ -65,4 +67,9 @@ __all__ = [
     "detect_pii_categories",
     "scan_messages",
     "estimate_cost",
+    # Model & provider catalog
+    "Catalog",
+    "ModelInfo",
+    "ProviderInfo",
+    "load_catalog",
 ]

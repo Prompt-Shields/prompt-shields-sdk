@@ -12,3 +12,6 @@ openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.34"]
 all = ["openai>=1.0", "anthropic>=0.34"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "respx>=0.21", "openai>=1.0", "anthropic>=0.34"]
+
+[tool.setuptools.package-data]
+prompt_shields = ["catalog.json"]

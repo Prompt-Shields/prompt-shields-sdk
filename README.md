@@ -81,7 +81,7 @@ Prompt Shields separates *collection* from *inventory*. Several independent coll
 
 | Captured | Notes |
 |---|---|
-| Vendor, model, tokens, latency, cost | Built-in pricing table for OpenAI, Anthropic and Google models |
+| Vendor, model, tokens, latency, cost | Bundled model catalog: OpenAI, Anthropic, Google, plus EU-hosted Mistral, Scaleway and OVHcloud models |
 | Ownership metadata | Business unit, use case, owner, environment, data classification |
 | PII categories | `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `health_data`, `financial_data` — categories only, never the matched value |
 | Tool and function calls | OpenAI `tool_calls` and Anthropic `tool_use` blocks |
@@ -129,9 +129,76 @@ This is a discovery and inventory tool. It is not a control, and the statements 
 
 **Semantic search calls OpenAI.** When `OPENAI_API_KEY` is set on the collector, asset metadata — vendor, model, use case, business unit — is sent to OpenAI's embeddings API (`text-embedding-3-small`) to build the search index. Leave the variable unset and embeddings are skipped, disabling `/search` but keeping asset metadata inside your network.
 
-**Cost figures are estimates.** Computed from a local pricing table against observed token counts. They will not reconcile to a provider invoice, and the table must be kept current by hand.
+**Cost figures are estimates.** They are computed from a bundled price catalog against observed token counts. They will not reconcile to a provider invoice. Cached and reasoning tokens are not yet priced separately. The catalog is a dated snapshot of the LiteLLM price map; it is regenerated with `scripts/build_catalog.py`, not refreshed at runtime.
 
 **Shadow AI capture is not in this repository.** The browser extensions and macOS app that detect employees using ChatGPT, Gemini, and Copilot are separate products. Cloning this repository gives you developer-side and infrastructure-side discovery only.
+
+## Coming next: Prompt Shields Route
+
+> **Status: in development. None of this is in the current release.** Everything in
+> the section above still describes what this repository does today. Scope, phasing and
+> success criteria are in [PRD 0001](docs/prd/0001-model-cost-optimizer.md). Progress is
+> tracked in the [project milestones](https://github.com/Prompt-Shields/prompt-shields-sdk/milestones).
+
+**Cut your AI bill without letting sensitive data go anywhere it shouldn't.**
+
+### Why
+
+AI spend keeps rising even as the price per token falls. Most of the waste comes from
+sending every request to the most expensive model "just in case." Routers that pick a
+cheaper model already exist. The question they cannot answer for a regulated business is
+*whether that cheaper model is allowed to see this data.* A router that knows prices but
+not sensitivity hands the CFO a saving and the CISO a breach.
+
+Prompt Shields already sits in the request path and already knows what kind of data each
+call carries. Route turns that knowledge into savings.
+
+### What it delivers
+
+| For | Value |
+|---|---|
+| **The CFO and FinOps team** | Each request goes to the cheapest model that still meets your quality bar. Spend is attributed to business units and use cases. Budgets can warn, downgrade or block. Savings are reported against a baseline frozen at onboarding and reconciled with your provider invoice. |
+| **The CISO and DPO** | Routing is constrained by data sensitivity *before* cost is considered. Confidential and personal data stays on EU or Nordic sovereign models, under your policy. Every call records where it was served and under which policy version, as evidence. If no compliant model is available, the call fails instead of being sent somewhere cheaper. |
+| **Platform teams** | One policy file, enforced at the gateway with no application changes, or in the SDK. Failover across providers covers capacity shortages, and a semantic cache serves repeat questions. |
+| **Developers** | Use `model="auto"` and stop hand-picking models and writing retry code. |
+
+### It gets cheaper on its own
+
+Route learns from your own traffic. Each call produces outcome signals: failures,
+retries, your users' feedback, and occasional side-by-side quality checks. A per-use-case
+learner uses them to find the cheapest model that actually solves *your* requests. It
+learns inside your environment; prompts are never shipped off for training. It can only
+choose between models your policy already allows. It recommends changes before it acts on
+them, and it rolls itself back if quality drops.
+
+### See the savings before you install anything
+
+The **AI bill teardown** runs on your own machine against a week of your logs. It
+replays them through the routing policy, re-tests a sample against cheaper compliant
+models, and reports what you would have saved at measured quality parity. It also shows
+how much of your traffic must stay sovereign. Your logs never leave your environment.
+
+### How it compares
+
+| | Price/latency routers | Enterprise AI gateways | AI FinOps tools | **Prompt Shields Route** |
+|---|---|---|---|---|
+| Lowers the cost of each request | Yes | Yes | No (they report spend) | **Yes** |
+| Routes by data sensitivity, fails closed | No | Partly (guardrails, no sovereignty policy) | No | **Yes** |
+| Keeps prompts in your environment, uses your own keys | Usually a hosted proxy | Varies | n/a | **Yes** |
+| Proves savings against an audited baseline | No | No | Partly | **Yes** |
+| Learns from your outcomes, within policy | Some (global models) | No | No | **Yes, per tenant** |
+| Ties every call to an owner, use case and data class in an AI asset registry | No | No | Partly | **Yes** |
+
+The evidence that routing works is well established. The peer-reviewed RouteLLM study
+reported cost reductions of up to 85% while keeping 95% of GPT-4's quality on MT-Bench
+([paper](https://arxiv.org/abs/2406.18665)). Real savings depend on your workload,
+which is why the teardown measures yours rather than quoting ours.
+
+### What it will not do
+
+Route will not resell tokens or run GPUs. It is not a hosted public router. It will not
+rewrite your prompts until the PII engine passes a measured accuracy target. Its
+"same quality" claims are always measured against your own eval sets, never assumed.
 
 ## Free vs Prompt Shields Cloud
 
