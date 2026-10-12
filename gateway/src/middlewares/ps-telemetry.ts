@@ -51,6 +51,28 @@ function detectVendor(url: string, provider?: string): string {
 }
 
 /**
+ * The provider the gateway will call, from `x-portkey-provider` or the
+ * provider of an `x-portkey-config` (top level, else its first target).
+ * The gateway's own URL never names the vendor, so without this every
+ * gateway event would be reported as `unknown`.
+ */
+export function providerFromHeaders(
+  headers: Record<string, string | undefined>
+): string | undefined {
+  const direct = headers['x-portkey-provider'];
+  if (direct) return direct;
+  const rawConfig = headers['x-portkey-config'];
+  if (!rawConfig) return undefined;
+  try {
+    const config = JSON.parse(rawConfig);
+    const provider = config?.provider ?? config?.targets?.[0]?.provider;
+    return typeof provider === 'string' ? provider : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Extract PS metadata from request headers (X-PS-* headers)
  */
 function extractPSHeaders(
@@ -92,7 +114,9 @@ export function buildCacheEvent(
   vendor: string
 ): TelemetryEvent {
   const isHit = cacheStatus === 'HIT' || cacheStatus === 'SEMANTIC HIT';
-  const estTokens = isHit ? Math.ceil(JSON.stringify(requestBody ?? {}).length / 4) : 0;
+  const estTokens = isHit
+    ? Math.ceil(JSON.stringify(requestBody ?? {}).length / 4)
+    : 0;
   return {
     vendor,
     model: requestBody?.model || 'unknown',
@@ -103,10 +127,16 @@ export function buildCacheEvent(
 }
 
 // Fail-open emit from a spot that already knows cacheStatus (handlerUtils).
-export function emitCacheTelemetry(cacheStatus: string, requestBody: any, vendor: string): void {
+export function emitCacheTelemetry(
+  cacheStatus: string,
+  requestBody: any,
+  vendor: string
+): void {
   try {
     if (!cacheStatus || cacheStatus === 'DISABLED') return;
-    sendTelemetry(buildCacheEvent(cacheStatus, requestBody, vendor)).catch(() => {});
+    sendTelemetry(buildCacheEvent(cacheStatus, requestBody, vendor)).catch(
+      () => {}
+    );
   } catch {
     /* fail-open */
   }
@@ -194,7 +224,7 @@ export function psTelemetry() {
         string,
         string
       >;
-      const vendor = detectVendor(url);
+      const vendor = detectVendor(url, providerFromHeaders(headers));
       const psHeaders = extractPSHeaders(headers);
       const route = c.get('psRoute');
 

@@ -133,4 +133,27 @@ describe('psTelemetry (Hono adapter)', () => {
     expect(serialized).not.toContain('pk-secret');
     expect(serialized).not.toContain('sk-config-secret');
   });
+  test('reports the vendor from x-portkey-provider or the config', async () => {
+    const app = makeApp((c) => c.json({ model: 'rerank-v3.5' }));
+    await post(
+      app,
+      { model: 'rerank-v3.5', query: 'q', documents: ['a'] },
+      { 'x-portkey-provider': 'cohere' }
+    );
+    await flush();
+    expect(sent.events[0].vendor).toBe('cohere');
+
+    await post(
+      app,
+      { model: 'gpt-4o', messages: [] },
+      {
+        'x-portkey-config': JSON.stringify({
+          strategy: { mode: 'fallback' },
+          targets: [{ provider: 'azure-openai' }, { provider: 'openai' }],
+        }),
+      }
+    );
+    await flush();
+    expect(sent.events[0].vendor).toBe('azure-openai');
+  });
 });
