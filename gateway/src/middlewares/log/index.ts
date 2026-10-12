@@ -37,7 +37,7 @@ const sanitizeProviderOptions = (
     ])
   );
 
-const sanitizeRequestOption = (requestOption: any) => {
+export const sanitizeRequestOption = (requestOption: any) => {
   if (!requestOption || typeof requestOption !== 'object') return requestOption;
 
   const sanitizedOption = { ...requestOption };

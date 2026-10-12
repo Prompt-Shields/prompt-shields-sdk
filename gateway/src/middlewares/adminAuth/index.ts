@@ -1,22 +1,43 @@
 import { Context, Next } from 'hono';
-import conf from '../../../conf.json';
+import { env } from 'hono/adapter';
 
 const SESSION_COOKIE_NAME = 'portkey_admin_session';
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 12; // 12 hours
 const adminSessions = new Map<string, number>();
 
-const getConfiguredAdminToken = (): string => {
-  const adminToken = (conf as Record<string, unknown>)?.admin_token;
-  if (
-    !adminToken ||
-    typeof adminToken !== 'string' ||
-    adminToken.trim() === ''
-  ) {
+// PS fork: upstream reads `admin_token` from a committed conf.json. Our fork
+// gitignores conf.json, so the token comes from the environment instead.
+export const ADMIN_TOKEN_ENV = 'PS_GATEWAY_ADMIN_TOKEN';
+const MIN_ADMIN_TOKEN_LENGTH = 16;
+
+export const readAdminToken = (c?: Context): string | undefined => {
+  const value = c
+    ? env<Record<string, string | undefined>>(c)[ADMIN_TOKEN_ENV]
+    : typeof process !== 'undefined'
+      ? process.env[ADMIN_TOKEN_ENV]
+      : undefined;
+  const token = typeof value === 'string' ? value.trim() : '';
+  return token.length >= MIN_ADMIN_TOKEN_LENGTH ? token : undefined;
+};
+
+const getConfiguredAdminToken = (c: Context): string => {
+  const adminToken = readAdminToken(c);
+  if (!adminToken) {
     throw new Error(
-      'Admin UI auth requires conf.json.admin_token. Set admin_token or start the gateway with --headless.'
+      `Admin UI auth requires ${ADMIN_TOKEN_ENV} (at least ${MIN_ADMIN_TOKEN_LENGTH} characters). Set it or start the gateway with --headless.`
     );
   }
   return adminToken;
+};
+
+// Constant-time comparison so the token cannot be recovered via timing.
+const tokensMatch = (candidate: unknown, expected: string): boolean => {
+  if (typeof candidate !== 'string') return false;
+  const a = new TextEncoder().encode(candidate);
+  const b = new TextEncoder().encode(expected);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < b.length; i++) diff |= (a[i] ?? 0) ^ b[i];
+  return diff === 0;
 };
 
 const parseCookies = (cookieHeader?: string): Record<string, string> => {
@@ -80,7 +101,7 @@ const setSessionCookie = (c: Context, sessionId: string) => {
 export const adminAuthMiddleware = async (c: Context, next: Next) => {
   let configuredToken: string;
   try {
-    configuredToken = getConfiguredAdminToken();
+    configuredToken = getConfiguredAdminToken(c);
   } catch (error) {
     const message =
       error instanceof Error
@@ -90,7 +111,7 @@ export const adminAuthMiddleware = async (c: Context, next: Next) => {
   }
 
   const hasValidSession = isSessionActive(getSessionId(c));
-  const hasValidBearerToken = getBearerToken(c) === configuredToken;
+  const hasValidBearerToken = tokensMatch(getBearerToken(c), configuredToken);
 
   if (!hasValidSession && !hasValidBearerToken) {
     return c.json(
@@ -108,7 +129,7 @@ export const adminAuthMiddleware = async (c: Context, next: Next) => {
 
 export const adminAuthSessionStatusHandler = (c: Context) => {
   try {
-    getConfiguredAdminToken();
+    getConfiguredAdminToken(c);
   } catch (error) {
     const message =
       error instanceof Error
@@ -123,7 +144,7 @@ export const adminAuthSessionStatusHandler = (c: Context) => {
 export const adminAuthLoginHandler = async (c: Context) => {
   let configuredToken: string;
   try {
-    configuredToken = getConfiguredAdminToken();
+    configuredToken = getConfiguredAdminToken(c);
   } catch (error) {
     const message =
       error instanceof Error
@@ -145,7 +166,7 @@ export const adminAuthLoginHandler = async (c: Context) => {
     );
   }
 
-  if (!body.admin_token || body.admin_token !== configuredToken) {
+  if (!tokensMatch(body?.admin_token, configuredToken)) {
     return c.json(
       {
         status: 'failure',

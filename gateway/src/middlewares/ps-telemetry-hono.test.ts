@@ -113,4 +113,24 @@ describe('psTelemetry (Hono adapter)', () => {
     });
     expect(res.status).toBe(200);
   });
+  test('never includes provider credentials in the event', async () => {
+    const app = makeApp((c) => c.json({ model: 'gpt-4o' }));
+    await post(
+      app,
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
+      {
+        authorization: 'Bearer sk-live-provider-secret',
+        'x-portkey-api-key': 'pk-secret',
+        'x-portkey-config': JSON.stringify({ api_key: 'sk-config-secret' }),
+        'x-ps-business-unit': 'HR',
+      }
+    );
+    await flush();
+
+    const serialized = JSON.stringify(sent);
+    expect(sent.events[0].business_unit).toBe('HR');
+    expect(serialized).not.toContain('sk-live-provider-secret');
+    expect(serialized).not.toContain('pk-secret');
+    expect(serialized).not.toContain('sk-config-secret');
+  });
 });
