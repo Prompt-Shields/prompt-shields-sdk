@@ -23,6 +23,7 @@ import { proxyHandler } from './handlers/proxyHandler';
 import { chatCompletionsHandler } from './handlers/chatCompletionsHandler';
 import { completionsHandler } from './handlers/completionsHandler';
 import { embeddingsHandler } from './handlers/embeddingsHandler';
+import { rerankHandler } from './handlers/rerankHandler';
 import { logHandler } from './middlewares/log';
 import { payloadSizeValidatorMiddleware } from './middlewares/payloadSizeValidator';
 import { redactSecrets, redactString } from './utils/redact';
@@ -180,6 +181,12 @@ app.post('/v1/completions', requestValidator, completionsHandler);
  * Handles requests by passing them to the embeddingsHandler.
  */
 app.post('/v1/embeddings', requestValidator, embeddingsHandler);
+
+/**
+ * POST route for '/v1/rerank' (Cohere-style request body; ported from
+ * Portkey 2.0.0). Supported providers: Cohere, Jina, Voyage, Bedrock.
+ */
+app.post('/v1/rerank', requestValidator, rerankHandler);
 
 /**
  * POST route for '/v1/images/generations'.

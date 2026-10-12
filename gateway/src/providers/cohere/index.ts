@@ -17,6 +17,7 @@ import {
 } from './createBatch';
 import { CohereDeleteFileResponseTransform } from './deleteFile';
 import { CohereEmbedConfig, CohereEmbedResponseTransform } from './embed';
+import { CohereRerankConfig, CohereRerankResponseTransform } from './rerank';
 import { CohereGetBatchOutputHandler } from './getBatchOutput';
 import {
   CohereGetFileResponseTransform,
@@ -33,6 +34,7 @@ const CohereConfig: ProviderConfigs = {
   complete: CohereCompleteConfig,
   chatComplete: CohereChatCompleteConfig,
   embed: CohereEmbedConfig,
+  rerank: CohereRerankConfig,
   api: CohereAPIConfig,
   createBatch: CohereCreateBatchConfig,
   cancelBatch: {},
@@ -48,6 +50,7 @@ const CohereConfig: ProviderConfigs = {
     chatComplete: CohereChatCompleteResponseTransform,
     'stream-chatComplete': CohereChatCompleteStreamChunkTransform,
     embed: CohereEmbedResponseTransform,
+    rerank: CohereRerankResponseTransform,
     uploadFile: CohereUploadFileResponseTransform,
     retrieveFile: CohereGetFileResponseTransform,
     listFiles: CohereGetFilesResponseTransform,

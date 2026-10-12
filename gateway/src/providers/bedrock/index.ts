@@ -49,6 +49,7 @@ import {
   BedrockTitanEmbedConfig,
   BedrockTitanEmbedResponseTransform,
 } from './embed';
+import { BedrockRerankConfig, BedrockRerankResponseTransform } from './rerank';
 import {
   BedrockGetBatchOutputRequestHandler,
   BedrockGetBatchOutputResponseTransform,
@@ -255,6 +256,7 @@ const BedrockConfig: ProviderConfigs = {
       listFinetunes: BedrockListFinetuneResponseTransform,
       listFiles: BedrockListFilesResponseTransform,
       deleteFile: BedrockDeleteFileResponseTransform,
+      rerank: BedrockRerankResponseTransform,
     };
     if (!config.responseTransforms) {
       config.responseTransforms = commonResponseTransforms;
@@ -266,6 +268,7 @@ const BedrockConfig: ProviderConfigs = {
     }
     config.createBatch = BedrockCreateBatchConfig;
     config.createFinetune = BedrockCreateFinetuneConfig;
+    config.rerank = BedrockRerankConfig;
     config.cancelBatch = {};
     config.cancelFinetune = {};
     return config;
