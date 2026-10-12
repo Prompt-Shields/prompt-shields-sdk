@@ -29,15 +29,16 @@ import sys
 import urllib.request
 
 OSS_REPO = "https://github.com/Portkey-AI/gateway"
-ENTERPRISE_CHANGELOG = (
-    "https://raw.githubusercontent.com/Portkey-AI/docs-core/main/changelog/enterprise.mdx"
-)
+ENTERPRISE_CHANGELOG = "https://raw.githubusercontent.com/Portkey-AI/docs-core/main/changelog/enterprise.mdx"
 
 # Checked in order: the first bucket whose pattern matches wins.
 BUCKETS = [
     (
         "security",
-        re.compile(r"\*\*security\*\*|ssrf|harden|vulnerab|\bcve\b|credential masking|sensitive headers", re.I),
+        re.compile(
+            r"\*\*security\*\*|ssrf|harden|vulnerab|\bcve\b|credential masking|sensitive headers",
+            re.IGNORECASE,
+        ),
     ),
     (
         "skip",
@@ -45,13 +46,15 @@ BUCKETS = [
             r"guardrail|jwt|workspace|prisma|airs|rate.?limit polic|usage.?limit|"
             r"control.?plane|prompt render|agent gateway|fips|3d|meshy|tripo|"
             r"lasso|lakera|akto|singulr|cato|crowdstrike|pangea|tavily|f5 ",
-            re.I,
+            re.IGNORECASE,
         ),
     ),
     ("review", re.compile(r".")),
 ]
 
-UPDATE_RE = re.compile(r'<Update label="([^"]+)" description="([^"]+)">(.*?)</Update>', re.S)
+UPDATE_RE = re.compile(
+    r'<Update label="([^"]+)" description="([^"]+)">(.*?)</Update>', re.DOTALL
+)
 
 
 def version_key(v: str) -> tuple[int, ...]:
@@ -59,7 +62,7 @@ def version_key(v: str) -> tuple[int, ...]:
 
 
 def fetch(url: str) -> str:
-    with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - fixed https URL
+    with urllib.request.urlopen(url, timeout=60) as resp:
         return resp.read().decode("utf-8")
 
 
@@ -73,14 +76,19 @@ def enterprise_entries(since: str) -> list[tuple[str, str, list[str]]]:
         items = []
         for line in body.splitlines():
             line = line.strip()
-            if line.startswith("### ") and line[4:] not in ("Provider Updates", "Fixes and Improvements"):
+            if line.startswith("### ") and line[4:] not in (
+                "Provider Updates",
+                "Fixes and Improvements",
+            ):
                 items.append(line[4:])
             elif line.startswith("- "):
                 text = re.sub(r"\s*\[[^\]]+\]\([^)]+\)", "", line[2:])
                 items.append(text.strip().rstrip("·").strip())
         out.append((label, date, items))
     if not out and not UPDATE_RE.search(text):
-        raise ValueError("enterprise changelog format changed: no <Update> blocks found")
+        raise ValueError(
+            "enterprise changelog format changed: no <Update> blocks found"
+        )
     return sorted(out, key=lambda e: version_key(e[0]))
 
 
@@ -107,16 +115,30 @@ def oss_heads() -> dict[str, str]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--since-enterprise", required=True, help="last triaged enterprise version, e.g. 2.28.0")
-    ap.add_argument("--since-main", required=True, help="last triaged OSS main commit (prefix ok)")
-    ap.add_argument("--since-2-0", required=True, help="last triaged OSS 2.0.0 commit (prefix ok)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--since-enterprise",
+        required=True,
+        help="last triaged enterprise version, e.g. 2.28.0",
+    )
+    ap.add_argument(
+        "--since-main", required=True, help="last triaged OSS main commit (prefix ok)"
+    )
+    ap.add_argument(
+        "--since-2-0", required=True, help="last triaged OSS 2.0.0 commit (prefix ok)"
+    )
     args = ap.parse_args()
 
     try:
         entries = enterprise_entries(args.since_enterprise)
         heads = oss_heads()
-    except Exception as exc:  # report and fail loudly; a silent watch is worse than none
+    except (
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as exc:  # fail loudly; a silent watch is worse than none
         print(f"upstream-watch: {exc}", file=sys.stderr)
         return 1
 
@@ -127,7 +149,9 @@ def main() -> int:
         sha = heads.get(branch, "")
         if sha and not sha.startswith(since):
             new = True
-            lines.append(f"- OSS `{branch}` moved: {OSS_REPO}/compare/{since}...{sha[:7]}")
+            lines.append(
+                f"- OSS `{branch}` moved: {OSS_REPO}/compare/{since}...{sha[:7]}"
+            )
         else:
             lines.append(f"- OSS `{branch}` unchanged at `{since}`")
     lines.append("")
@@ -135,7 +159,9 @@ def main() -> int:
     if entries:
         new = True
         latest = entries[-1][0]
-        lines.append(f"Enterprise releases {entries[0][0]} to {latest} (closed source; re-implement, never copy):")
+        lines.append(
+            f"Enterprise releases {entries[0][0]} to {latest} (closed source; re-implement, never copy):"
+        )
         lines.append("")
         grouped: dict[str, list[str]] = {"security": [], "review": [], "skip": []}
         for version, date, items in entries:
