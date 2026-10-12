@@ -60,6 +60,9 @@ Configuration:
 ```bash
 PS_COLLECTOR_URL=https://collector.promptshields.io   # PS collector
 PS_API_KEY=ps-...                                     # tenant API key
+PS_GATEWAY_ADMIN_TOKEN=<16+ random chars>             # unlocks /public console and /log/stream; unset = disabled
+PS_MAX_CUSTOM_HOST_RESPONSE_BYTES=52428800            # optional; cap on custom-host response size
+TRUSTED_CUSTOM_HOSTS=localhost,127.0.0.1              # optional; hosts exempt from the SSRF checks
 ```
 
 Per-request annotations:

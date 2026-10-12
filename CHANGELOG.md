@@ -14,8 +14,19 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Router wired into the gateway pipeline** — `router/hono.ts` exposes `psRouter()`, mounted in `gateway/src/index.ts` (`app.use('*', psRouter())`) ahead of hooks/cache, gated on `PS_ROUTER_ENABLED=true`. Because Hono 4.x re-parses the body per `c.req.json()`, the adapter overwrites `c.req.bodyCache.json` so the rewritten model reaches the handler, and exposes the decision on `c.get('psRoute')`.
 - **Telemetry wired into the gateway pipeline** — `ps-telemetry.ts` exposes `psTelemetry()`, a Hono middleware mounted after `psRouter` (gated on `PS_API_KEY`). It parses token usage + served model from the response, merges `X-PS-*` business headers, and folds in `c.get('psRoute')` so `requested_model`/`served_model`/`route_*` actually emit in production. Fire-and-forget, fail-open, POST-only; streaming responses emit without usage.
 
+### Security
+
+- **Gateway admin console and log stream require auth** — `/public` and `/log/stream` now need `PS_GATEWAY_ADMIN_TOKEN` (at least 16 characters) as a bearer token or session cookie, and the log stream is disabled when it is unset. Previously anyone who could reach the gateway port could watch live request logs. Provider options and headers are redacted in the stream. Ported from upstream Portkey `main` (#54).
+- **`x-portkey-forward-headers` loop guard** — requests or configs that try to forward the forward-headers header itself are rejected with 400 (upstream `de0e6c5`, #55).
+- **Upstream URL SSRF check** — provider URLs built from request fields (Azure resource name, Vertex region, AWS region, account ids) may no longer point at metadata, private, link-local or alternatively encoded IPs (#65).
+- **Credential masking in gateway logs** — bearer tokens, API keys, AWS and Google keys, and passwords in URLs are masked in the shared logger, the Redis connection log and error logs (#65).
+- **Config fan-out cap** — at most 100 root targets (1000 for conditional routing) and 50 nested targets per root target; override with `MAX_ROOT_CONFIG_TARGETS`, `MAX_CONDITIONAL_ROOT_CONFIG_TARGETS` and `MAX_NESTED_CONFIG_TARGETS` (#65).
+- **Custom-host response size cap** — responses from custom hosts are limited to 50 MiB (`PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`) (#65).
+- **Provider credentials win on proxy routes** — forwarded or proxied client headers no longer overwrite the credential headers a provider config sets (#65).
+
 ### Documentation
 
+- `gateway/FORK_NOTICE.md` records the upstream fork base (`28ed85e`), the decision to rebase onto Portkey `2.0.0`, the cherry-picked commits and how to sync. New `scripts/upstream-watch.py` reports untriaged Portkey OSS commits and enterprise changelog entries (#56, #66).
 - README updated to reflect SDK v0.2 capabilities (Anthropic, async, PII detection, cost estimation, API key fingerprinting, `ps_metadata` wiring).
 - Added SDK Guide section 6 "Cost-aware routing", `docs/sdks/python.mdx` routing reference, and the gateway routing-header contract + `ps-router.ts` spec in `gateway/src/middlewares/PS_README.md`.
 
