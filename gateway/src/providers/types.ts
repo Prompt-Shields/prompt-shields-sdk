@@ -8,6 +8,7 @@ import {
 import { VERTEX_GEMINI_GENERATE_CONTENT_FINISH_REASON } from './google-vertex-ai/types';
 import { GOOGLE_GENERATE_CONTENT_FINISH_REASON } from './google/types';
 import { DEEPSEEK_STOP_REASON } from './deepseek/types';
+import { LATITUDE_STOP_REASON } from './latitude/types';
 import { MISTRAL_AI_FINISH_REASON } from './mistral-ai/types';
 import { TOGETHER_AI_FINISH_REASON } from './together-ai/types';
 import { COHERE_STOP_REASON } from './cohere/types';
@@ -451,6 +452,7 @@ export type PROVIDER_FINISH_REASON =
   | GOOGLE_GENERATE_CONTENT_FINISH_REASON
   | TITAN_STOP_REASON
   | DEEPSEEK_STOP_REASON
+  | LATITUDE_STOP_REASON
   | MISTRAL_AI_FINISH_REASON
   | TOGETHER_AI_FINISH_REASON
   | COHERE_STOP_REASON;
