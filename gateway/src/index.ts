@@ -24,6 +24,7 @@ import { chatCompletionsHandler } from './handlers/chatCompletionsHandler';
 import { completionsHandler } from './handlers/completionsHandler';
 import { embeddingsHandler } from './handlers/embeddingsHandler';
 import { logHandler } from './middlewares/log';
+import { payloadSizeValidatorMiddleware } from './middlewares/payloadSizeValidator';
 import { redactSecrets, redactString } from './utils/redact';
 import { imageGenerationsHandler } from './handlers/imageGenerationsHandler';
 import { createSpeechHandler } from './handlers/createSpeechHandler';
@@ -91,6 +92,10 @@ if (runtime === 'node') {
  * Returns a greeting message.
  */
 app.get('/', (c) => c.text('AI Gateway says hey!'));
+
+// Reject oversized JSON bodies before anything parses them (opt-in via
+// MAX_JSON_PAYLOAD_SIZE_IN_MB). Ported from Portkey 2.0.0.
+app.post('*', payloadSizeValidatorMiddleware());
 
 // Use prettyJSON middleware for all routes
 app.use('*', prettyJSON());
