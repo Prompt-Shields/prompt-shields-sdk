@@ -70,11 +70,13 @@ Files in this skill:
     `autopilot_login` unset, treat it as 0 and say so in the journal.
 12. **Never ask questions in a tick.** No human is watching, so a question
     blocks the tick and leaves the lock held. Never call `AskUserQuestion`
-    or stop to wait for an answer, and never end a turn on a question. When
-    a decision belongs to a human, take the safe default: do nothing
-    irreversible (no merge, release, close or delete). Label the item
-    `autopilot:needs-human`, put the question in the journal entry, and move
-    on. The tick still ends with a journal entry and `UNLOCK`.
+    or any other interactive prompt, never stop to wait for an answer, and
+    never end a turn on a question. When a decision belongs to a human,
+    take the safe default and do nothing irreversible (no merge, release,
+    close or delete, for example). Label the item `autopilot:needs-human`,
+    post the question as a comment on that issue or PR, mention it in the
+    journal entry, and move on. If the tick holds the lock, it still ends
+    with a journal entry and `UNLOCK`.
 
 ## The tick
 
