@@ -1,5 +1,6 @@
 import { Context } from 'hono';
 import { getRuntimeKey } from 'hono/adapter';
+import { redactString } from '../../utils/redact';
 
 let logId = 0;
 const MAX_RESPONSE_LENGTH = 100000;
@@ -33,7 +34,12 @@ const sanitizeProviderOptions = (
   Object.fromEntries(
     Object.entries(providerOptions).map(([key, value]) => [
       key,
-      ALLOWED_PROVIDER_OPTION_KEYS.has(key) ? value : '[REDACTED]',
+      ALLOWED_PROVIDER_OPTION_KEYS.has(key)
+        ? // PS fork: URLs can carry keys in the query (e.g. Google `?key=`).
+          typeof value === 'string'
+          ? redactString(value)
+          : value
+        : '[REDACTED]',
     ])
   );
 

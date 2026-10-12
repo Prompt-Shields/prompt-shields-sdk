@@ -65,7 +65,9 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 3. **Added** `X-PS-*` HTTP header parsing for business-context annotations
 4. **Disabled** routing/caching/guardrails defaults in `conf.example.json` and `initializeSettings.ts`
 5. **Documented** the keep/strip policy in `README.md` for downstream maintainers
-6. **Hardened** (re-implementations of Portkey enterprise fixes, #65): upstream URL SSRF check on provider-built URLs (`isSafeUpstreamURL`), credential masking in gateway logs (`src/utils/redact.ts`), config target fan-out cap (`MAX_ROOT_CONFIG_TARGETS`, `MAX_CONDITIONAL_ROOT_CONFIG_TARGETS`, `MAX_NESTED_CONFIG_TARGETS`), custom-host response size cap (`PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`, default 50 MiB), and provider credential headers taking precedence over forwarded or proxied client headers
+6. **Hardened** (re-implementations of Portkey enterprise fixes, #65): upstream URL SSRF check on provider-built URLs (`isSafeUpstreamURL`), credential masking in gateway logs (`src/utils/redact.ts`), config target fan-out cap (`MAX_ROOT_CONFIG_TARGETS`, `MAX_CONDITIONAL_ROOT_CONFIG_TARGETS`, `MAX_NESTED_CONFIG_TARGETS`), custom-host response size cap (`PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`, default 50 MiB), and provider credential headers taking precedence over forwarded or proxied client headers.
+   Limits: the upstream URL check is hostname-only (no DNS resolution, so no DNS-rebinding or redirect protection), rejects every IPv6 literal not listed in `TRUSTED_CUSTOM_HOSTS`, and does not cover providers with custom request handlers, which build their own URLs. The response size cap applies to custom-host upstreams only.
+7. **Ported with changes** the upstream admin login (`src/middlewares/adminAuth`, the login modal in `src/public/index.html`): the token comes from `PS_GATEWAY_ADMIN_TOKEN` instead of `conf.json`, malformed session cookies are treated as absent, and expired sessions are pruned. The session cookie is `HttpOnly; SameSite=Strict` but not `Secure`, because the console is served over plain HTTP on localhost
 
 ## Original License
 

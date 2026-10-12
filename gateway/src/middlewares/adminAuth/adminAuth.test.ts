@@ -84,4 +84,12 @@ describe('adminAuth', () => {
     });
     expect(res.status).toBe(200);
   });
+
+  test('a malformed session cookie is a 401, not a 500', async () => {
+    process.env[ADMIN_TOKEN_ENV] = TOKEN;
+    const res = await makeApp().request('/log/stream', {
+      headers: { cookie: 'portkey_admin_session=%E0%A4%A' },
+    });
+    expect(res.status).toBe(401);
+  });
 });

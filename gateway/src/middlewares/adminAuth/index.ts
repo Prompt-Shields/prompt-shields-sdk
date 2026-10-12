@@ -47,7 +47,11 @@ const parseCookies = (cookieHeader?: string): Record<string, string> => {
     (acc, cookiePart) => {
       const [rawKey, ...valueParts] = cookiePart.trim().split('=');
       if (!rawKey) return acc;
-      acc[rawKey] = decodeURIComponent(valueParts.join('='));
+      try {
+        acc[rawKey] = decodeURIComponent(valueParts.join('='));
+      } catch {
+        // PS fork: a malformed cookie is treated as absent (401), not a 500.
+      }
       return acc;
     },
     {} as Record<string, string>
@@ -85,6 +89,11 @@ const isSessionActive = (sessionId?: string): boolean => {
 };
 
 const createSession = (): string => {
+  // PS fork: drop expired sessions so the map cannot grow without bound.
+  const now = Date.now();
+  for (const [id, expiresAt] of adminSessions) {
+    if (expiresAt < now) adminSessions.delete(id);
+  }
   const sessionId = crypto.randomUUID();
   const expiresAt = Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
   adminSessions.set(sessionId, expiresAt);

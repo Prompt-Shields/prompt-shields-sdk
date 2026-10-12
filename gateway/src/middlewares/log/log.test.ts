@@ -8,6 +8,8 @@ describe('log stream redaction', () => {
         apiKey: 'sk-live-secret',
         awsSecretAccessKey: 'aws-secret',
         requestURL: 'https://api.openai.com/v1/chat/completions',
+        rubeusURL:
+          'https://generativelanguage.googleapis.com/v1/models?key=AIzaSyA1234567890abcdefghijklmnopqrstuv',
       },
       transformedRequest: {
         body: { model: 'gpt-4o' },
@@ -23,6 +25,7 @@ describe('log stream redaction', () => {
     expect(serialized).not.toContain('sk-live-secret');
     expect(serialized).not.toContain('aws-secret');
     expect(serialized).not.toContain('session=abc');
+    expect(serialized).not.toContain('AIzaSyA1234567890abcdefghijklmnopqrstuv');
     expect(sanitized.providerOptions.provider).toBe('openai');
     expect(sanitized.providerOptions.requestURL).toBe(
       'https://api.openai.com/v1/chat/completions'

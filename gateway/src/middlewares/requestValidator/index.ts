@@ -373,18 +373,11 @@ export function isSafeUpstreamURL(rawUrl: string, c?: Context): boolean {
       return false;
     }
     if (isAlternativeIPRepresentation(bareHost, hostParts)) return false;
-    if (bareHost.includes(':')) {
-      if (isLocalOrPrivateIPv6(bareHost)) return false;
-      const ipv4Match =
-        bareHost.match(VALIDATION_PATTERNS.IPV6_MAPPED_IPV4) ||
-        bareHost.match(VALIDATION_PATTERNS.IPV6_EMBEDDED_IPV4);
-      if (
-        ipv4Match &&
-        (isPrivateIPv4(ipv4Match[1]) || isReservedIPv4(ipv4Match[1]))
-      ) {
-        return false;
-      }
-    }
+    // No provider builds an IPv6-literal host, and the URL parser rewrites
+    // embedded IPv4 (::ffff:169.254.169.254 -> ::ffff:a9fe:a9fe, also
+    // 64:ff9b::/96 and 2002::/16), which dotted-form checks cannot see.
+    // Reject every IPv6 literal here; list one in TRUSTED_CUSTOM_HOSTS if needed.
+    if (bareHost.includes(':')) return false;
     return true;
   } catch {
     return false;
