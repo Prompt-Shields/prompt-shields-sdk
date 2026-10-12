@@ -11,7 +11,7 @@ This directory is a fork of the [Portkey AI Gateway](https://github.com/Portkey-
 | OSS `2.0.0` triaged to | [`8febc1d`](https://github.com/Portkey-AI/gateway/commit/8febc1d) | 2026-03-14 | Pre-release; branches from our exact base. |
 | Enterprise changelog triaged to | 2.28.0 | 2026-10-08 | Closed source. Features are re-implemented from the public changelog, never copied. |
 
-**Decision (#56, 2026-10-12): rebase onto `2.0.0`, do not wait for a GA tag.** OSS `main` has been frozen since 2026-05-25 and `2.0.0` branches from our base, so cherry-picking 909 files piece by piece costs more than one rebase. Until the rebase lands (milestone *U1*, #67), security fixes are cherry-picked from `main`.
+**Decision (#56, 2026-10-12): stay on `28ed85e` and port features from `2.0.0`; do not rebase.** Run standalone (`FETCH_SETTINGS_FROM_FILE=true`), `2.0.0` rejects every request with `401 Invalid API Key`: its `authNMiddleWare` always validates the caller's key against Portkey's control plane (`ALBUS_BASEPATH`). The branch also does not build on Linux without fixing two filename-case bugs. The features we want (rerank, Responses/Messages adapters, tokenizer, payload-size limit, OTel/metrics, new providers) do not depend on the control plane, so they are ported one at a time (milestone *U1*, #57–#62). Security fixes keep being cherry-picked from `main`.
 
 ### Cherry-picked from upstream `main`
 

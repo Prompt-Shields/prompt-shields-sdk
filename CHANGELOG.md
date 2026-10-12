@@ -26,7 +26,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Documentation
 
-- `gateway/FORK_NOTICE.md` records the upstream fork base (`28ed85e`), the decision to rebase onto Portkey `2.0.0`, the cherry-picked commits and how to sync. New `scripts/upstream-watch.py` reports untriaged Portkey OSS commits and enterprise changelog entries (#56, #66).
+- `gateway/FORK_NOTICE.md` records the upstream fork base (`28ed85e`), the decision to port features from Portkey `2.0.0` rather than rebase onto it, the cherry-picked commits and how to sync. New `scripts/upstream-watch.py` reports untriaged Portkey OSS commits and enterprise changelog entries (#56, #66).
 - README updated to reflect SDK v0.2 capabilities (Anthropic, async, PII detection, cost estimation, API key fingerprinting, `ps_metadata` wiring).
 - Added SDK Guide section 6 "Cost-aware routing", `docs/sdks/python.mdx` routing reference, and the gateway routing-header contract + `ps-router.ts` spec in `gateway/src/middlewares/PS_README.md`.
 
