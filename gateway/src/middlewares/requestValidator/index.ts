@@ -202,6 +202,19 @@ export const requestValidator = (c: Context, next: any) => {
         );
       }
 
+      const fanOutError = checkConfigFanOut(parsedConfig, c);
+      if (fanOutError) {
+        return new Response(
+          JSON.stringify({ status: 'failure', message: fanOutError }),
+          {
+            status: 400,
+            headers: {
+              'content-type': 'application/json',
+            },
+          }
+        );
+      }
+
       if (parsedConfig.options) {
         return new Response(
           JSON.stringify({
@@ -256,6 +269,127 @@ export const requestValidator = (c: Context, next: any) => {
   }
   return next();
 };
+
+// PS fork: cap config target fan-out so one request cannot multiply into
+// thousands of upstream calls (egress amplification). Mirrors the defaults
+// Portkey's enterprise gateway introduced in 2.14; override with env vars.
+const DEFAULT_MAX_ROOT_CONFIG_TARGETS = 100;
+const DEFAULT_MAX_CONDITIONAL_ROOT_CONFIG_TARGETS = 1000;
+const DEFAULT_MAX_NESTED_CONFIG_TARGETS = 50;
+
+const positiveIntFromEnv = (raw: unknown, fallback: number): number => {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+};
+
+const countNestedTargets = (target: any, budget: number): number => {
+  let count = 0;
+  const stack: any[] = Array.isArray(target?.targets)
+    ? [...target.targets]
+    : [];
+  while (stack.length) {
+    const t = stack.pop();
+    count++;
+    // Stop walking once over budget; the exact total does not matter.
+    if (count > budget) return count;
+    if (Array.isArray(t?.targets)) stack.push(...t.targets);
+  }
+  return count;
+};
+
+export function checkConfigFanOut(config: any, c?: Context): string | null {
+  if (!config || !Array.isArray(config.targets)) return null;
+  const envVars = Environment(c) ?? {};
+  const isConditional = config.strategy?.mode === 'conditional';
+  const maxRoot = isConditional
+    ? positiveIntFromEnv(
+        envVars.MAX_CONDITIONAL_ROOT_CONFIG_TARGETS,
+        DEFAULT_MAX_CONDITIONAL_ROOT_CONFIG_TARGETS
+      )
+    : positiveIntFromEnv(
+        envVars.MAX_ROOT_CONFIG_TARGETS,
+        DEFAULT_MAX_ROOT_CONFIG_TARGETS
+      );
+  const maxNested = positiveIntFromEnv(
+    envVars.MAX_NESTED_CONFIG_TARGETS,
+    DEFAULT_MAX_NESTED_CONFIG_TARGETS
+  );
+
+  if (config.targets.length > maxRoot) {
+    return `Config has ${config.targets.length} root targets; the limit is ${maxRoot}`;
+  }
+  for (let i = 0; i < config.targets.length; i++) {
+    if (countNestedTargets(config.targets[i], maxNested) > maxNested) {
+      return `Config target ${i} has more than ${maxNested} nested targets`;
+    }
+  }
+  return null;
+}
+
+/**
+ * PS fork: sanity check on the final upstream URL a provider config builds.
+ * Provider base URLs interpolate request-controlled values (Azure resource
+ * name, Vertex region and project, AWS region, account ids). A value such as
+ * `169.254.169.254/latest#` would otherwise turn the gateway into an SSRF
+ * proxy without ever touching the custom-host check. This is deliberately
+ * looser than isValidCustomHost: it does not block special TLDs, because
+ * real provider hosts are built here, only internal and metadata targets.
+ */
+export function isSafeUpstreamURL(rawUrl: string, c?: Context): boolean {
+  try {
+    if (VALIDATION_PATTERNS.CONTROL_CHARS.test(rawUrl)) return false;
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    if (url.username || url.password) return false;
+
+    const host = url.hostname.toLowerCase();
+    if (!host || host.includes('%') || host.endsWith('.')) return false;
+    const bareHost = host.replace(/^\[|\]$/g, '');
+    if (!/^[a-z0-9.:-]+$/.test(bareHost)) return false;
+    if (url.port && !isValidPort(url.port)) return false;
+
+    const trustedHosts = TRUSTED_CUSTOM_HOSTS(c);
+    if (
+      trustedHosts.has(bareHost) ||
+      (trustedHosts.has('localhost') && bareHost.endsWith('.localhost'))
+    ) {
+      return true;
+    }
+
+    if (BLOCKED_HOSTS.includes(bareHost)) return false;
+    if (bareHost === 'localhost' || bareHost.endsWith('.localhost'))
+      return false;
+    if (
+      bareHost.startsWith('169.254.169.') ||
+      bareHost.startsWith('fd00:ec2::')
+    )
+      return false;
+
+    const hostParts = bareHost.split('.');
+    if (
+      isIPv4(hostParts) &&
+      (isPrivateIPv4(bareHost) || isReservedIPv4(bareHost))
+    ) {
+      return false;
+    }
+    if (isAlternativeIPRepresentation(bareHost, hostParts)) return false;
+    if (bareHost.includes(':')) {
+      if (isLocalOrPrivateIPv6(bareHost)) return false;
+      const ipv4Match =
+        bareHost.match(VALIDATION_PATTERNS.IPV6_MAPPED_IPV4) ||
+        bareHost.match(VALIDATION_PATTERNS.IPV6_EMBEDDED_IPV4);
+      if (
+        ipv4Match &&
+        (isPrivateIPv4(ipv4Match[1]) || isReservedIPv4(ipv4Match[1]))
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function isValidCustomHost(customHost: string, c?: Context) {
   try {

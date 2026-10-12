@@ -24,6 +24,7 @@ import { chatCompletionsHandler } from './handlers/chatCompletionsHandler';
 import { completionsHandler } from './handlers/completionsHandler';
 import { embeddingsHandler } from './handlers/embeddingsHandler';
 import { logHandler } from './middlewares/log';
+import { redactSecrets, redactString } from './utils/redact';
 import { imageGenerationsHandler } from './handlers/imageGenerationsHandler';
 import { createSpeechHandler } from './handlers/createSpeechHandler';
 import { createTranscriptionHandler } from './handlers/createTranscriptionHandler';
@@ -133,7 +134,12 @@ app.notFound((c) => c.json({ message: 'Not Found', ok: false }, 404));
  * Otherwise, logs the error and returns a JSON response with status code 500.
  */
 app.onError((err, c) => {
-  logger.error('Global Error Handler: ', err.message, err.cause, err.stack);
+  logger.error(
+    'Global Error Handler: ',
+    redactString(err.message),
+    redactSecrets(err.cause),
+    redactString(err.stack ?? '')
+  );
   if (err instanceof HTTPException) {
     return err.getResponse();
   }

@@ -1,5 +1,6 @@
 import retry from 'async-retry';
 import { MAX_RETRY_LIMIT_MS, POSSIBLE_RETRY_STATUS_HEADERS } from '../globals';
+import { redactSecrets, redactString } from '../utils/redact';
 
 async function fetchWithTimeout(
   url: string,
@@ -187,8 +188,8 @@ export const retryRequest = async (
     ) {
       console.error(
         'retryRequest ConnectTimeoutError error:',
-        error.cause,
-        error.message
+        redactSecrets(error.cause),
+        redactString(error.message ?? '')
       );
       // This error comes in case the host address is unreachable. Empty status code used to get returned
       // from here hence no retry logic used to get called.
@@ -196,7 +197,11 @@ export const retryRequest = async (
         status: 503,
       });
     } else if (!error.status || error instanceof TypeError) {
-      console.error('retryRequest error:', error.cause, error.message);
+      console.error(
+        'retryRequest error:',
+        redactSecrets(error.cause),
+        redactString(error.message ?? '')
+      );
       // The retry handler will always attach status code to the error object
       lastResponse = new Response(
         `Message: ${error.message} Cause: ${error.cause ?? 'NA'} Name: ${error.name}`,

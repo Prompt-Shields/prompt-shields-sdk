@@ -21,6 +21,10 @@ import { endpointStrings } from '../providers/types';
 import { Options, Params, StrategyModes, Targets } from '../types/requestBody';
 import { convertKeysToCamelCase } from '../utils';
 import { retryRequest } from './retryHandler';
+import {
+  limitResponseSize,
+  maxCustomHostResponseBytes,
+} from './responseSizeLimit';
 import { env } from 'hono/adapter';
 import { afterRequestHookHandler, responseHandler } from './responseHandlers';
 import { HookSpan } from '../middlewares/hooks';
@@ -38,6 +42,8 @@ import { ProviderContext } from './services/providerContext';
 import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
+import { isSafeUpstreamURL } from '../middlewares/requestValidator';
+import { pickCredentialHeaders, redactString } from '../utils/redact';
 
 function constructRequestBody(
   requestContext: RequestContext,
@@ -131,12 +137,18 @@ function constructRequestHeaders(
         requestHeaders[lowerCaseHeaderKey];
   });
 
+  // PS fork: credential headers produced by the provider config must not be
+  // overwritten by forwarded or proxied client headers (upstream enterprise
+  // 2.14 fixed the same issue on proxy routes).
+  const providerCredentialHeaders = pickCredentialHeaders(headers);
+
   // Add any headers that the model might need
   headers = {
     ...baseHeaders,
     ...headers,
     ...forwardHeadersMap,
     ...(fn === 'proxy' && proxyHeaders),
+    ...providerCredentialHeaders,
   };
 
   const contentType = headers['content-type']?.split(';')[0];
@@ -312,6 +324,15 @@ export async function tryPost(
 
   // Set the requestURL in requestContext
   requestContext.requestURL = await providerContext.getFullURL(requestContext);
+  // PS fork: custom hosts are validated up front by requestValidator; this
+  // catches provider-built URLs whose host came from request-controlled fields.
+  if (
+    !requestContext.customHost &&
+    !providerContext.hasRequestHandler(requestContext) &&
+    !isSafeUpstreamURL(requestContext.requestURL, c)
+  ) {
+    throw new GatewayError('Invalid upstream URL', 400);
+  }
 
   // Create the base log object from requestContext
   const logObject = new LogObjectBuilder(logsService, requestContext);
@@ -810,9 +831,9 @@ export async function tryTargetsRecursively(
         // GatewayError will check for all handled exceptions which cannot allow the request to proceed.
         console.error(
           'tryTargetsRecursively error: ',
-          error.message,
-          error.cause,
-          error.stack
+          redactString(error.message ?? ''),
+          redactString(String(error.cause ?? '')),
+          redactString(error.stack ?? '')
         );
         const errorMessage =
           error instanceof GatewayError
@@ -1229,6 +1250,13 @@ export async function recursiveAfterRequestHookHandler(
     requestHandler,
     retry.useRetryAfterHeader
   ));
+
+  if (requestContext.customHost) {
+    response = limitResponseSize(
+      response,
+      maxCustomHostResponseBytes(env(c).PS_MAX_CUSTOM_HOST_RESPONSE_BYTES)
+    );
+  }
 
   // Check if sync hooks are available
   // This will be used to determine if we need to parse the response body or simply passthrough the response as is
