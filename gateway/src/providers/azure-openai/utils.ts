@@ -2,6 +2,35 @@ import { AZURE_OPEN_AI } from '../../globals';
 import { Options } from '../../types/requestBody';
 import { OpenAIErrorResponseTransform } from '../openai/utils';
 import { ErrorResponse } from '../types';
+import { Environment } from '../../utils/env';
+import { GatewayError } from '../../errors/GatewayError';
+
+// Prompt Shields: callers pick `x-portkey-azure-auth-mode` per request, and
+// `managed` / `workload` authenticate as the gateway host's own Azure
+// identity, so they need an explicit operator opt-in.
+export function ambientAzureCredentialsEnabled(
+  env?: Record<string, any>
+): boolean {
+  return (
+    String(Environment(env).AZURE_AMBIENT_CREDENTIALS_ENABLED).toLowerCase() ===
+    'true'
+  );
+}
+
+export function assertAzureAuthModeAllowed(
+  azureAuthMode: string | undefined,
+  env?: Record<string, any>
+) {
+  if (
+    (azureAuthMode === 'managed' || azureAuthMode === 'workload') &&
+    !ambientAzureCredentialsEnabled(env)
+  ) {
+    throw new GatewayError(
+      `azureAuthMode ${azureAuthMode} is disabled on this gateway`,
+      403
+    );
+  }
+}
 
 export async function getAccessTokenFromEntraId(
   tenantId: string,
