@@ -79,6 +79,14 @@ import OracleConfig from './oracle';
 import IOIntelligenceConfig from './iointelligence';
 import AIBadgrConfig from './aibadgr';
 import OVHcloudConfig from './ovhcloud';
+import MiniMaxConfig from './minimax';
+import BytePlusConfig from './byteplus';
+import LightningAIConfig from './lightning-ai';
+import BergetConfig from './berget';
+import ScalewayConfig from './scaleway';
+import RegoloConfig from './regolo';
+import IONOSConfig from './ionos';
+import STACKITConfig from './stackit';
 
 const Providers: { [key: string]: ProviderConfigs } = {
   openai: OpenAIConfig,
@@ -158,6 +166,14 @@ const Providers: { [key: string]: ProviderConfigs } = {
   pinecone: PineconeConfig,
   elevenlabs: ElevenLabsConfig,
   deepgram: DeepgramConfig,
+  minimax: MiniMaxConfig,
+  byteplus: BytePlusConfig,
+  'lightning-ai': LightningAIConfig,
+  berget: BergetConfig,
+  scaleway: ScalewayConfig,
+  regolo: RegoloConfig,
+  ionos: IONOSConfig,
+  stackit: STACKITConfig,
 };
 
 export default Providers;
