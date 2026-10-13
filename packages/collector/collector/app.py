@@ -52,6 +52,11 @@ app.include_router(oauth_router)
 app.include_router(partner_admin_router)
 app.include_router(partner_registry_router)
 
+# Platform signal: provider org usage pull (admin trigger)
+from collector.provider_usage_admin import router as provider_usage_router  # noqa: E402
+
+app.include_router(provider_usage_router)
+
 # Operator surface: retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router  # noqa: E402
 
