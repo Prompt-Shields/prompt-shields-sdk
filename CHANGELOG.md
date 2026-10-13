@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **TypeScript Partner SDK (`@prompt-shields/partner`)** in `packages/partner-ts/`: a typed, dependency-free client for every `/partner/v1` endpoint. It supports OAuth client credentials with token caching or API-key auth, cursor pagination (async iterator, `toArray()`, `listPage()`), retries on 429 that honour `Retry-After`, and typed errors (`APIError`, `RateLimitError`, and others). `assets.usageSummary()` needs the collector endpoint from #99. The package is not yet published to npm (#105).
 - **Gateway: Gemini 3 tool calling across turns** — thought signatures are returned on tool calls (`function.thought_signature`, non-strict mode) and sent back to Gemini/Vertex; per-part `media_resolution` for images. Ported from Portkey 2.0.0 (#108).
 - **Gateway: Bedrock on Portkey 2.0's provider code** — Converse and Messages for Claude (`anthropic_beta` as header string or body array, cache reads and writes in `prompt_tokens`), inference-profile ARNs, batch, files and fine-tuning; IRSA, pod identity, ECS and IMDS credentials for `serviceRole` behind `AWS_AMBIENT_CREDENTIALS_ENABLED` (#108).
 - **Gateway: Anthropic structured outputs and effort** — `response_format` JSON schema and `reasoning_effort` map to Anthropic `output_config` (#108).
