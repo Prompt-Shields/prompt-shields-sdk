@@ -7,6 +7,7 @@ import { AzureOpenAIGetBatchOutputRequestHandler } from './azure-openai/getBatch
 import { BatchOutputRequestHandler as VertexBatchOutputRequestHandler } from './google-vertex-ai/getBatchOutput';
 import { GoogleFileUploadRequestHandler } from './google-vertex-ai/uploadFile';
 import { GoogleBatchCreateConfig } from './google-vertex-ai/createBatch';
+import { resolveBatchModelName } from './google-vertex-ai/utils';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -132,6 +133,57 @@ describe('OpenAI/Azure batch output streaming (#108)', () => {
     expect(await res.text()).toBe('{"id":1}\n');
   });
 
+  test('Azure follows an output blob only to Azure Blob Storage', async () => {
+    for (const blob of [
+      'http://169.254.169.254/metadata',
+      'https://attacker.example/out.jsonl',
+      'http://acct.blob.core.windows.net/out.jsonl',
+    ]) {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ output_blob: blob }))
+      );
+      const res = await AzureOpenAIGetBatchOutputRequestHandler({
+        c,
+        providerOptions: azureOptions,
+        requestURL: 'https://gw/v1/batches/batch_1/output',
+      });
+      expect(res.status).toBe(502);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            output_blob: 'https://acct.blob.core.windows.net/c/out.jsonl',
+          })
+        )
+      )
+      .mockResolvedValueOnce(new Response(streamOf(['{"id":1}\n'])));
+    const res = await AzureOpenAIGetBatchOutputRequestHandler({
+      c,
+      providerOptions: azureOptions,
+      requestURL: 'https://gw/v1/batches/batch_1/output',
+    });
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      'https://acct.blob.core.windows.net/c/out.jsonl'
+    );
+    expect(await res.text()).toBe('{"id":1}\n');
+  });
+
+  test('Azure batch output still enforces the ambient-identity gate', async () => {
+    await expect(
+      AzureOpenAIGetBatchOutputRequestHandler({
+        c,
+        providerOptions: { ...azureOptions, azureAuthMode: 'managed' },
+        requestURL: 'https://gw/v1/batches/batch_1/output',
+      })
+    ).rejects.toMatchObject({ status: 403 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test('Azure maps a failed fetch to a 500 error response', async () => {
     fetchMock
       .mockResolvedValueOnce(
@@ -195,6 +247,36 @@ describe('Vertex batch output and upload (#108)', () => {
     const row = JSON.parse(lines[0]);
     expect(row.id).toBe('batch-123');
     expect(row.custom_id).toBe('r1');
+  });
+
+  test('refuses an output directory outside GCS', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          model: 'publishers/google/models/gemini-2.5-flash',
+          outputInfo: { gcsOutputDirectory: 'https://attacker.example/out' },
+        })
+      )
+    );
+    const res = await VertexBatchOutputRequestHandler({
+      c,
+      providerOptions: vertexOptions,
+      requestURL: 'https://gw/v1/batches/123/output',
+      requestBody: {},
+      requestHeaders: {},
+    } as any);
+    expect(res.status).toBe(500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('resolves resource-name models to their provider', () => {
+    expect(
+      resolveBatchModelName('publishers/anthropic/models/claude-sonnet-4@1')
+    ).toBe('anthropic.claude-sonnet-4@1');
+    expect(resolveBatchModelName('projects/p/locations/l/models/123')).toBe(
+      '123'
+    );
+    expect(resolveBatchModelName('gemini-2.5-flash')).toBe('gemini-2.5-flash');
   });
 
   test('returns an error response when the batch lookup fails', async () => {

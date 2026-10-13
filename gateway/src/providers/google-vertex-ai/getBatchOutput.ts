@@ -1,7 +1,11 @@
 import { getAnthropicChatCompleteResponseTransform } from '../anthropic/chatComplete';
 import { RequestHandler } from '../types';
 import { GoogleBatchRecord } from './types';
-import { getModelAndProvider, isEmbeddingModel } from './utils';
+import {
+  getModelAndProvider,
+  isEmbeddingModel,
+  resolveBatchModelName,
+} from './utils';
 import { responseTransformers } from '../open-ai-base';
 import {
   GoogleChatCompleteResponseTransform,
@@ -174,7 +178,12 @@ export const BatchOutputRequestHandler: RequestHandler = async ({
     return errorResponse('Failed to retrieve batch details', 500);
   }
 
-  const { provider } = getModelAndProvider(modelName ?? '');
+  // Vertex reports the job's model as a resource name
+  // (`publishers/anthropic/models/...`); resolve it the same way uploads do so
+  // non-Google rows get their own response transform.
+  const { provider } = getModelAndProvider(
+    resolveBatchModelName(modelName ?? '')
+  );
 
   const batchEndpoint = isEmbeddingModel(modelName)
     ? BatchEndpoints.EMBEDDINGS
@@ -192,7 +201,12 @@ export const BatchOutputRequestHandler: RequestHandler = async ({
     );
   }
 
-  outputURL = outputURL.replace('gs://', 'https://storage.googleapis.com/');
+  // The output location comes from the provider response and is fetched with
+  // the caller's Google credentials, so only accept a GCS bucket path.
+  if (!outputURL.startsWith('gs://')) {
+    return errorResponse('Unexpected batch output location', 500);
+  }
+  outputURL = `https://storage.googleapis.com/${outputURL.slice('gs://'.length)}`;
 
   // Ported from Portkey 2.0.0: chat jobs write `predictions.jsonl` and
   // embedding jobs `000000000000.jsonl`, so probe for the file that exists.

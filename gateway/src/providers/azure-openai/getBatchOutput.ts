@@ -6,6 +6,27 @@ import { AZURE_OPEN_AI } from '../../globals';
 import { generateErrorResponse } from '../utils';
 import { externalServiceFetch } from '../../utils/fetch';
 import { logger } from '../../apm';
+import { isSafeUpstreamURL } from '../../middlewares/requestValidator';
+
+const AZURE_BLOB_HOST_SUFFIXES = [
+  '.blob.core.windows.net',
+  '.blob.core.usgovcloudapi.net',
+  '.blob.core.chinacloudapi.cn',
+];
+
+const isAzureBlobURL = (rawUrl: string, c: Context) => {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase();
+    return (
+      url.protocol === 'https:' &&
+      AZURE_BLOB_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix)) &&
+      isSafeUpstreamURL(rawUrl, c)
+    );
+  } catch {
+    return false;
+  }
+};
 
 // Return a ReadableStream containing batches output data
 export const AzureOpenAIGetBatchOutputRequestHandler = async ({
@@ -101,6 +122,24 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
     });
   }
   if (outputBlob) {
+    // The blob URL comes from the provider response and is fetched with the
+    // caller's Azure credentials, so only follow it to Azure Blob Storage.
+    if (!isAzureBlobURL(outputBlob, c)) {
+      return new Response(
+        JSON.stringify(
+          generateErrorResponse(
+            {
+              message: 'Unexpected batch output location',
+              type: null,
+              param: null,
+              code: null,
+            },
+            AZURE_OPEN_AI
+          )
+        ),
+        { status: 502, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
     const retrieveBlobHeaders = await AzureOpenAIAPIConfig.headers({
       c,
       providerOptions: {

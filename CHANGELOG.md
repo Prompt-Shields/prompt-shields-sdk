@@ -28,7 +28,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
-- **Gateway: batch output streams instead of buffering** — OpenAI, Azure OpenAI and Vertex batch output files are passed through as `application/octet-stream`. Vertex embedding batches read `000000000000.jsonl`, row ids lose a stray `-`, provider errors return error responses, and batch uploads keep multi-byte characters split across chunks. The shared line splitter now emits bytes, which also stops Fireworks dataset uploads from dropping every line. Ported from Portkey 2.0.0 (#108).
+- **Gateway: batch output streams instead of buffering** — OpenAI, Azure OpenAI and Vertex batch output files are passed through as `application/octet-stream`. Vertex embedding batches read `000000000000.jsonl`, row ids lose a stray `-`, provider errors return error responses, and batch uploads keep multi-byte characters split across chunks. The shared line splitter now emits bytes, which also stops Fireworks dataset uploads from dropping every line. Batch output follows provider-returned locations only to GCS and Azure Blob Storage, and Vertex output resolves `publishers/<provider>/models/...` names to that provider's transform. Ported from Portkey 2.0.0 (#108).
 - **Anthropic `prompt_tokens` excluded cached tokens** — they are now included, matching OpenAI's usage convention, so cost and usage reports count cached input (#108).
 - **OpenAI batch output fetched `/files/undefined/content`** when a batch had neither an output nor an error file; it now uses the error file, or returns 400 (#108).
 - **Bedrock** no longer crashes on a tool call with empty arguments, and adds the text block Converse requires next to a document (#108).
