@@ -83,7 +83,7 @@ Prompt Shields separates *collection* from *inventory*. Several independent coll
 |---|---|
 | Vendor, model, tokens, latency, cost | Built-in pricing table for OpenAI, Anthropic and Google models |
 | Ownership metadata | Business unit, use case, owner, environment, data classification |
-| PII categories | `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `health_data`, `financial_data` — categories only, never the matched value |
+| PII categories | `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `national_id`, `health_data`, `financial_data` — categories only, never the matched value |
 | Tool and function calls | OpenAI `tool_calls` and Anthropic `tool_use` blocks |
 | API key fingerprint | Truncated SHA-256, never the raw key |
 | Requested versus served model | Makes cost-routing savings provable |
