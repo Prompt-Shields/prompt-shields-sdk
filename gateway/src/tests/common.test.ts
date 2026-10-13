@@ -16,3 +16,12 @@ for (const provider in testVariables) {
       executeChatCompletionEndpointTests(provider, variables));
   }
 }
+
+// Runs without API keys, so the suite always has at least one test.
+describe('provider test variables', () => {
+  it('only reference registered providers', () => {
+    for (const provider in testVariables) {
+      expect(Providers[provider]).toBeDefined();
+    }
+  });
+});
