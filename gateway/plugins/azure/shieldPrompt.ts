@@ -12,7 +12,8 @@ import { getAccessToken } from './utils';
 export const handler = async (
   context: PluginContext,
   parameters: PluginParameters<{ contentSafety: AzureCredentials }>,
-  eventType: HookEventType
+  eventType: HookEventType,
+  pluginOptions?: Record<string, any>
 ) => {
   let verdict = true;
   let data = null;
@@ -86,15 +87,21 @@ export const handler = async (
 
   const url = `https://${credentials.resourceName}.cognitiveservices.azure.com/contentsafety/text:shieldPrompt?api-version=${apiVersion}`;
 
-  const { token, error: tokenError } = await getAccessToken(
+  const {
+    token,
+    error: tokenError,
+    denied,
+  } = await getAccessToken(
     credentials as any,
-    'shieldPrompt'
+    'shieldPrompt',
+    pluginOptions,
+    pluginOptions?.env
   );
 
   if (tokenError) {
     return {
       error: tokenError,
-      verdict: true,
+      verdict: !denied,
       data,
     };
   }
