@@ -141,6 +141,21 @@ components:
           format: date-time
           description: Most recent activity timestamp
           example: "2026-03-25T14:22:00Z"
+        lifecycle_state:
+          type: string
+          description: >
+            Telemetry-driven lifecycle. `stale` after no telemetry for
+            PS_ASSET_STALE_AFTER_DAYS (default 30), `retired` after
+            PS_ASSET_RETIRE_AFTER_DAYS (default 90). New telemetry makes the
+            asset `active` again. Independent of the governance `status`.
+          enum: [active, stale, retired]
+          example: "active"
+        lifecycle_changed_at:
+          type: string
+          format: date-time
+          description: When `lifecycle_state` last changed
+          nullable: true
+          example: null
       required:
         - id
         - vendor
@@ -248,6 +263,11 @@ components:
           description: Type of change
         asset:
           $ref: '#/components/schemas/AIAsset'
+        lifecycle_change:
+          type: string
+          enum: [stale, retired, reactivated]
+          nullable: true
+          description: Lifecycle transition since `since`, or null if none
         changed_at:
           type: string
           format: date-time
@@ -346,6 +366,14 @@ components:
         enum: [active, deprecated, under_review]
       description: Filter by governance status
 
+    LifecycleStateParam:
+      name: lifecycle_state
+      in: query
+      schema:
+        type: string
+        enum: [active, stale, retired]
+      description: Filter by telemetry-driven lifecycle state
+
     DiscoverySourceParam:
       name: discovery_source
       in: query
@@ -443,6 +471,7 @@ paths:
         - $ref: '#/components/parameters/AfterParam'
         - $ref: '#/components/parameters/BusinessUnitParam'
         - $ref: '#/components/parameters/StatusParam'
+        - $ref: '#/components/parameters/LifecycleStateParam'
         - $ref: '#/components/parameters/DiscoverySourceParam'
         - $ref: '#/components/parameters/SinceParam'
         - $ref: '#/components/parameters/VendorParam'

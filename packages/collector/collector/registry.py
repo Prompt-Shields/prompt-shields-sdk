@@ -10,6 +10,7 @@ from sqlalchemy import and_, case, func, or_, select
 
 from collector.auth import resolve_tenant
 from collector.embeddings import get_embedding, mock_embedding
+from collector.lifecycle import LifecycleState
 
 router = APIRouter(prefix="/api/v1/registry")
 
@@ -19,6 +20,7 @@ async def list_assets(
     request: Request,
     business_unit: str | None = None,
     status: str | None = None,
+    lifecycle_state: LifecycleState | None = None,
     discovery_source: str | None = None,
     since: str | None = None,
     after: str | None = None,
@@ -32,6 +34,8 @@ async def list_assets(
         conditions.append(AIAsset.business_unit == business_unit)
     if status:
         conditions.append(AIAsset.status == status)
+    if lifecycle_state:
+        conditions.append(AIAsset.lifecycle_state == lifecycle_state)
     if discovery_source:
         conditions.append(AIAsset.discovery_source.any(discovery_source))
     if since:
@@ -217,6 +221,10 @@ def _serialize_asset(a: AIAsset) -> dict:
         "confidence": a.confidence,
         "first_seen": a.first_seen.isoformat() if a.first_seen else None,
         "last_seen": a.last_seen.isoformat() if a.last_seen else None,
+        "lifecycle_state": a.lifecycle_state or "active",
+        "lifecycle_changed_at": (
+            a.lifecycle_changed_at.isoformat() if a.lifecycle_changed_at else None
+        ),
     }
 
 

@@ -53,6 +53,10 @@ class AIAsset(Base):
     owner_email = Column(Text)
     environment = Column(Text)
     status = Column(Text, default="active")
+    # Telemetry-driven lifecycle: active -> stale -> retired, back to active
+    # when telemetry resumes. Independent of the governance `status` above.
+    lifecycle_state = Column(Text, nullable=False, default="active", server_default="active")
+    lifecycle_changed_at = Column(TIMESTAMP(timezone=True))
     data_classification = Column(Text)
     discovery_source = Column(ARRAY(Text), nullable=False)
     confidence = Column(Text, default="low")
@@ -74,6 +78,7 @@ class AIAsset(Base):
         Index("ix_ai_assets_tenant_bu", "tenant_id", "business_unit"),
         Index("ix_ai_assets_tenant_vendor_model", "tenant_id", "vendor", "model"),
         Index("ix_ai_assets_tenant_status", "tenant_id", "status"),
+        Index("ix_ai_assets_tenant_lifecycle", "tenant_id", "lifecycle_state"),
         Index("ix_ai_assets_discovery_source", "discovery_source", postgresql_using="gin"),
         Index("ix_ai_assets_embedding", "embedding", postgresql_using="hnsw",
               postgresql_ops={"embedding": "vector_cosine_ops"}),
