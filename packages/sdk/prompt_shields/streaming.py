@@ -10,8 +10,10 @@ Usage comes from the provider when it sends it:
     `stream_options={"include_usage": True}`. The SDK requests it by default
     (see `request_openai_stream_usage`) and hides the extra usage-only chunk
     from callers who did not ask for it, so their chunk sequence is unchanged.
-  - Anthropic: `message_start` (input tokens) and `message_delta` (cumulative
-    output tokens).
+  - Anthropic: `message_start` (input and cache tokens) and `message_delta`
+    (cumulative output tokens, and cumulative input/cache tokens when sent).
+Cached-input, cache-write and reasoning token counts are parsed with the same
+helpers as non-streamed responses (`prompt_shields.providers`).
 When usage is missing (truncated stream, gateway that drops it), tokens are
 estimated at ~4 characters per token and the event carries
 `tokens_estimated=True`.
@@ -24,6 +26,13 @@ import logging
 import time
 from collections.abc import Callable
 from typing import Any
+
+from prompt_shields.providers import (
+    _field,
+    _int,
+    anthropic_usage_fields,
+    openai_usage_fields,
+)
 
 logger = logging.getLogger("prompt_shields.streaming")
 
@@ -88,6 +97,14 @@ class StreamAccumulator:
         self._messages = messages
         self.tokens_in: int | None = None
         self.tokens_out: int | None = None
+        self.tokens_cached: int | None = None
+        self.tokens_cache_write: int | None = None
+        self.tokens_reasoning: int | None = None
+        # Anthropic reports these separately and they may arrive in
+        # different events; `tokens_in` is derived from them.
+        self._anthropic_input: int | None = None
+        self._anthropic_cache_read: int | None = None
+        self._anthropic_cache_write: int | None = None
         self.served_model: str | None = None
         self.output_chars = 0
         self._tool_calls: dict[Any, str | None] = {}
@@ -104,8 +121,11 @@ class StreamAccumulator:
             self.served_model = model
         usage = getattr(chunk, "usage", None)
         if usage is not None:
-            self.tokens_in = getattr(usage, "prompt_tokens", None)
-            self.tokens_out = getattr(usage, "completion_tokens", None)
+            fields = openai_usage_fields(usage)
+            self.tokens_in = fields["tokens_in"]
+            self.tokens_out = fields["tokens_out"]
+            self.tokens_cached = fields["tokens_cached"]
+            self.tokens_reasoning = fields["tokens_reasoning"]
         for choice in getattr(chunk, "choices", None) or []:
             delta = getattr(choice, "delta", None)
             if delta is None:
@@ -129,20 +149,10 @@ class StreamAccumulator:
             model = getattr(message, "model", None)
             if model:
                 self.served_model = model
-            usage = getattr(message, "usage", None)
-            if usage is not None:
-                self.tokens_in = getattr(usage, "input_tokens", None)
-                self.tokens_out = getattr(usage, "output_tokens", None)
+            self._observe_anthropic_usage(getattr(message, "usage", None))
         elif etype == "message_delta":
-            usage = getattr(event, "usage", None)
-            if usage is not None:
-                # output_tokens on message_delta is cumulative, not a delta.
-                out = getattr(usage, "output_tokens", None)
-                if out is not None:
-                    self.tokens_out = out
-                tokens_in = getattr(usage, "input_tokens", None)
-                if tokens_in is not None:
-                    self.tokens_in = tokens_in
+            # Counts on message_delta are cumulative, not deltas.
+            self._observe_anthropic_usage(getattr(event, "usage", None))
         elif etype == "content_block_start":
             block = getattr(event, "content_block", None)
             if getattr(block, "type", None) == "tool_use":
@@ -151,6 +161,30 @@ class StreamAccumulator:
             text = getattr(getattr(event, "delta", None), "text", None)
             if isinstance(text, str):
                 self.output_chars += len(text)
+
+    def _observe_anthropic_usage(self, usage: Any) -> None:
+        if usage is None:
+            return
+        out = _int(_field(usage, "output_tokens"))
+        if out is not None:
+            self.tokens_out = out
+        for attr, name in (
+            ("_anthropic_input", "input_tokens"),
+            ("_anthropic_cache_read", "cache_read_input_tokens"),
+            ("_anthropic_cache_write", "cache_creation_input_tokens"),
+        ):
+            value = _int(_field(usage, name))
+            if value is not None:
+                setattr(self, attr, value)
+        fields = anthropic_usage_fields(
+            self._anthropic_input,
+            self.tokens_out,
+            self._anthropic_cache_read,
+            self._anthropic_cache_write,
+        )
+        self.tokens_in = fields["tokens_in"]
+        self.tokens_cached = fields["tokens_cached"]
+        self.tokens_cache_write = fields["tokens_cache_write"]
 
     def adapter_fields(self) -> dict:
         """Event fields in the same shape as `ProviderAdapter.extract`."""
@@ -161,6 +195,9 @@ class StreamAccumulator:
         fields: dict = {
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
+            "tokens_cached": self.tokens_cached,
+            "tokens_cache_write": self.tokens_cache_write,
+            "tokens_reasoning": self.tokens_reasoning,
             "tool_calls_used": tool_calls or None,
             "served_model": self.served_model,
         }

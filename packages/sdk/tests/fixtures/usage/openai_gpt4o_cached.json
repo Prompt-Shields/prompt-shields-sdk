@@ -1,0 +1,20 @@
+{
+  "vendor": "openai",
+  "model": "gpt-4o",
+  "note": "Public pricing: input $2.50/M, cached input $1.25/M, output $10.00/M.",
+  "response": {
+    "id": "chatcmpl-fixture-1",
+    "object": "chat.completion",
+    "model": "gpt-4o-2024-08-06",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok", "tool_calls": null}, "finish_reason": "stop"}],
+    "usage": {
+      "prompt_tokens": 2006,
+      "completion_tokens": 300,
+      "total_tokens": 2306,
+      "prompt_tokens_details": {"cached_tokens": 1920, "audio_tokens": 0},
+      "completion_tokens_details": {"reasoning_tokens": 0, "audio_tokens": 0}
+    }
+  },
+  "expected_fields": {"tokens_in": 2006, "tokens_out": 300, "tokens_cached": 1920, "tokens_reasoning": 0},
+  "expected_cost_usd": 0.005615
+}

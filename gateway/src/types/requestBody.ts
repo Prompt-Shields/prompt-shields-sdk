@@ -71,6 +71,12 @@ export interface Options {
   azureEntraTenantId?: string;
   azureAdToken?: string;
   azureModelName?: string;
+  /** PS fork (#76): OAuth client credentials for OpenAI-compatible upstreams */
+  oauthTokenUrl?: string;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthScope?: string;
+  oauthAudience?: string;
   /** Workers AI specific */
   workersAiAccountId?: string;
   /** The parameter to set custom base url */
@@ -123,6 +129,8 @@ export interface Options {
   vertexRegion?: string;
   vertexProjectId?: string;
   vertexServiceAccountJson?: Record<string, any>;
+  /** PS fork (#76): `workload` uses the gateway host's Google identity */
+  vertexAuthType?: string;
   vertexStorageBucketName?: string;
   vertexModelName?: string;
   vertexBatchEndpoint?: BatchEndpoints;
