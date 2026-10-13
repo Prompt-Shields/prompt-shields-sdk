@@ -71,6 +71,9 @@ class _Result:
         assert len(self._rows) <= 1
         return self.scalar()
 
+    def one_or_none(self):
+        return self.scalar_one_or_none()
+
     def mappings(self):
         return self
 
@@ -90,6 +93,8 @@ class FakeSession:
         rows = [r for r in self.tables.get(table, []) if _matches(r, criteria)]
         if table == "partner_credentials":
             return _Result([])  # rate limit falls back to the default
+        if table == "tenants":
+            return _Result([])  # retention lookup: no clamp (DB test covers it)
         if table == "ai_assets":
             return _Result([r.id for r in rows])
         if table == "ai_usage_events":
