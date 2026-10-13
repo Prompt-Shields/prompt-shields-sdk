@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Collector: provider org usage pull (platform signal)** — pulls daily usage from the OpenAI organization usage API and the Anthropic Admin usage report, per project/workspace, API key and model. Keys nobody instrumented appear as `medium`-confidence assets with `discovery_source=["platform_signal"]`; re-runs overwrite the same buckets. Admin keys come from `PS_PROVIDER_ADMIN_KEYS`; trigger with `POST /api/v1/admin/provider-usage/pull` or `python -m collector.provider_usage_admin` (#93).
 - **Gateway: Gemini 3 tool calling across turns** — thought signatures are returned on tool calls (`function.thought_signature`, non-strict mode) and sent back to Gemini/Vertex; per-part `media_resolution` for images. Ported from Portkey 2.0.0 (#108).
 - **Gateway: Bedrock on Portkey 2.0's provider code** — Converse and Messages for Claude (`anthropic_beta` as header string or body array, cache reads and writes in `prompt_tokens`), inference-profile ARNs, batch, files and fine-tuning; IRSA, pod identity, ECS and IMDS credentials for `serviceRole` behind `AWS_AMBIENT_CREDENTIALS_ENABLED` (#108).
 - **Gateway: Anthropic structured outputs and effort** — `response_format` JSON schema and `reasoning_effort` map to Anthropic `output_config` (#108).
