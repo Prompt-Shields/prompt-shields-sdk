@@ -17,6 +17,7 @@ import os
 import time
 from typing import Any
 
+from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import add_usage_detail_fields, estimate_cost
 from prompt_shields.providers import get_adapter
@@ -260,8 +261,10 @@ class _CompletionsNamespace:
             hide_usage_chunk = request_openai_stream_usage(kwargs)
 
         start = time.monotonic()
-        response = self._call_upstream(model=model, messages=messages,
-                                        max_tokens=max_tokens, **kwargs)
+        # This client emits its own event; keep instrument() from adding one.
+        with suppress_instrumentation():
+            response = self._call_upstream(model=model, messages=messages,
+                                            max_tokens=max_tokens, **kwargs)
 
         if streaming:
             return self._wrap_stream(

@@ -137,6 +137,33 @@ response = client.chat.completions.create(
 | `session_id` | Groups related calls in a multi-turn conversation |
 | `user_id` | Opaque identifier (hash before passing if you need to anonymize) |
 
+## Auto-Instrumentation
+
+To get telemetry without changing call sites, call `instrument()` once at
+startup. It patches the installed `openai` and `anthropic` SDKs, sync and
+async: `chat.completions.create`, `responses.create` and `messages.create`,
+including `stream=True`.
+
+```python
+import openai
+import prompt_shields
+
+prompt_shields.instrument(ps_api_key="ps-...", use_case="support-bot")
+
+client = openai.OpenAI()  # unchanged app code
+client.chat.completions.create(model="gpt-4o", messages=[...])  # emits an event
+```
+
+Unset arguments fall back to `PS_API_KEY`, `PS_COLLECTOR_URL`,
+`PS_BUSINESS_UNIT`, `PS_USE_CASE`, `PS_OWNER`, `PS_DATA_CLASSIFICATION`,
+`PS_ENVIRONMENT`, `PS_CALLING_SERVICE`, `PS_ATLAS_URL` and `PS_ATLAS_API_KEY`.
+Pass `vendors=("openai",)` to patch only some providers.
+
+- Calling `instrument()` again does nothing; `uninstrument()` restores the original methods.
+- Missing packages are skipped. Telemetry errors never affect the call.
+- Calls made through `ShieldsClient` are not counted twice. To skip other calls, wrap them in `with prompt_shields.suppress_instrumentation():`.
+- `.with_raw_response` calls, and positional-argument calls, are not instrumented.
+
 ## Cost-Aware Routing
 
 Attach a `RouteHint` to a call to express *intent*. The SDK emits `X-PS-*`
