@@ -83,6 +83,20 @@ describe('otelConfig', () => {
     expect(otelConfig({ PS_OTEL_ENDPOINT: 'x' })!.captureContent).toBe(false);
   });
 
+  test('never sends PS key to a generic OTEL_* endpoint', () => {
+    const c = otelConfig({
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:
+        'https://otel.vendor.example/v1/traces',
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: 'x-vendor-key=v',
+      PS_API_KEY: 'k',
+    })!;
+    expect(c.headers).toEqual({ 'x-vendor-key': 'v' });
+  });
+
+  test('malformed header escape does not throw', () => {
+    expect(parseHeaderList('a=%zz,b=1')).toEqual({ a: '%zz', b: '1' });
+  });
+
   test('explicit authorization header wins over PS key', () => {
     const c = otelConfig({
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'x',

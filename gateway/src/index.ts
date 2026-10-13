@@ -144,6 +144,15 @@ if (process.env.PS_API_KEY) {
 // PS_OTEL_ENDPOINT; prompt/completion content only with PS_OTEL_CAPTURE_CONTENT.
 const psOtelConfig = otelConfig();
 if (psOtelConfig) {
+  if (
+    process.env.PS_API_KEY &&
+    psOtelConfig.endpoint.includes('/ingest/otel/')
+  ) {
+    console.warn(
+      '[PS OTel] PS_API_KEY telemetry and PS_OTEL_ENDPOINT both send to the ' +
+        'Prompt Shields collector: every LLM call is ingested twice. Use one.'
+    );
+  }
   app.use('*', psOtel(psOtelConfig));
 }
 

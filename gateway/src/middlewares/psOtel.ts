@@ -55,7 +55,13 @@ export function parseHeaderList(raw?: string): Record<string, string> {
     if (i <= 0) continue;
     const k = pair.slice(0, i).trim();
     const v = pair.slice(i + 1).trim();
-    if (k) out[k] = decodeURIComponent(v);
+    if (!k) continue;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch {
+      // Malformed %-escape: keep the raw value rather than crash startup.
+      out[k] = v;
+    }
   }
   return out;
 }
@@ -64,17 +70,18 @@ export function parseHeaderList(raw?: string): Record<string, string> {
 export function otelConfig(
   env: Record<string, string | undefined> = process.env
 ): OtelConfig | null {
-  const endpoint = (
-    env.PS_OTEL_ENDPOINT ||
-    env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||
-    ''
-  ).trim();
+  const psEndpoint = (env.PS_OTEL_ENDPOINT || '').trim();
+  const endpoint =
+    psEndpoint || (env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT || '').trim();
   if (!endpoint) return null;
   const headers = parseHeaderList(
     env.PS_OTEL_HEADERS || env.OTEL_EXPORTER_OTLP_TRACES_HEADERS
   );
-  // Sending to the PS collector: reuse the gateway's tenant ingest key.
+  // Sending to the PS collector: reuse the gateway's tenant ingest key. Only
+  // for the PS-specific PS_OTEL_ENDPOINT: the generic OTEL_* endpoint is often
+  // set platform-wide for a third-party backend, which must never receive it.
   if (
+    psEndpoint &&
     env.PS_API_KEY &&
     !Object.keys(headers).some((k) => k.toLowerCase() === 'authorization')
   ) {
