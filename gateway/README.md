@@ -67,6 +67,7 @@ PS_METRICS_ENABLED=true                               # optional; Prometheus met
 PS_METRICS_TOKEN=<random>                             # optional; require Bearer token on /metrics
 MAX_JSON_PAYLOAD_SIZE_IN_MB=10                        # optional; 413 for larger JSON bodies
 AWS_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Bedrock/SageMaker callers use this host's AWS identity (serviceRole)
+AZURE_AMBIENT_CREDENTIALS_ENABLED=true                # optional; let Azure callers use this host's managed or workload identity
 ```
 
 Liveness: `GET /v1/health` (no auth, no upstream call). Metrics are labelled with route, status, provider, model and the `X-PS-Business-Unit` / `X-PS-Environment` values; prompt and completion content never appear in metrics.
@@ -132,7 +133,7 @@ resp = client.chat.completions.create(
 # Asset now visible in the Atlas AI dashboard + Partner API registry.
 ```
 
-Want richer per-request annotations and PII detection on the client side? Use the [Python SDK](https://github.com/jun-bit-pulse-ai/prompt-shields-sdk/tree/main/packages/sdk) instead — same data model, more knobs.
+Want richer per-request annotations and PII detection on the client side? Use the [Python SDK](https://github.com/Prompt-Shields/prompt-shields-sdk/tree/main/packages/sdk) instead — same data model, more knobs.
 
 ---
 

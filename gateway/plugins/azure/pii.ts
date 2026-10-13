@@ -7,7 +7,7 @@ import {
 } from '../types';
 import { post, getCurrentContentPart, setCurrentContentPart } from '../utils';
 import { AzureCredentials } from './types';
-import { getAccessToken } from './utils';
+import { AzureHostIdentityDisabledError, getAccessToken } from './utils';
 
 const redact = async (
   documents: any[],
@@ -32,7 +32,11 @@ const redact = async (
 
   const url = `${credentials?.customHost || `https://${credentials?.resourceName}.cognitiveservices.azure.com`}/language/:analyze-text?api-version=${apiVersion}`;
 
-  const { token, error: tokenError } = await getAccessToken(
+  const {
+    token,
+    error: tokenError,
+    denied,
+  } = await getAccessToken(
     credentials as any,
     'pii',
     pluginOptions,
@@ -50,6 +54,9 @@ const redact = async (
     delete headers['Ocp-Apim-Subscription-Key'];
   }
 
+  if (denied) {
+    throw new AzureHostIdentityDisabledError(tokenError ?? '');
+  }
   if (tokenError) {
     throw new Error('Unable to get access token');
   }
@@ -153,7 +160,7 @@ export const handler: PluginHandler<{ pii: AzureCredentials }> = async (
     }
   } catch (e) {
     error = e;
-    verdict = true;
+    verdict = !(e instanceof AzureHostIdentityDisabledError);
     data = null;
   }
 

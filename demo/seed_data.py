@@ -2,6 +2,7 @@
 import asyncio
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import Base, Tenant, AIAsset, DataFlow, RiskMapping
 from datetime import datetime, timezone
 
@@ -12,14 +13,18 @@ DB_URL = os.environ.get(
     "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields",
 )
 
+# Local demo key only. The database stores its hash, never this string.
+DEMO_API_KEY = "ps-demo-key-acme"
+
 
 async def seed():
     engine = create_async_engine(DB_URL)
     session_factory = async_sessionmaker(engine, class_=AsyncSession)
 
     async with session_factory() as db:
-        tenant = Tenant(name="Acme Insurance", domain="acme.com",
-                        settings={"api_key": "ps-demo-key-acme"})
+        tenant = Tenant(name="Acme Insurance", domain="acme.com", settings={},
+                        api_key_prefix=api_key_lookup_prefix(DEMO_API_KEY),
+                        api_key_hash=hash_api_key(DEMO_API_KEY))
         db.add(tenant)
         await db.flush()
 
@@ -76,7 +81,7 @@ async def seed():
 
         await db.commit()
         print(f"Seeded {len(assets)} assets, {len(flows)} data flows, {len(risks)} risk mappings")
-        print(f"Demo API key: ps-demo-key-acme")
+        print(f"Demo API key: {DEMO_API_KEY}")
 
     await engine.dispose()
 

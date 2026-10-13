@@ -11,6 +11,7 @@ governance. Best-effort — designed as a signal, not a guarantee.
 import re
 from typing import Iterable
 
+from prompt_shields.national_ids import contains_nordic_national_id
 
 # Compiled patterns — order independent, all run in one pass
 _PATTERNS = {
@@ -64,6 +65,10 @@ def detect_pii_categories(text: str | None) -> list[str]:
     for name, pattern in _PATTERNS.items():
         if pattern.search(text):
             found.add(name)
+
+    # Checksum-validated categories — regex alone is too noisy for these
+    if contains_nordic_national_id(text):
+        found.add("national_id")
 
     lower = text.lower()
     for category, keywords in _KEYWORD_CATEGORIES.items():
