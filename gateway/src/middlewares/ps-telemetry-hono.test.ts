@@ -113,4 +113,73 @@ describe('psTelemetry (Hono adapter)', () => {
     });
     expect(res.status).toBe(200);
   });
+  test('never includes provider credentials in the event', async () => {
+    const app = makeApp((c) => c.json({ model: 'gpt-4o' }));
+    await post(
+      app,
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
+      {
+        authorization: 'Bearer sk-live-provider-secret',
+        'x-portkey-api-key': 'pk-secret',
+        'x-portkey-config': JSON.stringify({ api_key: 'sk-config-secret' }),
+        'x-ps-business-unit': 'HR',
+      }
+    );
+    await flush();
+
+    const serialized = JSON.stringify(sent);
+    expect(sent.events[0].business_unit).toBe('HR');
+    expect(serialized).not.toContain('sk-live-provider-secret');
+    expect(serialized).not.toContain('pk-secret');
+    expect(serialized).not.toContain('sk-config-secret');
+  });
+  test('reports the vendor from x-portkey-provider or the config', async () => {
+    const app = makeApp((c) => c.json({ model: 'rerank-v3.5' }));
+    await post(
+      app,
+      { model: 'rerank-v3.5', query: 'q', documents: ['a'] },
+      { 'x-portkey-provider': 'cohere' }
+    );
+    await flush();
+    expect(sent.events[0].vendor).toBe('cohere');
+
+    await post(
+      app,
+      { model: 'gpt-4o', messages: [] },
+      {
+        'x-portkey-config': JSON.stringify({
+          strategy: { mode: 'fallback' },
+          targets: [{ provider: 'azure-openai' }, { provider: 'openai' }],
+        }),
+      }
+    );
+    await flush();
+    expect(sent.events[0].vendor).toBe('azure-openai');
+  });
+  test('Messages/Responses usage and the API surface are recorded', async () => {
+    const app = new Hono();
+    app.use('*', psTelemetry());
+    app.post('/v1/messages', (c) =>
+      c.json({
+        type: 'message',
+        model: 'mistral-small',
+        usage: { input_tokens: 5, output_tokens: 2 },
+      })
+    );
+    await app.request('/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-portkey-provider': 'mistral-ai',
+      },
+      body: JSON.stringify({ model: 'mistral-small', messages: [] }),
+    });
+    await flush();
+    expect(sent.events[0]).toMatchObject({
+      vendor: 'mistral-ai',
+      api_surface: 'messages',
+      tokens_in: 5,
+      tokens_out: 2,
+    });
+  });
 });

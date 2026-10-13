@@ -3,6 +3,8 @@
  * Configurable logger utility for MCP Gateway
  */
 
+import { redactSecrets, redactString } from '../../utils/redact';
+
 export enum LogLevel {
   ERROR = 0,
   CRITICAL = 1, // New level for critical information
@@ -57,14 +59,17 @@ class Logger {
   private log(level: LogLevel, levelName: string, message: string, data?: any) {
     if (level > this.config.level) return;
 
-    const formattedMessage = this.formatMessage(levelName, message);
+    const formattedMessage = this.formatMessage(
+      levelName,
+      redactString(message)
+    );
     const color = this.config.colors
       ? this.colors[levelName as keyof typeof this.colors]
       : '';
     const reset = this.config.colors ? this.colors.reset : '';
 
     if (data !== undefined) {
-      console.log(`${color}${formattedMessage}${reset}`, data);
+      console.log(`${color}${formattedMessage}${reset}`, redactSecrets(data));
     } else {
       console.log(`${color}${formattedMessage}${reset}`);
     }
@@ -74,7 +79,7 @@ class Logger {
     if (error instanceof Error) {
       this.log(LogLevel.ERROR, 'error', `${message}: ${error.message}`);
       if (this.config.level >= LogLevel.DEBUG) {
-        console.error(error.stack);
+        console.error(redactString(error.stack ?? ''));
       }
     } else if (error) {
       this.log(LogLevel.ERROR, 'error', message, error);

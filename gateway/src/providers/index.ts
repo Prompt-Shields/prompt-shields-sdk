@@ -18,6 +18,9 @@ import TogetherAIConfig from './together-ai';
 import StabilityAIConfig from './stability-ai';
 import OllamaAPIConfig from './ollama';
 import { ProviderConfigs } from './types';
+import LatitudeConfig from './latitude';
+import DatabricksConfig from './databricks';
+import PineconeConfig from './pinecone';
 import GroqConfig from './groq';
 import SegmindConfig from './segmind';
 import JinaConfig from './jina';
@@ -148,6 +151,9 @@ const Providers: { [key: string]: ProviderConfigs } = {
   iointelligence: IOIntelligenceConfig,
   aibadgr: AIBadgrConfig,
   ovhcloud: OVHcloudConfig,
+  latitude: LatitudeConfig,
+  databricks: DatabricksConfig,
+  pinecone: PineconeConfig,
 };
 
 export default Providers;

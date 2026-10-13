@@ -271,3 +271,89 @@ export enum TITAN_STOP_REASON {
   RAG_QUERY_WHEN_RAG_DISABLED = 'RAG_QUERY_WHEN_RAG_DISABLED',
   CONTENT_FILTERED = 'CONTENT_FILTERED',
 }
+
+// ==================== Rerank Types ====================
+
+/**
+ * Bedrock Rerank API Request
+ * https://docs.aws.amazon.com/bedrock/latest/APIReference/API_agent-runtime_Rerank.html
+ */
+export interface BedrockRerankRequest {
+  /** Array of query objects (fixed to 1 item) */
+  queries: BedrockRerankQuery[];
+  /** Array of source documents to rerank (1-1000 items) */
+  sources: BedrockRerankSource[];
+  /** Reranking configuration */
+  rerankingConfiguration: BedrockRerankingConfiguration;
+  /** Pagination token for next batch of results */
+  nextToken?: string;
+}
+
+export interface BedrockRerankQuery {
+  /** Query type */
+  type: 'TEXT';
+  /** Text query object */
+  textQuery: {
+    text: string;
+  };
+}
+
+export interface BedrockRerankSource {
+  /** Source type */
+  type: 'INLINE';
+  /** Inline document source */
+  inlineDocumentSource: {
+    /** Document type */
+    type: 'TEXT' | 'JSON';
+    /** Text document */
+    textDocument?: {
+      text: string;
+    };
+    /** JSON document */
+    jsonDocument?: Record<string, any>;
+  };
+}
+
+export interface BedrockRerankingConfiguration {
+  /** Configuration type */
+  type: 'BEDROCK_RERANKING_MODEL';
+  /** Bedrock-specific reranking configuration */
+  bedrockRerankingConfiguration: {
+    /** Model configuration */
+    modelConfiguration: {
+      /** Model ARN */
+      modelArn: string;
+      /** Additional model request fields */
+      additionalModelRequestFields?: Record<string, any>;
+    };
+    /** Number of results to return */
+    numberOfResults?: number;
+  };
+}
+
+/**
+ * Bedrock Rerank API Response
+ */
+export interface BedrockRerankResponse {
+  /** Array of reranked results */
+  results?: BedrockRerankResult[];
+  /** Pagination token for next batch */
+  nextToken?: string;
+  /** Error message */
+  message?: string;
+}
+
+export interface BedrockRerankResult {
+  /** Position in the original source list */
+  index: number;
+  /** Relevance score */
+  relevanceScore: number;
+  /** Document content (if returned) */
+  document?: {
+    type: string;
+    textDocument?: {
+      text: string;
+    };
+    jsonDocument?: Record<string, any>;
+  };
+}

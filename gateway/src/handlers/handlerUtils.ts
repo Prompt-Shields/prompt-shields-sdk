@@ -16,11 +16,16 @@ import {
   FIREWORKS_AI,
   CORTEX,
   ORACLE,
+  DATABRICKS,
 } from '../globals';
 import { endpointStrings } from '../providers/types';
 import { Options, Params, StrategyModes, Targets } from '../types/requestBody';
 import { convertKeysToCamelCase } from '../utils';
 import { retryRequest } from './retryHandler';
+import {
+  limitResponseSize,
+  maxCustomHostResponseBytes,
+} from './responseSizeLimit';
 import { env } from 'hono/adapter';
 import { afterRequestHookHandler, responseHandler } from './responseHandlers';
 import { HookSpan } from '../middlewares/hooks';
@@ -38,6 +43,9 @@ import { ProviderContext } from './services/providerContext';
 import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
+import { isSafeUpstreamURL } from '../middlewares/requestValidator';
+import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
+import { pickCredentialHeaders, redactString } from '../utils/redact';
 
 function constructRequestBody(
   requestContext: RequestContext,
@@ -131,12 +139,18 @@ function constructRequestHeaders(
         requestHeaders[lowerCaseHeaderKey];
   });
 
+  // PS fork: credential headers produced by the provider config must not be
+  // overwritten by forwarded or proxied client headers (upstream enterprise
+  // 2.14 fixed the same issue on proxy routes).
+  const providerCredentialHeaders = pickCredentialHeaders(headers);
+
   // Add any headers that the model might need
   headers = {
     ...baseHeaders,
     ...headers,
     ...forwardHeadersMap,
     ...(fn === 'proxy' && proxyHeaders),
+    ...providerCredentialHeaders,
   };
 
   const contentType = headers['content-type']?.split(';')[0];
@@ -286,7 +300,63 @@ export function convertHooksShorthand(
  * @returns {Promise<CompletionResponse>} - The response from the POST request.
  * @throws Will throw an error if the response is not ok or if all retry attempts fail.
  */
+/**
+ * Makes the upstream call for one target. When the target provider does not
+ * speak the requested Messages or Responses API natively, the request is
+ * translated to Chat Completions and the response translated back (adapters
+ * ported from Portkey 2.0.0, #59). The decision is per target, so mixed
+ * fallback or load-balance configs use native passthrough where available.
+ */
 export async function tryPost(
+  c: Context,
+  providerOption: Options,
+  requestBody: Params | FormData | ArrayBuffer | ReadableStream,
+  requestHeaders: Record<string, string>,
+  fn: endpointStrings,
+  currentIndex: number | string,
+  method: string = 'POST'
+): Promise<Response> {
+  const isRawBody =
+    requestBody instanceof FormData ||
+    requestBody instanceof ReadableStream ||
+    requestBody instanceof ArrayBuffer;
+  const params = (isRawBody ? {} : requestBody) as Params;
+  const adapterResult = applyAdapterRequestTransform(
+    fn,
+    providerOption.provider ?? '',
+    params,
+    requestBody,
+    Boolean(params.stream),
+    method
+  );
+  if (adapterResult instanceof Response) return adapterResult;
+  if (!adapterResult) {
+    return tryPostToProvider(
+      c,
+      providerOption,
+      requestBody,
+      requestHeaders,
+      fn,
+      currentIndex,
+      method
+    );
+  }
+
+  // Ask the provider transform for its non-strict output; the adapters
+  // read provider extras (e.g. reasoning content) to rebuild the response.
+  const response = await tryPostToProvider(
+    c,
+    { ...providerOption, strictOpenAiCompliance: false },
+    adapterResult.requestBody,
+    requestHeaders,
+    adapterResult.fn,
+    currentIndex,
+    method
+  );
+  return adaptResponse(response, adapterResult.adapterCtx, c);
+}
+
+async function tryPostToProvider(
   c: Context,
   providerOption: Options,
   requestBody: Params | FormData | ArrayBuffer | ReadableStream,
@@ -312,6 +382,15 @@ export async function tryPost(
 
   // Set the requestURL in requestContext
   requestContext.requestURL = await providerContext.getFullURL(requestContext);
+  // PS fork: custom hosts are validated up front by requestValidator; this
+  // catches provider-built URLs whose host came from request-controlled fields.
+  if (
+    !requestContext.customHost &&
+    !providerContext.hasRequestHandler(requestContext) &&
+    !isSafeUpstreamURL(requestContext.requestURL, c)
+  ) {
+    throw new GatewayError('Invalid upstream URL', 400);
+  }
 
   // Create the base log object from requestContext
   const logObject = new LogObjectBuilder(logsService, requestContext);
@@ -810,9 +889,9 @@ export async function tryTargetsRecursively(
         // GatewayError will check for all handled exceptions which cannot allow the request to proceed.
         console.error(
           'tryTargetsRecursively error: ',
-          error.message,
-          error.cause,
-          error.stack
+          redactString(error.message ?? ''),
+          redactString(String(error.cause ?? '')),
+          redactString(error.stack ?? '')
         );
         const errorMessage =
           error instanceof GatewayError
@@ -1020,6 +1099,10 @@ export function constructConfigFromRequestHeaders(
       requestHeaders[`x-${POWERED_BY}-oracle-key-passphrase`],
   };
 
+  const databricksConfig = {
+    databricksWorkspace: requestHeaders[`x-${POWERED_BY}-databricks-workspace`],
+  };
+
   const defaultsConfig = {
     input_guardrails: requestHeaders[`x-portkey-default-input-guardrails`]
       ? JSON.parse(requestHeaders[`x-portkey-default-input-guardrails`])
@@ -1126,6 +1209,12 @@ export function constructConfigFromRequestHeaders(
           ...cortexConfig,
         };
       }
+      if (parsedConfigJson.provider === DATABRICKS) {
+        parsedConfigJson = {
+          ...parsedConfigJson,
+          ...databricksConfig,
+        };
+      }
       if (parsedConfigJson.provider === ORACLE) {
         parsedConfigJson = {
           ...parsedConfigJson,
@@ -1182,6 +1271,8 @@ export function constructConfigFromRequestHeaders(
       fireworksConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === CORTEX && cortexConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === ORACLE && oracleConfig),
+    ...(requestHeaders[`x-${POWERED_BY}-provider`] === DATABRICKS &&
+      databricksConfig),
   };
 }
 
@@ -1229,6 +1320,13 @@ export async function recursiveAfterRequestHookHandler(
     requestHandler,
     retry.useRetryAfterHeader
   ));
+
+  if (requestContext.customHost) {
+    response = limitResponseSize(
+      response,
+      maxCustomHostResponseBytes(env(c).PS_MAX_CUSTOM_HOST_RESPONSE_BYTES)
+    );
+  }
 
   // Check if sync hooks are available
   // This will be used to determine if we need to parse the response body or simply passthrough the response as is

@@ -14,6 +14,7 @@ import { MemoryCacheBackend } from './backends/memory';
 import { FileCacheBackend } from './backends/file';
 import { createRedisBackend } from './backends/redis';
 import { createCloudflareKVBackend } from './backends/cloudflareKV';
+import { redactString } from '../../../utils/redact';
 // Using console.log for now to avoid build issues
 const logger = {
   debug: (msg: string, ...args: any[]) =>
@@ -392,7 +393,7 @@ export async function createCacheBackendsLocal(): Promise<void> {
 }
 
 export function createCacheBackendsRedis(redisUrl: string): void {
-  logger.info('Creating cache backends with Redis', redisUrl);
+  logger.info('Creating cache backends with Redis', redactString(redisUrl));
   let commonOptions: CacheConfig = {
     backend: 'redis',
     redisUrl: redisUrl,

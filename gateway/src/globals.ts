@@ -113,6 +113,9 @@ export const ORACLE: string = 'oracle';
 export const IO_INTELLIGENCE: string = 'iointelligence';
 export const AIBADGR: string = 'aibadgr';
 export const OVHCLOUD: string = 'ovhcloud';
+export const LATITUDE: string = 'latitude';
+export const DATABRICKS: string = 'databricks';
+export const PINECONE: string = 'pinecone';
 
 export const VALID_PROVIDERS = [
   ANTHROPIC,
@@ -189,6 +192,9 @@ export const VALID_PROVIDERS = [
   IO_INTELLIGENCE,
   AIBADGR,
   OVHCLOUD,
+  LATITUDE,
+  DATABRICKS,
+  PINECONE,
 ];
 
 export const CONTENT_TYPES = {

@@ -143,7 +143,13 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       return `https://${providerOptions.awsS3Bucket}.s3.${providerOptions.awsRegion || 'us-east-1'}.${getAwsEndpointDomain(c)}`;
     const isAWSControlPlaneEndpoint =
       fn && AWS_CONTROL_PLANE_ENDPOINTS.includes(fn);
-    return `https://${isAWSControlPlaneEndpoint ? 'bedrock' : 'bedrock-runtime'}.${providerOptions.awsRegion || 'us-east-1'}.${getAwsEndpointDomain(c)}`;
+    // Rerank lives on the Agents runtime (signing name is still `bedrock`).
+    const subdomain = isAWSControlPlaneEndpoint
+      ? 'bedrock'
+      : fn === 'rerank'
+        ? 'bedrock-agent-runtime'
+        : 'bedrock-runtime';
+    return `https://${subdomain}.${providerOptions.awsRegion || 'us-east-1'}.${getAwsEndpointDomain(c)}`;
   },
   headers: async ({
     c,
@@ -280,6 +286,9 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       }
       case 'embed': {
         return endpoint;
+      }
+      case 'rerank': {
+        return '/rerank';
       }
       case 'imageGenerate': {
         return endpoint;

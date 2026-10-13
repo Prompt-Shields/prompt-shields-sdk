@@ -8,6 +8,13 @@ import { Context } from 'hono';
 import { createNodeWebSocket } from '@hono/node-ws';
 import { realTimeHandlerNode } from './handlers/realtimeHandlerNode';
 import { requestValidator } from './middlewares/requestValidator';
+import {
+  ADMIN_TOKEN_ENV,
+  adminAuthLoginHandler,
+  adminAuthMiddleware,
+  adminAuthSessionStatusHandler,
+  readAdminToken,
+} from './middlewares/adminAuth';
 
 // Extract the port number from the command line arguments
 const defaultPort = 8787;
@@ -16,6 +23,7 @@ const portArg = args.find((arg) => arg.startsWith('--port='));
 const port = portArg ? parseInt(portArg.split('=')[1]) : defaultPort;
 
 const isHeadless = args.includes('--headless');
+const hasAdminToken = Boolean(readAdminToken());
 
 // Setup static file serving only if not in headless mode
 if (
@@ -37,10 +45,17 @@ if (
     const indexContent = readFileSync(indexPath, 'utf-8');
 
     const serveIndex = (c: Context) => {
+      if (!hasAdminToken) {
+        return c.html(
+          `Admin token is required to access the local gateway UI. Set ${ADMIN_TOKEN_ENV} (at least 16 characters) and restart the gateway.`
+        );
+      }
       return c.html(indexContent);
     };
 
     // Set up routes
+    app.post('/public/auth', adminAuthLoginHandler);
+    app.get('/public/auth/session', adminAuthSessionStatusHandler);
     app.get('/public/logs', serveIndex);
     app.get('/public/', serveIndex);
 
@@ -69,7 +84,7 @@ if (
     return Promise.race([fn(), timeoutPromise]);
   }
 
-  app.get('/log/stream', (c: Context) => {
+  app.get('/log/stream', adminAuthMiddleware, (c: Context) => {
     const clientId = Date.now().toString();
 
     // Set headers to prevent caching

@@ -23,7 +23,12 @@ import { proxyHandler } from './handlers/proxyHandler';
 import { chatCompletionsHandler } from './handlers/chatCompletionsHandler';
 import { completionsHandler } from './handlers/completionsHandler';
 import { embeddingsHandler } from './handlers/embeddingsHandler';
+import { rerankHandler } from './handlers/rerankHandler';
 import { logHandler } from './middlewares/log';
+import { metricsHandler, psMetrics } from './middlewares/psMetrics';
+import { version } from '../package.json';
+import { payloadSizeValidatorMiddleware } from './middlewares/payloadSizeValidator';
+import { redactSecrets, redactString } from './utils/redact';
 import { imageGenerationsHandler } from './handlers/imageGenerationsHandler';
 import { createSpeechHandler } from './handlers/createSpeechHandler';
 import { createTranscriptionHandler } from './handlers/createTranscriptionHandler';
@@ -91,6 +96,23 @@ if (runtime === 'node') {
  */
 app.get('/', (c) => c.text('AI Gateway says hey!'));
 
+/**
+ * Liveness/readiness endpoint (ported from Portkey 2.0.0, #61). No auth, no
+ * upstream calls: it only proves the process is serving.
+ */
+app.get('/v1/health', (c) =>
+  c.json({ status: 'success', message: 'Server is healthy', version })
+);
+
+// Prometheus metrics (#61). Opt-in via PS_METRICS_ENABLED=true; set
+// PS_METRICS_TOKEN to require a bearer token on GET /metrics.
+app.get('/metrics', metricsHandler);
+app.use('*', psMetrics());
+
+// Reject oversized JSON bodies before anything parses them (opt-in via
+// MAX_JSON_PAYLOAD_SIZE_IN_MB). Ported from Portkey 2.0.0.
+app.post('*', payloadSizeValidatorMiddleware());
+
 // Use prettyJSON middleware for all routes
 app.use('*', prettyJSON());
 
@@ -133,7 +155,12 @@ app.notFound((c) => c.json({ message: 'Not Found', ok: false }, 404));
  * Otherwise, logs the error and returns a JSON response with status code 500.
  */
 app.onError((err, c) => {
-  logger.error('Global Error Handler: ', err.message, err.cause, err.stack);
+  logger.error(
+    'Global Error Handler: ',
+    redactString(err.message),
+    redactSecrets(err.cause),
+    redactString(err.stack ?? '')
+  );
   if (err instanceof HTTPException) {
     return err.getResponse();
   }
@@ -169,6 +196,12 @@ app.post('/v1/completions', requestValidator, completionsHandler);
  * Handles requests by passing them to the embeddingsHandler.
  */
 app.post('/v1/embeddings', requestValidator, embeddingsHandler);
+
+/**
+ * POST route for '/v1/rerank' (Cohere-style request body; ported from
+ * Portkey 2.0.0). Supported providers: Cohere, Jina, Voyage, Bedrock.
+ */
+app.post('/v1/rerank', requestValidator, rerankHandler);
 
 /**
  * POST route for '/v1/images/generations'.

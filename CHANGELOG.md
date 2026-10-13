@@ -8,14 +8,39 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Gateway: Responses and Messages API on any provider** — when a provider lacks native support, `/v1/responses` and `/v1/messages` requests (JSON and streaming) are translated through Chat Completions and back, decided per target. Ported from Portkey 2.0.0 (#59).
+- **Gateway `/v1/health` and opt-in Prometheus `/metrics`** — `PS_METRICS_ENABLED=true`, optional `PS_METRICS_TOKEN`. Labels include route, status, provider, model and the X-PS business unit and environment, never prompt content. `deployment.yaml` now has liveness and readiness probes (#61).
+- **Gateway provider fixes from Portkey 2.0.0** — `prompt_cache_retention`, OpenAI `service_tier` in responses, gpt-image-1 parameters, Azure image-edit transform, Z.ai image generation (#60).
+
+- **Gateway `/v1/rerank`** — a unified, Cohere-style rerank endpoint for Cohere, Jina, Voyage, Bedrock (Agents runtime) and Pinecone. Ported from Portkey gateway 2.0.0 (#58).
+- **Gateway providers: Databricks, Latitude, Pinecone** — Databricks takes its workspace from `x-portkey-databricks-workspace`. Ported from Portkey 2.0.0 (#57).
+- **Gateway JSON payload-size limit** — set `MAX_JSON_PAYLOAD_SIZE_IN_MB` to reject oversized JSON bodies with 413. Ported from Portkey 2.0.0 (#62).
+
 - **Cost-aware route hints (SDK)** — `RouteHint(quality=, max_cost=, model_group=, allow_cache=)` on `chat.completions.create(route=...)` for both sync and async clients. The SDK never routes; it emits `X-PS-Quality`, `X-PS-Max-Cost`, `X-PS-Route`, and `X-PS-Cache` headers that the gateway acts on (transparent-by-default, per-route override). An empty hint emits no headers.
 - **`requested_model` / `served_model` on every event** — the requested model (possibly `"auto"`) is captured alongside the model that actually ran (from the provider response / gateway `X-PS-Served-Model`), so routing savings are provable in Atlas.
 - **Gateway cost-aware router** (`gateway/src/middlewares/router/`) — pluggable `RouterStrategy` behind `resolveRoute` with a `HeuristicStrategy` (input-token/code-fence/JSON-schema difficulty → cheap vs. frontier group, `max_cost` budget-clamp across groups). `psRouterMiddleware` rewrites `model="auto"` (or any hinted request) to a concrete model; a concrete model with no hint is left untouched. Config-driven `RoutePolicy` (groups + pricing mirror the SDK) overridable per virtual-key. Fail-open. Telemetry now emits `requested_model`, `served_model`, `route_group`, `route_reason`, `route_est_cost`.
 - **Router wired into the gateway pipeline** — `router/hono.ts` exposes `psRouter()`, mounted in `gateway/src/index.ts` (`app.use('*', psRouter())`) ahead of hooks/cache, gated on `PS_ROUTER_ENABLED=true`. Because Hono 4.x re-parses the body per `c.req.json()`, the adapter overwrites `c.req.bodyCache.json` so the rewritten model reaches the handler, and exposes the decision on `c.get('psRoute')`.
 - **Telemetry wired into the gateway pipeline** — `ps-telemetry.ts` exposes `psTelemetry()`, a Hono middleware mounted after `psRouter` (gated on `PS_API_KEY`). It parses token usage + served model from the response, merges `X-PS-*` business headers, and folds in `c.get('psRoute')` so `requested_model`/`served_model`/`route_*` actually emit in production. Fire-and-forget, fail-open, POST-only; streaming responses emit without usage.
 
+### Fixed
+
+- **Gateway telemetry dropped Messages/Responses token counts** — `input_tokens`/`output_tokens` usage is now counted, which also fixes native Anthropic `/v1/messages` events. Events now carry `api_surface`.
+
+- **Gateway telemetry reported vendor `unknown`** — the gateway's telemetry middleware looked for the vendor in the gateway's own URL. It now uses `x-portkey-provider`, or the provider in `x-portkey-config`.
+
+### Security
+
+- **Gateway admin console and log stream require auth** — `/public` and `/log/stream` now need `PS_GATEWAY_ADMIN_TOKEN` (at least 16 characters) as a bearer token or session cookie, and the log stream is disabled when it is unset. Previously anyone who could reach the gateway port could watch live request logs. Provider options and headers are redacted in the stream. Ported from upstream Portkey `main` (#54).
+- **`x-portkey-forward-headers` loop guard** — requests or configs that try to forward the forward-headers header itself are rejected with 400 (upstream `de0e6c5`, #55).
+- **Upstream URL SSRF check** — provider URLs built from request fields (Azure resource name, Vertex region, AWS region, account ids) may no longer point at metadata, private, link-local or alternatively encoded IPs (#65).
+- **Credential masking in gateway logs** — bearer tokens, API keys, AWS and Google keys, and passwords in URLs are masked in the shared logger, the Redis connection log and error logs (#65).
+- **Config fan-out cap** — at most 100 root targets (1000 for conditional routing) and 50 nested targets per root target; override with `MAX_ROOT_CONFIG_TARGETS`, `MAX_CONDITIONAL_ROOT_CONFIG_TARGETS` and `MAX_NESTED_CONFIG_TARGETS` (#65).
+- **Custom-host response size cap** — responses from custom hosts are limited to 50 MiB (`PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`) (#65).
+- **Provider credentials win on proxy routes** — forwarded or proxied client headers no longer overwrite the credential headers a provider config sets (#65).
+
 ### Documentation
 
+- `gateway/FORK_NOTICE.md` records the upstream fork base (`28ed85e`), the decision to port features from Portkey `2.0.0` rather than rebase onto it, the cherry-picked commits and how to sync. New `scripts/upstream-watch.py` reports untriaged Portkey OSS commits and enterprise changelog entries (#56, #66).
 - README updated to reflect SDK v0.2 capabilities (Anthropic, async, PII detection, cost estimation, API key fingerprinting, `ps_metadata` wiring).
 - Added SDK Guide section 6 "Cost-aware routing", `docs/sdks/python.mdx` routing reference, and the gateway routing-header contract + `ps-router.ts` spec in `gateway/src/middlewares/PS_README.md`.
 

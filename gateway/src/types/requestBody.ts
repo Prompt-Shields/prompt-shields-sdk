@@ -175,6 +175,7 @@ export interface Options {
   oracleFingerprint?: string; // example: 12:34:56:78:90:ab:cd:ef:12:34:56:78:90:ab:cd:ef
   oraclePrivateKey?: string; // example: -----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...
   oracleKeyPassphrase?: string; // example: password
+  databricksWorkspace?: string; // example: dbc-a1b2c3d4-e5f6
 
   /** Model pricing config */
   modelPricingConfig?: Record<string, any>;
@@ -439,6 +440,8 @@ export interface Params {
   stream?: boolean;
   logprobs?: number;
   top_logprobs?: boolean;
+  stream_options?: { include_usage?: boolean; [key: string]: unknown };
+  parallel_tool_calls?: boolean;
   echo?: boolean;
   stop?: string | string[];
   presence_penalty?: number;

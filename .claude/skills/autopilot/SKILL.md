@@ -229,6 +229,29 @@ labelled `priority:high` + `regression` (or, if the cause is obvious and
 small, a fix PR right away). Do not label it `autopilot:ready` yourself
 (rule 8); say in the issue whether you think it is a good fit.
 
+### 6b. Upstream watch (weekly)
+
+Portkey ships its enterprise gateway about weekly and that code is closed, so
+the gap to upstream only stays visible if someone reads the changelog (#66).
+Skip this step if any journal comment from the last 7 days contains an
+`Upstream:` line, or if no time is left before `phase_cutoff`.
+
+1. Read the triage points from the "Upstream base" table in
+   `gateway/FORK_NOTICE.md` and run
+   `python3 -I scripts/upstream-watch.py --since-enterprise <v> --since-main <sha> --since-2-0 <sha>`.
+2. Exit 0 → nothing new. Exit 1 → the fetch or parse failed; record it under
+   Blocked. Exit 10 → open one issue titled
+   `[Upstream] Triage Portkey changes since <v>` with the report as its body,
+   labelled `area:gateway`, unless an open issue with that title prefix
+   already exists (then comment the new report on it instead). If the report
+   lists any `security` entries, also add `autopilot:needs-human` (rule 3).
+   Never copy enterprise code; the report is a list of behaviours to
+   re-implement or skip.
+3. Do not edit the triage points yourself. A human updates the
+   `FORK_NOTICE.md` table when they close the triage issue.
+4. Add `Upstream: <exit code> <issue link or "nothing new">` to this tick's
+   journal entry.
+
 ### 7. Retro and self-improvement
 
 Run this phase whenever **this tick holds the lock**, including after an early
@@ -245,6 +268,7 @@ line phase 0 specifies.
    Reviewed: <PR number + head SHA + verdict, one per line>
    Labels: <every label added or removed, with the issue/PR number>
    Blocked: <bullets or "nothing">
+   Upstream: <only when phase 6b ran: exit code + issue link or "nothing new">
    Surprises: <what went differently than this skill predicted>
    Next tick should: <follow-ups>
    ```
