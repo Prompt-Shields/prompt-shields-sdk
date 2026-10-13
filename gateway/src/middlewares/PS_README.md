@@ -29,6 +29,34 @@ Applications can annotate requests with business context via HTTP headers:
 - `X-PS-Data-Classification` — e.g., "confidential"
 - `X-PS-Environment` — e.g., "production"
 
+## psOtel.ts (OpenTelemetry GenAI spans, #70)
+
+Opt-in. With `PS_OTEL_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) set,
+the gateway emits one CLIENT span per LLM call as OTLP/HTTP JSON, using GenAI
+semantic conventions 1.40: `gen_ai.operation.name`, `gen_ai.provider.name`
+(`aws.bedrock`, `gcp.vertex_ai`, ...), `gen_ai.request.model` and sampling
+params, `gen_ai.response.model`/`id`/`finish_reasons` (normalised to `stop`,
+`length`, `tool_call`, `content_filter`, `error`), `gen_ai.usage.*` and
+`error.type`. `X-PS-*` business context goes to `ps.*` span attributes and
+`X-PS-Environment` to the `deployment.environment.name` resource attribute.
+An inbound `traceparent` makes the span a child of the caller's span.
+
+- `PS_OTEL_ENDPOINT` — full traces URL, e.g. `http://collector:8000/ingest/otel/v1/traces`
+- `PS_OTEL_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` — `k=v,k2=v2`; when the endpoint comes from `PS_OTEL_ENDPOINT`, `PS_API_KEY` is sent as a bearer token unless an `Authorization` header is given. It is never added for an endpoint taken from `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+- `OTEL_SERVICE_NAME` — default `prompt-shields-gateway`
+- `PS_OTEL_CAPTURE_CONTENT` / `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` — `true` adds `gen_ai.input.messages`, `gen_ai.output.messages` and `gen_ai.system_instructions` (non-streamed calls only). Off by default.
+- `PS_OTEL_MAX_BATCH` (64), `PS_OTEL_FLUSH_MS` (5000), `PS_OTEL_MAX_QUEUE` (2048) — batching on Node. On Workers each request flushes the queue under `waitUntil`.
+
+Export never blocks or fails a request; failed batches are dropped.
+
+**Do not point this exporter at the Prompt Shields collector while `PS_API_KEY`
+telemetry (`ps-telemetry.ts`) is also on.** Both paths ingest the same call, so
+usage and token counts are doubled, and because this exporter uses semconv
+provider names (`aws.bedrock`) while `/ingest/events` uses gateway ids
+(`bedrock`), some calls also show up as two separate assets. Use OTel for a
+third-party backend, or for the collector instead of `PS_API_KEY` telemetry. The
+gateway logs a warning at startup when both target the collector.
+
 ## Cost-aware routing (spec)
 
 The SDK never picks a model. It expresses *intent*; the gateway owns the
