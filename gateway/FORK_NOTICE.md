@@ -31,8 +31,67 @@ Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b3
 | JSON payload-size limit (#62) | `src/middlewares/payloadSizeValidator.ts` | Limit read per request from `MAX_JSON_PAYLOAD_SIZE_IN_MB`; matches `application/json; charset=...`; Prometheus bookkeeping dropped |
 | `/v1/rerank` (#58) | `src/handlers/rerankHandler.ts`, `src/types/rerankRequestBody.ts`, `src/utils/idGenerator.ts`, `src/providers/{cohere,jina,voyage,bedrock}/rerank.ts` | Handler reads the body from the Hono request (our style); Bedrock routes rerank to `bedrock-agent-runtime` |
 | Databricks, Latitude, Pinecone providers (#57) | `src/providers/{databricks,latitude,pinecone}/` | Databricks workspace header plumbed through `constructConfigFromRequestHeaders` |
+| Responses/Messages adapters (#59) | `src/adapters/`, `src/handlers/adapterUtils.ts` | `tryPost` wraps the unchanged pipeline (`tryPostToProvider`); native Responses list matches this tree; `normalizeTokenLimitForProvider` renames `max_completion_tokens` for chat configs that only map `max_tokens`; upstream tests updated for the `max_completion_tokens` change |
+| `/v1/health` (#61) | route in `src/index.ts` | Same response shape; used by `deployment.yaml` probes |
+| Provider fixes (#60) | `openai`, `azure-openai`, `azure-ai-inference`, `z-ai`, `cohere`, `ollama`, `ai21` | Stand-alone fixes only; per-provider `pricing` configs dropped. Google/Vertex, Bedrock, Anthropic, Fireworks and batch-output fixes need 2.0.0's core: #108 |
 
-Not ported: `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
+Not ported:
+- `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
+- Prometheus via `prom-client` and `addMetricsMiddleware` (#61): Node-only and tied to control-plane context keys. `/metrics` is our own dependency-free implementation (`src/middlewares/psMetrics/`).
+- OTel trace ingest and `customLogHandler` (#61): wrappers over Portkey's log store. Span ingest belongs in the collector (#92).
+
+### Upstream files modified in this fork
+
+Every file that exists at the fork base `28ed85e` and differs here (regenerate with the loop in *How to sync upstream*). Files added by this fork are not listed.
+
+- `README.md`
+- `conf.example.json`
+- `deployment.yaml`
+- `src/globals.ts`
+- `src/handlers/handlerUtils.ts`
+- `src/handlers/retryHandler.ts`
+- `src/handlers/services/cacheService.ts`
+- `src/handlers/services/requestContext.ts`
+- `src/index.ts`
+- `src/middlewares/cache/index.ts`
+- `src/middlewares/log/index.ts`
+- `src/middlewares/requestValidator/index.ts`
+- `src/middlewares/requestValidator/schema/config.ts`
+- `src/providers/ai21/api.ts`
+- `src/providers/ai21/embed.ts`
+- `src/providers/azure-ai-inference/chatComplete.ts`
+- `src/providers/azure-ai-inference/messages.ts`
+- `src/providers/azure-openai/chatComplete.ts`
+- `src/providers/azure-openai/imageGenerate.ts`
+- `src/providers/azure-openai/index.ts`
+- `src/providers/bedrock/api.ts`
+- `src/providers/bedrock/index.ts`
+- `src/providers/bedrock/types.ts`
+- `src/providers/bytez/api.ts`
+- `src/providers/cohere/api.ts`
+- `src/providers/cohere/chatComplete.ts`
+- `src/providers/cohere/complete.ts`
+- `src/providers/cohere/index.ts`
+- `src/providers/cohere/types.ts`
+- `src/providers/index.ts`
+- `src/providers/jina/api.ts`
+- `src/providers/jina/index.ts`
+- `src/providers/ollama/chatComplete.ts`
+- `src/providers/ollama/embed.ts`
+- `src/providers/open-ai-base/index.ts`
+- `src/providers/openai/chatComplete.ts`
+- `src/providers/openai/imageGenerate.ts`
+- `src/providers/types.ts`
+- `src/providers/voyage/api.ts`
+- `src/providers/voyage/index.ts`
+- `src/providers/z-ai/api.ts`
+- `src/providers/z-ai/index.ts`
+- `src/public/index.html`
+- `src/shared/services/cache/index.ts`
+- `src/shared/utils/logger.ts`
+- `src/start-server.ts`
+- `src/types/modelResponses.ts`
+- `src/types/requestBody.ts`
 
 ### How to sync upstream
 
@@ -44,6 +103,9 @@ python3 scripts/upstream-watch.py --since-enterprise 2.28.0 --since-main 669825c
 git clone --filter=blob:none https://github.com/Portkey-AI/gateway /tmp/portkey
 mkdir -p /tmp/portkey-base && git -C /tmp/portkey archive 28ed85e | tar -x -C /tmp/portkey-base
 diff -rq /tmp/portkey-base gateway -x node_modules
+
+# 3. Regenerate the modified-files list below
+(cd gateway && git ls-files | while read f; do [ -f /tmp/portkey-base/$f ] && ! cmp -s /tmp/portkey-base/$f $f && echo "$f"; done)
 ```
 
 File an issue for every `security` entry and for any `review` entry that serves discovery or Route cost accuracy, then update the triage points in the table above in the same PR. Autopilot runs step 1 weekly (see `.claude/skills/autopilot/SKILL.md`, phase 6b).
