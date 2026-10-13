@@ -27,6 +27,7 @@ from sqlalchemy import and_, desc, func, select
 
 from collector import aibom
 from collector.audit import record_read
+from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.partner_auth import (
     PartnerPrincipal,
     require_scope,
@@ -136,6 +137,10 @@ def _asset_dict(a: AIAsset) -> dict:
         "confidence": a.confidence,
         "first_seen": a.first_seen.isoformat() if a.first_seen else None,
         "last_seen": a.last_seen.isoformat() if a.last_seen else None,
+        "lifecycle_state": a.lifecycle_state or "active",
+        "lifecycle_changed_at": (
+            a.lifecycle_changed_at.isoformat() if a.lifecycle_changed_at else None
+        ),
     }
 
 
@@ -181,6 +186,7 @@ async def list_assets(
     principal: PartnerPrincipal = Depends(require_scope("registry:read")),
     business_unit: str | None = None,
     status: str | None = None,
+    lifecycle_state: LifecycleState | None = None,
     discovery_source: str | None = None,
     since: str | None = None,
     after: str | None = None,
@@ -197,6 +203,8 @@ async def list_assets(
         conditions.append(AIAsset.business_unit == business_unit)
     if status:
         conditions.append(AIAsset.status == status)
+    if lifecycle_state:
+        conditions.append(AIAsset.lifecycle_state == lifecycle_state)
     if discovery_source:
         conditions.append(AIAsset.discovery_source.any(discovery_source))
     if since:
@@ -562,6 +570,8 @@ async def get_changes(
             "change_type": change_type,
             "asset": _asset_dict(a),
             "changed_at": a.updated_at.isoformat() if a.updated_at else None,
+            # Lifecycle transition since `since`: stale, retired, reactivated, or null.
+            "lifecycle_change": lifecycle_change_for(a, since_dt),
             # `changed_fields` requires field-level audit; deferred to Phase 2.
             "changed_fields": None,
         })

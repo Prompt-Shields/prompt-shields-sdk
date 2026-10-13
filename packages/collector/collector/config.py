@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     # Rows in partner_audit_log older than this are deleted by
     # `python -m collector.audit purge`.
     audit_retention_days: int = 365
+    # Asset lifecycle: days without telemetry before an asset is marked
+    # stale (PS_ASSET_STALE_AFTER_DAYS) and then retired
+    # (PS_ASSET_RETIRE_AFTER_DAYS). See collector/lifecycle.py.
+    asset_stale_after_days: int = 30
+    asset_retire_after_days: int = 90
     # Data retention (#85). A tenant's settings["retention_days"] overrides the
     # default. Nothing is purged until an operator runs the purge (CLI or the
     # /api/v1/operator endpoints).
