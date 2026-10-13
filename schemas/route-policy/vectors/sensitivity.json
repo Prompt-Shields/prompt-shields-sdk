@@ -1,0 +1,109 @@
+{
+  "$schema": "../vectors.schema.json",
+  "description": "Sensitivity = max(declared or unclassified_default, PII-escalated levels). Escalate-only: detection never lowers a level. sensitivity_source is 'pii_escalated' only when a detection raised the level.",
+  "policy": "nordic-sovereign",
+  "vectors": [
+    {
+      "id": "unclassified-uses-default",
+      "status": "pending",
+      "pending_reason": "Sensitivity classification is not implemented yet (backlog item 13, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "draft" }
+      },
+      "expected": {
+        "sensitivity_level": "confidential",
+        "sensitivity_source": "default"
+      }
+    },
+    {
+      "id": "declared-level-kept-without-pii",
+      "status": "pending",
+      "pending_reason": "Sensitivity classification is not implemented yet (backlog item 13, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "internal"
+      },
+      "expected": {
+        "sensitivity_level": "internal",
+        "sensitivity_source": "declared"
+      }
+    },
+    {
+      "id": "pii-escalates-declared-level",
+      "status": "pending",
+      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "internal",
+        "pii_detected": ["iban"]
+      },
+      "expected": {
+        "sensitivity_level": "confidential",
+        "sensitivity_source": "pii_escalated"
+      }
+    },
+    {
+      "id": "pii-never-lowers-level",
+      "status": "pending",
+      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "restricted",
+        "pii_detected": ["email"]
+      },
+      "expected": {
+        "sensitivity_level": "restricted",
+        "sensitivity_source": "declared"
+      }
+    },
+    {
+      "id": "pii-below-default-keeps-default",
+      "status": "pending",
+      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "pii_detected": ["email"]
+      },
+      "expected": {
+        "sensitivity_level": "confidential",
+        "sensitivity_source": "default"
+      }
+    },
+    {
+      "id": "highest-pii-category-wins",
+      "status": "pending",
+      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "public",
+        "pii_detected": ["email", "health_data", "iban"]
+      },
+      "expected": {
+        "sensitivity_level": "restricted",
+        "sensitivity_source": "pii_escalated"
+      }
+    },
+    {
+      "id": "unmapped-pii-category-ignored",
+      "status": "pending",
+      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "internal",
+        "pii_detected": ["phone"]
+      },
+      "expected": {
+        "sensitivity_level": "internal",
+        "sensitivity_source": "declared"
+      }
+    }
+  ]
+}
