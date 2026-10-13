@@ -1,5 +1,5 @@
 import hashlib
-from typing import Annotated
+from typing import Annotated, Any
 
 from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -33,10 +33,13 @@ class IngestEvent(BaseModel):
     tool_calls_used: list[dict] | None = None
     prompt_text: str | None = None
     # Data-flow metadata (ps_metadata on the SDK); see collector/data_flows.py.
-    data_sources: list[str] | None = None
-    output_destination: str | None = None
-    detected_pii_types: list[str] | None = None
-    region: str | None = None
+    # Loosely typed on purpose: these fields used to be ignored, so a malformed
+    # value must not 422 the whole batch. build_flow_context drops what it
+    # can't use.
+    data_sources: Any = None
+    output_destination: Any = None
+    detected_pii_types: Any = None
+    region: Any = None
 
 
 class IngestRequest(BaseModel):

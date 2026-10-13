@@ -262,3 +262,22 @@ def test_flow_context_is_normalised_and_bounded():
     assert len(ctx["service"]) == 200
     assert build_flow_context() is None
     assert build_flow_context(data_classification="top-secret") is None
+
+
+def test_flow_context_tolerates_malformed_values():
+    ctx = build_flow_context(
+        data_sources="crm", pii_types=7, output_destination=["x"], region={"a": 1}
+    )
+    assert ctx == {"data_sources": ["crm"]}
+
+
+@pytest.mark.asyncio
+async def test_malformed_flow_metadata_does_not_reject_the_batch(seeded_db):
+    bad = {**SDK_EVENT, "data_sources": "candidates_db", "detected_pii_types": None,
+           "output_destination": 42, "region": ["eu"]}
+    resp = await _post("/ingest/events", {"json": {"events": [bad]}})
+    assert resp.status_code == 200, resp.text
+    flows = await _flows(seeded_db, await _tenant_id(seeded_db))
+    assert [(f[0], f[1], f[2]) for f in flows] == [
+        ("candidates_db", "openai/gpt-4o", "input")
+    ]

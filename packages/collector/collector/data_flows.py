@@ -62,6 +62,8 @@ def _name(value: Any) -> str | None:
 
 
 def _names(values: Any, limit: int, lower: bool = False) -> list[str]:
+    if isinstance(values, str):
+        values = [values]
     if not isinstance(values, (list, tuple)):
         return []
     out: list[str] = []
@@ -89,10 +91,10 @@ def build_flow_context(
 ) -> dict | None:
     """Normalised, bounded flow metadata for one event (None when empty)."""
     ctx: dict[str, Any] = {}
-    sources = _names(list(data_sources or []), MAX_DATA_SOURCES)
+    sources = _names(data_sources, MAX_DATA_SOURCES)
     if sources:
         ctx["data_sources"] = sources
-    pii = _names(list(pii_types or []), MAX_PII_TYPES, lower=True)
+    pii = _names(pii_types, MAX_PII_TYPES, lower=True)
     if pii:
         ctx["pii_types"] = sorted(pii)
     for key, value in (
