@@ -7,13 +7,15 @@ import {
 import { RouterError } from '../errors/RouterError';
 
 async function getRequestData(request: Request, contentType: string) {
-  let finalRequest: any;
+  // Body-less requests (and any content type we do not parse) proxy with
+  // empty params. Most SDKs send GET/DELETE without a content-type, which
+  // previously left the body undefined and crashed tryPost on params.stream.
+  let finalRequest: any = {};
+  if (['GET', 'DELETE'].includes(request.method)) {
+    return finalRequest;
+  }
   if (contentType == CONTENT_TYPES.APPLICATION_JSON) {
-    if (['GET', 'DELETE'].includes(request.method)) {
-      finalRequest = {};
-    } else {
-      finalRequest = await request.json();
-    }
+    finalRequest = await request.json();
   } else if (contentType == CONTENT_TYPES.MULTIPART_FORM_DATA) {
     finalRequest = await request.formData();
   } else if (contentType?.startsWith(CONTENT_TYPES.GENERIC_AUDIO_PATTERN)) {

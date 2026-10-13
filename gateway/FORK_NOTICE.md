@@ -53,6 +53,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `deployment.yaml`
 - `src/globals.ts`
 - `src/handlers/handlerUtils.ts`
+- `src/handlers/proxyHandler.ts`
 - `src/handlers/retryHandler.ts`
 - `src/handlers/services/cacheService.ts`
 - `src/handlers/services/requestContext.ts`
