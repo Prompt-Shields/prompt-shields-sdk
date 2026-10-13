@@ -132,7 +132,7 @@ resp = client.chat.completions.create(
 # Asset now visible in the Atlas AI dashboard + Partner API registry.
 ```
 
-Want richer per-request annotations and PII detection on the client side? Use the [Python SDK](https://github.com/jun-bit-pulse-ai/prompt-shields-sdk/tree/main/packages/sdk) instead — same data model, more knobs.
+Want richer per-request annotations and PII detection on the client side? Use the [Python SDK](https://github.com/Prompt-Shields/prompt-shields-sdk/tree/main/packages/sdk) instead — same data model, more knobs.
 
 ---
 
