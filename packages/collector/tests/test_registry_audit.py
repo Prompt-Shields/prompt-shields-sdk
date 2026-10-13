@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from collector import audit, partner_registry, registry
-from collector.partner_auth import api_key_prefix_sha256
+from db.api_keys import api_key_lookup_prefix
 from fastapi.routing import APIRoute
 from starlette.requests import Request
 
@@ -122,7 +122,7 @@ class TestBuildRow:
         )
         assert row.tenant_id == TENANT_ID
         assert row.partner_id is None
-        assert row.api_key_prefix == api_key_prefix_sha256(TENANT_KEY)
+        assert row.api_key_prefix == api_key_lookup_prefix(TENANT_KEY)
         assert row.endpoint == "/api/v1/registry/assets"
         assert row.method == "GET"
         assert row.status_code == 200

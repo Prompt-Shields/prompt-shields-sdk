@@ -30,11 +30,10 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from db.api_keys import api_key_lookup_prefix
 from db.models import PartnerAuditLog
 from fastapi import Request
 from sqlalchemy import delete
-
-from collector.partner_auth import api_key_prefix_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,7 @@ def bearer_key_prefix(request: Request) -> str | None:
     if not auth.startswith("Bearer "):
         return None
     token = auth.removeprefix("Bearer ").strip()
-    return api_key_prefix_sha256(token) if token else None
+    return api_key_lookup_prefix(token) if token else None
 
 
 def _route_template(request: Request) -> str:
