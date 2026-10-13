@@ -134,6 +134,10 @@ const nodeEnv = {
   AZURE_FEDERATED_TOKEN_FILE: getValueOrFileContents(
     process.env.AZURE_FEDERATED_TOKEN_FILE
   ),
+  AZURE_AMBIENT_CREDENTIALS_ENABLED: getValueOrFileContents(
+    process.env.AZURE_AMBIENT_CREDENTIALS_ENABLED,
+    true
+  ),
 
   SSE_ENCRYPTION_TYPE: getValueOrFileContents(process.env.SSE_ENCRYPTION_TYPE),
   KMS_KEY_ID: getValueOrFileContents(process.env.KMS_KEY_ID),

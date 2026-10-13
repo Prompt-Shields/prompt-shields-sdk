@@ -415,6 +415,7 @@ The SDK runs a **local pattern-based PII scanner** on every prompt before sendin
 | `credit_card` | 13-19 digits with optional separators |
 | `ip_address` | IPv4 dotted-quad |
 | `iban` | IBAN format |
+| `national_id` | Nordic national IDs, checksum- and date-validated: Swedish personnummer, Norwegian fødselsnummer, Danish CPR, Finnish HETU |
 | `health_data` | Keywords: `diagnosis`, `prescription`, `medication`, `patient id`, `icd-10`, etc. |
 | `financial_data` | Keywords: `account number`, `routing number`, `swift code`, `tax id`, etc. |
 
@@ -755,14 +756,19 @@ If a vendor releases a new method (e.g., `client.responses.create()`), we add an
 
 ### Q: How do I get telemetry from streaming responses?
 
-Streaming support is **deferred to Phase 2**. Currently if you pass `stream=True`, the response is returned correctly but telemetry is skipped (no usage data is available until the stream completes).
+Pass `stream=True` as usual. The SDK returns a thin wrapper around the provider's stream: you get the same chunks, unchanged and as soon as they arrive, and one telemetry event is sent when the stream ends. Iteration, `with` / `async with`, and `close()` all work on both the sync and async clients.
 
-Workaround: collect tokens manually and call `client._telemetry.enqueue(...)` after the stream finishes. Or use the gateway proxy, which has full streaming support.
+- **Usage:** OpenAI sends token usage on a final chunk only when `stream_options={"include_usage": True}`. When the client talks to `api.openai.com`, the SDK sets this for you if you haven't, and hides that extra usage-only chunk (empty `choices`) so your loop sees exactly what it would have without it. If you set `include_usage` yourself, True or False, the SDK leaves it alone and passes every chunk through. With a custom `base_url` (Azure, a gateway, a self-hosted server) the SDK never adds `stream_options`, because some OpenAI-compatible servers reject it; pass `stream_options={"include_usage": True}` yourself if yours supports it. Anthropic usage comes from `message_start` and `message_delta`.
+- **Estimates:** when no usage arrives (you set `include_usage: False`, or the stream stopped early), tokens are estimated at about 4 characters per token and the event carries `tokens_estimated: true`.
+- **Incomplete streams:** every streamed event has `stream: true` and `stream_completed`. It is `false` when you `break`, `close()` the stream, or exit the `with` block before the end, and when the stream raises (`stream_error` holds the exception type). The exception is re-raised unchanged.
+- **Abandoned streams:** a stream that is neither consumed to the end nor closed emits no event. Use `with` or call `close()`.
+
+Telemetry stays fail-open: an error while recording or sending never reaches your loop.
 
 ### Q: How do I run a local collector for development?
 
 ```bash
-git clone https://github.com/jun-bit-pulse-ai/prompt-shields-sdk
+git clone https://github.com/Prompt-Shields/prompt-shields-sdk
 cd prompt-shields-sdk
 docker compose up -d
 # Run migrations
@@ -808,4 +814,4 @@ client = ShieldsOpenAI(
 - [docs/integrations/ardoq.mdx](docs/integrations/ardoq.mdx) — Ardoq Integration Builder setup
 - [`packages/sdk/prompt_shields/`](packages/sdk/prompt_shields/) — SDK source code
 
-Questions? Open an issue at [github.com/jun-bit-pulse-ai/prompt-shields-sdk/issues](https://github.com/jun-bit-pulse-ai/prompt-shields-sdk/issues).
+Questions? Open an issue at [github.com/Prompt-Shields/prompt-shields-sdk/issues](https://github.com/Prompt-Shields/prompt-shields-sdk/issues).
