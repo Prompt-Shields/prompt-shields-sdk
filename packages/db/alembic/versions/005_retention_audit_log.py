@@ -8,12 +8,8 @@ Per-tenant retention itself needs no schema change; it lives in
 tenants.settings->'retention_days'.
 
 Revision ID: 005
-Revises: 003
+Revises: 004
 Create Date: 2026-10-13
-
-Note: revision 004 (hash tenant API keys, PR #114) is open against 003 as
-well. Whichever of the two merges second must set its down_revision to the
-other so the chain stays linear.
 """
 
 from collections.abc import Sequence
@@ -23,7 +19,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "005"
-down_revision: str | None = "003"
+down_revision: str | None = "004"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
