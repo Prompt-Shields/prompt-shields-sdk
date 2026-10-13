@@ -257,3 +257,37 @@ class RetentionAuditLog(Base):
     __table_args__ = (
         Index("ix_retention_audit_tenant_ts", "tenant_id", "created_at"),
     )
+
+
+class TelemetryClientStats(Base):
+    """Per-tenant, per-SDK-client delivery accounting (#87).
+
+    One row per (tenant, client_id). client_id is the random id an SDK sends
+    in batch metadata; batches without metadata (older SDKs, other callers)
+    land on client_id "unidentified". Counters are cumulative:
+
+      received_events / received_batches  stored by the collector
+      sdk_enqueued_total, sdk_dropped     latest cumulative figures the SDK
+                                          reported (only taken from a batch
+                                          whose seq is newer than last_seq)
+      collector_rejected                  events in batches the collector
+                                          refused or failed to store, by
+                                          reason (the SDK normally retries)
+      ignored_fields                      unknown event fields the collector
+                                          discarded, field name -> count
+    """
+
+    __tablename__ = "telemetry_client_stats"
+
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True)
+    client_id = Column(Text, primary_key=True)
+    sdk = Column(Text)
+    last_seq = Column(BigInteger, nullable=False, default=0)
+    received_events = Column(BigInteger, nullable=False, default=0)
+    received_batches = Column(BigInteger, nullable=False, default=0)
+    sdk_enqueued_total = Column(BigInteger, nullable=False, default=0)
+    sdk_dropped = Column(JSONB, nullable=False, default=dict)
+    collector_rejected = Column(JSONB, nullable=False, default=dict)
+    ignored_fields = Column(JSONB, nullable=False, default=dict)
+    first_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    last_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)

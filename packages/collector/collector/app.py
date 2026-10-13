@@ -39,6 +39,7 @@ async def db_session_middleware(request: Request, call_next):
 # Internal collector + registry surface
 from collector.ingest import router as ingest_router  # noqa: E402
 from collector.lifecycle import router as lifecycle_router
+from collector.loss_accounting import router as loss_accounting_router  # noqa: E402
 from collector.otel_ingest import router as otel_ingest_router  # noqa: E402
 from collector.registry import router as registry_router  # noqa: E402
 
@@ -46,6 +47,7 @@ app.include_router(ingest_router)
 app.include_router(registry_router)
 app.include_router(lifecycle_router)
 app.include_router(otel_ingest_router)
+app.include_router(loss_accounting_router)
 
 # Partner API surface (read-only, OAuth + API key)
 from collector.oauth import router as oauth_router  # noqa: E402

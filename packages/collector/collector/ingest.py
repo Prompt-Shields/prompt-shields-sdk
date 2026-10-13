@@ -5,6 +5,7 @@ from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from collector import loss_accounting
 from collector.auth import resolve_tenant
 from collector.config import settings
 from collector.data_flows import record_event_flows
@@ -44,6 +45,8 @@ class IngestEvent(BaseModel):
 
 class IngestRequest(BaseModel):
     events: list[IngestEvent]
+    # SDK delivery accounting (#87); parsed leniently by loss_accounting.
+    metadata: dict | None = None
 
 
 def _enforce_rate_limit(
@@ -82,11 +85,40 @@ async def ingest_events(
     limiter: Annotated[FixedWindowRateLimiter, Depends(get_ingest_rate_limiter)],
 ):
     tenant_id = await resolve_tenant(request)
-    _enforce_rate_limit(limiter, tenant_id, response)
     db = request.state.db
+    meta = loss_accounting.parse_metadata(body.metadata)
+    try:
+        _enforce_rate_limit(limiter, tenant_id, response)
+    except HTTPException as exc:
+        if exc.status_code == 429:
+            await loss_accounting.record_rejected(
+                db, tenant_id, meta, len(body.events), "rate_limited"
+            )
+        raise
 
+    try:
+        assets_created = await _store_events(db, tenant_id, body.events)
+        if body.events:
+            ignored = loss_accounting.ignored_fields(
+                (await request.json()).get("events"), set(IngestEvent.model_fields)
+            )
+            await loss_accounting.record_received(
+                db, tenant_id, meta, len(body.events), ignored
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await loss_accounting.record_rejected(
+            db, tenant_id, meta, len(body.events), "write_failed"
+        )
+        raise
+
+    return {"ingested": len(body.events), "assets_created": assets_created}
+
+
+async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
     assets_created = 0
-    for event in body.events:
+    for event in events:
         asset, is_new = await find_or_create_asset(
             db=db,
             tenant_id=tenant_id,
@@ -147,6 +179,4 @@ async def ingest_events(
             calling_service=event.calling_service,
         )
 
-    await db.commit()
-
-    return {"ingested": len(body.events), "assets_created": assets_created}
+    return assets_created
