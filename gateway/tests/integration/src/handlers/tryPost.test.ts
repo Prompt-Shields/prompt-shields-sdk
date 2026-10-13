@@ -41,7 +41,7 @@ describe('core functionality', () => {
     // Append a random file to formData
     formData.append(
       'file',
-      new Blob([readFileSync('./src/handlers/tests/test.txt')]),
+      new Blob([readFileSync(join(__dirname, 'test.txt'))]),
       'test.txt'
     );
     formData.append('purpose', 'assistants');
@@ -62,7 +62,7 @@ describe('core functionality', () => {
       const formData = new FormData();
       formData.append(
         'file',
-        new Blob([readFileSync('./src/handlers/tests/speech2.mp3')]),
+        new Blob([readFileSync(join(__dirname, 'speech2.mp3'))]),
         'speech2.mp3'
       );
       formData.append('model', 'gpt-4o-transcribe');
@@ -495,7 +495,7 @@ describe('tryPost-caching', () => {
     // Append a random file to formData
     formData.append(
       'file',
-      new Blob([readFileSync('./src/handlers/tests/test.txt')]),
+      new Blob([readFileSync(join(__dirname, 'test.txt'))]),
       'test.txt'
     );
     formData.append('purpose', 'assistants');
