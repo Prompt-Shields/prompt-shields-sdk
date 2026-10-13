@@ -18,6 +18,20 @@ All Partner API endpoints are rate-limited to protect service stability.
   based on partnership level will be available in a future release.
 </Info>
 
+## Ingest Limits
+
+`POST /ingest/events` is limited per tenant API key, counted in requests per
+minute (a batch of events is one request). The default is 100 requests/minute,
+set with `PS_RATE_LIMIT_PER_MINUTE` on the collector; `0` turns it off. It
+uses the same headers and `429` response as the Partner API. The SDK is
+fail-open: a `429` keeps the batch buffered for the next flush and never blocks
+the model call.
+
+<Info>
+  The limiter is in-process, so each collector worker counts separately.
+  Running N workers allows up to N times the configured limit.
+</Info>
+
 ## Rate Limit Headers
 
 Every response includes rate limit headers:
