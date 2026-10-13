@@ -8,6 +8,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **`route-policy.v1` JSON Schema and golden decision vectors** — `schemas/route-policy/` holds the shared routing contract (JSON Schema 2020-12): groups, quality mapping, sensitivity levels, PII escalation, data policy, per-use-case quality bar and fallback. It also has three example policies and decision vectors in `vectors/*.json`. The gateway router runs every active vector through `resolveRoute`. The SDK checks the schema, the examples and `RouteHint` encoding. Sensitivity, data-policy and quality-bar vectors are marked `pending` and skipped with their reason until those P1 features land (#11).
+
 - **Gateway: token usage and truncation for streamed responses** — gateway telemetry now reads usage from SSE streams as they pass to the client (OpenAI chat `usage` chunks, Anthropic `message_start`/`message_delta`, Responses `response.completed`) and sends the event when the stream ends, so streamed calls are no longer costed at zero. A stream that ends without its terminal event is marked `stream_truncated`, a client disconnect `stream_cancelled`; `/metrics` gains `ps_gateway_streams_total{outcome}` and counts streamed tokens (#72).
 
 - **TypeScript Partner SDK (`@prompt-shields/partner`)** in `packages/partner-ts/`: a typed, dependency-free client for every `/partner/v1` endpoint. It supports OAuth client credentials with token caching or API-key auth, cursor pagination (async iterator, `toArray()`, `listPage()`), retries on 429 that honour `Retry-After`, and typed errors (`APIError`, `RateLimitError`, and others). `assets.usageSummary()` needs the collector endpoint from #99. The package is not yet published to npm (#105).
