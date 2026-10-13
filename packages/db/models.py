@@ -28,9 +28,17 @@ class Tenant(Base):
     name = Column(Text, nullable=False)
     domain = Column(Text)
     settings = Column(JSONB, default=dict)
+    # Ingest key: SHA-256 lookup prefix + bcrypt hash, never plaintext.
+    # See db/api_keys.py.
+    api_key_prefix = Column(Text)
+    api_key_hash = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), default=utcnow)
 
     assets = relationship("AIAsset", back_populates="tenant")
+
+    __table_args__ = (
+        Index("ix_tenants_api_key_prefix", "api_key_prefix", unique=True),
+    )
 
 
 class AIAsset(Base):

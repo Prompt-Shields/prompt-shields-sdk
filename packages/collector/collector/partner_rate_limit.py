@@ -1,6 +1,7 @@
-"""In-process rate limiter for the Partner API.
+"""In-process rate limiter for the Partner API and tenant ingest.
 
-Implements a fixed-window counter per (partner_id, minute). Bucket keys
+Implements a fixed-window counter per (key, minute), where the key is a
+partner id or a tenant id. Bucket keys
 expire after 2 minutes to bound memory. Suitable for single-process
 deployments; production should use Redis with an atomic INCR + EXPIRE.
 
@@ -12,9 +13,9 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from collections.abc import Hashable
 from dataclasses import dataclass
 from threading import Lock
-from uuid import UUID
 
 
 @dataclass
@@ -27,32 +28,41 @@ class RateLimitResult:
 
 
 class FixedWindowRateLimiter:
-    """Counter per (partner_id, minute_bucket). Thread-safe."""
+    """Counter per (key, minute_bucket). Thread-safe.
+
+    ``check`` never awaits, so it is also atomic with respect to concurrent
+    async requests on the same event loop.
+    """
 
     def __init__(self) -> None:
-        self._counts: dict[tuple[UUID, int], int] = defaultdict(int)
+        self._counts: dict[tuple[Hashable, int], int] = defaultdict(int)
         self._lock = Lock()
+        self._last_gc_minute: int | None = None
 
     def _gc(self, now_minute: int) -> None:
-        """Drop buckets older than the previous minute. O(N) — fine at
-        partner-API scale (small partner count, ~once per minute)."""
+        """Drop buckets older than the previous minute. O(N), run at most
+        once per minute, so memory stays bounded by the keys seen in the
+        current and previous minute."""
         cutoff = now_minute - 1
         self._counts = defaultdict(
             int,
             {k: v for k, v in self._counts.items() if k[1] >= cutoff},
         )
 
-    def check(self, partner_id: UUID, limit: int) -> RateLimitResult:
+    def check(self, partner_id: Hashable, limit: int) -> RateLimitResult:
         now = int(time.time())
         now_minute = now // 60
         key = (partner_id, now_minute)
 
         with self._lock:
+            # GC on minute rollover. Keying it off a per-key count would
+            # never run when every key stays under the trigger, leaking one
+            # bucket per key per minute (many low-volume tenants).
+            if self._last_gc_minute != now_minute:
+                self._gc(now_minute)
+                self._last_gc_minute = now_minute
             self._counts[key] += 1
             count = self._counts[key]
-            # Light-touch GC every ~64 ticks to avoid every-call overhead
-            if count % 64 == 0:
-                self._gc(now_minute)
 
         reset_at = (now_minute + 1) * 60
         remaining = max(0, limit - count)
@@ -74,3 +84,13 @@ _LIMITER = FixedWindowRateLimiter()
 
 def get_rate_limiter() -> FixedWindowRateLimiter:
     return _LIMITER
+
+
+# Separate singleton for /ingest/events so tenant and partner counters never
+# share buckets. Swap for a shared-store implementation with the same
+# ``check`` signature via FastAPI ``dependency_overrides``.
+_INGEST_LIMITER = FixedWindowRateLimiter()
+
+
+def get_ingest_rate_limiter() -> FixedWindowRateLimiter:
+    return _INGEST_LIMITER
