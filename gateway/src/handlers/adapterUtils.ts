@@ -266,8 +266,9 @@ async function adaptNonStreamingResponse(
 
 /**
  * Transform a streaming chatComplete response to Messages or Responses API SSE format.
- * Reads from a clone of the response so the original body (stored in requestOptions)
- * remains readable for middleware/logging until the async overwrite completes.
+ * Reads the upstream body directly (the log copy of a stream keeps only status
+ * and headers), and cancels it when the client disconnects so the provider
+ * stops generating.
  */
 function adaptStreamingResponse(
   response: Response,
@@ -276,11 +277,25 @@ function adaptStreamingResponse(
 ): Response {
   if (!response.body) return response;
 
-  const responseToProcess = response.clone();
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
-  const reader = responseToProcess.body!.getReader();
+  const reader = response.body.getReader();
   const encoder = new TextEncoder();
+
+  // Same as handleStreamingMode: a client cancel errors the writable side,
+  // so cancel the upstream body then. desiredSize is null once errored.
+  const cancelUpstream = (reason?: unknown) => {
+    reader.cancel(reason).catch(() => {});
+  };
+  writer.closed.catch(cancelUpstream);
+  const isClientGone = () => writer.desiredSize === null;
+  const onError = (err: unknown) => {
+    cancelUpstream(err);
+    if (!isClientGone()) logger.error('Adapter stream transform error:', err);
+  };
+  const close = () => {
+    if (!isClientGone()) writer.close().catch(() => {});
+  };
 
   if (originalFn === 'messages') {
     const state = messagesCreateStreamState();
@@ -300,9 +315,9 @@ function adaptStreamingResponse(
           await writer.write(encoder.encode(finalEvents));
         }
       } catch (err) {
-        logger.error('Adapter stream transform error:', err);
+        onError(err);
       } finally {
-        writer.close();
+        close();
       }
     })();
   } else {
@@ -329,9 +344,9 @@ function adaptStreamingResponse(
           await writer.write(encoder.encode(finalEvents));
         }
       } catch (err) {
-        logger.error('Adapter stream transform error:', err);
+        onError(err);
       } finally {
-        writer.close();
+        close();
       }
     })();
   }
@@ -349,13 +364,13 @@ function adaptStreamingResponse(
     headers,
   });
 
-  // Synchronously update requestOptions so the logging middleware
-  // reads the adapted stream (not the pre-adapter Chat Completions stream).
-  // Clone ensures both the client and the middleware can read independently.
+  // Synchronously update requestOptions so logging sees the adapted status
+  // and headers. Streams are not read back from logs, and a clone would tee
+  // the body and keep the upstream alive after the client disconnects.
   const requestOptions = c.get('requestOptions');
   if (requestOptions?.length) {
     const lastOption = requestOptions[requestOptions.length - 1];
-    lastOption.response = adaptedResponse.clone();
+    lastOption.response = new Response(null, { status: 200, headers });
     lastOption.providerOptions.rubeusURL = originalFn;
   }
 

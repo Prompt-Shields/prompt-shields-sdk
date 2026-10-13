@@ -5,6 +5,7 @@
 import http from 'node:http';
 import { AddressInfo } from 'node:net';
 import { handleStreamingMode } from './streamHandler';
+import { adaptResponse } from './adapterUtils';
 import { LogObjectBuilder, LogsService } from './services/logsService';
 import { observeSSE, StreamSummary } from '../middlewares/psStreamObserver';
 
@@ -167,6 +168,32 @@ describe('handleStreamingMode client cancellation', () => {
     });
     expect(await res.json()).toEqual({ ok: true });
   });
+
+  test.each(['messages', 'createModelResponse'] as const)(
+    'adapter (%s): client cancel cancels upstream, log copy is headers only',
+    async (originalFn) => {
+      const { response, state } = upstream(100);
+      const requestOptions: any[] = [{ providerOptions: {} }];
+      const c: any = { get: () => requestOptions };
+      const adapted = await adaptResponse(
+        stream(response),
+        { isActive: true, originalFn } as any,
+        c
+      );
+      expect(requestOptions[0].response.body).toBeNull();
+      expect(requestOptions[0].response.headers.get('content-type')).toBe(
+        'text/event-stream'
+      );
+      const reader = adapted.body!.getReader();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      await reader.cancel();
+      expect(await until(() => state.cancelled)).toBe(true);
+      expect(state.served).toBeLessThan(100);
+      await tick(50);
+      expect(errorSpy).not.toHaveBeenCalled();
+    }
+  );
 
   test('Node fetch: client cancel closes the upstream connection', async () => {
     let closedEarly = false;
