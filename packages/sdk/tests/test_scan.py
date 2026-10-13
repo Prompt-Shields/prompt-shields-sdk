@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -115,6 +116,21 @@ def test_size_bound(repo):
     report = scan_path(repo, max_file_bytes=1000)
     assert "big.py" not in {f["path"] for f in report["findings"]}
     assert report["files_skipped"] >= 1
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs and symlinks")
+def test_skips_symlinks_and_fifos(repo, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("import mistralai\n")
+    (repo / "link.py").symlink_to(outside / "secret.py")
+    (repo / "linkdir").symlink_to(outside, target_is_directory=True)
+    # A FIFO with a source extension must not block the scan.
+    os.mkfifo(repo / "pipe.py")
+    report = scan_path(repo)
+    paths = {f["path"] for f in report["findings"]}
+    assert not any(p.startswith(("link.py", "linkdir/", "pipe.py")) for p in paths)
+    assert ("mistral", "mistralai") not in _kinds(report, "import")
 
 
 def test_env_var_name_only():

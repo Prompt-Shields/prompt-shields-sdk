@@ -31,6 +31,7 @@ import ast
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
@@ -554,12 +555,35 @@ def iter_files(root: Path) -> Iterator[Path]:
                 yield path
 
 
+_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+
 def _read_text(path: Path, max_bytes: int) -> str | None:
+    # O_NOFOLLOW: a file swapped for a symlink after the walk is not followed.
+    # O_NONBLOCK + S_ISREG: FIFOs and devices are rejected instead of hanging.
+    # The read itself is capped, so st_size cannot be trusted to lie low.
     try:
-        if path.stat().st_size > max_bytes:
-            return None
-        data = path.read_bytes()
+        fd = os.open(path, _OPEN_FLAGS)
     except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+            return None
+        with os.fdopen(fd, "rb") as fh:
+            fd = -1
+            data = fh.read(max_bytes + 1)
+    except OSError:
+        return None
+    finally:
+        if fd != -1:
+            os.close(fd)
+    if len(data) > max_bytes:
         return None
     if b"\x00" in data[:8192]:
         return None
