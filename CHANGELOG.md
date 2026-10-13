@@ -38,6 +38,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **Gateway telemetry dropped Messages/Responses token counts** — `input_tokens`/`output_tokens` usage is now counted, which also fixes native Anthropic `/v1/messages` events. Events now carry `api_surface`.
 
+- **Gateway proxy returned 500 for GET/DELETE without a `content-type`** — the catch-all `/v1/*` proxy left the request params undefined, so `tryPost` crashed reading `stream`. Most SDKs send GETs (e.g. `/v1/files`) this way. Body-less requests now proxy with no body, the same method and the upstream response.
+
 - **Gateway telemetry reported vendor `unknown`** — the gateway's telemetry middleware looked for the vendor in the gateway's own URL. It now uses `x-portkey-provider`, or the provider in `x-portkey-config`.
 
 ### Security
