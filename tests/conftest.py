@@ -2,6 +2,7 @@ import os
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import Base, Tenant
 
 # Overridable so a host that has remapped the database port (PS_DB_PORT) can
@@ -24,7 +25,9 @@ async def seeded_db():
         tenant = Tenant(
             name="Test Corp",
             domain="test.com",
-            settings={"api_key": "ps-test-key-12345"}
+            settings={},
+            api_key_prefix=api_key_lookup_prefix("ps-test-key-12345"),
+            api_key_hash=hash_api_key("ps-test-key-12345"),
         )
         session.add(tenant)
         await session.commit()
