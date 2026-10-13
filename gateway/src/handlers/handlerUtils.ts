@@ -440,6 +440,11 @@ async function tryPostToProvider(
   // Attach the body of the request
   if (!providerContext.hasRequestHandler(requestContext)) {
     requestContext.transformToProviderRequestAndSave();
+  } else {
+    // PS fork: request handlers build their own upstream body. Record the
+    // gateway body so the log and cache middlewares, which read
+    // requestOptions[0].requestParams, do not fail on an undefined value.
+    requestContext.transformedRequestBody = requestContext.requestBody;
   }
 
   // Construct the base object for the request

@@ -194,6 +194,7 @@ const AzureAIInferenceAPI: ProviderAPIConfig = {
       createSpeech: '/audio/speech',
       createTranscription: '/audio/transcriptions',
       createTranslation: '/audio/translations',
+      ocr: '/ocr',
       uploadFile: path,
       retrieveFile: path,
       listFiles: path,
@@ -244,6 +245,7 @@ const AzureAIInferenceAPI: ProviderAPIConfig = {
       case 'createSpeech':
       case 'createTranscription':
       case 'createTranslation':
+      case 'ocr':
       case 'cancelBatch':
       case 'createBatch':
       case 'getBatchOutput':

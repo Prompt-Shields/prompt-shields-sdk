@@ -33,6 +33,7 @@ import { imageGenerationsHandler } from './handlers/imageGenerationsHandler';
 import { createSpeechHandler } from './handlers/createSpeechHandler';
 import { createTranscriptionHandler } from './handlers/createTranscriptionHandler';
 import { createTranslationHandler } from './handlers/createTranslationHandler';
+import { ocrHandler } from './handlers/ocrHandler';
 import { modelsHandler } from './handlers/modelsHandler';
 import { realTimeHandler } from './handlers/realtimeHandler';
 import filesHandler from './handlers/filesHandler';
@@ -236,6 +237,12 @@ app.post(
  * Handles requests by passing them to the createTranslationHandler.
  */
 app.post('/v1/audio/translations', requestValidator, createTranslationHandler);
+
+/**
+ * POST route for '/v1/ocr'.
+ * Handles requests by passing them to the ocrHandler.
+ */
+app.post('/v1/ocr', requestValidator, ocrHandler);
 
 // files
 app.get('/v1/files', requestValidator, filesHandler('listFiles', 'GET'));

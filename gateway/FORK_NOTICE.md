@@ -69,8 +69,10 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/anthropic/chatComplete.ts`
 - `src/providers/anthropic/complete.ts`
 - `src/providers/anthropic/types.ts`
+- `src/providers/azure-ai-inference/api.ts`
 - `src/providers/azure-ai-inference/chatComplete.ts`
 - `src/providers/azure-ai-inference/getBatchOutput.ts`
+- `src/providers/azure-ai-inference/index.ts`
 - `src/providers/azure-ai-inference/messages.ts`
 - `src/providers/azure-openai/chatComplete.ts`
 - `src/providers/azure-openai/imageGenerate.ts`
@@ -117,6 +119,8 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/index.ts`
 - `src/providers/jina/api.ts`
 - `src/providers/jina/index.ts`
+- `src/providers/mistral-ai/api.ts`
+- `src/providers/mistral-ai/index.ts`
 - `src/providers/ollama/chatComplete.ts`
 - `src/providers/ollama/embed.ts`
 - `src/providers/open-ai-base/index.ts`
@@ -189,6 +193,8 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
    Limits: the upstream URL check is hostname-only (no DNS resolution, so no DNS-rebinding or redirect protection), rejects every IPv6 literal not listed in `TRUSTED_CUSTOM_HOSTS`, and does not cover providers with custom request handlers, which build their own URLs. The response size cap applies to custom-host upstreams only.
 7. **Ported with changes** the upstream admin login (`src/middlewares/adminAuth`, the login modal in `src/public/index.html`): the token comes from `PS_GATEWAY_ADMIN_TOKEN` instead of `conf.json`, malformed session cookies are treated as absent, and expired sessions are pruned. The session cookie is `HttpOnly; SameSite=Strict` but not `Secure`, because the console is served over plain HTTP on localhost
 8. **Hardened** AWS credential handling in the Bedrock/SageMaker port (#108): Portkey 2.0 lets a caller pick `awsAuthType=serviceRole`, or `assumedRole` with no configured keys, and then signs with the gateway host's own AWS identity. Here both need `AWS_AMBIENT_CREDENTIALS_ENABLED=true` (otherwise `serviceRole` is 403 and `assumedRole` must use `AWS_ASSUME_ROLE_ACCESS_KEY_ID`/`SECRET` or `AWS_ASSUME_ROLE_SOURCE_ARN`). `assumedRole` without a role ARN is a 400, so a caller can never get the operator's assume-role keys themselves. `AWS_ENDPOINT_DOMAIN` is read per request, so Workers bindings apply. Requests are only signed for `https://*.<AWS_ENDPOINT_DOMAIN>` hosts, so a crafted `x-portkey-aws-region` or S3 bucket cannot send signed headers (access key id, session token) to another host.
+
+9. **Added** (re-implemented from the Portkey enterprise changelog 2.18-2.23, #75): `POST /v1/ocr` in the Mistral OCR request shape for `mistral-ai`, Vertex-hosted Mistral (`mistralai.<model>`, `rawPredict`) and Azure AI Foundry (`<azureFoundryUrl>/ocr`); `elevenlabs` and `deepgram` providers for `/v1/audio/speech` and `/v1/audio/transcriptions`, on fixed vendor hosts (the ElevenLabs voice must match a voice-ID pattern before it becomes a path segment). Their transcription calls use provider request handlers, which ignore custom hosts. `ps-telemetry` emits `modality` and non-token `usage_units`/`usage_unit_type` (seconds, pages, characters).
 
 ## Original License
 
