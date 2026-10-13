@@ -1,5 +1,6 @@
 import { env } from 'hono/adapter';
-import { getAwsEndpointDomain } from '../../utils/awsAuth';
+import { assertAwsUrl, getAwsEndpointDomain } from '../../utils/awsAuth';
+import { GatewayError } from '../../errors/GatewayError';
 import { getBoundaryFromContentType } from '../../handlers/streamHandlerUtils';
 import {
   BedrockUploadFileTransformerConfig,
@@ -40,8 +41,13 @@ class AwsMultipartUploadHandler {
     this.bucket = bucket;
     this.objectKey = objectKey;
     this.domain = getAwsEndpointDomain(env(c));
+    // The bucket and region come from the request. Header signing also runs
+    // assertAwsUrl, but `awsAuthType: apiKey` skips signing.
     this.url = new URL(
-      `https://${bucket}.s3.${region}.${this.domain}/${objectKey}?uploads`
+      assertAwsUrl(
+        `https://${bucket}.s3.${region}.${this.domain}/${objectKey}?uploads`,
+        env(c)
+      )
     );
     this.providerOptions = providerOptions;
     this.c = c;
@@ -425,6 +431,7 @@ export const BedrockUploadFileRequestHandler: RequestHandler<
       },
     });
   } catch (error: any) {
+    if (error instanceof GatewayError) throw error;
     let errorResponse;
 
     try {

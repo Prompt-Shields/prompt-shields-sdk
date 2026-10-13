@@ -16,6 +16,7 @@ import { createLineSplitter } from '../../handlers/streamHandlerUtils';
 import GoogleApiConfig from './api';
 import { GoogleEmbedResponseTransform } from './embed';
 import { externalServiceFetch } from '../../utils/fetch';
+import { assertSafeUpstreamURL } from '../../middlewares/requestValidator';
 import { generateErrorResponse } from '../utils';
 import { logger } from '../../apm';
 
@@ -121,19 +122,6 @@ export const BatchOutputRequestHandler: RequestHandler = async ({
   c,
   requestBody,
 }) => {
-  const headers = await GoogleApiConfig.headers({
-    c,
-    fn: 'retrieveBatch',
-    providerOptions,
-    transformedRequestBody: requestBody,
-    transformedRequestUrl: requestURL,
-  });
-
-  const options = {
-    method: 'GET',
-    headers,
-  };
-
   // URL: <gateway>/v1/batches/<batchId>/output
   const batchId = requestURL.split('/').at(-2);
 
@@ -154,7 +142,23 @@ export const BatchOutputRequestHandler: RequestHandler = async ({
     gatewayRequestBodyJSON: {},
   });
 
-  const batchesURL = `${baseURL}${endpoint}`;
+  // The host is built from the request's Vertex region; check it before the
+  // service account token is minted or anything is fetched.
+  const batchesURL = assertSafeUpstreamURL(`${baseURL}${endpoint}`, c);
+
+  const headers = await GoogleApiConfig.headers({
+    c,
+    fn: 'retrieveBatch',
+    providerOptions,
+    transformedRequestBody: requestBody,
+    transformedRequestUrl: requestURL,
+  });
+
+  const options = {
+    method: 'GET',
+    headers,
+  };
+
   let modelName = '';
   let outputURL;
   // Ported from Portkey 2.0.0: provider errors come back as error responses
