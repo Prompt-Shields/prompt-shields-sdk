@@ -45,6 +45,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Router wired into the gateway pipeline** — `router/hono.ts` exposes `psRouter()`, mounted in `gateway/src/index.ts` (`app.use('*', psRouter())`) ahead of hooks/cache, gated on `PS_ROUTER_ENABLED=true`. Because Hono 4.x re-parses the body per `c.req.json()`, the adapter overwrites `c.req.bodyCache.json` so the rewritten model reaches the handler, and exposes the decision on `c.get('psRoute')`.
 - **Telemetry wired into the gateway pipeline** — `ps-telemetry.ts` exposes `psTelemetry()`, a Hono middleware mounted after `psRouter` (gated on `PS_API_KEY`). It parses token usage + served model from the response, merges `X-PS-*` business headers, and folds in `c.get('psRoute')` so `requested_model`/`served_model`/`route_*` actually emit in production. Fire-and-forget, fail-open, POST-only; streaming responses emit without usage.
 
+### Changed
+
+- **SDK: Anthropic `tokens_in` now counts cached prompt tokens** — it is `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, the total prompt size, matching OpenAI `prompt_tokens`. Before, it was `input_tokens` alone, which leaves cache reads and writes out. For prompt-cached workloads, Anthropic `tokens_in` and `cost` will both rise: cache tokens used to be left out of the cost, and are now billed at the cache read and write rates. Use `tokens_cached` and `tokens_cache_write` for the split (#9).
+
 ### Fixed
 
 - **Gateway: batch output streams instead of buffering** — OpenAI, Azure OpenAI and Vertex batch output files are passed through as `application/octet-stream`. Vertex embedding batches read `000000000000.jsonl`, row ids lose a stray `-`, provider errors return error responses, and batch uploads keep multi-byte characters split across chunks. The shared line splitter now emits bytes, which also stops Fireworks dataset uploads from dropping every line. Batch output follows provider-returned locations only to GCS and Azure Blob Storage, and Vertex output resolves `publishers/<provider>/models/...` names to that provider's transform. Ported from Portkey 2.0.0 (#108).
