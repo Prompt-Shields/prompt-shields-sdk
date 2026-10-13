@@ -31,6 +31,10 @@ import {
   getAnthropicStreamChunkTransform,
 } from '../anthropic/chatComplete';
 import {
+  GetMistralAIOcrResponseTransform,
+  MistralAIOcrConfig,
+} from '../mistral-ai/ocr';
+import {
   AzureAIInferenceMessagesConfig,
   AzureAIInferenceMessagesResponseTransform,
 } from './messages';
@@ -57,6 +61,7 @@ const AzureAIInferenceAPIConfig: ProviderConfigs = {
       createFinetune: OpenAICreateFinetuneConfig,
       createTranscription: {},
       createTranslation: {},
+      ocr: MistralAIOcrConfig,
       realtime: {},
       cancelBatch: {},
       createBatch: AzureOpenAICreateBatchConfig,
@@ -81,6 +86,7 @@ const AzureAIInferenceAPIConfig: ProviderConfigs = {
         createTranscription:
           AzureAIInferenceCreateTranscriptionResponseTransform,
         createTranslation: AzureAIInferenceCreateTranslationResponseTransform,
+        ocr: GetMistralAIOcrResponseTransform(AZURE_AI_INFERENCE),
         realtime: {},
         createBatch: AzureAIInferenceResponseTransform,
         retrieveBatch: AzureAIInferenceResponseTransform,

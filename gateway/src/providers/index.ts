@@ -21,6 +21,8 @@ import { ProviderConfigs } from './types';
 import LatitudeConfig from './latitude';
 import DatabricksConfig from './databricks';
 import PineconeConfig from './pinecone';
+import ElevenLabsConfig from './elevenlabs';
+import DeepgramConfig from './deepgram';
 import GroqConfig from './groq';
 import SegmindConfig from './segmind';
 import JinaConfig from './jina';
@@ -154,6 +156,8 @@ const Providers: { [key: string]: ProviderConfigs } = {
   latitude: LatitudeConfig,
   databricks: DatabricksConfig,
   pinecone: PineconeConfig,
+  elevenlabs: ElevenLabsConfig,
+  deepgram: DeepgramConfig,
 };
 
 export default Providers;

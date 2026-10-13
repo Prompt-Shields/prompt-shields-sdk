@@ -56,6 +56,10 @@ import {
   GetMistralAIChatCompleteStreamChunkTransform,
   MistralAIChatCompleteConfig,
 } from '../mistral-ai/chatComplete';
+import {
+  GetMistralAIOcrResponseTransform,
+  MistralAIOcrConfig,
+} from '../mistral-ai/ocr';
 
 import {
   getAnthropicChatCompleteResponseTransform,
@@ -196,12 +200,14 @@ const VertexConfig: ProviderConfigs = {
       case 'mistralai':
         return {
           chatComplete: MistralAIChatCompleteConfig,
+          ocr: MistralAIOcrConfig,
           api: GoogleApiConfig,
           responseTransforms: {
             chatComplete:
               GetMistralAIChatCompleteResponseTransform(GOOGLE_VERTEX_AI),
             'stream-chatComplete':
               GetMistralAIChatCompleteStreamChunkTransform(GOOGLE_VERTEX_AI),
+            ocr: GetMistralAIOcrResponseTransform(GOOGLE_VERTEX_AI),
           },
         };
       default:
