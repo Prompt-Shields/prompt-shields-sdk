@@ -5,11 +5,8 @@ collector received, the cumulative enqueued and dropped counts the SDK
 reported in batch metadata, batches the collector rejected, and unknown
 event fields it ignored (#87).
 
-Chained onto 004; other open PRs also add a 005, so this may be renumbered
-at merge.
-
-Revision ID: 005
-Revises: 004
+Revision ID: 009
+Revises: 008
 Create Date: 2026-10-13
 """
 
@@ -19,8 +16,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "005"
-down_revision: str | None = "004"
+revision: str = "009"
+down_revision: str | None = "008"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
