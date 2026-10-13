@@ -66,6 +66,7 @@ TRUSTED_CUSTOM_HOSTS=localhost,127.0.0.1              # optional; hosts exempt f
 PS_METRICS_ENABLED=true                               # optional; Prometheus metrics at GET /metrics
 PS_METRICS_TOKEN=<random>                             # optional; require Bearer token on /metrics
 MAX_JSON_PAYLOAD_SIZE_IN_MB=10                        # optional; 413 for larger JSON bodies
+AWS_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Bedrock/SageMaker callers use this host's AWS identity (serviceRole)
 ```
 
 Liveness: `GET /v1/health` (no auth, no upstream call). Metrics are labelled with route, status, provider, model and the `X-PS-Business-Unit` / `X-PS-Environment` values; prompt and completion content never appear in metrics.

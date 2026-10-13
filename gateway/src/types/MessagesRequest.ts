@@ -1,5 +1,6 @@
 export interface CacheControlEphemeral {
   type: 'ephemeral';
+  scope?: 'global';
 }
 
 export interface ServerToolUseBlockParam {

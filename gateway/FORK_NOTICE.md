@@ -37,6 +37,7 @@ Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b3
 | Gemini/Vertex chat (#108) | `src/providers/google/{chatComplete,types,embed}.ts`, `src/providers/google-vertex-ai/{chatComplete,types,transformGenerationConfig,utils}.ts`, upstream tests | Thought signatures, media resolution, tool-message content; `getAccessToken` kept from this fork (context cache, plain fetch); workload-identity and model-lookup helpers not ported |
 | Anthropic (#108) | `src/providers/anthropic/{chatComplete,types,api,complete}.ts` | Cached tokens counted in `prompt_tokens`; structured outputs and effort via `output_config`; tool `strict` not forwarded (reverted upstream in enterprise 2.4.4); Vertex Claude uses the shared Anthropic transforms |
 | Batch output, Fireworks, Bedrock fixes (#108) | `cohere`/`azure-ai-inference` `getBatchOutput.ts`, `fireworks-ai/*` | `src/utils/fetch.ts` is a plain-fetch shim of upstream's names; OpenAI batch fallback and two Bedrock chat fixes hand-ported; Fireworks keeps this fork's `index.ts` |
+| Bedrock full port (#108) | `src/providers/bedrock/*`, `src/providers/anthropic-base/{messages,utils/streamGenerator}.ts`, `src/utils/awsAuth.ts`, `src/providers/sagemaker/api.ts` | `Environment()` accepts the runtime env record (2.0) or a Hono context (ours); `services/cache/cacheService.ts` is an in-process TTL shim of upstream's Redis/KV `requestCache`; `assumedRole`/`serviceRole` resolve through one helper (`providerAssumedRoleCredentials`); host credentials (env, shared files, IRSA, pod identity, ECS, IMDS) only with `AWS_AMBIENT_CREDENTIALS_ENABLED=true`, and are no longer read at module load; signing only for `https` hosts under `AWS_ENDPOINT_DOMAIN`, region format checked, STS query encoded; `uploadFile` keeps this fork's web-stream implementation |
 
 Not ported:
 - `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
@@ -62,6 +63,8 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/middlewares/requestValidator/schema/config.ts`
 - `src/providers/ai21/api.ts`
 - `src/providers/ai21/embed.ts`
+- `src/providers/anthropic-base/messages.ts`
+- `src/providers/anthropic-base/utils/streamGenerator.ts`
 - `src/providers/anthropic/api.ts`
 - `src/providers/anthropic/chatComplete.ts`
 - `src/providers/anthropic/complete.ts`
@@ -74,8 +77,20 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/azure-openai/index.ts`
 - `src/providers/bedrock/api.ts`
 - `src/providers/bedrock/chatComplete.ts`
+- `src/providers/bedrock/complete.ts`
+- `src/providers/bedrock/countTokens.ts`
+- `src/providers/bedrock/createBatch.ts`
+- `src/providers/bedrock/createFinetune.ts`
+- `src/providers/bedrock/getBatchOutput.ts`
 - `src/providers/bedrock/index.ts`
+- `src/providers/bedrock/messages.ts`
+- `src/providers/bedrock/retrieveFile.ts`
+- `src/providers/bedrock/retrieveFileContent.ts`
 - `src/providers/bedrock/types.ts`
+- `src/providers/bedrock/uploadFile.ts`
+- `src/providers/bedrock/uploadFileUtils.ts`
+- `src/providers/bedrock/utils.ts`
+- `src/providers/bedrock/utils/messagesUtils.ts`
 - `src/providers/bytez/api.ts`
 - `src/providers/cohere/api.ts`
 - `src/providers/cohere/chatComplete.ts`
@@ -108,6 +123,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/openai/chatComplete.ts`
 - `src/providers/openai/getBatchOutput.ts`
 - `src/providers/openai/imageGenerate.ts`
+- `src/providers/sagemaker/api.ts`
 - `src/providers/types.ts`
 - `src/providers/voyage/api.ts`
 - `src/providers/voyage/index.ts`
@@ -118,9 +134,12 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/shared/services/cache/index.ts`
 - `src/shared/utils/logger.ts`
 - `src/start-server.ts`
+- `src/types/MessagesRequest.ts`
+- `src/types/MessagesStreamResponse.ts`
 - `src/types/messagesResponse.ts`
 - `src/types/modelResponses.ts`
 - `src/types/requestBody.ts`
+- `src/utils/env.ts`
 
 ### How to sync upstream
 
@@ -169,6 +188,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 6. **Hardened** (re-implementations of Portkey enterprise fixes, #65): upstream URL SSRF check on provider-built URLs (`isSafeUpstreamURL`), credential masking in gateway logs (`src/utils/redact.ts`), config target fan-out cap (`MAX_ROOT_CONFIG_TARGETS`, `MAX_CONDITIONAL_ROOT_CONFIG_TARGETS`, `MAX_NESTED_CONFIG_TARGETS`), custom-host response size cap (`PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`, default 50 MiB), and provider credential headers taking precedence over forwarded or proxied client headers.
    Limits: the upstream URL check is hostname-only (no DNS resolution, so no DNS-rebinding or redirect protection), rejects every IPv6 literal not listed in `TRUSTED_CUSTOM_HOSTS`, and does not cover providers with custom request handlers, which build their own URLs. The response size cap applies to custom-host upstreams only.
 7. **Ported with changes** the upstream admin login (`src/middlewares/adminAuth`, the login modal in `src/public/index.html`): the token comes from `PS_GATEWAY_ADMIN_TOKEN` instead of `conf.json`, malformed session cookies are treated as absent, and expired sessions are pruned. The session cookie is `HttpOnly; SameSite=Strict` but not `Secure`, because the console is served over plain HTTP on localhost
+8. **Hardened** AWS credential handling in the Bedrock/SageMaker port (#108): Portkey 2.0 lets a caller pick `awsAuthType=serviceRole`, or `assumedRole` with no configured keys, and then signs with the gateway host's own AWS identity. Here both need `AWS_AMBIENT_CREDENTIALS_ENABLED=true` (otherwise `serviceRole` is 403 and `assumedRole` must use `AWS_ASSUME_ROLE_ACCESS_KEY_ID`/`SECRET` or `AWS_ASSUME_ROLE_SOURCE_ARN`). `assumedRole` without a role ARN is a 400, so a caller can never get the operator's assume-role keys themselves. `AWS_ENDPOINT_DOMAIN` is read per request, so Workers bindings apply. Requests are only signed for `https://*.<AWS_ENDPOINT_DOMAIN>` hosts, so a crafted `x-portkey-aws-region` or S3 bucket cannot send signed headers (access key id, session token) to another host.
 
 ## Original License
 

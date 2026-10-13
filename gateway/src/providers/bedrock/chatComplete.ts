@@ -1,7 +1,7 @@
 import {
   BEDROCK,
-  fileExtensionMimeTypeMap,
   imagesMimeTypes,
+  fileExtensionMimeTypeMap,
   videoMimeTypes,
 } from '../../globals';
 import {
@@ -10,8 +10,8 @@ import {
   ToolCall,
   SYSTEM_MESSAGE_ROLES,
   ContentType,
-  ToolChoiceObject,
   Options,
+  ToolChoiceObject,
 } from '../../types/requestBody';
 import {
   ChatCompletionResponse,
@@ -71,6 +71,7 @@ export interface BedrockConverseAnthropicChatCompletionsParams
     type: string;
     budget_tokens: number;
   };
+  // Header form is comma-separated; body form is an array.
   anthropic_beta?: string | string[];
 }
 
@@ -90,6 +91,8 @@ export interface BedrockConverseAI21ChatCompletionsParams
   presencePenalty?: number;
   countPenalty?: number;
 }
+
+// const CACHE_SUPPORTED_ROLES = ['user', 'assistant', 'system'];
 
 const getMessageTextContentArray = (
   message: Message
@@ -277,8 +280,6 @@ const getMessageContent = (message: Message) => {
     out.push({
       toolUse: {
         name: toolCall.function.name,
-        // Ported from Portkey 2.0.0: an empty arguments string is `{}`, not
-        // a JSON.parse crash.
         input:
           toolCall.function.arguments?.length > 0
             ? JSON.parse(toolCall.function.arguments)
@@ -288,8 +289,7 @@ const getMessageContent = (message: Message) => {
     });
   });
 
-  // Ported from Portkey 2.0.0: Converse rejects a message that has a
-  // document block but no text block.
+  // Bedrock requires a text block when documents are present
   const hasDocument = out.some((item) => 'document' in item);
   const hasText = out.some((item) => 'text' in item);
   if (hasDocument && !hasText) {
@@ -310,9 +310,10 @@ export const BedrockConverseChatCompleteConfig: ProviderConfig = {
         const transformedMessages = params.messages
           .filter((msg) => !SYSTEM_MESSAGE_ROLES.includes(msg.role))
           .map((msg) => {
+            const content = getMessageContent(msg);
             return {
               role: msg.role === 'assistant' ? 'assistant' : 'user',
-              content: getMessageContent(msg),
+              content: content,
             };
           });
         let prevRole = '';
@@ -346,8 +347,10 @@ export const BedrockConverseChatCompleteConfig: ProviderConfig = {
             acc: Array<{ text: string } | { cachePoint: { type: string } }>,
             msg
           ) => {
-            if (SYSTEM_MESSAGE_ROLES.includes(msg.role))
-              return acc.concat(...getMessageTextContentArray(msg));
+            if (SYSTEM_MESSAGE_ROLES.includes(msg.role)) {
+              const content = getMessageTextContentArray(msg);
+              return acc.concat(...content);
+            }
             return acc;
           },
           []
@@ -780,6 +783,22 @@ export const BedrockConverseAnthropicChatCompleteConfig: ProviderConfig = {
       transformAnthropicAdditionalModelRequestFields(params, providerOptions),
   },
   anthropic_beta: {
+    param: 'additionalModelRequestFields',
+    transform: (
+      params: BedrockConverseAnthropicChatCompletionsParams,
+      providerOptions?: Options
+    ) =>
+      transformAnthropicAdditionalModelRequestFields(params, providerOptions),
+  },
+  reasoning_effort: {
+    param: 'additionalModelRequestFields',
+    transform: (
+      params: BedrockConverseAnthropicChatCompletionsParams,
+      providerOptions?: Options
+    ) =>
+      transformAnthropicAdditionalModelRequestFields(params, providerOptions),
+  },
+  response_format: {
     param: 'additionalModelRequestFields',
     transform: (
       params: BedrockConverseAnthropicChatCompletionsParams,

@@ -3,13 +3,22 @@ import { Options, Params } from '../../types/requestBody';
 import { endpointStrings, ProviderAPIConfig } from '../types';
 import { bedrockInvokeModels } from './constants';
 import {
-  getAwsEndpointDomain,
   generateAWSHeaders,
-  getFoundationModelFromInferenceProfile,
-  providerAssumedRoleCredentials,
   getBedrockModelWithoutRegion,
+  getFoundationModelFromInferenceProfile,
+  getRegionFromEnv,
+  getS3EncryptionHeaders,
+  providerAssumedRoleCredentials,
 } from './utils';
+import { env } from 'hono/adapter';
 import { GatewayError } from '../../errors/GatewayError';
+import {
+  assertAwsUrl,
+  getAwsEndpointDomain,
+  isValidAwsRegion,
+} from '../../utils/awsAuth';
+import { getProviderAndModel } from '.';
+import { ANTHROPIC } from '../../globals';
 
 interface BedrockAPIConfigInterface extends Omit<ProviderAPIConfig, 'headers'> {
   headers: (args: {
@@ -48,17 +57,6 @@ const AWS_GET_METHODS: endpointStrings[] = [
   'retrieveFinetune',
 ];
 
-// Endpoints that does not require model parameter
-const BEDROCK_NO_MODEL_ENDPOINTS: endpointStrings[] = [
-  'listFinetunes',
-  'retrieveFinetune',
-  'cancelFinetune',
-  'listBatches',
-  'retrieveBatch',
-  'getBatchOutput',
-  'cancelBatch',
-];
-
 const ENDPOINTS_TO_ROUTE_TO_S3 = [
   'retrieveFileContent',
   'getBatchOutput',
@@ -67,6 +65,12 @@ const ENDPOINTS_TO_ROUTE_TO_S3 = [
   'uploadFile',
   'initiateMultipartUpload',
 ];
+
+const getControlPlaneEndpoint = (fn: endpointStrings | undefined) => {
+  if (fn && AWS_CONTROL_PLANE_ENDPOINTS.includes(fn)) return 'bedrock';
+  if (fn && fn === 'rerank') return 'bedrock-agent-runtime';
+  return 'bedrock-runtime';
+};
 
 const getMethod = (
   fn: endpointStrings,
@@ -89,6 +93,15 @@ const getService = (fn: endpointStrings) => {
     : 'bedrock';
 };
 
+const isAnthropicModelOnMessagesRoute = (
+  provider: string,
+  fn: endpointStrings
+) => {
+  return (
+    provider === ANTHROPIC && (fn === 'messages' || fn === 'stream-messages')
+  );
+};
+
 const setRouteSpecificHeaders = (
   fn: string,
   headers: Record<string, string>,
@@ -98,6 +111,11 @@ const setRouteSpecificHeaders = (
     headers['x-amz-object-attributes'] = 'ObjectSize';
   }
   if (fn === 'initiateMultipartUpload') {
+    const encryptionHeaders = getS3EncryptionHeaders({});
+    // if encryption headers are present, add them to the headers
+    if (Object.keys(encryptionHeaders).length > 0) {
+      Object.assign(headers, encryptionHeaders);
+    }
     if (providerOptions.awsServerSideEncryptionKMSKeyId) {
       headers['x-amz-server-side-encryption-aws-kms-key-id'] =
         providerOptions.awsServerSideEncryptionKMSKeyId;
@@ -111,18 +129,31 @@ const setRouteSpecificHeaders = (
 };
 
 const BedrockAPIConfig: BedrockAPIConfigInterface = {
-  getBaseURL: async ({ c, providerOptions, fn, gatewayRequestURL, params }) => {
+  getBaseURL: async ({ providerOptions, fn, gatewayRequestURL, params, c }) => {
+    if (providerOptions.awsAuthType === 'serviceRole') {
+      providerOptions.awsRegion =
+        providerOptions.awsRegion || getRegionFromEnv();
+    }
+    if (
+      providerOptions.awsRegion &&
+      !isValidAwsRegion(providerOptions.awsRegion)
+    ) {
+      throw new GatewayError('Invalid AWS region', 400);
+    }
+    const cEnv = env(c);
+    const awsEndpointDomain = getAwsEndpointDomain(cEnv);
     const model = decodeURIComponent(params?.model || '');
     if (model.includes('arn:aws') && params) {
       const foundationModel = model.includes('foundation-model/')
         ? model.split('/').pop()
         : await getFoundationModelFromInferenceProfile(
-            c,
             model,
-            providerOptions
+            providerOptions,
+            cEnv
           );
       if (foundationModel) {
         providerOptions.foundationModel = foundationModel;
+        params.foundationModel = foundationModel;
       }
     }
     if (fn === 'retrieveFile') {
@@ -130,37 +161,41 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
         gatewayRequestURL.split('/v1/files/')[1]
       );
       const bucketName = s3URL.replace('s3://', '').split('/')[0];
-      return `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${getAwsEndpointDomain(c)}`;
+      return assertAwsUrl(
+        `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+        cEnv
+      );
     }
     if (fn === 'retrieveFileContent') {
       const s3URL = decodeURIComponent(
         gatewayRequestURL.split('/v1/files/')[1]
       );
       const bucketName = s3URL.replace('s3://', '').split('/')[0];
-      return `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${getAwsEndpointDomain(c)}`;
+      return assertAwsUrl(
+        `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+        cEnv
+      );
     }
     if (fn === 'uploadFile')
-      return `https://${providerOptions.awsS3Bucket}.s3.${providerOptions.awsRegion || 'us-east-1'}.${getAwsEndpointDomain(c)}`;
-    const isAWSControlPlaneEndpoint =
-      fn && AWS_CONTROL_PLANE_ENDPOINTS.includes(fn);
-    // Rerank lives on the Agents runtime (signing name is still `bedrock`).
-    const subdomain = isAWSControlPlaneEndpoint
-      ? 'bedrock'
-      : fn === 'rerank'
-        ? 'bedrock-agent-runtime'
-        : 'bedrock-runtime';
-    return `https://${subdomain}.${providerOptions.awsRegion || 'us-east-1'}.${getAwsEndpointDomain(c)}`;
+      return assertAwsUrl(
+        `https://${providerOptions.awsS3Bucket}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+        cEnv
+      );
+    return assertAwsUrl(
+      `https://${getControlPlaneEndpoint(fn)}.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+      cEnv
+    );
   },
   headers: async ({
-    c,
     fn,
     providerOptions,
     transformedRequestBody,
     transformedRequestUrl,
     gatewayRequestBody, // for proxy use the passed body blindly
+    c,
     headers: requestHeaders,
   }) => {
-    const { awsAuthType, awsService } = providerOptions;
+    const { awsService, awsAuthType } = providerOptions;
     const method =
       c.get('method') || // method set specifically into context
       getMethod(fn as endpointStrings, transformedRequestUrl, c); // method calculated
@@ -181,10 +216,9 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
     }
 
     setRouteSpecificHeaders(fn, headers, providerOptions);
+    const cEnv = env(c);
 
-    if (awsAuthType === 'assumedRole') {
-      await providerAssumedRoleCredentials(c, providerOptions);
-    }
+    await providerAssumedRoleCredentials(providerOptions, cEnv);
 
     if (awsAuthType === 'apiKey') {
       headers['Authorization'] = `Bearer ${providerOptions.apiKey}`;
@@ -208,13 +242,15 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       providerOptions.awsRegion || '',
       providerOptions.awsAccessKeyId || '',
       providerOptions.awsSecretAccessKey || '',
-      providerOptions.awsSessionToken || ''
+      providerOptions.awsSessionToken || '',
+      cEnv
     );
   },
   getEndpoint: ({
     fn,
     gatewayRequestBodyJSON: gatewayRequestBody,
     gatewayRequestURL,
+    providerOptions,
   }) => {
     if (fn === 'retrieveFile') {
       const fileId = decodeURIComponent(
@@ -241,13 +277,14 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       return `/model-invocation-job/${batchId}/stop`;
     }
     const { model, stream } = gatewayRequestBody;
+    const { provider } = getProviderAndModel(
+      gatewayRequestBody,
+      providerOptions
+    );
     const decodedModel = decodeURIComponent(model ?? '');
     const uriEncodedModel = encodeURIComponent(decodedModel);
     const modelWithoutRegion = getBedrockModelWithoutRegion(decodedModel);
     const uriEncodedModelWithoutRegion = encodeURIComponent(modelWithoutRegion);
-    if (!model && !BEDROCK_NO_MODEL_ENDPOINTS.includes(fn as endpointStrings)) {
-      throw new GatewayError('Model is required');
-    }
     let mappedFn: string = fn;
     if (stream) {
       mappedFn = `stream-${fn}`;
@@ -259,6 +296,7 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
         mappedFn === 'stream-chatComplete' ||
         mappedFn === 'messages' ||
         mappedFn === 'stream-messages') &&
+      !isAnthropicModelOnMessagesRoute(provider, fn) &&
       model &&
       !bedrockInvokeModels.includes(model)
     ) {
@@ -286,9 +324,6 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       }
       case 'embed': {
         return endpoint;
-      }
-      case 'rerank': {
-        return '/rerank';
       }
       case 'imageGenerate': {
         return endpoint;
@@ -319,6 +354,9 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       }
       case 'messagesCountTokens': {
         return `/model/${uriEncodedModelWithoutRegion}/count-tokens`;
+      }
+      case 'rerank': {
+        return '/rerank';
       }
       default:
         return '';

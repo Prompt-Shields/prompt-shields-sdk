@@ -16,6 +16,7 @@ export const BedrockCreateFinetuneConfig: ProviderConfig = {
     param: 'hyperParameters',
     required: false,
     transform: (value: FinetuneRequest) => {
+      // PS fork: also reads `method.<type>.hyperparameters` (OpenAI's newer form).
       const hyperParameters = populateHyperParameters(value);
       const epochCount = hyperParameters.n_epochs;
       const learningRateMultiplier = hyperParameters.learning_rate_multiplier;
@@ -90,8 +91,9 @@ export const BedrockCreateFinetuneResponseTransform: (
   Response;
   if (!OK_STATUS.includes(responseStatus) || 'error' in response) {
     return (
-      BedrockErrorResponseTransform(response as BedrockErrorResponse) ||
-      (response as ErrorResponse)
+      BedrockErrorResponseTransform(
+        response as unknown as BedrockErrorResponse
+      ) || (response as ErrorResponse)
     );
   }
 

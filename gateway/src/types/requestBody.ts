@@ -430,6 +430,8 @@ export interface Tool extends PromptCache {
  */
 export interface Params {
   model?: string;
+  /** Bedrock: base model resolved from an inference-profile ARN. */
+  foundationModel?: string;
   prompt?: string | string[];
   messages?: Message[];
   functions?: Function[];
