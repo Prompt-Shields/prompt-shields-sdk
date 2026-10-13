@@ -277,11 +277,25 @@ const getMessageContent = (message: Message) => {
     out.push({
       toolUse: {
         name: toolCall.function.name,
-        input: JSON.parse(toolCall.function.arguments),
+        // Ported from Portkey 2.0.0: an empty arguments string is `{}`, not
+        // a JSON.parse crash.
+        input:
+          toolCall.function.arguments?.length > 0
+            ? JSON.parse(toolCall.function.arguments)
+            : {},
         toolUseId: toolCall.id,
       },
     });
   });
+
+  // Ported from Portkey 2.0.0: Converse rejects a message that has a
+  // document block but no text block.
+  const hasDocument = out.some((item) => 'document' in item);
+  const hasText = out.some((item) => 'text' in item);
+  if (hasDocument && !hasText) {
+    out.unshift({ text: ' ' });
+  }
+
   return out;
 };
 

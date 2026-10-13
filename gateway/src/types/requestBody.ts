@@ -256,6 +256,8 @@ export interface ContentType extends PromptCache {
     url: string;
     detail?: string;
     mime_type?: string;
+    /** Gemini/Vertex per-part media resolution (e.g. MEDIA_RESOLUTION_HIGH). */
+    media_resolution?: string;
   };
   data?: string;
   file?: {

@@ -75,7 +75,8 @@ const getValue = (
 export const transformUsingProviderConfig = (
   providerConfig: ProviderConfig,
   params: Params,
-  providerOptions: Options
+  // Optional as in upstream 2.0.0, so its provider tests run unchanged.
+  providerOptions: Options = {} as Options
 ) => {
   const transformedRequest: { [key: string]: any } = {};
 

@@ -8,6 +8,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Gateway: Gemini 3 tool calling across turns** — thought signatures are returned on tool calls (`function.thought_signature`, non-strict mode) and sent back to Gemini/Vertex; per-part `media_resolution` for images. Ported from Portkey 2.0.0 (#108).
+- **Gateway: Anthropic structured outputs and effort** — `response_format` JSON schema and `reasoning_effort` map to Anthropic `output_config` (#108).
+
 - **Gateway: Responses and Messages API on any provider** — when a provider lacks native support, `/v1/responses` and `/v1/messages` requests (JSON and streaming) are translated through Chat Completions and back, decided per target. Ported from Portkey 2.0.0 (#59).
 - **Gateway `/v1/health` and opt-in Prometheus `/metrics`** — `PS_METRICS_ENABLED=true`, optional `PS_METRICS_TOKEN`. Labels include route, status, provider, model and the X-PS business unit and environment, never prompt content. `deployment.yaml` now has liveness and readiness probes (#61).
 - **Gateway provider fixes from Portkey 2.0.0** — `prompt_cache_retention`, OpenAI `service_tier` in responses, gpt-image-1 parameters, Azure image-edit transform, Z.ai image generation (#60).
@@ -23,6 +26,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Telemetry wired into the gateway pipeline** — `ps-telemetry.ts` exposes `psTelemetry()`, a Hono middleware mounted after `psRouter` (gated on `PS_API_KEY`). It parses token usage + served model from the response, merges `X-PS-*` business headers, and folds in `c.get('psRoute')` so `requested_model`/`served_model`/`route_*` actually emit in production. Fire-and-forget, fail-open, POST-only; streaming responses emit without usage.
 
 ### Fixed
+
+- **Anthropic `prompt_tokens` excluded cached tokens** — they are now included, matching OpenAI's usage convention, so cost and usage reports count cached input (#108).
+- **OpenAI batch output fetched `/files/undefined/content`** when a batch had neither an output nor an error file; it now uses the error file, or returns 400 (#108).
+- **Bedrock** no longer crashes on a tool call with empty arguments, and adds the text block Converse requires next to a document (#108).
 
 - **Gateway telemetry dropped Messages/Responses token counts** — `input_tokens`/`output_tokens` usage is now counted, which also fixes native Anthropic `/v1/messages` events. Events now carry `api_surface`.
 

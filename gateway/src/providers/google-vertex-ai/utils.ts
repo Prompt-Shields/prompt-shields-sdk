@@ -3,7 +3,7 @@ import {
   GoogleResponseCandidate,
   GoogleBatchRecord,
   GoogleFinetuneRecord,
-  GoogleSearchRetrievalTool,
+  type GoogleSearchRetrievalTool,
 } from './types';
 import { generateErrorResponse } from '../utils';
 import {
@@ -15,7 +15,8 @@ import { ErrorResponse, FinetuneRequest, Logprobs } from '../types';
 import { Context } from 'hono';
 import { env } from 'hono/adapter';
 import { ContentType, JsonSchema, Tool } from '../../types/requestBody';
-import { GoogleMessagePart } from '../google/chatComplete';
+import { logger } from '../../apm';
+import { Environment } from '../../utils/env';
 
 /**
  * Encodes an object as a Base64 URL-encoded string.
@@ -226,7 +227,7 @@ export const derefer = (
     const defKey = getDefFromRef(node.$ref);
     const target = getDefObject(activeDefs, defKey);
     if (defKey && target) {
-      if (stack.has(defKey)) return node;
+      if (stack.has(defKey)) return { type: 'object' }; // Replace self-reference with generic object
       stack.add(defKey);
       const resolved = derefer(target, activeDefs, stack);
       stack.delete(defKey);
@@ -300,23 +301,106 @@ export const transformGeminiToolParameters = (
   return transformNode(schema);
 };
 
-// Vertex AI does not support additionalProperties in JSON Schema
-// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/Schema
-export const recursivelyDeleteUnsupportedParameters = (obj: any) => {
+// Vertex AI only supports a subset of JSON Schema fields.
+// Using an allowlist ensures any unsupported field is filtered out.
+// https://cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1beta1/Schema
+const VERTEX_AI_SUPPORTED_SCHEMA_FIELDS = new Set([
+  // Type & format
+  'type',
+  'format',
+  // Metadata
+  'title',
+  'description',
+  'nullable',
+  'default',
+  'example',
+  // Array
+  'items',
+  'minItems',
+  'maxItems',
+  // Enum
+  'enum',
+  // Object
+  'properties',
+  'propertyOrdering',
+  'required',
+  'minProperties',
+  'maxProperties',
+  // Number/Integer
+  'minimum',
+  'maximum',
+  // String
+  'minLength',
+  'maxLength',
+  'pattern',
+  // Composition
+  'anyOf',
+]);
+
+const filterSchemaFields = (obj: any, isSchemaObject: boolean): void => {
   if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return;
-  delete obj.additional_properties;
-  delete obj.additionalProperties;
-  delete obj['$schema'];
-  for (const key in obj) {
-    if (obj[key] !== null && typeof obj[key] === 'object') {
-      recursivelyDeleteUnsupportedParameters(obj[key]);
+
+  // Only filter keys if this is a schema object (not a properties map)
+  if (isSchemaObject) {
+    // Convert array type to anyOf format (Vertex AI doesn't support type arrays)
+    // e.g., {"type": ["string", "number"]} -> {"anyOf": [{"type": "string"}, {"type": "number"}]}
+    if (Array.isArray(obj.type)) {
+      const types = obj.type;
+      delete obj.type;
+      // If anyOf doesn't exist, create it from the type array
+      if (!obj.anyOf) {
+        obj.anyOf = types.map((t: string) => ({ type: t }));
+      }
     }
-    if (key == 'anyOf' && Array.isArray(obj[key])) {
-      obj[key].forEach((item: any) => {
-        recursivelyDeleteUnsupportedParameters(item);
-      });
+
+    for (const key in obj) {
+      if (!VERTEX_AI_SUPPORTED_SCHEMA_FIELDS.has(key)) {
+        delete obj[key];
+      }
     }
   }
+
+  // Recurse into nested structures
+  for (const key in obj) {
+    const value = obj[key];
+    if (value !== null && typeof value === 'object') {
+      if (key === 'properties') {
+        // 'properties' is a map of property names to schemas
+        // Keys are property names (not schema fields), values are schemas
+        for (const propName in value) {
+          filterSchemaFields(value[propName], true);
+        }
+      } else if (key === 'items') {
+        // 'items' is a schema object
+        filterSchemaFields(value, true);
+      } else if (key === 'anyOf' && Array.isArray(value)) {
+        // 'anyOf' is an array of schemas
+        value.forEach((item: any) => {
+          filterSchemaFields(item, true);
+        });
+      } else if (Array.isArray(value)) {
+        // Other arrays (like 'enum', 'required') - don't filter their elements
+        // but if they contain objects, those might be schemas
+        value.forEach((item: any) => {
+          if (typeof item === 'object' && item !== null) {
+            filterSchemaFields(item, true);
+          }
+        });
+      } else {
+        filterSchemaFields(value, true);
+      }
+    }
+  }
+};
+
+export const recursivelyDeleteUnsupportedParameters = (obj: any) => {
+  if (typeof obj !== 'object' || obj === null) return obj;
+  const cloned = { ...obj };
+  delete cloned.strict;
+  delete cloned.additionalProperties;
+  delete obj['$schema'];
+  filterSchemaFields(cloned, true);
+  return cloned;
 };
 
 // Generate Gateway specific response.
@@ -461,9 +545,14 @@ export const GoogleToOpenAIBatch = (response: GoogleBatchRecord) => {
     ...getTimeKey(response.state, response.updateTime),
     request_counts: {
       total: total,
-      completed: response.completionStats?.successfulCount,
-      failed: response.completionStats?.failedCount,
+      completed: response.completionStats?.successfulCount
+        ? Number.parseInt(response.completionStats.successfulCount)
+        : null,
+      failed: response.completionStats?.failedCount
+        ? Number.parseInt(response.completionStats.failedCount)
+        : null,
     },
+    model: response?.model,
     ...(response.error && {
       errors: {
         object: 'list',
@@ -716,27 +805,31 @@ export const isEmbeddingModel = (modelName: string) => {
 export const OPENAI_AUDIO_FORMAT_TO_VERTEX_MIME_TYPE_MAPPING = {
   mp3: 'audio/mp3',
   wav: 'audio/wav',
-  opus: 'audio/ogg',
+  opus: 'audio/opus',
+  ogg: 'audio/ogg',
   flac: 'audio/flac',
   pcm16: 'audio/pcm',
+  pcm: 'audio/pcm',
   'x-aac': 'audio/aac',
+  aac: 'audio/aac',
   'x-m4a': 'audio/m4a',
+  m4a: 'audio/m4a',
   mpeg: 'audio/mpeg',
   mpga: 'audio/mpga',
   mp4: 'audio/mp4',
   webm: 'audio/webm',
 };
 
-export const transformInputAudioPart = (c: ContentType): GoogleMessagePart => {
+export const transformInputAudioPart = (c: ContentType) => {
   const data = c.input_audio?.data;
   const mimeType =
     OPENAI_AUDIO_FORMAT_TO_VERTEX_MIME_TYPE_MAPPING[
       c.input_audio
         ?.format as keyof typeof OPENAI_AUDIO_FORMAT_TO_VERTEX_MIME_TYPE_MAPPING
-    ];
+    ] ?? c.input_audio?.format;
   return {
     inlineData: {
-      data: data ?? '',
+      data,
       mimeType,
     },
   };
@@ -755,9 +848,7 @@ export const googleTools = [
 
 export const transformGoogleTools = (tool: Tool) => {
   const tools: any = [];
-  // This function is called only when tool.function exists
   if (!tool.function) return tools;
-
   if (['googleSearch', 'google_search'].includes(tool.function.name)) {
     const timeRangeFilter = tool.function.parameters?.timeRangeFilter;
     tools.push({
@@ -794,10 +885,21 @@ export const buildGoogleSearchRetrievalTool = (tool: Tool) => {
   const googleSearchRetrievalTool: GoogleSearchRetrievalTool = {
     googleSearchRetrieval: {},
   };
-  // This function is called only when tool.function exists
   if (tool.function?.parameters?.dynamicRetrievalConfig) {
     googleSearchRetrievalTool.googleSearchRetrieval.dynamicRetrievalConfig =
       tool.function.parameters.dynamicRetrievalConfig;
   }
   return googleSearchRetrievalTool;
+};
+
+export const getThoughtSignature = (
+  model?: string,
+  thoughtSignature?: string
+) => {
+  if (thoughtSignature) return thoughtSignature;
+  if (
+    ['gemini-1.5', 'gemini-2.0', 'gemini-2.5'].some((m) => model?.includes(m))
+  )
+    return undefined; // older models do not require thought signature
+  return 'skip_thought_signature_validator';
 };
