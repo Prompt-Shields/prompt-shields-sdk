@@ -74,7 +74,7 @@ def _asset(tenant_id, **kw) -> AIAsset:
         "confidence": "high",
         "calling_service": "support-api",
         "first_seen": datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
-        "last_seen": datetime(2026, 2, 3, 4, 5, 6),  # naive on purpose
+        "last_seen": datetime(2026, 2, 3, 4, 5, 6),  # noqa: DTZ001 - naive on purpose
     }
     defaults.update(kw)
     return AIAsset(**defaults)
