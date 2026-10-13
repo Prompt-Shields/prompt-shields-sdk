@@ -7,7 +7,7 @@ process.env.PS_API_KEY = 'ps-test';
 
 import { Hono } from 'hono';
 import { psTelemetry } from './ps-telemetry';
-import { SSEUsageTracker } from './psStreamObserver';
+import { inputTokensOf, SSEUsageTracker } from './psStreamObserver';
 
 const enc = new TextEncoder();
 
@@ -88,6 +88,35 @@ describe('SSEUsageTracker', () => {
 
   test('a finish_reason counts as terminal when [DONE] never comes', () => {
     expect(run(OPENAI_COMPLETE.slice(0, 2)).terminal).toBe(true);
+  });
+
+  test('Anthropic cache reads and writes count as input tokens (#73)', () => {
+    const s = run([
+      'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5,"output_tokens":1}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":7}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    expect(s).toMatchObject({ tokens_in: 115, tokens_out: 7, terminal: true });
+  });
+
+  test('inputTokensOf: prompt_tokens and Responses input_tokens already include cache', () => {
+    expect(
+      inputTokensOf({ prompt_tokens: 50, cache_read_input_tokens: 40 })
+    ).toBe(50);
+    expect(
+      inputTokensOf({
+        input_tokens: 50,
+        input_tokens_details: { cached_tokens: 40 },
+      })
+    ).toBe(50);
+    expect(
+      inputTokensOf({
+        input_tokens: 10,
+        cache_read_input_tokens: 40,
+        cache_creation_input_tokens: 2,
+      })
+    ).toBe(52);
+    expect(inputTokensOf(undefined)).toBeUndefined();
   });
 
   test('ignores malformed data lines', () => {
