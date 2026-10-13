@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Gateway `/v1/ocr`, ElevenLabs and Deepgram** — `POST /v1/ocr` (Mistral OCR shape) for Mistral, Vertex-hosted Mistral and Azure AI Foundry; `elevenlabs` and `deepgram` providers for `/v1/audio/speech` and `/v1/audio/transcriptions`, with transcripts mapped to the OpenAI shape. Telemetry now emits `modality` (text, audio, image, document) and non-token usage (audio seconds, OCR pages, speech characters) (#75).
 - **Collector: OTel GenAI ingest** — `POST /ingest/otel/v1/traces` accepts OTLP/HTTP JSON traces with the same tenant key as `/ingest/events` and turns `gen_ai.*` spans into usage events with discovery source `otel`. Other spans are ignored. Prompt and completion content attributes and span events are always dropped. Bodies are capped at 4 MiB and 2000 spans. Protobuf is not supported yet (#92).
 - **Partner API `GET /partner/v1/assets/{asset_id}/usage-summary`** — the documented endpoint now exists. It returns requests, tokens in and out, cost, unique sessions and average latency for the last `7d`, `30d` or `90d` from `ai_usage_events`. Assets in another tenant return 404 (#99).
 - **Collector: per-tenant ingest rate limit** — `POST /ingest/events` now enforces `PS_RATE_LIMIT_PER_MINUTE` (default 100 requests/minute, `0` disables) per tenant, reusing the Partner API's fixed-window limiter. Exceeding it returns `429` with `Retry-After` and `X-RateLimit-*` headers. In-process, so the count is per worker (#82).
