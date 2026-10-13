@@ -20,6 +20,11 @@ from typing import Any
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import estimate_cost
 from prompt_shields.providers import get_adapter
+from prompt_shields.streaming import (
+    ShieldsStream,
+    StreamAccumulator,
+    request_openai_stream_usage,
+)
 from prompt_shields.telemetry import (
     AtlasTelemetrySender,
     TelemetrySender,
@@ -123,8 +128,11 @@ class ShieldsClient:
         response: Any,
         latency_ms: int,
         ps_metadata: PSMetadata | None = None,
+        adapter_fields: dict | None = None,
     ) -> dict:
-        adapter_fields = self._adapter.extract(response)
+        # Streams pass fields accumulated from their chunks instead.
+        if adapter_fields is None:
+            adapter_fields = self._adapter.extract(response)
         tokens_in = adapter_fields.get("tokens_in")
         tokens_out = adapter_fields.get("tokens_out")
 
@@ -238,9 +246,22 @@ class _CompletionsNamespace:
                 **route.to_headers(),
             }
 
+        streaming = kwargs.get("stream") is True
+        hide_usage_chunk = False
+        if streaming and self._parent._vendor == "openai":
+            hide_usage_chunk = request_openai_stream_usage(kwargs)
+
         start = time.monotonic()
         response = self._call_upstream(model=model, messages=messages,
                                         max_tokens=max_tokens, **kwargs)
+
+        if streaming:
+            return self._wrap_stream(
+                response, model=model, messages=messages,
+                ps_metadata=ps_metadata, start=start,
+                hide_usage_chunk=hide_usage_chunk,
+            )
+
         latency_ms = int((time.monotonic() - start) * 1000)
 
         event = self._parent._build_event(
@@ -250,6 +271,10 @@ class _CompletionsNamespace:
             latency_ms=latency_ms,
             ps_metadata=ps_metadata,
         )
+        self._send(event, messages)
+        return response
+
+    def _send(self, event: dict, messages: list) -> None:
         self._parent._telemetry.enqueue(event)
         self._parent._telemetry.flush_sync()
 
@@ -257,7 +282,33 @@ class _CompletionsNamespace:
             self._parent._atlas.enqueue(build_atlas_event(event, messages))
             self._parent._atlas.flush_sync()
 
-        return response
+    def _wrap_stream(self, response: Any, *, model: str, messages: list,
+                     ps_metadata: PSMetadata | None, start: float,
+                     hide_usage_chunk: bool) -> Any:
+        """Wrap a stream so one event is emitted when it ends. Fail-open."""
+
+        def on_finish(adapter_fields: dict, stream_fields: dict,
+                      latency_ms: int) -> None:
+            event = self._parent._build_event(
+                model=model, messages=messages, response=None,
+                latency_ms=latency_ms, ps_metadata=ps_metadata,
+                adapter_fields=adapter_fields,
+            )
+            event.update(stream_fields)
+            if adapter_fields.get("tokens_estimated"):
+                event["tokens_estimated"] = True
+            self._send(event, messages)
+
+        try:
+            return ShieldsStream(
+                response,
+                StreamAccumulator(self._parent._vendor, messages),
+                on_finish,
+                start,
+                hide_usage_chunk=hide_usage_chunk,
+            )
+        except Exception:  # noqa: BLE001 - fail-open: return the raw stream
+            return response
 
     def _call_upstream(self, *, model: str, messages: list,
                        max_tokens: int | None = None, **kwargs):
