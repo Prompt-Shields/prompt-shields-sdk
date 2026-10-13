@@ -1,0 +1,35 @@
+{
+  "$schema": "../vectors.schema.json",
+  "description": "Fallback rules that hold today: an unknown group falls back to default_group (fallback.unknown_group = default_group). Fail-closed behavior on a data-policy violation is in data-policy.json.",
+  "policy": "deterministic",
+  "vectors": [
+    {
+      "id": "unknown-explicit-group-to-default",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "model_group": "does-not-exist" }
+      },
+      "expected": {
+        "model": "mid",
+        "group": "balanced",
+        "reason": "override:unknown-group-default",
+        "est_cost": 0.0010025
+      }
+    },
+    {
+      "id": "unknown-explicit-group-ignores-quality",
+      "description": "The override still wins over quality, even when its group is unknown.",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "model_group": "does-not-exist", "quality": "critical" }
+      },
+      "expected": {
+        "model": "mid",
+        "group": "balanced",
+        "reason": "override:unknown-group-default"
+      }
+    }
+  ]
+}

@@ -1,10 +1,15 @@
 import hashlib
-from pydantic import BaseModel
-from fastapi import APIRouter, Request
-from collector.auth import resolve_tenant
-from collector.dedup import find_or_create_asset
-from collector.embeddings import get_embedding, build_asset_text
+from typing import Annotated
+
 from db.models import AIUsageEvent
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel
+
+from collector.auth import resolve_tenant
+from collector.config import settings
+from collector.dedup import find_or_create_asset
+from collector.embeddings import build_asset_text, get_embedding
+from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
 
 router = APIRouter()
 
@@ -32,9 +37,43 @@ class IngestRequest(BaseModel):
     events: list[IngestEvent]
 
 
+def _enforce_rate_limit(
+    limiter: FixedWindowRateLimiter, tenant_id, response: Response
+) -> None:
+    """Per-tenant request limit on ingest. Sets X-RateLimit-* headers and
+    raises 429 with Retry-After once the tenant exceeds the window."""
+    limit = settings.rate_limit_per_minute
+    if limit <= 0:
+        return
+    result = limiter.check(tenant_id, limit)
+    headers = {
+        "X-RateLimit-Limit": str(result.limit),
+        "X-RateLimit-Remaining": str(result.remaining),
+        "X-RateLimit-Reset": str(result.reset_at),
+    }
+    if not result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "type": "about:blank",
+                "title": "Too Many Requests",
+                "status": 429,
+                "detail": f"Rate limit exceeded. Retry after {result.retry_after} seconds.",
+            },
+            headers={**headers, "Retry-After": str(result.retry_after)},
+        )
+    response.headers.update(headers)
+
+
 @router.post("/ingest/events")
-async def ingest_events(body: IngestRequest, request: Request):
+async def ingest_events(
+    body: IngestRequest,
+    request: Request,
+    response: Response,
+    limiter: Annotated[FixedWindowRateLimiter, Depends(get_ingest_rate_limiter)],
+):
     tenant_id = await resolve_tenant(request)
+    _enforce_rate_limit(limiter, tenant_id, response)
     db = request.state.db
 
     assets_created = 0

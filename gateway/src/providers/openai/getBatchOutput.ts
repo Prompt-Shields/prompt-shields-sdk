@@ -3,6 +3,7 @@ import { Context } from 'hono';
 import OpenAIAPIConfig from './api';
 import { Options } from '../../types/requestBody';
 import { RetrieveBatchResponse } from '../types';
+import { externalServiceFetch } from '../../utils/fetch';
 
 // Return a ReadableStream containing batches output data
 export const OpenAIGetBatchOutputRequestHandler = async ({
@@ -33,7 +34,7 @@ export const OpenAIGetBatchOutputRequestHandler = async ({
     transformedRequestUrl: retrieveBatchURL,
     gatewayRequestBody: {},
   });
-  const retrieveBatchesResponse = await fetch(retrieveBatchURL, {
+  const retrieveBatchesResponse = await externalServiceFetch(retrieveBatchURL, {
     method: 'GET',
     headers: retrieveBatchesHeaders,
   });
@@ -71,11 +72,18 @@ export const OpenAIGetBatchOutputRequestHandler = async ({
     transformedRequestUrl: retrieveFileContentURL,
     gatewayRequestBody: {},
   });
-  const response = fetch(retrieveFileContentURL, {
+  const response = await externalServiceFetch(retrieveFileContentURL, {
     method: 'GET',
     headers: retrieveFileContentHeaders,
   });
-  return response;
+  if (!response.ok) {
+    return response;
+  }
+  // Ported from Portkey 2.0.0: label the file as octet-stream so the response
+  // handler streams it through instead of buffering and parsing it as JSON.
+  return new Response(response.body, {
+    headers: { 'Content-Type': 'application/octet-stream' },
+  });
 };
 
 export const BatchOutputResponseTransform = async (response: Response) => {

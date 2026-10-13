@@ -1,0 +1,93 @@
+{
+  "$schema": "../vectors.schema.json",
+  "description": "max_cost ceilings. When the natural pick busts the ceiling, the router clamps to the most capable candidate under it, across all groups. When nothing fits, it serves the globally cheapest candidate and says so (fallback.budget_unsatisfiable = cheapest).",
+  "policy": "deterministic",
+  "vectors": [
+    {
+      "id": "quality-draft-within-budget",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "draft", "max_cost": 0.0001 }
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "quality:draft",
+        "est_cost": 0.0000401
+      }
+    },
+    {
+      "id": "quality-critical-budget-clamp",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "critical", "max_cost": 0.002 }
+      },
+      "expected": {
+        "model": "mid",
+        "group": "balanced",
+        "reason": "quality:critical+budget-clamp",
+        "est_cost": 0.0010025
+      }
+    },
+    {
+      "id": "quality-critical-budget-unsatisfiable",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "critical", "max_cost": 0.00001 }
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "quality:critical+budget-unsatisfiable",
+        "est_cost": 0.0000401
+      }
+    },
+    {
+      "id": "explicit-group-budget-clamp",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "model_group": "frontier", "max_cost": 0.002 }
+      },
+      "expected": {
+        "model": "mid",
+        "group": "balanced",
+        "reason": "override+budget-clamp",
+        "est_cost": 0.0010025
+      }
+    },
+    {
+      "id": "transparent-complex-budget-clamp",
+      "request": {
+        "messages": [{ "role": "user", "content": "summarize" }],
+        "approx_input_tokens": 2500,
+        "max_tokens": 100,
+        "hints": { "max_cost": 0.01 }
+      },
+      "expected": {
+        "model": "mid",
+        "group": "balanced",
+        "reason": "heuristic:complex+budget-clamp",
+        "est_cost": 0.00725
+      }
+    },
+    {
+      "id": "transparent-complex-budget-unsatisfiable",
+      "request": {
+        "messages": [{ "role": "user", "content": "summarize" }],
+        "approx_input_tokens": 2500,
+        "max_tokens": 100,
+        "hints": { "max_cost": 0.0001 }
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "heuristic:budget-unsatisfiable-cheapest",
+        "est_cost": 0.00029
+      }
+    }
+  ]
+}

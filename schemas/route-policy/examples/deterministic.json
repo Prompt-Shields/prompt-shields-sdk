@@ -1,0 +1,46 @@
+{
+  "$schema": "../route-policy.v1.schema.json",
+  "schema_version": "route-policy.v1",
+  "policy_version": "vectors-deterministic-1",
+  "default_group": "balanced",
+  "group_order": ["cheap", "balanced", "frontier"],
+  "quality_to_group": {
+    "draft": "cheap",
+    "balanced": "balanced",
+    "critical": "frontier"
+  },
+  "strategy": "heuristic",
+  "groups": {
+    "cheap": [
+      {
+        "model": "mini-plus",
+        "input_cost_per_1k": 0.0002,
+        "output_cost_per_1k": 0.0008
+      },
+      {
+        "model": "mini",
+        "input_cost_per_1k": 0.0001,
+        "output_cost_per_1k": 0.0004
+      }
+    ],
+    "balanced": [
+      {
+        "model": "mid",
+        "input_cost_per_1k": 0.0025,
+        "output_cost_per_1k": 0.01
+      }
+    ],
+    "frontier": [
+      {
+        "model": "big",
+        "input_cost_per_1k": 0.015,
+        "output_cost_per_1k": 0.06
+      }
+    ]
+  },
+  "fallback": {
+    "unknown_group": "default_group",
+    "budget_unsatisfiable": "cheapest",
+    "no_compliant_candidate": "fail_closed"
+  }
+}
