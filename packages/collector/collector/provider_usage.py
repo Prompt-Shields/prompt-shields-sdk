@@ -65,7 +65,9 @@ class ProviderUsageSettings(BaseSettings):
 
     provider_admin_keys: dict[str, dict[str, SecretStr]] = {}
 
-    model_config = {"env_prefix": "PS_"}
+    # A malformed PS_PROVIDER_ADMIN_KEYS (e.g. a bare key string where a
+    # {provider: key} map belongs) must not echo the key in the error.
+    model_config = {"env_prefix": "PS_", "extra": "ignore", "hide_input_in_errors": True}
 
 
 def admin_keys_for_tenant(

@@ -344,21 +344,42 @@ def test_admin_keys_come_from_env(monkeypatch):
     assert pu.admin_keys_for_tenant(uuid.uuid4()) == {}
 
 
-def test_admin_endpoint_runs_pull_for_calling_tenant(monkeypatch):
-    from collector import provider_usage_admin
+def test_malformed_env_does_not_echo_the_key(monkeypatch):
+    monkeypatch.setenv(
+        "PS_PROVIDER_ADMIN_KEYS", f'{{"{TENANT}": "{OPENAI_KEY}"}}'
+    )
+    with pytest.raises(Exception) as exc_info:
+        pu.admin_keys_for_tenant(TENANT)
+    assert OPENAI_KEY not in str(exc_info.value)
+
+
+PULL_URL = "/api/v1/admin/provider-usage/pull"
+
+
+def test_pull_endpoint_is_absent_without_admin_token(monkeypatch):
     from collector.app import app
     from fastapi.testclient import TestClient
 
-    async def fake_tenant(request):
-        return TENANT
+    monkeypatch.delenv("PS_ADMIN_TOKEN", raising=False)
+    resp = TestClient(app).post(
+        PULL_URL,
+        json={"tenant_id": str(TENANT)},
+        headers={"Authorization": "Bearer ps-test-key-12345"},
+    )
+    assert resp.status_code == 404
 
-    monkeypatch.setattr(provider_usage_admin, "resolve_tenant", fake_tenant)
-    monkeypatch.delenv("PS_PROVIDER_ADMIN_KEYS", raising=False)
-    resp = TestClient(app).post("/api/v1/admin/provider-usage/pull", json={"days": 2})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["tenant_id"] == str(TENANT)
-    assert body["providers"] == {
-        "openai": {"status": "not_configured"},
-        "anthropic": {"status": "not_configured"},
-    }
+
+@pytest.mark.parametrize(
+    "auth",
+    [None, "Bearer ps-test-key-12345", "Bearer wrong-token", "op-token"],
+)
+def test_pull_endpoint_rejects_tenant_keys_and_bad_tokens(monkeypatch, auth):
+    from collector.app import app
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("PS_ADMIN_TOKEN", "op-token")
+    headers = {"Authorization": auth} if auth else {}
+    resp = TestClient(app).post(
+        PULL_URL, json={"tenant_id": str(TENANT)}, headers=headers
+    )
+    assert resp.status_code == 401
