@@ -30,6 +30,26 @@ logger = logging.getLogger("prompt_shields.streaming")
 _CHARS_PER_TOKEN = 4
 
 
+def upstream_accepts_stream_options(upstream: Any) -> bool:
+    """True when the OpenAI client talks to api.openai.com.
+
+    OpenAI-compatible servers (older Azure API versions, self-hosted
+    gateways) may reject `stream_options` with a 400, so the SDK only adds
+    it for the official API. Elsewhere, callers can opt in by passing
+    `stream_options={"include_usage": True}` themselves.
+    """
+    from urllib.parse import urlsplit
+
+    base_url = getattr(upstream, "base_url", None)
+    if base_url is None:
+        return False
+    try:
+        host = urlsplit(str(base_url)).hostname or ""
+    except ValueError:
+        return False
+    return host == "api.openai.com"
+
+
 def request_openai_stream_usage(kwargs: dict) -> bool:
     """Ask OpenAI to send usage on the final stream chunk.
 

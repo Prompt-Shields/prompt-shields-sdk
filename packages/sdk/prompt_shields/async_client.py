@@ -19,6 +19,7 @@ from prompt_shields.streaming import (
     AsyncShieldsStream,
     StreamAccumulator,
     request_openai_stream_usage,
+    upstream_accepts_stream_options,
 )
 from prompt_shields.telemetry import (
     AtlasTelemetrySender,
@@ -188,7 +189,11 @@ class _AsyncCompletionsNamespace:
 
         streaming = kwargs.get("stream") is True
         hide_usage_chunk = False
-        if streaming and self._parent._vendor == "openai":
+        if (
+            streaming
+            and self._parent._vendor == "openai"
+            and upstream_accepts_stream_options(self._parent._upstream)
+        ):
             hide_usage_chunk = request_openai_stream_usage(kwargs)
 
         start = time.monotonic()

@@ -118,6 +118,7 @@ def _sync_client(vendor, stream):
     client._telemetry.enqueue = events.append
     client._telemetry.flush_sync = lambda: None
     client._upstream = MagicMock()
+    client._upstream.base_url = "https://api.openai.com/v1/"
     client._upstream.chat.completions.create.return_value = stream
     client._upstream.messages.create.return_value = stream
     return client, events
@@ -462,3 +463,19 @@ async def test_async_stream_is_fail_open_when_telemetry_breaks():
         model="gpt-4o", messages=MESSAGES, stream=True
     )
     assert [c async for c in stream] == chunks[:3]
+
+
+def test_include_usage_not_injected_for_openai_compatible_hosts():
+    # Older Azure API versions and self-hosted servers may 400 on stream_options.
+    chunks = _oa_chunks()
+    client, events = _sync_client("openai", FakeStream(chunks))
+    client._upstream.base_url = "https://my-gateway.internal/v1/"
+
+    received = list(
+        client.chat.completions.create(model="gpt-4o", messages=MESSAGES, stream=True)
+    )
+
+    _, kwargs = client._upstream.chat.completions.create.call_args
+    assert "stream_options" not in kwargs
+    assert received == chunks  # nothing hidden when the SDK did not inject
+    assert len(events) == 1
