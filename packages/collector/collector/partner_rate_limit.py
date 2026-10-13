@@ -1,6 +1,7 @@
-"""In-process rate limiter for the Partner API.
+"""In-process rate limiter for the Partner API and tenant ingest.
 
-Implements a fixed-window counter per (partner_id, minute). Bucket keys
+Implements a fixed-window counter per (key, minute), where the key is a
+partner id or a tenant id. Bucket keys
 expire after 2 minutes to bound memory. Suitable for single-process
 deployments; production should use Redis with an atomic INCR + EXPIRE.
 
@@ -12,9 +13,9 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from collections.abc import Hashable
 from dataclasses import dataclass
 from threading import Lock
-from uuid import UUID
 
 
 @dataclass
@@ -27,10 +28,14 @@ class RateLimitResult:
 
 
 class FixedWindowRateLimiter:
-    """Counter per (partner_id, minute_bucket). Thread-safe."""
+    """Counter per (key, minute_bucket). Thread-safe.
+
+    ``check`` never awaits, so it is also atomic with respect to concurrent
+    async requests on the same event loop.
+    """
 
     def __init__(self) -> None:
-        self._counts: dict[tuple[UUID, int], int] = defaultdict(int)
+        self._counts: dict[tuple[Hashable, int], int] = defaultdict(int)
         self._lock = Lock()
 
     def _gc(self, now_minute: int) -> None:
@@ -42,7 +47,7 @@ class FixedWindowRateLimiter:
             {k: v for k, v in self._counts.items() if k[1] >= cutoff},
         )
 
-    def check(self, partner_id: UUID, limit: int) -> RateLimitResult:
+    def check(self, partner_id: Hashable, limit: int) -> RateLimitResult:
         now = int(time.time())
         now_minute = now // 60
         key = (partner_id, now_minute)
@@ -74,3 +79,13 @@ _LIMITER = FixedWindowRateLimiter()
 
 def get_rate_limiter() -> FixedWindowRateLimiter:
     return _LIMITER
+
+
+# Separate singleton for /ingest/events so tenant and partner counters never
+# share buckets. Swap for a shared-store implementation with the same
+# ``check`` signature via FastAPI ``dependency_overrides``.
+_INGEST_LIMITER = FixedWindowRateLimiter()
+
+
+def get_ingest_rate_limiter() -> FixedWindowRateLimiter:
+    return _INGEST_LIMITER
