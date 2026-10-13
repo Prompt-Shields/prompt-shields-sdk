@@ -57,6 +57,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Security
 
+- **Gateway cache skips multipart and binary requests** — with simple caching on, every multipart (`/v1/audio/transcriptions`, file uploads) or binary body serialised to `{}` and got the same cache key, so one audio file could get another's cached transcript. The cache now only reads and writes JSON request bodies; FormData, Blob, ArrayBuffer, typed-array and stream bodies always go to the provider (cache status `DISABLED`).
 - **Collector tenant ingest keys are hashed** — tenants now store a SHA-256 lookup prefix and a bcrypt hash instead of the plaintext key in `settings`. Migration `004` hashes existing keys and removes the plaintext; downgrading cannot restore them. An unknown key and a wrong key get the same 401 after the same bcrypt work (#81).
 - **Gateway admin console and log stream require auth** — `/public` and `/log/stream` now need `PS_GATEWAY_ADMIN_TOKEN` (at least 16 characters) as a bearer token or session cookie, and the log stream is disabled when it is unset. Previously anyone who could reach the gateway port could watch live request logs. Provider options and headers are redacted in the stream. Ported from upstream Portkey `main` (#54).
 - **`x-portkey-forward-headers` loop guard** — requests or configs that try to forward the forward-headers header itself are rejected with 400 (upstream `de0e6c5`, #55).
