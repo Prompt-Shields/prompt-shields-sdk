@@ -19,7 +19,7 @@ from typing import Any
 
 from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.pii import scan_messages
-from prompt_shields.pricing import estimate_cost
+from prompt_shields.pricing import add_usage_detail_fields, estimate_cost
 from prompt_shields.providers import get_adapter
 from prompt_shields.streaming import (
     ShieldsStream,
@@ -159,9 +159,12 @@ class ShieldsClient:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 pricing_table=self._pricing_table,
+                tokens_cached=adapter_fields.get("tokens_cached"),
+                tokens_cache_write=adapter_fields.get("tokens_cache_write"),
             ),
             "api_key_fingerprint": self._api_key_fingerprint,
         }
+        add_usage_detail_fields(event, adapter_fields)
 
         # Map SDK field names to collector field names
         field_mapping = {"use_case": "use_case_name", "owner": "owner_email"}
