@@ -19,7 +19,7 @@ Internal tool first, run as a standalone SaaS web app that we host.
 ## Roadmap
 
 0. Foundations: Entra ID login, RBAC, tenant-scoped schema, fake connector
-1. Azure MVP (internal): our own tenant, token metrics, cost exports, per-deployment cost
+1. Azure MVP (internal): one-click connect (one Reader role, no setup in Azure), token metrics, cost, per-deployment view
 2. Budgets, alerts, PTU reports, tag / deployment-based allocation
 2b. Open to external users: signup, connection wizard, Google login, SAML
 3. GCP (Vertex AI)

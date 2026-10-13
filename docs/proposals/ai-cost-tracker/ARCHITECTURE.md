@@ -1,6 +1,6 @@
 # AI Cost Tracker: Architecture Plan (Draft v0.1)
 
-Status: **Draft for review** (v0.3: product shape, hosting, frontend, attribution and billing scope decided, see §2a).
+Status: **Draft for review** (v0.5: one-click onboarding; product shape, hosting, frontend, attribution and billing scope decided, see §2a).
 Owner: Prompt Shields. Last updated: 2026-10-13.
 
 ## 1. Problem
@@ -35,8 +35,8 @@ AWS Bedrock.
 |---|----------|-----|
 | D1 | **Two data planes: billed cost and token usage**, joined on (cloud, account, resource, model, day). | Billing is authoritative but late and coarse; metrics are near-real-time and granular but not money. We need both. |
 | D2 | **FOCUS 1.x** (FinOps Open Cost & Usage Spec) as the canonical cost schema. | Azure, AWS and GCP all export FOCUS-formatted data, so multi-cloud becomes a mapping exercise rather than three bespoke models. |
-| D3 | **Pull from cloud-native exports, not scraping APIs**, where possible. | Exports (Azure Cost Exports, AWS Data Exports, GCP BigQuery billing export) are cheap, complete and not rate limited. The Cost Details / Query APIs are a fallback for backfill and onboarding. |
-| D4 | **Secretless, least-privilege connections**: Entra multi-tenant app + admin consent (Azure), Workload Identity Federation (GCP), cross-account IAM role with External ID (AWS). | Customers will not paste long-lived keys into a cost tool, and they should not have to. |
+| D3 | **v1 (Azure, internal): query APIs, zero setup in the subscription.** Cost Management Query API for cost, Azure Monitor for tokens. **At scale / multi-cloud: cloud-native exports** (Azure Cost Exports, AWS Data Exports, GCP BigQuery billing export). | Onboarding simplicity wins at our scale: no storage account, no export to create, no extra role. Exports are cheaper and unthrottled once we track many subscriptions or external tenants; they slot in behind the same connector interface. |
+| D4 | **Secretless, least-privilege connections**: v1 uses the app's own **managed identity** with one `Reader` role per subscription (Azure, same tenant); external tenants later use an Entra multi-tenant app + admin consent; Workload Identity Federation (GCP), cross-account IAM role with External ID (AWS). | Customers will not paste long-lived keys into a cost tool, and they should not have to. |
 | D5 | **Python / FastAPI / PostgreSQL**, same as `prompt-shields-sdk`. | Shared libraries, auth, tenancy and ops. Time-series sit in Postgres (+ TimescaleDB) until volume justifies ClickHouse. |
 | D6 | **Estimate, then true-up.** Show estimated cost (tokens × price list) for today, replace it with billed cost once the bill lands. | Users want today's number today. Estimates are visibly flagged and reconciled. |
 | D7 | **Multi-tenant-ready schema, single internal tenant at launch** (tenant_id on every row, row-level security; no self-serve signup in v1). | We start as an internal tool, but the data model must not block offering it as SaaS later. Onboarding polish is deferred, isolation is not. |
@@ -46,7 +46,7 @@ AWS Bedrock.
 | Question | Decision | Consequences for this plan |
 |----------|----------|----------------------------|
 | Attribution source | **Gateway is not in front of Azure traffic yet.** | Phase 1–2 attribution comes from Azure itself: deployment names and resource / subscription tags, enforced by a naming convention (§4.4). Gateway ingestion becomes optional and moves out of phase 2; it plugs in later without schema changes. |
-| Billing scope | **No EA / MCA billing-account access.** | We connect **per subscription**: `Cost Management Reader` on each subscription, discovered and added in bulk. Billed cost comes from subscription-scope exports / the Cost Details API; no price sheet, so negotiated discounts appear only in billed cost, not in estimates. |
+| Billing scope | **No EA / MCA billing-account access; subscriptions are pay-as-you-go.** | We connect **per subscription** (or one management group above them): the `Reader` role, discovered and granted in one click (§4.3). Billed cost comes from the Cost Management Query API at subscription scope. Pay-as-you-go pays retail list prices, so the public Retail Prices API matches what we're billed and estimates should be close to billed cost (see §4.5). |
 | Product shape | **Internal tool first.** | Phase 1 targets our own Azure tenant(s). One tenant, created by a seed script; no signup flow, billing or tenant self-service. Connections can be set up by an admin with a CLI or a minimal settings page rather than a polished wizard. Customer-facing onboarding moves to a later phase. |
 | Hosting | **SaaS only.** | One deployment we operate (Azure Container Apps). No self-hosted, Marketplace managed app or customer-tenant packaging. Config can assume our infra (Key Vault, Entra, Postgres Flexible Server). |
 | Frontend | **Standalone app.** | Own Next.js app, own domain (e.g. `costs.promptshields.com`). It doesn't embed in or depend on another Prompt Shields UI; integration with the registry stays API-to-API. |
@@ -75,8 +75,8 @@ AWS Bedrock.
         ▼                           ▼                       ▼                        ▼
  ┌──────────────┐          ┌─────────────────┐     ┌────────────────┐      ┌──────────────────┐
  │ Azure        │          │ GCP (phase 3)   │     │ AWS (phase 4)  │      │ Prompt Shields   │
- │ Cost Exports │          │ BigQuery billing│     │ Data Exports / │      │ gateway & SDK    │
- │ Cost Details │          │ export, Cloud   │     │ CUR 2.0 (S3),  │      │ per-request      │
+ │ Cost Mgmt    │          │ BigQuery billing│     │ Data Exports / │      │ gateway (later)  │
+ │ Query API    │          │ export, Cloud   │     │ CUR 2.0 (S3),  │      │ per-request      │
  │ Monitor      │          │ Monitoring      │     │ CloudWatch,    │      │ usage w/ app,    │
  │ Resource Grph│          │ (Vertex AI)     │     │ Bedrock logs   │      │ user, team tags  │
  │ Retail Prices│          │ Pricing API     │     │ Pricing API    │      │                  │
@@ -94,7 +94,7 @@ AWS Bedrock.
 | **Normaliser** | Maps raw rows to FOCUS cost rows and to the token-usage fact table; parses AI meters into (model, version, direction, deployment type, region). |
 | **Reconciler** | Joins estimated vs billed cost, computes effective unit prices, flags variance. |
 | **Anomaly / alerts** | Daily and intraday rules: budget thresholds, day-over-day spikes, idle PTU, unknown deployments. Delivered to email, Slack, Teams, webhook. |
-| **Storage** | PostgreSQL 16 + TimescaleDB hypertables for usage; raw export files retained in object storage (Azure Blob) for replay. |
+| **Storage** | PostgreSQL 16 + TimescaleDB hypertables for usage; raw API responses (and export files, later) retained in object storage (Azure Blob) for replay. |
 
 ## 4. Azure integration (phase 1)
 
@@ -102,8 +102,8 @@ AWS Bedrock.
 
 | Data | Source | Granularity / latency | Used for |
 |------|--------|-----------------------|----------|
-| **Billed cost** | Cost Management **Exports** (FOCUS, daily, to a storage account) | Daily, ~8–24h lag, finalised after month close | Authoritative cost per resource & meter |
-| Billed cost (backfill / no-export fallback) | Cost Management **Cost Details API** (async report) | Daily | Onboarding backfill (up to 13 months), tenants who won't create an export |
+| **Billed cost** (v1) | Cost Management **Query API** at subscription scope, daily granularity, grouped by resource ID, meter and tags (what Cost Analysis itself uses) | Daily, ~8–24h lag, finalised after the invoice period closes | Authoritative cost per resource & meter, and backfill (up to 12 months) with no setup |
+| Billed cost (at scale, later) | Cost Management **Exports** to a storage account | Daily | Many subscriptions / external tenants, where Query API throttling would bite |
 | **Token usage** | **Azure Monitor metrics** on `Microsoft.CognitiveServices/accounts` (input / output / total token metrics, request counts, PTU utilisation), split by `ModelDeploymentName` and `ModelName` | 1-min, ~3 min lag | Near-real-time tokens per deployment; estimated cost |
 | **Inventory** | **Azure Resource Graph** + Cognitive Services management API (accounts, deployments, SKU: Standard / Global / Data Zone / Provisioned, capacity, model + version, tags) | On change / hourly | Map cost and metrics to named deployments, owners and tags |
 | **Prices** | **Azure Retail Prices API** (public). Customer price sheet / reservations only with billing-account access, which we don't have in v1 | Daily | Estimation at list price; billed cost shows what we actually pay |
@@ -118,39 +118,53 @@ Azure OpenAI billing lines carry meter names such as `gpt-4o-0806 Inp regnl 1M T
 surfaced in an admin queue rather than silently dropped, and new mappings ship as data, not
 code.
 
-### 4.3 Connecting an Azure tenant
+### 4.3 Connecting Azure: one click, one role
 
-Two supported paths. In the internal phase an admin configures them via CLI / settings page; a guided wizard comes with external onboarding:
+**Goal: from first sign-in to a populated dashboard in under 5 minutes, with nothing to
+create in Azure and no secrets to handle.**
 
-1. **Delegated admin consent (recommended)**
-   - Prompt Shields registers a **multi-tenant Entra ID app**. A customer admin clicks
-     "Connect Azure", signs in, and grants admin consent.
-   - The wizard then guides (or, with the admin's token, performs) role assignments on the
-     chosen scope (management group, subscription or billing account):
-     - `Cost Management Reader` (cost data)
-     - `Monitoring Reader` (token metrics)
-     - `Reader` (Resource Graph inventory, deployments)
-     - `Storage Blob Data Reader` on the export container (if using exports)
-   - We authenticate as that service principal using a **federated credential** from our
-     own workload identity: no client secret is stored for customer tenants.
-   - Optionally we create the FOCUS daily export in the customer's storage account on their
-     behalf (requires `Cost Management Contributor` once, at setup).
-2. **Bring-your-own export (most restrictive)** — customer creates the export themselves and
-   grants us read access to the container only. We get cost but not token metrics or
-   inventory; the UI shows which features are degraded.
+What we ask for, in total: **the built-in `Reader` role on each subscription** (or once, on a
+management group above them) for the app's managed identity. `Reader` covers cost data
+(Cost Management Query API), metrics (token usage) and inventory (Resource Graph,
+deployments). No storage account, no export, no `Cost Management Contributor`, no app
+registration, no client secret.
 
-**Scope (v1): per subscription.** We have no EA / MCA billing-account access, so:
+**Onboarding flow (internal v1)**
 
-- The service principal gets `Cost Management Reader`, `Monitoring Reader` and `Reader` on
-  each subscription that hosts AI resources (assigned at management-group level where we can,
-  which also covers new subscriptions automatically for metrics and inventory).
-- `inventory.sync` lists every subscription the principal can see; an admin ticks which ones
-  to track. Each subscription is one `cloud_account` under a single connection.
-- Cost comes from a **subscription-scope daily export** per subscription (FOCUS if our
-  agreement type offers it, otherwise the "actual cost" details export, which the normaliser
-  maps to FOCUS), with the Cost Details API for backfill.
-- Billing-account scope remains supported in the design for later or for external tenants;
-  it changes only how many exports we read, not the data model.
+1. **Sign in** with your work account (Entra ID). Anyone in the allow-listed Entra group gets
+   in; their role comes from group membership. No invites, no tenant setup.
+2. **Click "Connect Azure".** Using your own signed-in Azure permissions (delegated ARM
+   token, used only for this step), the app runs one Resource Graph query and lists every
+   subscription you can see, **pre-ticking the ones that contain Azure OpenAI / AI Foundry
+   resources** and showing how many deployments each has.
+3. **Click "Connect".** The app assigns `Reader` to its managed identity on the ticked
+   subscriptions (or on the management group, if you pick that option and have rights).
+   - If you lack permission to assign roles (you need Owner or User Access Administrator),
+     the screen shows a ready-to-run `az role assignment create …` command and a
+     shareable link to send to the subscription owner. The subscription shows as "waiting
+     for access" and connects itself as soon as the role appears; nobody has to come back.
+4. **Data appears immediately.**
+   - Inventory and deployments: seconds.
+   - Token usage: Azure Monitor keeps ~93 days of platform metrics, so the last 30 days of
+     tokens per deployment load within a minute.
+   - Cost: 12 months of daily cost backfills in the background with a progress bar;
+     yesterday's cost shows first.
+5. **Done.** A "Connection health" panel shows per subscription: last successful pull for
+   cost, tokens and inventory, in plain language, with a one-line fix when something is wrong
+   (e.g. "Reader role removed on sub X — re-grant" with the command).
+
+**Staying connected with zero maintenance**
+
+- Daily discovery: if a new subscription with AI resources becomes visible (or a role
+  assignment at management-group level covers it already), it's added automatically or
+  surfaced as a one-click banner "1 new subscription with AI resources found".
+- New deployments, models and tags are picked up hourly without any action.
+- No credentials expire: the managed identity is rotated by Azure.
+
+**Later: external tenants (phase 2b).** Same three clicks, but step 3 becomes Entra admin
+consent for our multi-tenant app followed by the same `Reader` assignment, authenticated with
+a federated credential (still no secret). A bring-your-own-export mode remains for customers
+who won't grant `Reader`.
 
 ### 4.4 Attribution without the gateway
 
@@ -170,6 +184,29 @@ Per-user and per-prompt-route attribution needs request-level data and waits for
 gateway (or APIM). Ingesting gateway events adds rows to `token_usage` with
 `source = gateway`; nothing else changes.
 
+### 4.5 Pay-as-you-go specifics
+
+Our subscriptions are pay-as-you-go (Microsoft Online Subscription Program). What that
+changes:
+
+- **Prices are retail.** There is no negotiated price sheet, so `prices.sync` from the Retail
+  Prices API is the real unit price. Estimate-vs-billed variance should come mostly from
+  metric vs meter rounding and timing, not price; a persistent gap above ~2% is a bug to
+  investigate, not a calibration factor.
+- **Credits are not cost.** Azure credits or sponsorship offsets reduce the invoice but the
+  cost data still shows the pre-credit charge. We report cost, and show credits separately
+  only if we later read invoices.
+- **Billing period ≠ calendar month.** A pay-as-you-go invoice period follows each
+  subscription's sign-up day. The UI reports by calendar month by default, with an
+  "invoice period" view per subscription for reconciling against invoices.
+- **Cost via Query API.** The Cost Management Query API works at subscription scope for
+  pay-as-you-go, needs only `Reader`, and avoids the EA / MCA-oriented Cost Details API and
+  exports entirely. Phase 0 includes a one-day spike on one subscription to confirm the
+  grouping we need (resource ID × meter × tags, daily) and the throttling limits.
+- **PTU reservations** bought on a pay-as-you-go subscription appear as purchases in actual
+  cost; amortised views (if the amortized dataset is available) spread them across the term
+  for the PTU utilisation report.
+
 ## 5. Ingestion pipeline
 
 | Job | Cadence | Notes |
@@ -177,8 +214,10 @@ gateway (or APIM). Ingesting gateway events adds rows to `token_usage` with
 | `inventory.sync` | Hourly + on demand | Upsert accounts and deployments; detect new / deleted deployments. |
 | `usage.pull` | Every 5 min | Azure Monitor metrics, 1-min grain, rolled up to 5-min / hourly / daily continuous aggregates. Watermark per (connection, resource). |
 | `prices.sync` | Daily | Retail prices for AI meters; diff stored so historical estimates stay reproducible. |
-| `cost.pull` | Every 4h | Read new export files (manifest-driven); re-ingest a day whenever its file is rewritten (Azure restates the current month). |
-| `cost.backfill` | On connect | Cost Details API, month by month, rate-limit aware. |
+| `cost.pull` | Every 4h | Query API for the current and previous invoice period per subscription; rewrite those days (Azure restates recent days). Exports replace this at scale. |
+| `cost.backfill` | On connect | Query API month by month, newest first, up to 12 months; throttling-aware with backoff. |
+| `metrics.backfill` | On connect | Last 30 days of token metrics from Azure Monitor. |
+| `discovery` | Daily | Find newly visible subscriptions with AI resources; auto-add or raise a banner. |
 | `reconcile` | After each `cost.pull` | Replace estimates with billed figures for closed days; record variance. |
 | `alerts.evaluate` | 15 min (usage-based) / daily (cost-based) | Budgets, spikes, idle PTU, unmapped meters. |
 
@@ -322,8 +361,8 @@ ai-cost-tracker/
 
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
-| **0. Foundations** (2 wks) | Repo skeleton, CI, Postgres + Timescale schema (tenant-scoped), Entra ID login for our tenant, RBAC via Entra groups, seeded internal tenant, fake connector, empty dashboard shell. | Can sign in with a work account and see fixture data in a chart. |
-| **1. Azure MVP — internal** (4–5 wks) | Azure connection for our own tenant (service principal + federated credential, set up by an admin) with per-subscription scope and bulk subscription discovery; inventory sync; Azure Monitor token metrics; Cost Details backfill + subscription-scope export ingestion; meter parsing; daily cost by deployment / model; estimated vs billed; cost per 1M tokens. | Internal Azure tenant shows yesterday's AI cost per deployment within 1% of Cost Analysis, and today's tokens within 5 min. |
+| **0. Foundations** (2 wks) | Query API + metrics spike on one pay-as-you-go subscription (§4.5), repo skeleton, CI, Postgres + Timescale schema (tenant-scoped), Entra ID login for our tenant, RBAC via Entra groups, seeded internal tenant, fake connector, empty dashboard shell. | Can sign in with a work account and see fixture data in a chart. |
+| **1. Azure MVP — internal** (4–5 wks) | Azure connection for our own tenant (service principal + federated credential, set up by an admin) with per-subscription scope and bulk subscription discovery; inventory sync; Azure Monitor token metrics; one-click connect flow (§4.3) with managed identity + `Reader`; Query API cost pull and 12-month backfill; 30-day token backfill; meter parsing; daily cost by deployment / model; estimated vs billed; cost per 1M tokens. | Internal Azure tenant shows yesterday's AI cost per deployment within 1% of Cost Analysis, and today's tokens within 5 min. |
 | **2. Make it useful** (3–4 wks) | Budgets & alerts (email, Slack, Teams), spike detection, PTU utilisation & idle-capacity report, tag-based allocation to cost centres, deployment naming / tagging convention with an untagged-spend report, shared-deployment split rules, CSV export & API. | The team uses it instead of Cost Analysis for AI spend reviews. |
 | **2b. Open to external users** (3 wks, when we decide to) | Self-serve signup, Entra admin-consent connection wizard, Google login, SAML, tenant admin pages, usage limits. | First design-partner tenant onboarded without engineering help. |
 | **3. GCP** (3 wks) | WIF connection, BigQuery billing export, Vertex AI metrics & inventory. | Unified multi-cloud overview. |
@@ -334,11 +373,13 @@ ai-cost-tracker/
 
 | Risk | Mitigation |
 |------|------------|
-| Billing data lags 24–72h and is restated during the month | Estimate-then-true-up (D6); re-ingest rewritten export days; label numbers as estimated / billed / finalised. |
+| Billing data lags 24–72h and is restated during the month | Estimate-then-true-up (D6); re-pull recent days every run; label numbers as estimated / billed / finalised. |
 | Azure meter names change with new models | Data-driven mapping table, unmapped-meter queue and alert, fixture tests per new model family. |
 | Token metric names / dimensions differ between classic Azure OpenAI and AI Foundry resources | Connector abstracts metric discovery (list metric definitions per resource) instead of hard-coding names. |
-| Customers reluctant to grant tenant-wide roles | Subscription-scope and BYO-export modes; clear permission explanations; read-only only. |
-| Negotiated pricing differs from retail, and without billing-account access we can't read the price sheet | Billed cost is the source of truth; estimates use retail and are corrected at true-up. Track the estimate-vs-billed ratio per meter and apply it to future estimates as a calibration factor. |
+| Whoever onboards can't assign roles | "Waiting for access" state, copy-paste command and shareable link for the owner; auto-connects when the role appears. |
+| `Reader` is broader than strictly needed | Read-only; documented why one role beats four narrower ones for onboarding; narrower custom role offered for external tenants that require it. |
+| Estimates drift from billed cost | Pay-as-you-go pays retail, so drift means a mapping or metric bug: alert on estimate-vs-billed variance above 2% per meter. Billed cost stays the source of truth. |
+| Cost Management Query API throttling as subscriptions grow | Per-subscription scheduling with jitter and backoff; pull only the open invoice periods after backfill; switch a connection to exports when it exceeds ~20 subscriptions. |
 | Per-subscription setup is easy to get incomplete (a new subscription with AI resources gets missed) | Inventory sync alerts on AI resources in subscriptions we can see but aren't tracking cost for; prefer management-group role assignments. |
 | Attribution is only as good as tagging / naming discipline | Untagged-spend bucket on the overview, weekly report of untagged deployments to owners, optional Azure Policy to require tags. |
 | Postgres volume at scale | Timescale compression + continuous aggregates first; ClickHouse is a planned swap behind the query layer. |
@@ -347,11 +388,11 @@ ai-cost-tracker/
 
 The original open questions are decided (§2a). Remaining, to answer in phase 0:
 
-1. **Agreement type** of our subscriptions (pay-as-you-go, MCA via the Azure portal, CSP?).
-   It decides whether subscription-scope FOCUS exports and the Cost Details API are
-   available, or whether we fall back to the usage-details export / Consumption API.
-2. **Subscription inventory** — which subscriptions host Azure OpenAI / Foundry resources,
-   and can we get role assignments at a management group above them?
+1. **Query API spike** — on one pay-as-you-go subscription, confirm daily cost grouped by
+   resource × meter × tags and the throttling limits (§4.5).
+2. **Who onboards** — the person clicking "Connect Azure" should be an Owner (or User Access
+   Administrator) on the AI subscriptions, ideally on a management group above them, so
+   onboarding is one pass.
 3. **Naming / tagging convention** — agree the deployment naming and required tags (§4.4)
    with the teams that own AI deployments, and whether to enforce them with Azure Policy.
 
