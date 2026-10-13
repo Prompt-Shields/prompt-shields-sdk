@@ -2,6 +2,7 @@ import { getRuntimeKey } from 'hono/adapter';
 import { GITHUB } from '../../globals';
 import { Environment } from '../../utils/env';
 import {
+  assertAzureAuthModeAllowed,
   getAccessTokenFromEntraId,
   getAzureManagedIdentityToken,
   getAzureWorkloadIdentityToken,
@@ -87,6 +88,8 @@ const AzureAIInferenceAPI: ProviderAPIConfig = {
       }
       return headers;
     }
+
+    assertAzureAuthModeAllowed(azureAuthMode, c);
 
     if (azureAuthMode === 'entra') {
       const {
