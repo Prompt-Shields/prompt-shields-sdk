@@ -5,9 +5,24 @@
  */
 process.env.PS_API_KEY = 'ps-test';
 
+// Real backoff waits (1s, 2s, ...) are not under test here; run retries
+// without delay. Production retry timing is unchanged.
+jest.mock('async-retry', () => {
+  const real = jest.requireActual('async-retry');
+  return (fn: any, opts: any) =>
+    real(fn, { ...opts, minTimeout: 0, maxTimeout: 0 });
+});
+
 import { Hono } from 'hono';
 import { retryRequest } from '../handlers/retryHandler';
-import { attemptsOf, errorClassOf, recordAttempt } from './psAttempts';
+import {
+  MAX_ATTEMPT_RECORDS,
+  attemptCountOf,
+  attemptsOf,
+  errorClassOf,
+  recordAttempt,
+  traceIdOf,
+} from './psAttempts';
 import { psTelemetry } from './ps-telemetry';
 
 const SECRET = 'sk-secret-should-never-leak';
@@ -151,6 +166,26 @@ describe('recordAttempt', () => {
     ]);
   });
 
+  test('keeps at most MAX_ATTEMPT_RECORDS records but counts every attempt', () => {
+    const c = fakeContext();
+    for (let i = 0; i < MAX_ATTEMPT_RECORDS + 10; i++) {
+      recordAttempt(c, { provider: 'openai' }, { status: 500, latency_ms: 1 });
+    }
+    expect(attemptsOf(c)).toHaveLength(MAX_ATTEMPT_RECORDS);
+    expect(attemptCountOf(c)).toBe(MAX_ATTEMPT_RECORDS + 10);
+  });
+
+  test('bounds provider and model strings', () => {
+    const c = fakeContext();
+    recordAttempt(
+      c,
+      { provider: 'p'.repeat(1000), model: 'm'.repeat(1000) },
+      { status: 200, latency_ms: 1 }
+    );
+    expect(attemptsOf(c)[0].provider).toHaveLength(128);
+    expect(attemptsOf(c)[0].model).toHaveLength(256);
+  });
+
   test('attemptsOf is empty when nothing was recorded', () => {
     expect(attemptsOf(fakeContext())).toEqual([]);
   });
@@ -245,6 +280,17 @@ describe('psTelemetry with attempts', () => {
     await flush();
     expect(typeof sent.events[0].trace_id).toBe('string');
     expect(sent.events[0].trace_id.length).toBeGreaterThan(0);
+  });
+
+  test('replaces a malformed or oversized trace id', async () => {
+    for (const bad of ['a'.repeat(129), 'x y', '<script>']) {
+      await post(app(true), { 'x-portkey-trace-id': bad });
+      await flush();
+      expect(sent.events[0].trace_id).not.toBe(bad);
+      expect(sent.events[0].trace_id).toMatch(/^[0-9a-f-]{36}$/);
+    }
+    expect(traceIdOf('abc-123_x.y:z')).toBe('abc-123_x.y:z');
+    expect(traceIdOf(undefined)).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('leaves the event unchanged when no attempt was recorded', async () => {

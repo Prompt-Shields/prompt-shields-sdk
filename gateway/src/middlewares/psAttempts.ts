@@ -24,6 +24,19 @@ export interface AttemptRecord extends AttemptStatus {
 }
 
 const CONTEXT_KEY = 'psAttempts';
+const COUNT_KEY = 'psAttemptCount';
+
+/** At most this many attempt records are kept per request; later ones are only counted. */
+export const MAX_ATTEMPT_RECORDS = 32;
+
+const TRACE_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** The caller's trace id if it is a short token, else a generated one. */
+export function traceIdOf(header: unknown): string {
+  return typeof header === 'string' && TRACE_ID_RE.test(header)
+    ? header
+    : crypto.randomUUID();
+}
 
 /** A coarse, content-free class for a failed attempt. */
 export function errorClassOf(
@@ -53,12 +66,17 @@ export function recordAttempt(
       list = [];
       c.set(CONTEXT_KEY, list);
     }
+    const count = (Number(c.get(COUNT_KEY)) || list.length) + 1;
+    c.set(COUNT_KEY, count);
+    if (list.length >= MAX_ATTEMPT_RECORDS) return;
     const record: AttemptRecord = {
-      attempt: list.length + 1,
+      attempt: count,
       latency_ms: result.latency_ms,
     };
-    if (typeof target.provider === 'string') record.provider = target.provider;
-    if (typeof target.model === 'string') record.model = target.model;
+    if (typeof target.provider === 'string')
+      record.provider = target.provider.slice(0, 128);
+    if (typeof target.model === 'string')
+      record.model = target.model.slice(0, 256);
     if (result.status !== undefined) record.status = result.status;
     if (result.error_class) record.error_class = result.error_class;
     list.push(record);
@@ -67,7 +85,16 @@ export function recordAttempt(
   }
 }
 
-/** The attempts recorded for the request, in order. */
+/** How many attempts were made for the request, including unrecorded ones. */
+export function attemptCountOf(c: any): number {
+  try {
+    return Number(c.get(COUNT_KEY)) || attemptsOf(c).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** The attempts recorded for the request, in order (at most MAX_ATTEMPT_RECORDS). */
 export function attemptsOf(c: any): AttemptRecord[] {
   try {
     const list = c.get(CONTEXT_KEY);
