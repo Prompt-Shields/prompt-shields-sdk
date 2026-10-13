@@ -15,6 +15,9 @@ Public surface:
         PSMetadata           — per-request metadata TypedDict
         PSConfig             — client config TypedDict
 
+    Auto-instrumentation:
+        instrument / uninstrument — patch installed openai / anthropic SDKs
+
     Utilities:
         detect_pii_categories — pattern-based PII detection
         estimate_cost         — token-to-USD cost estimator
@@ -29,6 +32,11 @@ from prompt_shields.client import (
     ShieldsAnthropic,
     ShieldsClient,
     ShieldsOpenAI,
+)
+from prompt_shields.instrumentation import (
+    instrument,
+    suppress_instrumentation,
+    uninstrument,
 )
 from prompt_shields.pii import detect_pii_categories, scan_messages
 from prompt_shields.pricing import estimate_cost
@@ -61,6 +69,10 @@ __all__ = [
     "DataClassification",
     "DiscoverySource",
     "Vendor",
+    # Auto-instrumentation
+    "instrument",
+    "uninstrument",
+    "suppress_instrumentation",
     # Utilities
     "detect_pii_categories",
     "scan_messages",

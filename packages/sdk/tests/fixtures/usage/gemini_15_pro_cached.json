@@ -1,0 +1,17 @@
+{
+  "vendor": "google",
+  "model": "gemini-1.5-pro",
+  "note": "Public pricing (prompts <=128k): input $1.25/M, cached input $0.3125/M, output $5.00/M. Cache storage is billed separately and not included.",
+  "response": {
+    "candidates": [{"content": {"role": "model", "parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+    "usageMetadata": {
+      "promptTokenCount": 40000,
+      "cachedContentTokenCount": 32000,
+      "candidatesTokenCount": 800,
+      "totalTokenCount": 40800
+    },
+    "modelVersion": "gemini-1.5-pro-002"
+  },
+  "expected_fields": {"tokens_in": 40000, "tokens_out": 800, "tokens_cached": 32000},
+  "expected_cost_usd": 0.024
+}
