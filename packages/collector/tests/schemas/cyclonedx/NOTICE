@@ -1,0 +1,7 @@
+CycloneDX JSON schemas, vendored for tests only.
+
+Files: bom-1.6.schema.json, spdx.schema.json, jsf-0.82.schema.json
+Source: https://github.com/CycloneDX/specification, tag 1.6, schema/
+Copyright OWASP Foundation / Ecma International TC54.
+Licensed under the Apache License, Version 2.0 (see LICENSE in this
+directory). The files are unmodified.
