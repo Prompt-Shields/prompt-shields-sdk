@@ -1,6 +1,7 @@
 # AI Cost Tracker: Architecture Plan (Draft v0.1)
 
-Status: **Draft for review**. Owner: Prompt Shields. Last updated: 2026-10-13.
+Status: **Draft for review** (v0.2: product shape, hosting and frontend decided, see §2a).
+Owner: Prompt Shields. Last updated: 2026-10-13.
 
 ## 1. Problem
 
@@ -38,14 +39,22 @@ AWS Bedrock.
 | D4 | **Secretless, least-privilege connections**: Entra multi-tenant app + admin consent (Azure), Workload Identity Federation (GCP), cross-account IAM role with External ID (AWS). | Customers will not paste long-lived keys into a cost tool, and they should not have to. |
 | D5 | **Python / FastAPI / PostgreSQL**, same as `prompt-shields-sdk`. | Shared libraries, auth, tenancy and ops. Time-series sit in Postgres (+ TimescaleDB) until volume justifies ClickHouse. |
 | D6 | **Estimate, then true-up.** Show estimated cost (tokens × price list) for today, replace it with billed cost once the bill lands. | Users want today's number today. Estimates are visibly flagged and reconciled. |
-| D7 | **Multi-tenant SaaS from day one** (tenant_id on every row, row-level security). | Same as the SDK registry; a single-tenant internal deployment is just one tenant. |
+| D7 | **Multi-tenant-ready schema, single internal tenant at launch** (tenant_id on every row, row-level security; no self-serve signup in v1). | We start as an internal tool, but the data model must not block offering it as SaaS later. Onboarding polish is deferred, isolation is not. |
+
+## 2a. Decisions taken (2026-10-13)
+
+| Question | Decision | Consequences for this plan |
+|----------|----------|----------------------------|
+| Product shape | **Internal tool first.** | Phase 1 targets our own Azure tenant(s). One tenant, created by a seed script; no signup flow, billing or tenant self-service. Connections can be set up by an admin with a CLI or a minimal settings page rather than a polished wizard. Customer-facing onboarding moves to a later phase. |
+| Hosting | **SaaS only.** | One deployment we operate (Azure Container Apps). No self-hosted, Marketplace managed app or customer-tenant packaging. Config can assume our infra (Key Vault, Entra, Postgres Flexible Server). |
+| Frontend | **Standalone app.** | Own Next.js app, own domain (e.g. `costs.promptshields.com`). It doesn't embed in or depend on another Prompt Shields UI; integration with the registry stays API-to-API. |
 
 ## 3. System overview
 
 ```
                          ┌──────────────────────────────────────────────┐
-  Users ──OIDC (Entra /  │                 Web App (Next.js)            │
-  Google / SAML)────────▶│  dashboards · explorer · budgets · settings  │
+  Users ──OIDC          │                 Web App (Next.js)            │
+  (Entra ID)────────────▶│  dashboards · explorer · budgets · settings  │
                          └───────────────────────┬──────────────────────┘
                                                  │ REST (JSON)
                          ┌───────────────────────▼──────────────────────┐
@@ -109,7 +118,7 @@ code.
 
 ### 4.3 Connecting an Azure tenant
 
-Two supported paths, chosen in the connection wizard:
+Two supported paths. In the internal phase an admin configures them via CLI / settings page; a guided wizard comes with external onboarding:
 
 1. **Delegated admin consent (recommended)**
    - Prompt Shields registers a **multi-tenant Entra ID app**. A customer admin clicks
@@ -173,13 +182,14 @@ tenant ─┬─ user / role
 
 ## 7. Login, identity and access
 
-- **User login**: OIDC. v1 supports **Microsoft Entra ID** (natural fit for Azure customers)
-  and **Google**; SAML / generic OIDC for enterprise SSO in phase 2. Self-hosted option:
-  Keycloak / any OIDC IdP via config.
+- **User login**: OIDC. v1 (internal) supports **Microsoft Entra ID** for our own tenant only,
+  restricted to an allow-listed group. Google and other external IdPs are added when the tool
+  opens to external users; SAML / generic OIDC for enterprise SSO after that.
 - **Sessions**: short-lived JWT access tokens + HTTP-only refresh cookie; API keys for
   programmatic access (scoped, hashed at rest), compatible with the SDK's `ps-…` key format.
-- **Tenant mapping**: the first user from an Entra / Google Workspace domain creates the
-  tenant; later users from the same IdP tenant join via invite or domain claim.
+- **Tenant mapping**: v1 has one seeded internal tenant, and Entra group membership maps to
+  roles. When opened up externally: the first user from an IdP domain creates the tenant;
+  later users join via invite or domain claim.
 - **RBAC**: `owner`, `admin` (manage connections, budgets), `analyst` (all data, read-only),
   `viewer` (scoped to cost centres / tags they own). Scopes are enforced in the query layer,
   not just the UI.
@@ -282,12 +292,13 @@ ai-cost-tracker/
 
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
-| **0. Foundations** (2 wks) | Repo skeleton, CI, Postgres + Timescale schema, OIDC login (Entra + Google), tenants & RBAC, fake connector, empty dashboard shell. | Can sign in, create a tenant, see fixture data in a chart. |
-| **1. Azure MVP** (4–5 wks) | Entra admin-consent connection flow; inventory sync; Azure Monitor token metrics; Cost Details backfill + FOCUS export ingestion; meter parsing; daily cost by deployment / model; estimated vs billed; cost per 1M tokens. | Internal Azure tenant shows yesterday's AI cost per deployment within 1% of Cost Analysis, and today's tokens within 5 min. |
-| **2. Make it useful** (3–4 wks) | Budgets & alerts (email, Slack, Teams), spike detection, PTU utilisation & idle-capacity report, tag-based allocation to cost centres, gateway usage ingestion for per-app / per-user attribution, CSV export & public API, SAML. | First design-partner tenant onboarded without engineering help. |
+| **0. Foundations** (2 wks) | Repo skeleton, CI, Postgres + Timescale schema (tenant-scoped), Entra ID login for our tenant, RBAC via Entra groups, seeded internal tenant, fake connector, empty dashboard shell. | Can sign in with a work account and see fixture data in a chart. |
+| **1. Azure MVP — internal** (4–5 wks) | Azure connection for our own tenant (service principal + federated credential, set up by an admin); inventory sync; Azure Monitor token metrics; Cost Details backfill + FOCUS export ingestion; meter parsing; daily cost by deployment / model; estimated vs billed; cost per 1M tokens. | Internal Azure tenant shows yesterday's AI cost per deployment within 1% of Cost Analysis, and today's tokens within 5 min. |
+| **2. Make it useful** (3–4 wks) | Budgets & alerts (email, Slack, Teams), spike detection, PTU utilisation & idle-capacity report, tag-based allocation to cost centres, gateway usage ingestion for per-app / per-user attribution, CSV export & API. | The team uses it instead of Cost Analysis for AI spend reviews. |
+| **2b. Open to external users** (3 wks, when we decide to) | Self-serve signup, Entra admin-consent connection wizard, Google login, SAML, tenant admin pages, usage limits. | First design-partner tenant onboarded without engineering help. |
 | **3. GCP** (3 wks) | WIF connection, BigQuery billing export, Vertex AI metrics & inventory. | Unified multi-cloud overview. |
 | **4. AWS** (3 wks) | CloudFormation role, Data Exports, Bedrock CloudWatch metrics & inventory. | Three clouds in one view. |
-| **5. Beyond** | Direct model providers, forecasting, recommendations (model swaps, PTU right-sizing), registry integration in the Prompt Shields UI. | — |
+| **5. Beyond** | Direct model providers, forecasting, recommendations (model swaps, PTU right-sizing), API-level links to the Prompt Shields registry. | — |
 
 ## 14. Risks
 
@@ -302,14 +313,11 @@ ai-cost-tracker/
 
 ## 15. Open questions
 
-1. **Product shape** — internal tool first, or a Prompt Shields product module from day one?
-   (Affects how much multi-tenant onboarding polish is needed in phase 1.)
-2. **Hosting** — SaaS only, or also a self-hosted / customer-tenant deployment (Azure
-   Marketplace managed app)? Many FinOps buyers want data to stay in their tenant.
-3. **Frontend** — standalone Next.js app, or a section inside an existing Prompt Shields UI?
-4. **Attribution source** — is the Prompt Shields gateway deployed in front of the Azure
+Product shape, hosting and frontend are decided (§2a). Remaining:
+
+1. **Attribution source** — is the Prompt Shields gateway deployed in front of the Azure
    OpenAI traffic we care about, or do we need APIM / diagnostic-log ingestion too?
-5. **Billing scope** — do we have EA / MCA billing-account access for our own tenant to
+2. **Billing scope** — do we have EA / MCA billing-account access for our own tenant to
    validate the billing-account-scope path early?
 
 ## Appendix A — ADRs to write next

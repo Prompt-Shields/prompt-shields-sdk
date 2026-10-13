@@ -6,6 +6,8 @@ Cost Management makes this hard to see, and expands to GCP Vertex AI and AWS Bed
 
 > Status: **planning**. No code yet. Staged here until the `Prompt-Shields/ai-cost-tracker` repo is created. See [docs/ARCHITECTURE.md](ARCHITECTURE.md).
 
+Internal tool first, run as a standalone SaaS web app that we host.
+
 ## What it will answer
 
 - Cost and tokens per deployment and model, today (estimated) and historically (billed)
@@ -16,8 +18,9 @@ Cost Management makes this hard to see, and expands to GCP Vertex AI and AWS Bed
 
 ## Roadmap
 
-0. Foundations: OIDC login (Entra ID, Google), tenants, RBAC, schema, fake connector
-1. Azure MVP: admin-consent connection, token metrics, cost exports, per-deployment cost
+0. Foundations: Entra ID login, RBAC, tenant-scoped schema, fake connector
+1. Azure MVP (internal): our own tenant, token metrics, cost exports, per-deployment cost
 2. Budgets, alerts, PTU reports, allocation, gateway attribution
+2b. Open to external users: signup, connection wizard, Google login, SAML
 3. GCP (Vertex AI)
 4. AWS (Bedrock)
