@@ -27,6 +27,8 @@ start = max(start, retention_cutoff(tenant))           # with a Tenant or its se
 cutoff = await get_retention_cutoff(db, tenant_id)     # looks the tenant up; None if absent
 ```
 
+The Partner API `usage-summary` endpoint already does this, so a `90d` summary for a tenant with 30-day retention covers only the last 30 days, even before the purge has run.
+
 ## Running the purge
 
 Nothing is deleted until an operator runs the purge. The collector has no built-in scheduler, so run it from cron or a Kubernetes CronJob:
