@@ -71,10 +71,11 @@ const allAssets = await client.assets.list({ limit: 200 }).toArray();
 
 // Manual pagination
 let page = await client.assets.listPage({ limit: 50 });
-while (page.meta.hasMore) {
+while (true) {
   for (const asset of page.data) {
     process(asset);
   }
+  if (!page.meta.hasMore) break;
   page = await client.assets.listPage({ limit: 50, after: page.meta.nextCursor });
 }
 ```
