@@ -34,6 +34,9 @@ Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b3
 | Responses/Messages adapters (#59) | `src/adapters/`, `src/handlers/adapterUtils.ts` | `tryPost` wraps the unchanged pipeline (`tryPostToProvider`); native Responses list matches this tree; `normalizeTokenLimitForProvider` renames `max_completion_tokens` for chat configs that only map `max_tokens`; upstream tests updated for the `max_completion_tokens` change |
 | `/v1/health` (#61) | route in `src/index.ts` | Same response shape; used by `deployment.yaml` probes |
 | Provider fixes (#60) | `openai`, `azure-openai`, `azure-ai-inference`, `z-ai`, `cohere`, `ollama`, `ai21` | Stand-alone fixes only; per-provider `pricing` configs dropped. Google/Vertex, Bedrock, Anthropic, Fireworks and batch-output fixes need 2.0.0's core: #108 |
+| Gemini/Vertex chat (#108) | `src/providers/google/{chatComplete,types,embed}.ts`, `src/providers/google-vertex-ai/{chatComplete,types,transformGenerationConfig,utils}.ts`, upstream tests | Thought signatures, media resolution, tool-message content; `getAccessToken` kept from this fork (context cache, plain fetch); workload-identity and model-lookup helpers not ported |
+| Anthropic (#108) | `src/providers/anthropic/{chatComplete,types,api,complete}.ts` | Cached tokens counted in `prompt_tokens`; structured outputs and effort via `output_config`; tool `strict` not forwarded (reverted upstream in enterprise 2.4.4); Vertex Claude uses the shared Anthropic transforms |
+| Batch output, Fireworks, Bedrock fixes (#108) | `cohere`/`azure-ai-inference` `getBatchOutput.ts`, `fireworks-ai/*` | `src/utils/fetch.ts` is a plain-fetch shim of upstream's names; OpenAI batch fallback and two Bedrock chat fixes hand-ported; Fireworks keeps this fork's `index.ts` |
 
 Not ported:
 - `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
@@ -59,20 +62,43 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/middlewares/requestValidator/schema/config.ts`
 - `src/providers/ai21/api.ts`
 - `src/providers/ai21/embed.ts`
+- `src/providers/anthropic/api.ts`
+- `src/providers/anthropic/chatComplete.ts`
+- `src/providers/anthropic/complete.ts`
+- `src/providers/anthropic/types.ts`
 - `src/providers/azure-ai-inference/chatComplete.ts`
+- `src/providers/azure-ai-inference/getBatchOutput.ts`
 - `src/providers/azure-ai-inference/messages.ts`
 - `src/providers/azure-openai/chatComplete.ts`
 - `src/providers/azure-openai/imageGenerate.ts`
 - `src/providers/azure-openai/index.ts`
 - `src/providers/bedrock/api.ts`
+- `src/providers/bedrock/chatComplete.ts`
 - `src/providers/bedrock/index.ts`
 - `src/providers/bedrock/types.ts`
 - `src/providers/bytez/api.ts`
 - `src/providers/cohere/api.ts`
 - `src/providers/cohere/chatComplete.ts`
 - `src/providers/cohere/complete.ts`
+- `src/providers/cohere/getBatchOutput.ts`
 - `src/providers/cohere/index.ts`
 - `src/providers/cohere/types.ts`
+- `src/providers/fireworks-ai/api.ts`
+- `src/providers/fireworks-ai/cancelFinetune.ts`
+- `src/providers/fireworks-ai/chatComplete.ts`
+- `src/providers/fireworks-ai/listFiles.ts`
+- `src/providers/fireworks-ai/retrieveFile.ts`
+- `src/providers/fireworks-ai/uploadFile.ts`
+- `src/providers/fireworks-ai/utils.ts`
+- `src/providers/google-vertex-ai/chatComplete.ts`
+- `src/providers/google-vertex-ai/getBatchOutput.ts`
+- `src/providers/google-vertex-ai/index.ts`
+- `src/providers/google-vertex-ai/transformGenerationConfig.ts`
+- `src/providers/google-vertex-ai/types.ts`
+- `src/providers/google-vertex-ai/utils.ts`
+- `src/providers/google/chatComplete.ts`
+- `src/providers/google/embed.ts`
+- `src/providers/google/types.ts`
 - `src/providers/index.ts`
 - `src/providers/jina/api.ts`
 - `src/providers/jina/index.ts`
@@ -80,6 +106,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/ollama/embed.ts`
 - `src/providers/open-ai-base/index.ts`
 - `src/providers/openai/chatComplete.ts`
+- `src/providers/openai/getBatchOutput.ts`
 - `src/providers/openai/imageGenerate.ts`
 - `src/providers/types.ts`
 - `src/providers/voyage/api.ts`
@@ -87,9 +114,11 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/z-ai/api.ts`
 - `src/providers/z-ai/index.ts`
 - `src/public/index.html`
+- `src/services/transformToProviderRequest.ts`
 - `src/shared/services/cache/index.ts`
 - `src/shared/utils/logger.ts`
 - `src/start-server.ts`
+- `src/types/messagesResponse.ts`
 - `src/types/modelResponses.ts`
 - `src/types/requestBody.ts`
 
