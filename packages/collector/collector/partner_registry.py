@@ -22,13 +22,17 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import and_, desc, func, select
 
+from collector import aibom
+from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.partner_auth import (
     PartnerPrincipal,
     require_scope,
 )
 from collector.partner_rate_limit import get_rate_limiter
+from collector.retention import get_retention_cutoff
 from db.models import (
     AIAsset,
     AIUsageEvent,
@@ -140,6 +144,10 @@ def _asset_dict(a: AIAsset) -> dict:
         "confidence": a.confidence,
         "first_seen": a.first_seen.isoformat() if a.first_seen else None,
         "last_seen": a.last_seen.isoformat() if a.last_seen else None,
+        "lifecycle_state": a.lifecycle_state or "active",
+        "lifecycle_changed_at": (
+            a.lifecycle_changed_at.isoformat() if a.lifecycle_changed_at else None
+        ),
     }
 
 
@@ -185,6 +193,7 @@ async def list_assets(
     principal: PartnerPrincipal = Depends(require_scope("registry:read")),
     business_unit: str | None = None,
     status: str | None = None,
+    lifecycle_state: LifecycleState | None = None,
     discovery_source: str | None = None,
     since: str | None = None,
     after: str | None = None,
@@ -201,6 +210,8 @@ async def list_assets(
         conditions.append(AIAsset.business_unit == business_unit)
     if status:
         conditions.append(AIAsset.status == status)
+    if lifecycle_state:
+        conditions.append(AIAsset.lifecycle_state == lifecycle_state)
     if discovery_source:
         conditions.append(AIAsset.discovery_source.any(discovery_source))
     if since:
@@ -376,7 +387,13 @@ async def get_usage_summary(
             },
         )
 
-    since = datetime.now(UTC) - timedelta(days=USAGE_PERIODS[period])
+    now = datetime.now(UTC)
+    since = now - timedelta(days=USAGE_PERIODS[period])
+    # Never report events past the tenant's retention period, even if the
+    # purge has not run yet (#85).
+    cutoff = await get_retention_cutoff(db, principal.tenant_id, now)
+    if cutoff is not None and cutoff > since:
+        since = cutoff
     row = (
         (
             await db.execute(
@@ -559,6 +576,8 @@ async def get_changes(
             "change_type": change_type,
             "asset": _asset_dict(a),
             "changed_at": a.updated_at.isoformat() if a.updated_at else None,
+            # Lifecycle transition since `since`: stale, retired, reactivated, or null.
+            "lifecycle_change": lifecycle_change_for(a, since_dt),
             # `changed_fields` requires field-level audit; deferred to Phase 2.
             "changed_fields": None,
         })
@@ -585,22 +604,38 @@ async def get_changes(
 async def export_registry(
     request: Request,
     response: Response,
-    format: str = Query(default="json"),
+    format: str = Query(
+        default="json",
+        description="`json` (registry envelope) or `cyclonedx` (CycloneDX 1.6 AI-BOM)",
+    ),
     principal: PartnerPrincipal = Depends(require_scope("registry:read")),
 ):
-    if format != "json":
+    if format not in ("json", "cyclonedx"):
         raise HTTPException(
             status_code=400,
             detail={
                 "type": "about:blank",
                 "title": "Bad Request",
                 "status": 400,
-                "detail": "Only format=json is supported",
+                "detail": "Supported formats: json, cyclonedx",
             },
         )
 
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
+
+    if format == "cyclonedx":
+        assets, flows, risks = await aibom.load_registry(db, principal.tenant_id)
+        bom = aibom.build_bom(principal.tenant_id, assets, flows, risks)
+        await _audit(request, principal, "/partner/v1/export", "GET", 200, len(assets))
+        # A returned Response does not inherit headers set on `response`, so
+        # carry the X-RateLimit-* headers over explicitly.
+        rate_headers = {
+            k: v for k, v in response.headers.items() if k.startswith("x-ratelimit-")
+        }
+        return JSONResponse(
+            content=bom, media_type=aibom.MEDIA_TYPE, headers=rate_headers
+        )
 
     rows = (
         await db.execute(
