@@ -8,6 +8,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Collector: stale and retired asset detection** — assets with no telemetry for `PS_ASSET_STALE_AFTER_DAYS` (default 30) become `stale`, and after `PS_ASSET_RETIRE_AFTER_DAYS` (default 90) `retired`; new telemetry reactivates them. New `lifecycle_state` / `lifecycle_changed_at` fields and `?lifecycle_state=` filter on registry and Partner API asset lists, `lifecycle_change` in `/partner/v1/changes`. Run the sweep with `python -m collector.lifecycle` or `POST /api/v1/admin/asset-lifecycle/sweep`. Migration `004_asset_lifecycle` (#100).
+
 - **Gateway: Gemini 3 tool calling across turns** — thought signatures are returned on tool calls (`function.thought_signature`, non-strict mode) and sent back to Gemini/Vertex; per-part `media_resolution` for images. Ported from Portkey 2.0.0 (#108).
 - **Gateway: Bedrock on Portkey 2.0's provider code** — Converse and Messages for Claude (`anthropic_beta` as header string or body array, cache reads and writes in `prompt_tokens`), inference-profile ARNs, batch, files and fine-tuning; IRSA, pod identity, ECS and IMDS credentials for `serviceRole` behind `AWS_AMBIENT_CREDENTIALS_ENABLED` (#108).
 - **Gateway: Anthropic structured outputs and effort** — `response_format` JSON schema and `reasoning_effort` map to Anthropic `output_config` (#108).
