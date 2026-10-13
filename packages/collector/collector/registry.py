@@ -1,11 +1,16 @@
-from uuid import UUID
+import operator
+import re
 from datetime import datetime
-from fastapi import APIRouter, Request, Query, HTTPException
-from sqlalchemy import select, func, and_
-from collector.auth import resolve_tenant
-from collector.embeddings import get_embedding, build_asset_text, mock_embedding
-from collector.lifecycle import LifecycleState
+from functools import reduce
+from uuid import UUID
+
 from db.models import AIAsset, DataFlow, RiskMapping
+from fastapi import APIRouter, HTTPException, Query, Request
+from sqlalchemy import and_, case, func, or_, select
+
+from collector.auth import resolve_tenant
+from collector.embeddings import get_embedding, mock_embedding
+from collector.lifecycle import LifecycleState
 
 router = APIRouter(prefix="/api/v1/registry")
 
@@ -123,43 +128,82 @@ async def semantic_search(
     limit: int = Query(default=10, le=50),
     use_mock: bool = Query(default=False, description="Use mock embeddings for testing"),
 ):
-    """Semantic search over AI assets using pgvector cosine similarity."""
+    """Search AI assets: pgvector cosine similarity, or keyword match when
+    embeddings are disabled (PS_EMBEDDINGS_BACKEND=none) or unavailable."""
     tenant_id = await resolve_tenant(request)
     db = request.state.db
 
-    # Generate embedding for query
     if use_mock:
         query_embedding = mock_embedding(q)
     else:
         query_embedding = await get_embedding(q)
-        if query_embedding is None:
-            # Fallback to mock if no API key
-            query_embedding = mock_embedding(q)
+    if query_embedding is None:
+        data = await _keyword_search(db, tenant_id, q, limit)
+        return {"data": data, "meta": {"total": len(data), "query": q, "mode": "keyword"}}
 
-    # Cosine similarity search using pgvector
+    distance = AIAsset.embedding.cosine_distance(query_embedding)
     stmt = (
-        select(AIAsset)
+        select(AIAsset, distance.label("distance"))
         .where(
             AIAsset.tenant_id == tenant_id,
             AIAsset.embedding.is_not(None),
         )
-        .order_by(AIAsset.embedding.cosine_distance(query_embedding))
+        .order_by(distance)
         .limit(limit)
     )
     result = await db.execute(stmt)
-    assets = result.scalars().all()
 
     data = []
-    for a in assets:
+    for a, dist in result.all():
         serialized = _serialize_asset(a)
-        # Add similarity score
-        if a.embedding is not None:
-            serialized["similarity"] = round(1.0 - float(
-                sum((x - y) ** 2 for x, y in zip(a.embedding, query_embedding)) ** 0.5
-            ), 4)
+        serialized["similarity"] = round(1.0 - float(dist), 4)
         data.append(serialized)
 
-    return {"data": data, "meta": {"total": len(data), "query": q}}
+    return {"data": data, "meta": {"total": len(data), "query": q, "mode": "semantic"}}
+
+
+_KEYWORD_FIELDS = (
+    AIAsset.vendor,
+    AIAsset.model,
+    AIAsset.use_case_name,
+    AIAsset.business_unit,
+    AIAsset.data_classification,
+)
+
+
+async def _keyword_search(db, tenant_id, q: str, limit: int) -> list[dict]:
+    """Rank assets by how many query terms start a word in their metadata.
+
+    Runs entirely in Postgres, so it works with embeddings disabled and sends
+    nothing off-box. Prefix-of-word matching keeps "hr" from hitting "anthropic".
+    """
+    words = re.findall(r"\w[\w.-]*", q.lower())
+    terms = list(dict.fromkeys(t for t in words if len(t) > 1))[:10]
+    if not terms:
+        return []
+
+    hits = [
+        case(
+            (or_(*(f.regexp_match(r"\m" + re.escape(t), flags="i") for f in _KEYWORD_FIELDS)), 1),
+            else_=0,
+        )
+        for t in terms
+    ]
+    score = reduce(operator.add, hits).label("score")
+    stmt = (
+        select(AIAsset, score)
+        .where(AIAsset.tenant_id == tenant_id)
+        .where(score > 0)
+        .order_by(score.desc(), AIAsset.last_seen.desc().nulls_last(), AIAsset.id)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    data = []
+    for a, matched in result.all():
+        serialized = _serialize_asset(a)
+        serialized["score"] = round(matched / len(terms), 4)
+        data.append(serialized)
+    return data
 
 
 def _serialize_asset(a: AIAsset) -> dict:

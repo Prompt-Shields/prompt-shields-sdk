@@ -356,6 +356,23 @@ export async function tryPost(
   return adaptResponse(response, adapterResult.adapterCtx, c);
 }
 
+/**
+ * Sets requestContext.transformedRequestBody. PS fork: request handlers build
+ * their own upstream body, so for them the gateway body is recorded instead,
+ * and the log and cache middlewares, which read
+ * requestOptions[0].requestParams, do not fail on an undefined value.
+ */
+function attachRequestBody(
+  providerContext: ProviderContext,
+  requestContext: RequestContext
+): void {
+  if (!providerContext.hasRequestHandler(requestContext)) {
+    requestContext.transformToProviderRequestAndSave();
+  } else {
+    requestContext.transformedRequestBody = requestContext.requestBody;
+  }
+}
+
 async function tryPostToProvider(
   c: Context,
   providerOption: Options,
@@ -406,9 +423,7 @@ async function tryPostToProvider(
     // transformedRequestBody is required to be set in requestOptions.
     // So in case the before request hooks fail (with deny as true), we need to set it here.
     // If the hooks do not result in a 446 response, transformedRequestBody is determined on the updated HookSpan context.
-    if (!providerContext.hasRequestHandler(requestContext)) {
-      requestContext.transformToProviderRequestAndSave();
-    }
+    attachRequestBody(providerContext, requestContext);
 
     const { response, originalResponseJson } = await responseService.create({
       response: brhResponse,
@@ -438,9 +453,7 @@ async function tryPostToProvider(
   }
 
   // Attach the body of the request
-  if (!providerContext.hasRequestHandler(requestContext)) {
-    requestContext.transformToProviderRequestAndSave();
-  }
+  attachRequestBody(providerContext, requestContext);
 
   // Construct the base object for the request
   const fetchOptions: RequestInit = await constructRequest(

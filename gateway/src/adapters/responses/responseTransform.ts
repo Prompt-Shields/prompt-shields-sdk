@@ -17,19 +17,39 @@ import {
   ResponseFunctionToolCall,
   ResponseOutputItemReasoning,
 } from '../../types/modelResponses';
-import { ChatCompletionResponse, ErrorResponse } from '../../providers/types';
+import {
+  ChatCompletionResponse,
+  ErrorResponse,
+  FINISH_REASON,
+} from '../../providers/types';
+import {
+  normalizeFinishReason,
+  normalizeUsage,
+  plainReasoningText,
+  toResponsesUsage,
+} from '../shared';
 import { randomUUID } from 'crypto';
 
-// Finish reason to status mapping
-const STATUS_MAP: Record<string, 'completed' | 'incomplete' | 'in_progress'> = {
-  stop: 'completed',
-  end_turn: 'completed',
-  tool_calls: 'completed',
-  function_call: 'completed',
-  length: 'incomplete',
-  max_tokens: 'incomplete',
-  content_filter: 'completed',
-};
+type ResponseStatus = 'completed' | 'incomplete' | 'in_progress';
+
+/**
+ * PS fork (#73): map a (possibly provider-native) finish reason to a
+ * Responses status and incomplete reason. Truncation and content filtering
+ * both make the response `incomplete`, as in the Responses API.
+ */
+export function toResponsesStatus(finishReason: string | null | undefined): {
+  status: ResponseStatus;
+  reason: 'max_output_tokens' | 'content_filter' | null;
+} {
+  switch (normalizeFinishReason(finishReason)) {
+    case FINISH_REASON.length:
+      return { status: 'incomplete', reason: 'max_output_tokens' };
+    case FINISH_REASON.content_filter:
+      return { status: 'incomplete', reason: 'content_filter' };
+    default:
+      return { status: 'completed', reason: null };
+  }
+}
 
 /**
  * Default values for Responses API fields
@@ -82,14 +102,20 @@ export function transformChatCompletionsToResponses(
     } as ErrorResponse;
   }
 
-  const output: ResponseOutputItem[] = [];
-  let overallStatus: 'completed' | 'incomplete' | 'in_progress' = 'completed';
+  const reasoningItems: ResponseOutputItem[] = [];
+  const messageItems: ResponseOutputItem[] = [];
+  const functionCallItems: ResponseOutputItem[] = [];
+  let overallStatus: ResponseStatus = 'completed';
+  let incompleteReason: string | null = null;
 
   // Process choices
   for (const choice of response.choices || []) {
-    const msg = choice.message as any;
-    const status = STATUS_MAP[choice.finish_reason] || 'completed';
-    if (status === 'incomplete') overallStatus = 'incomplete';
+    const msg = (choice.message as any) || {};
+    const { status, reason } = toResponsesStatus(choice.finish_reason);
+    if (status === 'incomplete') {
+      overallStatus = 'incomplete';
+      incompleteReason = reason;
+    }
 
     // Handle reasoning/thinking from content_blocks
     // Providers like Anthropic, Google, OpenRouter expose thinking via content_blocks
@@ -99,7 +125,7 @@ export function transformChatCompletionsToResponses(
         // Handle thinking blocks (Anthropic, OpenRouter format)
         if (block.thinking || block.type === 'thinking') {
           const thinkingText = block.thinking || block.text || '';
-          output.push({
+          reasoningItems.push({
             id: `rs_${randomUUID()}`,
             type: 'reasoning',
             summary: [
@@ -113,14 +139,26 @@ export function transformChatCompletionsToResponses(
       }
     }
 
+    // PS fork (#73): OpenAI-compatible reasoning fields (reasoning_content)
+    if (!reasoningItems.length) {
+      const reasoning = plainReasoningText(msg);
+      if (reasoning) {
+        reasoningItems.push({
+          id: `rs_${randomUUID()}`,
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: reasoning }],
+        } as ResponseOutputItemReasoning);
+      }
+    }
+
     // Handle tool calls
     if (msg.tool_calls?.length) {
       for (const tc of msg.tool_calls) {
-        if (tc.type === 'function') {
-          output.push({
+        if (tc.type === 'function' || (!tc.type && tc.function)) {
+          functionCallItems.push({
             id: `fc_${randomUUID()}`,
             type: 'function_call',
-            call_id: tc.id,
+            call_id: tc.id || `call_${randomUUID()}`,
             name: tc.function.name,
             arguments: tc.function.arguments,
             status: 'completed',
@@ -141,7 +179,7 @@ export function transformChatCompletionsToResponses(
 
       // Only add message if there's actual text content
       if (text) {
-        output.push({
+        messageItems.push({
           id: `msg_${randomUUID()}`,
           type: 'message',
           role: 'assistant',
@@ -159,14 +197,15 @@ export function transformChatCompletionsToResponses(
     }
   }
 
-  // Build usage
-  const usage = response.usage;
-  const inputTokens = usage?.prompt_tokens || 0;
-  const outputTokens = usage?.completion_tokens || 0;
-  const reasoningTokens =
-    (usage as any)?.completion_tokens_details?.reasoning_tokens || 0;
-  const cachedTokens =
-    (usage as any)?.prompt_tokens_details?.cached_tokens || 0;
+  // PS fork (#73): reasoning, then message, then function calls
+  const output: ResponseOutputItem[] = [
+    ...reasoningItems,
+    ...messageItems,
+    ...functionCallItems,
+  ];
+
+  // PS fork (#73): cached tokens also read from Anthropic-style usage
+  const usage = toResponsesUsage(normalizeUsage(response.usage));
 
   const createdAt = response.created || Math.floor(Date.now() / 1000);
 
@@ -195,7 +234,7 @@ export function transformChatCompletionsToResponses(
       overallStatus === 'completed' ? Math.floor(Date.now() / 1000) : null,
     status: overallStatus,
     incomplete_details:
-      overallStatus === 'incomplete' ? { reason: 'max_output_tokens' } : null,
+      overallStatus === 'incomplete' ? { reason: incompleteReason } : null,
     model: response.model,
     previous_response_id: req.previous_response_id ?? null,
     instructions: req.instructions ?? null,
@@ -215,13 +254,7 @@ export function transformChatCompletionsToResponses(
     top_logprobs: req.top_logprobs ?? RESPONSE_DEFAULTS.top_logprobs,
     temperature: req.temperature ?? RESPONSE_DEFAULTS.temperature,
     reasoning: req.reasoning ?? null,
-    usage: {
-      input_tokens: inputTokens,
-      input_tokens_details: { cached_tokens: cachedTokens },
-      output_tokens: outputTokens,
-      output_tokens_details: { reasoning_tokens: reasoningTokens },
-      total_tokens: inputTokens + outputTokens,
-    },
+    usage,
     max_output_tokens: req.max_output_tokens ?? null,
     max_tool_calls: req.max_tool_calls ?? null,
     store: req.store ?? RESPONSE_DEFAULTS.store,
