@@ -71,9 +71,9 @@ async def test_list_vendors(seeded_db):
 
 @pytest.mark.asyncio
 async def test_registry_reads_write_audit_rows(seeded_db):
+    from db.models import PartnerAuditLog
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
-    from db.models import PartnerAuditLog
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
