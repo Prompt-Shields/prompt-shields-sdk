@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Collector: per-tenant ingest rate limit** — `POST /ingest/events` now enforces `PS_RATE_LIMIT_PER_MINUTE` (default 100 requests/minute, `0` disables) per tenant, reusing the Partner API's fixed-window limiter. Exceeding it returns `429` with `Retry-After` and `X-RateLimit-*` headers. In-process, so the count is per worker (#82).
 - **Gateway: unified, provider-backed `GET /v1/models`** — goes through the same validation as other `/v1` routes, proxies to the configured provider, and returns Anthropic's list shape (with `limit` / `after_id` / `before_id`) when the caller sends `anthropic-version`, so Claude Code can discover models through the gateway; other callers get OpenAI's shape (#79).
 - **`route-policy.v1` JSON Schema and golden decision vectors** — `schemas/route-policy/` holds the shared routing contract (JSON Schema 2020-12): groups, quality mapping, sensitivity levels, PII escalation, data policy, per-use-case quality bar and fallback. It also has three example policies and decision vectors in `vectors/*.json`. The gateway router runs every active vector through `resolveRoute`. The SDK checks the schema, the examples and `RouteHint` encoding. Sensitivity, data-policy and quality-bar vectors are marked `pending` and skipped with their reason until those P1 features land (#11).
 
