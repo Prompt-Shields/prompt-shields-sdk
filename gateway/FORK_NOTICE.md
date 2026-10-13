@@ -203,6 +203,8 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 
 10. **Added** (re-implemented from the Portkey enterprise changelog 2.18-2.23, #75): `POST /v1/ocr` in the Mistral OCR request shape for `mistral-ai`, Vertex-hosted Mistral (`mistralai.<model>`, `rawPredict`) and Azure AI Foundry (`<azureFoundryUrl>/ocr`); `elevenlabs` and `deepgram` providers for `/v1/audio/speech` and `/v1/audio/transcriptions`, on fixed vendor hosts (the ElevenLabs voice must match a voice-ID pattern before it becomes a path segment). Their transcription calls use provider request handlers, which ignore custom hosts. `ps-telemetry` emits `modality` and non-token `usage_units`/`usage_unit_type` (seconds, pages, characters).
 
+11. **Added** (first slice of #74, written from the vendors' public OpenAI-compatible API docs, no enterprise code): `minimax`, `byteplus`, `lightning-ai` from the Portkey enterprise changelog 2.9-2.16, and the EU-hosted `berget`, `scaleway`, `regolo`, `ionos` and `stackit` for sovereignty routing. Each reuses the `open-ai-base` chat (and, where the vendor offers it, embeddings) transforms on a fixed vendor base URL.
+
 ## Original License
 
 The original Portkey AI Gateway is licensed under the MIT License. See [`LICENSE`](./LICENSE).
