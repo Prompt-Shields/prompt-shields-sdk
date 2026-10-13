@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     # Operator token for /api/v1/operator/*. Empty disables those endpoints.
     admin_token: str = ""
 
+    # Semantic search embeddings; see collector/embeddings.py and the README.
+    # auto | openai | local | none. auto = openai if OPENAI_API_KEY is set, else none.
+    embeddings_backend: str = "auto"
+    embeddings_model: str | None = None  # backend default when unset
+    embeddings_openai_base_url: str = "https://api.openai.com/v1"
+    embeddings_cache_dir: str | None = None  # fastembed model cache (local backend)
+
     model_config = {"env_prefix": "PS_"}
 
 
