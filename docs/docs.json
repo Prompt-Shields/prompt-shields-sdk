@@ -67,7 +67,8 @@
         "guides/discovery-sources",
         "guides/data-flows",
         "guides/risk-frameworks",
-        "guides/confidence-scoring"
+        "guides/confidence-scoring",
+        "guides/data-retention"
       ]
     },
     {

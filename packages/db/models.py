@@ -198,3 +198,32 @@ class PartnerAuditLog(Base):
         Index("ix_partner_audit_tenant_ts", "tenant_id", "timestamp"),
         Index("ix_partner_audit_partner_ts", "partner_id", "timestamp"),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Data retention — purge and erasure audit trail (#85)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class RetentionAuditLog(Base):
+    """Append-only record of every retention purge, tenant erasure and
+    retention-setting change.
+
+    `tenant_id` deliberately has no foreign key: the row has to outlive the
+    tenant it describes, so an erasure stays provable after the tenant is gone.
+    `details` holds counts (or the new setting), never the deleted data.
+    """
+
+    __tablename__ = "retention_audit_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    action = Column(Text, nullable=False)  # 'purge' | 'erase' | 'set_retention'
+    actor = Column(Text, nullable=False)
+    cutoff = Column(TIMESTAMP(timezone=True))
+    details = Column(JSONB, default=dict)  # row counts per table, or the new setting
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_retention_audit_tenant_ts", "tenant_id", "created_at"),
+    )
