@@ -2,6 +2,9 @@ import { AzureCredentials } from './types';
 
 const cacheExpiry = 15 * 60; // 15 minutes
 
+/** Thrown by `pii`, whose token lookup reports errors by throwing. */
+export class AzureHostIdentityDisabledError extends Error {}
+
 export async function getAccessTokenFromEntraId(
   tenantId: string,
   clientId: string,
@@ -115,12 +118,24 @@ export const getAccessToken = async (
 
   const { clientId, clientSecret, tenantId, azureAuthMode } = credentials ?? {};
 
-  let tokenResult: { token: string; error: string | null } = {
+  let tokenResult: { token: string; error: string | null; denied?: boolean } = {
     token: '',
     error: null,
   };
   // client id is only set for managed identity
   if (azureAuthMode === 'managed') {
+    // Prompt Shields: the guardrail config comes from the caller, and a
+    // managed identity token is the gateway host's own Azure identity.
+    // `denied` makes the guardrail fail closed instead of skipping the check.
+    if (
+      String(env?.AZURE_AMBIENT_CREDENTIALS_ENABLED).toLowerCase() !== 'true'
+    ) {
+      return {
+        token: '',
+        error: 'azureAuthMode managed is disabled on this gateway',
+        denied: true,
+      };
+    }
     tokenResult = await getAzureManagedIdentityToken(
       credentials?.resourceName ?? '',
       check,
