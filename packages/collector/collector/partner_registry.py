@@ -23,12 +23,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import and_, desc, func, select
 
+from collector.audit import record_read
 from collector.partner_auth import (
     PartnerPrincipal,
     require_scope,
 )
 from collector.partner_rate_limit import get_rate_limiter
-from db.models import AIAsset, DataFlow, PartnerAuditLog, PartnerCredential, RiskMapping
+from db.models import AIAsset, DataFlow, PartnerCredential, RiskMapping
 
 router = APIRouter(prefix="/partner/v1", tags=["Partner API"])
 
@@ -45,32 +46,25 @@ async def _audit(
     method: str,
     status_code: int,
     response_count: int | None = None,
+    asset_ids: list[UUID | str] | None = None,
 ) -> None:
-    """Write one row to partner_audit_log. Best-effort — never raises."""
-    try:
-        db = request.state.db
-        ip = request.client.host if request.client else None
-        ua = request.headers.get("User-Agent")
-        db.add(
-            PartnerAuditLog(
-                tenant_id=principal.tenant_id,
-                partner_id=principal.partner_id,
-                endpoint=endpoint,
-                method=method,
-                status_code=status_code,
-                response_count=response_count,
-                ip_address=ip,
-                user_agent=ua,
-            )
-        )
-        await db.commit()
-    except Exception:
-        # Audit failures must not break the request. They go to the
-        # observability layer in a real deployment.
-        try:
-            await request.state.db.rollback()
-        except Exception:
-            pass
+    """Write one row to partner_audit_log. Best-effort — never raises.
+
+    Thin wrapper over `collector.audit.record_read`, the same writer the
+    tenant registry uses, so every partner endpoint that calls `_audit`
+    also records path asset ids and redacted query params. List-style
+    endpoints pass the returned `asset_ids`.
+    """
+    await record_read(
+        request,
+        tenant_id=principal.tenant_id,
+        partner_id=principal.partner_id,
+        endpoint=endpoint,
+        method=method,
+        status_code=status_code,
+        response_count=response_count,
+        asset_ids=asset_ids,
+    )
 
 
 async def _enforce_rate_limit(
@@ -236,6 +230,7 @@ async def list_assets(
         method="GET",
         status_code=200,
         response_count=len(data),
+        asset_ids=[a["id"] for a in data],
     )
 
     return {
@@ -465,7 +460,13 @@ async def get_changes(
     next_cursor = data[-1]["asset"]["id"] if has_more and data else None
 
     await _audit(
-        request, principal, "/partner/v1/changes", "GET", 200, len(data)
+        request,
+        principal,
+        "/partner/v1/changes",
+        "GET",
+        200,
+        len(data),
+        asset_ids=[d["asset"]["id"] for d in data],
     )
 
     return {
@@ -509,7 +510,15 @@ async def export_registry(
     ).scalars().all()
 
     now = datetime.utcnow()
-    await _audit(request, principal, "/partner/v1/export", "GET", 200, len(rows))
+    await _audit(
+        request,
+        principal,
+        "/partner/v1/export",
+        "GET",
+        200,
+        len(rows),
+        asset_ids=[a.id for a in rows],
+    )
 
     return {
         "data": [_asset_dict(a) for a in rows],

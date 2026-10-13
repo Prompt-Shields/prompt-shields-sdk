@@ -2,6 +2,7 @@ from uuid import UUID
 from datetime import datetime
 from fastapi import APIRouter, Request, Query, HTTPException
 from sqlalchemy import select, func, and_
+from collector.audit import record_read
 from collector.auth import resolve_tenant
 from collector.embeddings import get_embedding, build_asset_text, mock_embedding
 from db.models import AIAsset, DataFlow, RiskMapping
@@ -50,6 +51,10 @@ async def list_assets(
     has_more = len(data) == limit and total > limit
     next_cursor = str(data[-1]["id"]) if has_more else None
 
+    await record_read(
+        request, tenant_id=tenant_id, status_code=200, response_count=len(data),
+        asset_ids=[a["id"] for a in data],
+    )
     return {"data": data, "meta": {"total": total, "has_more": has_more, "next_cursor": next_cursor}}
 
 
@@ -62,10 +67,14 @@ async def get_asset(asset_id: UUID, request: Request):
     result = await db.execute(stmt)
     asset = result.scalar_one_or_none()
     if asset is None:
+        await record_read(request, tenant_id=tenant_id, status_code=404, response_count=0)
         raise HTTPException(status_code=404, detail={
             "type": "about:blank", "title": "Not Found", "status": 404, "detail": "Asset not found"
         })
-    return _serialize_asset(asset)
+    # Serialize before the audit commit so no expired attribute is reloaded.
+    body = _serialize_asset(asset)
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=1)
+    return body
 
 
 @router.get("/assets/{asset_id}/data-flows")
@@ -76,7 +85,9 @@ async def get_data_flows(asset_id: UUID, request: Request):
     stmt = select(DataFlow).where(DataFlow.asset_id == asset_id, DataFlow.tenant_id == tenant_id)
     result = await db.execute(stmt)
     flows = result.scalars().all()
-    return {"data": [_serialize_flow(f) for f in flows]}
+    data = [_serialize_flow(f) for f in flows]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(data))
+    return {"data": data}
 
 
 @router.get("/assets/{asset_id}/risks")
@@ -87,7 +98,9 @@ async def get_risks(asset_id: UUID, request: Request):
     stmt = select(RiskMapping).where(RiskMapping.asset_id == asset_id, RiskMapping.tenant_id == tenant_id)
     result = await db.execute(stmt)
     risks = result.scalars().all()
-    return {"data": [_serialize_risk(r) for r in risks]}
+    data = [_serialize_risk(r) for r in risks]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(data))
+    return {"data": data}
 
 
 @router.get("/vendors")
@@ -98,6 +111,7 @@ async def list_vendors(request: Request):
     stmt = select(AIAsset.vendor).where(AIAsset.tenant_id == tenant_id).distinct()
     result = await db.execute(stmt)
     vendors = [row[0] for row in result.all()]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(vendors))
     return {"data": vendors}
 
 
@@ -109,6 +123,7 @@ async def list_models(request: Request):
     stmt = select(AIAsset.model).where(AIAsset.tenant_id == tenant_id, AIAsset.model.is_not(None)).distinct()
     result = await db.execute(stmt)
     models = [row[0] for row in result.all()]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(models))
     return {"data": models}
 
 
@@ -155,6 +170,11 @@ async def semantic_search(
             ), 4)
         data.append(serialized)
 
+    # `q` is stored hashed, never as text (see collector.audit).
+    await record_read(
+        request, tenant_id=tenant_id, status_code=200, response_count=len(data),
+        asset_ids=[a["id"] for a in data],
+    )
     return {"data": data, "meta": {"total": len(data), "query": q}}
 
 
