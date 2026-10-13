@@ -53,7 +53,7 @@ AWS Bedrock.
 
 ```
                          ┌──────────────────────────────────────────────┐
-  Users ──OIDC          │                 Web App (Next.js)            │
+  Users ──OIDC           │                 Web App (Next.js)            │
   (Entra ID)────────────▶│  dashboards · explorer · budgets · settings  │
                          └───────────────────────┬──────────────────────┘
                                                  │ REST (JSON)
