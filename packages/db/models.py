@@ -53,6 +53,10 @@ class AIAsset(Base):
     owner_email = Column(Text)
     environment = Column(Text)
     status = Column(Text, default="active")
+    # Telemetry-driven lifecycle: active -> stale -> retired, back to active
+    # when telemetry resumes. Independent of the governance `status` above.
+    lifecycle_state = Column(Text, nullable=False, default="active", server_default="active")
+    lifecycle_changed_at = Column(TIMESTAMP(timezone=True))
     data_classification = Column(Text)
     discovery_source = Column(ARRAY(Text), nullable=False)
     confidence = Column(Text, default="low")
@@ -74,6 +78,7 @@ class AIAsset(Base):
         Index("ix_ai_assets_tenant_bu", "tenant_id", "business_unit"),
         Index("ix_ai_assets_tenant_vendor_model", "tenant_id", "vendor", "model"),
         Index("ix_ai_assets_tenant_status", "tenant_id", "status"),
+        Index("ix_ai_assets_tenant_lifecycle", "tenant_id", "lifecycle_state"),
         Index("ix_ai_assets_discovery_source", "discovery_source", postgresql_using="gin"),
         Index("ix_ai_assets_embedding", "embedding", postgresql_using="hnsw",
               postgresql_ops={"embedding": "vector_cosine_ops"}),
@@ -176,27 +181,67 @@ class PartnerCredential(Base):
 
 
 class PartnerAuditLog(Base):
-    """Append-only log of every Partner API request.
+    """Append-only log of every registry read.
 
-    Used for compliance, debugging, and tenant-visible activity feeds.
+    Covers both the Partner API (`partner_id` set) and the tenant registry
+    `/api/v1/registry/*` (`partner_id` NULL, `api_key_prefix` set). Written
+    by `collector.audit.record_read`. Used for compliance, debugging, and
+    tenant-visible activity feeds.
     """
 
     __tablename__ = "partner_audit_log"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
-    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=False)
+    # NULL for tenant registry reads (no partner involved).
+    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True)
+    # SHA-256 lookup prefix of the caller's API key, never the key itself.
+    api_key_prefix = Column(Text)
     endpoint = Column(Text, nullable=False)
     method = Column(Text, nullable=False)
     status_code = Column(Integer, nullable=False)
     timestamp = Column(TIMESTAMP(timezone=True), default=utcnow)
     response_count = Column(Integer)
+    # Asset ids in the path or returned by the read (capped).
+    asset_ids = Column(ARRAY(UUID(as_uuid=True)))
+    # Query parameters with secrets redacted and free-text search hashed.
+    query_params = Column(JSONB)
     ip_address = Column(Text)
     user_agent = Column(Text)
 
     __table_args__ = (
         Index("ix_partner_audit_tenant_ts", "tenant_id", "timestamp"),
         Index("ix_partner_audit_partner_ts", "partner_id", "timestamp"),
+        Index("ix_partner_audit_ts", "timestamp"),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Data retention — purge and erasure audit trail (#85)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class RetentionAuditLog(Base):
+    """Append-only record of every retention purge, tenant erasure and
+    retention-setting change.
+
+    `tenant_id` deliberately has no foreign key: the row has to outlive the
+    tenant it describes, so an erasure stays provable after the tenant is gone.
+    `details` holds counts (or the new setting), never the deleted data.
+    """
+
+    __tablename__ = "retention_audit_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    action = Column(Text, nullable=False)  # 'purge' | 'erase' | 'set_retention'
+    actor = Column(Text, nullable=False)
+    cutoff = Column(TIMESTAMP(timezone=True))
+    details = Column(JSONB, default=dict)  # row counts per table, or the new setting
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_retention_audit_tenant_ts", "tenant_id", "created_at"),
     )
 
 
