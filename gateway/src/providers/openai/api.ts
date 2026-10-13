@@ -1,10 +1,18 @@
 import { ProviderAPIConfig } from '../types';
+import {
+  getOAuthClientCredentialsToken,
+  hasOAuthClientCredentials,
+} from '../../utils/oauthClientCredentials';
 
 const OpenAIAPIConfig: ProviderAPIConfig = {
   getBaseURL: () => 'https://api.openai.com/v1',
-  headers: ({ providerOptions, fn }) => {
+  headers: async ({ providerOptions, fn, c }) => {
+    // PS fork (#76): keyless auth via OAuth client credentials.
+    const bearer = hasOAuthClientCredentials(providerOptions)
+      ? await getOAuthClientCredentialsToken(providerOptions, c)
+      : providerOptions.apiKey;
     const headersObj: Record<string, string> = {
-      Authorization: `Bearer ${providerOptions.apiKey}`,
+      Authorization: `Bearer ${bearer}`,
     };
     if (providerOptions.openaiOrganization) {
       headersObj['OpenAI-Organization'] = providerOptions.openaiOrganization;
