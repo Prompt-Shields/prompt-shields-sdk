@@ -51,3 +51,8 @@ from collector.partner_registry import router as partner_registry_router  # noqa
 app.include_router(oauth_router)
 app.include_router(partner_admin_router)
 app.include_router(partner_registry_router)
+
+# Operator surface: retention purge and tenant erasure (PS_ADMIN_TOKEN)
+from collector.operator_admin import router as operator_admin_router  # noqa: E402
+
+app.include_router(operator_admin_router)
