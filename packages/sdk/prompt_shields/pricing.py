@@ -6,11 +6,35 @@ ships sensible defaults; customers can override by passing a custom
 
 Returns USD as a Decimal-compatible float. Returns None when the model is
 unknown — the collector treats None cost as "unmetered" rather than zero.
+
+Cached input and cache writes are priced separately when their counts are
+given. `tokens_in` is the total prompt size *including* cached and
+cache-write tokens (the SDK's provider adapters normalise to this), so only
+the remainder is charged at the full input rate. Reasoning/thinking tokens
+are already inside `tokens_out` and are charged at the output rate.
+
+A pricing-table entry is `(input_per_1k, output_per_1k)` or, to override the
+vendor defaults below, `(input_per_1k, output_per_1k, cached_input_per_1k)`
+or `(..., cached_input_per_1k, cache_write_per_1k)`.
 """
+
+# Cache rates as a multiple of the input rate, when a table entry does not
+# give its own. OpenAI: cached input at 50% (gpt-4o / o1 families). Anthropic:
+# cache reads at 10%, 5-minute cache writes at 125%. Google: Gemini 1.5
+# context-cache reads at 25%. Vendors not listed bill cache tokens at the
+# full input rate.
+CACHE_READ_MULTIPLIER: dict[str, float] = {
+    "openai": 0.5,
+    "anthropic": 0.1,
+    "google": 0.25,
+}
+CACHE_WRITE_MULTIPLIER: dict[str, float] = {
+    "anthropic": 1.25,
+}
 
 # (input_per_1k_tokens, output_per_1k_tokens) in USD
 # Source: public pricing pages as of 2026-Q1. Override at runtime if needed.
-DEFAULT_PRICING: dict[tuple[str, str], tuple[float, float]] = {
+DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
     # OpenAI
     ("openai", "gpt-4o"): (0.0025, 0.010),
     ("openai", "gpt-4o-mini"): (0.00015, 0.0006),
@@ -39,6 +63,8 @@ def estimate_cost(
     tokens_in: int | None,
     tokens_out: int | None,
     pricing_table: dict | None = None,
+    tokens_cached: int | None = None,
+    tokens_cache_write: int | None = None,
 ) -> float | None:
     """Estimate USD cost for a single call.
 
@@ -55,5 +81,48 @@ def estimate_cost(
     if rates is None:
         return None
 
-    in_rate, out_rate = rates
-    return round((tokens_in / 1000.0) * in_rate + (tokens_out / 1000.0) * out_rate, 6)
+    in_rate, out_rate = rates[0], rates[1]
+    cached_rate = (
+        rates[2] if len(rates) > 2
+        else in_rate * CACHE_READ_MULTIPLIER.get(vendor, 1.0)
+    )
+    write_rate = (
+        rates[3] if len(rates) > 3
+        else in_rate * CACHE_WRITE_MULTIPLIER.get(vendor, 1.0)
+    )
+    cached = tokens_cached or 0
+    cache_write = tokens_cache_write or 0
+    # Never charge a negative uncached remainder if counts are inconsistent.
+    uncached = max(tokens_in - cached - cache_write, 0)
+    cost = (
+        uncached * in_rate
+        + cached * cached_rate
+        + cache_write * write_rate
+        + tokens_out * out_rate
+    ) / 1000.0
+    return round(cost, 6)
+
+
+USAGE_DETAIL_FIELDS = ("tokens_cached", "tokens_cache_write", "tokens_reasoning")
+
+# `cost_source` values: how the event's `cost` was produced.
+COST_SOURCE_PRICING_TABLE = "pricing_table"
+COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS = "pricing_table_estimated_tokens"
+
+
+def add_usage_detail_fields(event: dict, adapter_fields: dict) -> None:
+    """Copy cached/reasoning counts onto `event` and set `cost_source`.
+
+    Detail counts are only added when the provider reported them. When
+    `cost` is None (unknown model or tokens), `cost_source` is omitted.
+    """
+    for key in USAGE_DETAIL_FIELDS:
+        value = adapter_fields.get(key)
+        if value is not None:
+            event[key] = value
+    if event.get("cost") is not None:
+        event["cost_source"] = (
+            COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS
+            if adapter_fields.get("tokens_estimated")
+            else COST_SOURCE_PRICING_TABLE
+        )

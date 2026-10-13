@@ -361,6 +361,45 @@ async def test_search_falls_back_to_keywords_when_disabled(
     assert miss.json()["data"] == []
 
 
+async def test_search_is_audited_in_both_modes(seeded_db, monkeypatch, no_network):
+    from collector.app import app
+    from db.models import PartnerAuditLog
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        set_embedder(TinyEmbedder())
+        await _seed(client)
+        semantic = await client.get(
+            "/api/v1/registry/search", params={"q": "legal contract"}, headers=HEADERS
+        )
+        set_embedder(None)
+        keyword = await client.get(
+            "/api/v1/registry/search", params={"q": "HR screening"}, headers=HEADERS
+        )
+
+    assert semantic.json()["meta"]["mode"] == "semantic"
+    assert keyword.json()["meta"]["mode"] == "keyword"
+    async with AsyncSession(seeded_db) as session:
+        rows = (
+            await session.execute(
+                select(PartnerAuditLog)
+                .where(PartnerAuditLog.endpoint == "/api/v1/registry/search")
+                .order_by(PartnerAuditLog.timestamp)
+            )
+        ).scalars().all()
+
+    assert [r.response_count for r in rows] == [
+        len(semantic.json()["data"]),
+        len(keyword.json()["data"]),
+    ]
+    assert [str(i) for i in rows[1].asset_ids] == [a["id"] for a in keyword.json()["data"]]
+    # The search text is stored hashed, never as plain text.
+    assert all(r.query_params["q"].startswith("sha256:") for r in rows)
+
+
 async def test_reembed_rebuilds_then_clears(seeded_db):
     from collector.app import app
     from collector.reembed import reembed
