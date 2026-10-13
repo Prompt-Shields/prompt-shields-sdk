@@ -93,3 +93,15 @@ async def test_ingest_limit_disabled_when_zero(limiter, monkeypatch):
 
     assert all(r.status_code == 200 for r in responses)
     assert "X-RateLimit-Limit" not in responses[0].headers
+
+
+def test_limiter_memory_bounded_with_many_low_volume_keys(monkeypatch):
+    now = [1_700_000_030.0]
+    monkeypatch.setattr(partner_rate_limit, "time", SimpleNamespace(time=lambda: now[0]))
+    lim = FixedWindowRateLimiter()
+    for minute in range(30):
+        now[0] = 1_700_000_030.0 + 60 * minute
+        for tenant in range(50):
+            lim.check(tenant, 100)
+    # Only the current and previous minute's buckets survive.
+    assert len(lim._counts) <= 100
