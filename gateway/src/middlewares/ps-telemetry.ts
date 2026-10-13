@@ -4,7 +4,11 @@
  * to the Prompt Shields collector service.
  */
 
-import { observeStream, StreamSummary } from './psStreamObserver';
+import {
+  inputTokensOf,
+  observeStream,
+  StreamSummary,
+} from './psStreamObserver';
 
 interface PSConfig {
   collectorUrl: string;
@@ -61,7 +65,7 @@ export function usageTokens(body: any): {
   const u = body?.usage;
   if (!u || typeof u !== 'object') return {};
   return {
-    tokens_in: u.prompt_tokens ?? u.input_tokens,
+    tokens_in: inputTokensOf(u),
     tokens_out: u.completion_tokens ?? u.output_tokens,
   };
 }

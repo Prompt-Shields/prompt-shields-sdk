@@ -31,10 +31,34 @@ const RESPONSES_TERMINAL = new Set([
 
 const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
 
+/**
+ * Total input tokens from a usage object. Chat Completions `prompt_tokens`
+ * and Responses `input_tokens` already include cached tokens; Anthropic
+ * Messages `input_tokens` excludes cache reads and writes, which it reports
+ * as `cache_read_input_tokens` / `cache_creation_input_tokens`, so they are
+ * added back (#73).
+ */
+export function inputTokensOf(u: any): number | undefined {
+  if (!u || typeof u !== 'object') return undefined;
+  const prompt = num(u.prompt_tokens);
+  if (prompt !== undefined) return prompt;
+  const input = num(u.input_tokens);
+  if (input === undefined) return undefined;
+  return (
+    input +
+    (num(u.cache_read_input_tokens) ?? 0) +
+    (num(u.cache_creation_input_tokens) ?? 0)
+  );
+}
+
 /** Incremental SSE parser that records usage, model and terminal events. */
 export class SSEUsageTracker {
   private decoder = new TextDecoder();
   private partial = '';
+  // Latest Anthropic-style counts, which may arrive in different events
+  private input?: number;
+  private cacheRead?: number;
+  private cacheCreation?: number;
   readonly summary: StreamSummary = {
     terminal: false,
     truncated: false,
@@ -108,10 +132,24 @@ export class SSEUsageTracker {
 
   private usage(u: any) {
     if (!u || typeof u !== 'object') return;
-    const tokensIn = num(u.prompt_tokens) ?? num(u.input_tokens);
     const tokensOut = num(u.completion_tokens) ?? num(u.output_tokens);
     // Anthropic reports cumulative counts, so the latest value wins.
-    if (tokensIn !== undefined) this.summary.tokens_in = tokensIn;
+    const prompt = num(u.prompt_tokens);
+    if (prompt !== undefined) {
+      this.summary.tokens_in = prompt;
+    } else {
+      this.input = num(u.input_tokens) ?? this.input;
+      this.cacheRead = num(u.cache_read_input_tokens) ?? this.cacheRead;
+      this.cacheCreation =
+        num(u.cache_creation_input_tokens) ?? this.cacheCreation;
+      if (this.input !== undefined) {
+        this.summary.tokens_in = inputTokensOf({
+          input_tokens: this.input,
+          cache_read_input_tokens: this.cacheRead,
+          cache_creation_input_tokens: this.cacheCreation,
+        });
+      }
+    }
     if (tokensOut !== undefined) this.summary.tokens_out = tokensOut;
   }
 }
