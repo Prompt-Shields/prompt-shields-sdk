@@ -272,6 +272,32 @@ def test_responses_api_event(fakes):
     assert event["prompt_text"] == "be brief call 555-123-4567"
 
 
+def _responses_usage():
+    return NS(input_tokens=2006, output_tokens=300,
+              input_tokens_details=NS(cached_tokens=1920),
+              output_tokens_details=NS(reasoning_tokens=7))
+
+
+def test_responses_usage_details_and_cached_cost():
+    fields = inst._extract_responses(NS(usage=_responses_usage(), output=[],
+                                        model="gpt-4o"))
+    assert fields["tokens_cached"] == 1920
+    assert fields["tokens_reasoning"] == 7
+    call = {"api": "responses", "vendor": "openai", "model": "gpt-4o",
+            "messages": [], "api_key": None,
+            "state": NS(metadata={}, scan_pii=False, send_prompt_text=False,
+                        pricing_table=None)}
+    event = inst._event(call, None, 1, adapter_fields=fields)
+    assert event["tokens_cached"] == 1920
+    assert event["cost"] == pytest.approx(0.005615)  # cached input at 50%
+
+    acc = inst._ResponsesAccumulator("openai", [])
+    acc.observe(NS(type="response.completed",
+                   response=NS(usage=_responses_usage(), output=[], model="gpt-4o")))
+    streamed = acc.adapter_fields()
+    assert (streamed["tokens_cached"], streamed["tokens_reasoning"]) == (1920, 7)
+
+
 def test_sync_stream_emits_once_and_hides_injected_usage_chunk(fakes):
     prompt_shields.instrument(ps_api_key="ps_key")
     resource = fakes.chat.Completions()

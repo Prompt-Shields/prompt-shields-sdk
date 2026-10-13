@@ -36,7 +36,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-from prompt_shields.providers import get_adapter
+from prompt_shields.providers import _field, _int, get_adapter
 from prompt_shields.streaming import (
     AsyncShieldsStream,
     ShieldsStream,
@@ -411,9 +411,16 @@ def _extract_responses(response: Any) -> dict:
         for item in getattr(response, "output", None) or []
         if getattr(item, "type", None) == "function_call"
     ]
+    # Like Chat Completions, `input_tokens` includes cached tokens and
+    # `output_tokens` includes reasoning tokens; the details are subsets.
+    input_details = _field(usage, "input_tokens_details")
+    output_details = _field(usage, "output_tokens_details")
     return {
-        "tokens_in": getattr(usage, "input_tokens", None) if usage else None,
-        "tokens_out": getattr(usage, "output_tokens", None) if usage else None,
+        "tokens_in": _int(_field(usage, "input_tokens")),
+        "tokens_out": _int(_field(usage, "output_tokens")),
+        "tokens_cached": _int(_field(input_details, "cached_tokens")),
+        "tokens_cache_write": None,
+        "tokens_reasoning": _int(_field(output_details, "reasoning_tokens")),
         "tool_calls_used": tool_calls or None,
         "served_model": getattr(response, "model", None),
     }
@@ -433,6 +440,10 @@ class _ResponsesAccumulator(StreamAccumulator):
                 self.tokens_in = fields["tokens_in"]
             if fields["tokens_out"] is not None:
                 self.tokens_out = fields["tokens_out"]
+            if fields["tokens_cached"] is not None:
+                self.tokens_cached = fields["tokens_cached"]
+            if fields["tokens_reasoning"] is not None:
+                self.tokens_reasoning = fields["tokens_reasoning"]
         elif etype == "response.output_text.delta":
             delta = getattr(event, "delta", None)
             if isinstance(delta, str):
