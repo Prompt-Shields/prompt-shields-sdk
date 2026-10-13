@@ -29,6 +29,26 @@ Applications can annotate requests with business context via HTTP headers:
 - `X-PS-Data-Classification` — e.g., "confidential"
 - `X-PS-Environment` — e.g., "production"
 
+## psOtel.ts (OpenTelemetry GenAI spans, #70)
+
+Opt-in. With `PS_OTEL_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) set,
+the gateway emits one CLIENT span per LLM call as OTLP/HTTP JSON, using GenAI
+semantic conventions 1.40: `gen_ai.operation.name`, `gen_ai.provider.name`
+(`aws.bedrock`, `gcp.vertex_ai`, ...), `gen_ai.request.model` and sampling
+params, `gen_ai.response.model`/`id`/`finish_reasons` (normalised to `stop`,
+`length`, `tool_call`, `content_filter`, `error`), `gen_ai.usage.*` and
+`error.type`. `X-PS-*` business context goes to `ps.*` span attributes and
+`X-PS-Environment` to the `deployment.environment.name` resource attribute.
+An inbound `traceparent` makes the span a child of the caller's span.
+
+- `PS_OTEL_ENDPOINT` — full traces URL, e.g. `http://collector:8000/ingest/otel/v1/traces`
+- `PS_OTEL_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` — `k=v,k2=v2`; `PS_API_KEY` is sent as a bearer token when no `Authorization` is given
+- `OTEL_SERVICE_NAME` — default `prompt-shields-gateway`
+- `PS_OTEL_CAPTURE_CONTENT` / `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` — `true` adds `gen_ai.input.messages`, `gen_ai.output.messages` and `gen_ai.system_instructions` (non-streamed calls only). Off by default.
+- `PS_OTEL_MAX_BATCH` (64), `PS_OTEL_FLUSH_MS` (5000), `PS_OTEL_MAX_QUEUE` (2048) — batching on Node. On Workers each request flushes the queue under `waitUntil`.
+
+Export never blocks or fails a request; failed batches are dropped.
+
 ## Cost-aware routing (spec)
 
 The SDK never picks a model. It expresses *intent*; the gateway owns the

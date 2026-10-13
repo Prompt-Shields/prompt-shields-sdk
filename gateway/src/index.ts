@@ -17,6 +17,7 @@ import { hooks } from './middlewares/hooks';
 import { memoryCache } from './middlewares/cache';
 import { psRouter } from './middlewares/router/hono';
 import { psTelemetry } from './middlewares/ps-telemetry';
+import { otelConfig, psOtel } from './middlewares/psOtel';
 
 // Handlers
 import { proxyHandler } from './handlers/proxyHandler';
@@ -137,6 +138,13 @@ if (process.env.PS_ROUTER_ENABLED === 'true') {
 // fold the routing decision (c.get('psRoute')) into requested_model/served_model.
 if (process.env.PS_API_KEY) {
   app.use('*', psTelemetry());
+}
+
+// OpenTelemetry GenAI spans (semconv 1.40, OTLP/HTTP JSON). Opt-in via
+// PS_OTEL_ENDPOINT; prompt/completion content only with PS_OTEL_CAPTURE_CONTENT.
+const psOtelConfig = otelConfig();
+if (psOtelConfig) {
+  app.use('*', psOtel(psOtelConfig));
 }
 
 // Use hooks middleware for all routes
