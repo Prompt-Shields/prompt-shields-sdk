@@ -10,6 +10,14 @@ export const GoogleBatchCreateConfig: ProviderConfig = {
     param: 'model',
     required: true,
     transform: (params: Record<string, any>) => {
+      // Ported from Portkey 2.0.0: custom or base models given as resource
+      // names (`projects/...`, `publishers/...`) pass through as is.
+      if (
+        params.model?.startsWith('projects') ||
+        params.model?.startsWith('publishers')
+      ) {
+        return params.model;
+      }
       const { model, provider } = getModelAndProvider(params.model);
       return `publishers/${provider}/models/${model}`;
     },

@@ -1,0 +1,135 @@
+{
+  "$schema": "../route-policy.v1.schema.json",
+  "schema_version": "route-policy.v1",
+  "policy_version": "nordic-sovereign-1",
+  "default_group": "balanced",
+  "group_order": ["cheap", "balanced", "frontier"],
+  "quality_to_group": {
+    "draft": "cheap",
+    "balanced": "balanced",
+    "critical": "frontier"
+  },
+  "strategy": "heuristic",
+  "groups": {
+    "cheap": [
+      {
+        "model": "gpt-4o-mini",
+        "provider": "openai",
+        "input_cost_per_1k": 0.00015,
+        "output_cost_per_1k": 0.0006,
+        "jurisdiction": "US",
+        "zdr": false,
+        "us_cloud_act_exposure": true
+      },
+      {
+        "model": "scaleway-small",
+        "provider": "scaleway",
+        "input_cost_per_1k": 0.0002,
+        "output_cost_per_1k": 0.0005,
+        "jurisdiction": "EEA",
+        "zdr": true,
+        "us_cloud_act_exposure": false
+      },
+      {
+        "model": "mistral-small-eu",
+        "provider": "mistral-eu",
+        "input_cost_per_1k": 0.0002,
+        "output_cost_per_1k": 0.0006,
+        "jurisdiction": "EEA",
+        "zdr": true,
+        "us_cloud_act_exposure": false
+      }
+    ],
+    "balanced": [
+      {
+        "model": "gpt-4o",
+        "provider": "openai",
+        "input_cost_per_1k": 0.0025,
+        "output_cost_per_1k": 0.01,
+        "jurisdiction": "US",
+        "zdr": false,
+        "us_cloud_act_exposure": true
+      },
+      {
+        "model": "berget-llama-70b",
+        "provider": "berget",
+        "input_cost_per_1k": 0.003,
+        "output_cost_per_1k": 0.012,
+        "jurisdiction": "EEA",
+        "zdr": true,
+        "us_cloud_act_exposure": false
+      }
+    ],
+    "frontier": [
+      {
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "input_cost_per_1k": 0.003,
+        "output_cost_per_1k": 0.015,
+        "jurisdiction": "US",
+        "zdr": false,
+        "us_cloud_act_exposure": true
+      },
+      {
+        "model": "mistral-large-eu",
+        "provider": "mistral-eu",
+        "input_cost_per_1k": 0.004,
+        "output_cost_per_1k": 0.02,
+        "jurisdiction": "EEA",
+        "zdr": true,
+        "us_cloud_act_exposure": false
+      }
+    ],
+    "us-hosted": [
+      {
+        "model": "gpt-4o",
+        "provider": "openai",
+        "input_cost_per_1k": 0.0025,
+        "output_cost_per_1k": 0.01,
+        "jurisdiction": "US",
+        "zdr": false,
+        "us_cloud_act_exposure": true
+      }
+    ]
+  },
+  "sensitivity": {
+    "levels": ["public", "internal", "confidential", "restricted"],
+    "unclassified_default": "confidential",
+    "pii_escalation": {
+      "health_data": "restricted",
+      "national_id": "restricted",
+      "iban": "confidential",
+      "email": "internal"
+    }
+  },
+  "data_policy": {
+    "public": { "jurisdictions": ["any"] },
+    "internal": { "jurisdictions": ["EEA", "US"], "require_zdr": false },
+    "confidential": {
+      "jurisdictions": ["EEA"],
+      "require_zdr": true,
+      "us_cloud_act_exposure": false
+    },
+    "restricted": {
+      "jurisdictions": ["NO", "EEA"],
+      "providers": ["berget", "mistral-eu"],
+      "require_zdr": true
+    }
+  },
+  "use_cases": {
+    "legal-review": { "min_group": "frontier" },
+    "claim-summary": {
+      "eval_set": "claims-v3",
+      "min_parity": 0.95,
+      "eligible_models": ["mistral-small-eu", "berget-llama-70b"]
+    }
+  },
+  "fallback": {
+    "unknown_group": "default_group",
+    "budget_unsatisfiable": "cheapest",
+    "no_compliant_candidate": "fail_closed",
+    "max_attempts": 3,
+    "retry_after_max_wait_ms": 10000,
+    "content_filter_refusal": "raise"
+  }
+}
