@@ -1,0 +1,70 @@
+---
+title: Data Retention and Erasure
+description: How long raw usage events are kept, how to purge them, and how to erase a tenant
+---
+
+# Data Retention and Erasure
+
+Raw usage events (`ai_usage_events`) can include session ids and prompt hashes, so the collector keeps them for a limited time. Assets in the registry, with their first-seen and last-seen dates, are kept. Purging old events does not remove an asset.
+
+## Retention period
+
+Each tenant keeps usage events for `retention_days` days:
+
+| Source | Setting |
+|--------|---------|
+| Default for all tenants | `PS_RETENTION_DAYS_DEFAULT` (default `365`) |
+| Per-tenant override | `tenants.settings.retention_days`, set through the operator API below |
+
+Valid values are 1 to 36500. A missing or invalid override falls back to the default, so a bad setting can never widen what gets deleted.
+
+Events with a `timestamp` older than `now - retention_days` are eligible for purge. Code that reads events can clamp its window to the same cutoff:
+
+```python
+from collector.retention import retention_cutoff, get_retention_cutoff
+
+start = max(start, retention_cutoff(tenant))           # with a Tenant or its settings dict
+cutoff = await get_retention_cutoff(db, tenant_id)     # looks the tenant up; None if absent
+```
+
+The Partner API `usage-summary` endpoint already does this, so a `90d` summary for a tenant with 30-day retention covers only the last 30 days, even before the purge has run.
+
+## Running the purge
+
+Nothing is deleted until an operator runs the purge. The collector has no built-in scheduler, so run it from cron or a Kubernetes CronJob:
+
+```bash
+python -m collector.retention purge                 # every tenant
+python -m collector.retention purge --tenant <id>   # one tenant
+python -m collector.retention purge --dry-run       # count only
+```
+
+The purge deletes in batches of `PS_RETENTION_BATCH_SIZE` rows (default `5000`) and commits after each batch, so it never holds a long lock on `ai_usage_events`. It is idempotent: a second run deletes nothing. Each run that deletes rows writes one `retention_audit_log` row per tenant with the cutoff and the count.
+
+<Warning>
+The first purge after upgrading deletes every event older than the default 365 days. Run it with `--dry-run` first, and set per-tenant overrides before that if any tenant needs longer.
+</Warning>
+
+## Operator API
+
+These endpoints act across tenants, so a tenant API key cannot call them. Set `PS_ADMIN_TOKEN` and send `Authorization: Bearer $PS_ADMIN_TOKEN`. Without `PS_ADMIN_TOKEN` the endpoints return 404.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/v1/operator/retention/purge` | Purge. Body: `{"tenant_id": "<optional>", "dry_run": false}` |
+| `GET` | `/api/v1/operator/tenants/{tenant_id}/retention` | Show retention days and the current cutoff |
+| `PUT` | `/api/v1/operator/tenants/{tenant_id}/retention` | Set the override. Body: `{"retention_days": 90}`, or `null` to clear it |
+| `DELETE` | `/api/v1/operator/tenants/{tenant_id}?confirm={tenant_id}` | Erase the tenant |
+
+## Erasing a tenant
+
+`DELETE /api/v1/operator/tenants/{tenant_id}` removes everything the tenant owns: usage events, data flows, risk mappings, partner audit log, partner credentials, assets, and finally the tenant row. The `confirm` query parameter must repeat the tenant id.
+
+Erasure runs in batches, child tables first. If it stops part-way, run it again: it is idempotent and reports `tenant_existed: false` once the tenant row is gone. Every erasure is recorded in `retention_audit_log` with per-table counts. That table has no foreign key to `tenants`, so the record survives the erasure. It stores counts only, never the deleted data.
+
+Every delete is filtered on `tenant_id`. The tests check that purging or erasing one tenant leaves every other tenant's rows untouched, and that any new table with a `tenant_id` column is included in erasure.
+
+## Not yet covered
+
+- **Erasure by end user.** Events do not store a user id today: the collector drops `user_external_id` at ingest. Delete-by-user can be added when user ids are stored.
+- Retention for `partner_audit_log`, which is kept until the tenant is erased.
