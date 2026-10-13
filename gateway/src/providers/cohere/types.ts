@@ -182,7 +182,7 @@ export interface Citation {
   type?: any;
 }
 
-namespace V2ChatStreamResponse {
+export namespace V2ChatStreamResponse {
   export interface MessageStart {
     type: 'message-start';
     id: string;
