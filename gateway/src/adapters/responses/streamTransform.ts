@@ -6,6 +6,16 @@
  */
 
 import { randomUUID } from 'crypto';
+import { normalizeUsage, toResponsesUsage } from '../shared';
+import { toResponsesStatus } from './responseTransform';
+
+interface FunctionCallItem {
+  id: string;
+  call_id: string;
+  name: string;
+  arguments: string;
+  outputIndex: number;
+}
 
 interface StreamState {
   responseId: string;
@@ -20,6 +30,26 @@ interface StreamState {
   sequenceNumber: number;
   accumulatedText: string;
   createdAt: number;
+  /** PS fork (#73): cached input tokens (input_tokens_details) */
+  cachedTokens: number;
+  /** PS fork (#73): reasoning output tokens (output_tokens_details) */
+  reasoningTokens: number;
+  totalTokens: number;
+  /** PS fork (#73): function calls in order; message item is output 0 */
+  functionCalls: FunctionCallItem[];
+  /** Chat tool_call index → position in functionCalls */
+  toolCallByIndex: Record<number, number>;
+}
+
+function functionCallOutput(fc: FunctionCallItem, status: string) {
+  return {
+    id: fc.id,
+    type: 'function_call',
+    call_id: fc.call_id,
+    name: fc.name,
+    arguments: fc.arguments,
+    status,
+  };
 }
 
 /**
@@ -47,6 +77,12 @@ function buildResponseSnapshot(
             },
           ],
         },
+        ...state.functionCalls.map((fc) =>
+          functionCallOutput(
+            fc,
+            status === 'in_progress' ? 'in_progress' : 'completed'
+          )
+        ),
       ]
     : [];
 
@@ -57,7 +93,13 @@ function buildResponseSnapshot(
     completed_at: status === 'completed' ? Math.floor(Date.now() / 1000) : null,
     status,
     incomplete_details:
-      status === 'incomplete' ? { reason: 'max_output_tokens' } : null,
+      status === 'incomplete'
+        ? {
+            reason:
+              toResponsesStatus(state.finishReason).reason ??
+              'max_output_tokens',
+          }
+        : null,
     model: state.model,
     previous_response_id: null,
     instructions: null,
@@ -76,10 +118,10 @@ function buildResponseSnapshot(
     reasoning: null,
     usage: {
       input_tokens: state.inputTokens,
-      input_tokens_details: { cached_tokens: 0 },
+      input_tokens_details: { cached_tokens: state.cachedTokens },
       output_tokens: state.outputTokens,
-      output_tokens_details: { reasoning_tokens: 0 },
-      total_tokens: state.inputTokens + state.outputTokens,
+      output_tokens_details: { reasoning_tokens: state.reasoningTokens },
+      total_tokens: state.totalTokens || state.inputTokens + state.outputTokens,
     },
     max_output_tokens: null,
     max_tool_calls: null,
@@ -106,6 +148,12 @@ export function transformStreamChunk(
       state.completed = true;
       // Send completion events with accumulated output
       const finalText = state.accumulatedText;
+      // PS fork (#73): truncated or filtered output ends as incomplete
+      const finalStatus = toResponsesStatus(state.finishReason).status;
+      const finalEvent =
+        finalStatus === 'incomplete'
+          ? 'response.incomplete'
+          : 'response.completed';
       return [
         `event: response.output_text.done\ndata: ${JSON.stringify({
           type: 'response.output_text.done',
@@ -148,10 +196,28 @@ export function transformStreamChunk(
             ],
           },
         })}\n\n`,
-        `event: response.completed\ndata: ${JSON.stringify({
-          type: 'response.completed',
+        // PS fork (#73): close each function call item
+        ...state.functionCalls.flatMap((fc) => [
+          `event: response.function_call_arguments.done\ndata: ${JSON.stringify(
+            {
+              type: 'response.function_call_arguments.done',
+              sequence_number: state.sequenceNumber++,
+              item_id: fc.id,
+              output_index: fc.outputIndex,
+              arguments: fc.arguments,
+            }
+          )}\n\n`,
+          `event: response.output_item.done\ndata: ${JSON.stringify({
+            type: 'response.output_item.done',
+            sequence_number: state.sequenceNumber++,
+            output_index: fc.outputIndex,
+            item: functionCallOutput(fc, 'completed'),
+          })}\n\n`,
+        ]),
+        `event: ${finalEvent}\ndata: ${JSON.stringify({
+          type: finalEvent,
           sequence_number: state.sequenceNumber++,
-          response: buildResponseSnapshot(state, 'completed', true, finalText),
+          response: buildResponseSnapshot(state, finalStatus, true, finalText),
         })}\n\n`,
       ].join('');
     }
@@ -231,34 +297,45 @@ export function transformStreamChunk(
     );
   }
 
-  // Handle tool calls
-  if (delta?.tool_calls) {
+  // Handle tool calls. PS fork (#73): each call is its own output item
+  // after the message (output_index 1..n) with a stable item id, and
+  // argument deltas reference that item.
+  if (Array.isArray(delta?.tool_calls)) {
     for (const tc of delta.tool_calls) {
-      if (tc.function?.name) {
+      if (!tc) continue;
+      const toolIdx = tc.index ?? 0;
+      const knownPos = state.toolCallByIndex[toolIdx];
+      let fc =
+        knownPos === undefined ? undefined : state.functionCalls[knownPos];
+      // A new id on a known index is a new call (Gemini restarts at 0)
+      if (!fc || (tc.id && tc.id !== fc.call_id)) {
+        fc = {
+          id: `fc_${randomUUID()}`,
+          call_id: tc.id || `call_${randomUUID()}`,
+          name: tc.function?.name || '',
+          arguments: '',
+          outputIndex: state.functionCalls.length + 1,
+        };
+        state.toolCallByIndex[toolIdx] = state.functionCalls.length;
+        state.functionCalls.push(fc);
         events.push(
           `event: response.output_item.added\ndata: ${JSON.stringify({
             type: 'response.output_item.added',
             sequence_number: state.sequenceNumber++,
-            output_index: tc.index ?? 0,
-            item: {
-              id: `fc_${randomUUID()}`,
-              type: 'function_call',
-              call_id: tc.id,
-              name: tc.function.name,
-              arguments: '',
-              status: 'in_progress',
-            },
+            output_index: fc.outputIndex,
+            item: functionCallOutput(fc, 'in_progress'),
           })}\n\n`
         );
       }
       if (tc.function?.arguments) {
+        fc.arguments += tc.function.arguments;
         events.push(
           `event: response.function_call_arguments.delta\ndata: ${JSON.stringify(
             {
               type: 'response.function_call_arguments.delta',
               sequence_number: state.sequenceNumber++,
-              item_id: state.outputItemId,
-              output_index: tc.index ?? 0,
+              item_id: fc.id,
+              output_index: fc.outputIndex,
               delta: tc.function.arguments,
             }
           )}\n\n`
@@ -269,8 +346,13 @@ export function transformStreamChunk(
 
   // Track usage if provided
   if (parsed.usage) {
-    state.inputTokens = parsed.usage.prompt_tokens || 0;
-    state.outputTokens = parsed.usage.completion_tokens || 0;
+    // PS fork (#73): keep cached and reasoning token detail
+    const u = toResponsesUsage(normalizeUsage(parsed.usage));
+    state.inputTokens = u.input_tokens;
+    state.outputTokens = u.output_tokens;
+    state.cachedTokens = u.input_tokens_details.cached_tokens;
+    state.reasoningTokens = u.output_tokens_details.reasoning_tokens;
+    state.totalTokens = u.total_tokens;
   }
 
   // Track finish reason
@@ -298,5 +380,10 @@ export function createStreamState(): StreamState {
     sequenceNumber: 0,
     accumulatedText: '',
     createdAt: 0,
+    cachedTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    functionCalls: [],
+    toolCallByIndex: {},
   };
 }

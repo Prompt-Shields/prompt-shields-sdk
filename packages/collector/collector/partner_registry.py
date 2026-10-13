@@ -29,6 +29,7 @@ from collector.partner_auth import (
     require_scope,
 )
 from collector.partner_rate_limit import get_rate_limiter
+from collector.retention import get_retention_cutoff
 from db.models import (
     AIAsset,
     AIUsageEvent,
@@ -376,7 +377,13 @@ async def get_usage_summary(
             },
         )
 
-    since = datetime.now(UTC) - timedelta(days=USAGE_PERIODS[period])
+    now = datetime.now(UTC)
+    since = now - timedelta(days=USAGE_PERIODS[period])
+    # Never report events past the tenant's retention period, even if the
+    # purge has not run yet (#85).
+    cutoff = await get_retention_cutoff(db, principal.tenant_id, now)
+    if cutoff is not None and cutoff > since:
+        since = cutoff
     row = (
         (
             await db.execute(
