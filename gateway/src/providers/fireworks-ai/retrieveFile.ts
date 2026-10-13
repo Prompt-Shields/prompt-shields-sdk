@@ -1,8 +1,7 @@
-import { FireworksFile } from './types';
 import { fireworksDatasetToOpenAIFile } from './utils';
 
 export const FireworksFileRetrieveResponseTransform = (
-  response: FireworksFile,
+  response: any,
   responseStatus: number
 ) => {
   if (responseStatus === 200) {

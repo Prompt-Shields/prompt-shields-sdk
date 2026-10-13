@@ -1,10 +1,10 @@
+import { getAnthropicChatCompleteResponseTransform } from '../anthropic/chatComplete';
 import { RequestHandler } from '../types';
 import { GoogleBatchRecord } from './types';
 import { getModelAndProvider, isEmbeddingModel } from './utils';
 import { responseTransformers } from '../open-ai-base';
 import {
   GoogleChatCompleteResponseTransform,
-  VertexAnthropicChatCompleteResponseTransform,
   VertexLlamaChatCompleteResponseTransform,
 } from './chatComplete';
 import { BatchEndpoints, GOOGLE_VERTEX_AI } from '../../globals';
@@ -19,7 +19,7 @@ const responseTransforms = {
   },
   anthropic: {
     [BatchEndpoints.CHAT_COMPLETIONS]:
-      VertexAnthropicChatCompleteResponseTransform,
+      getAnthropicChatCompleteResponseTransform(GOOGLE_VERTEX_AI),
     [BatchEndpoints.EMBEDDINGS]: null,
   },
   meta: {

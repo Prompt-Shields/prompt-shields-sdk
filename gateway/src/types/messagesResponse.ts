@@ -239,6 +239,7 @@ export enum ANTHROPIC_STOP_REASON {
   tool_use = 'tool_use',
   pause_turn = 'pause_turn',
   refusal = 'refusal',
+  model_context_window_exceeded = 'model_context_window_exceeded',
 }
 
 export interface ServerToolUsage {
