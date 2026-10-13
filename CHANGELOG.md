@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Collector: OTel GenAI ingest** — `POST /ingest/otel/v1/traces` accepts OTLP/HTTP JSON traces with the same tenant key as `/ingest/events` and turns `gen_ai.*` spans into usage events with discovery source `otel`. Other spans are ignored. Prompt and completion content attributes and span events are always dropped. Bodies are capped at 4 MiB and 2000 spans. Protobuf is not supported yet (#92).
 - **Partner API `GET /partner/v1/assets/{asset_id}/usage-summary`** — the documented endpoint now exists. It returns requests, tokens in and out, cost, unique sessions and average latency for the last `7d`, `30d` or `90d` from `ai_usage_events`. Assets in another tenant return 404 (#99).
 - **Collector: per-tenant ingest rate limit** — `POST /ingest/events` now enforces `PS_RATE_LIMIT_PER_MINUTE` (default 100 requests/minute, `0` disables) per tenant, reusing the Partner API's fixed-window limiter. Exceeding it returns `429` with `Retry-After` and `X-RateLimit-*` headers. In-process, so the count is per worker (#82).
 - **Gateway: unified, provider-backed `GET /v1/models`** — goes through the same validation as other `/v1` routes, proxies to the configured provider, and returns Anthropic's list shape (with `limit` / `after_id` / `before_id`) when the caller sends `anthropic-version`, so Claude Code can discover models through the gateway; other callers get OpenAI's shape (#79).
