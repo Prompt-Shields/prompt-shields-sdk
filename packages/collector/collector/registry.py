@@ -1,10 +1,17 @@
-from uuid import UUID
+import operator
+import re
 from datetime import datetime
-from fastapi import APIRouter, Request, Query, HTTPException
-from sqlalchemy import select, func, and_
-from collector.auth import resolve_tenant
-from collector.embeddings import get_embedding, build_asset_text, mock_embedding
+from functools import reduce
+from uuid import UUID
+
 from db.models import AIAsset, DataFlow, RiskMapping
+from fastapi import APIRouter, HTTPException, Query, Request
+from sqlalchemy import and_, case, func, or_, select
+
+from collector.audit import record_read
+from collector.auth import resolve_tenant
+from collector.embeddings import get_embedding, mock_embedding
+from collector.lifecycle import LifecycleState
 
 router = APIRouter(prefix="/api/v1/registry")
 
@@ -14,6 +21,7 @@ async def list_assets(
     request: Request,
     business_unit: str | None = None,
     status: str | None = None,
+    lifecycle_state: LifecycleState | None = None,
     discovery_source: str | None = None,
     since: str | None = None,
     after: str | None = None,
@@ -27,6 +35,8 @@ async def list_assets(
         conditions.append(AIAsset.business_unit == business_unit)
     if status:
         conditions.append(AIAsset.status == status)
+    if lifecycle_state:
+        conditions.append(AIAsset.lifecycle_state == lifecycle_state)
     if discovery_source:
         conditions.append(AIAsset.discovery_source.any(discovery_source))
     if since:
@@ -50,6 +60,10 @@ async def list_assets(
     has_more = len(data) == limit and total > limit
     next_cursor = str(data[-1]["id"]) if has_more else None
 
+    await record_read(
+        request, tenant_id=tenant_id, status_code=200, response_count=len(data),
+        asset_ids=[a["id"] for a in data],
+    )
     return {"data": data, "meta": {"total": total, "has_more": has_more, "next_cursor": next_cursor}}
 
 
@@ -62,10 +76,14 @@ async def get_asset(asset_id: UUID, request: Request):
     result = await db.execute(stmt)
     asset = result.scalar_one_or_none()
     if asset is None:
+        await record_read(request, tenant_id=tenant_id, status_code=404, response_count=0)
         raise HTTPException(status_code=404, detail={
             "type": "about:blank", "title": "Not Found", "status": 404, "detail": "Asset not found"
         })
-    return _serialize_asset(asset)
+    # Serialize before the audit commit so no expired attribute is reloaded.
+    body = _serialize_asset(asset)
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=1)
+    return body
 
 
 @router.get("/assets/{asset_id}/data-flows")
@@ -76,7 +94,9 @@ async def get_data_flows(asset_id: UUID, request: Request):
     stmt = select(DataFlow).where(DataFlow.asset_id == asset_id, DataFlow.tenant_id == tenant_id)
     result = await db.execute(stmt)
     flows = result.scalars().all()
-    return {"data": [_serialize_flow(f) for f in flows]}
+    data = [_serialize_flow(f) for f in flows]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(data))
+    return {"data": data}
 
 
 @router.get("/assets/{asset_id}/risks")
@@ -87,7 +107,9 @@ async def get_risks(asset_id: UUID, request: Request):
     stmt = select(RiskMapping).where(RiskMapping.asset_id == asset_id, RiskMapping.tenant_id == tenant_id)
     result = await db.execute(stmt)
     risks = result.scalars().all()
-    return {"data": [_serialize_risk(r) for r in risks]}
+    data = [_serialize_risk(r) for r in risks]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(data))
+    return {"data": data}
 
 
 @router.get("/vendors")
@@ -98,6 +120,7 @@ async def list_vendors(request: Request):
     stmt = select(AIAsset.vendor).where(AIAsset.tenant_id == tenant_id).distinct()
     result = await db.execute(stmt)
     vendors = [row[0] for row in result.all()]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(vendors))
     return {"data": vendors}
 
 
@@ -109,6 +132,7 @@ async def list_models(request: Request):
     stmt = select(AIAsset.model).where(AIAsset.tenant_id == tenant_id, AIAsset.model.is_not(None)).distinct()
     result = await db.execute(stmt)
     models = [row[0] for row in result.all()]
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(models))
     return {"data": models}
 
 
@@ -119,43 +143,91 @@ async def semantic_search(
     limit: int = Query(default=10, le=50),
     use_mock: bool = Query(default=False, description="Use mock embeddings for testing"),
 ):
-    """Semantic search over AI assets using pgvector cosine similarity."""
+    """Search AI assets: pgvector cosine similarity, or keyword match when
+    embeddings are disabled (PS_EMBEDDINGS_BACKEND=none) or unavailable."""
     tenant_id = await resolve_tenant(request)
     db = request.state.db
 
-    # Generate embedding for query
     if use_mock:
         query_embedding = mock_embedding(q)
     else:
         query_embedding = await get_embedding(q)
-        if query_embedding is None:
-            # Fallback to mock if no API key
-            query_embedding = mock_embedding(q)
+    if query_embedding is None:
+        data = await _keyword_search(db, tenant_id, q, limit)
+        await record_read(
+            request, tenant_id=tenant_id, status_code=200, response_count=len(data),
+            asset_ids=[a["id"] for a in data],
+        )
+        return {"data": data, "meta": {"total": len(data), "query": q, "mode": "keyword"}}
 
-    # Cosine similarity search using pgvector
+    distance = AIAsset.embedding.cosine_distance(query_embedding)
     stmt = (
-        select(AIAsset)
+        select(AIAsset, distance.label("distance"))
         .where(
             AIAsset.tenant_id == tenant_id,
             AIAsset.embedding.is_not(None),
         )
-        .order_by(AIAsset.embedding.cosine_distance(query_embedding))
+        .order_by(distance)
         .limit(limit)
     )
     result = await db.execute(stmt)
-    assets = result.scalars().all()
 
     data = []
-    for a in assets:
+    for a, dist in result.all():
         serialized = _serialize_asset(a)
-        # Add similarity score
-        if a.embedding is not None:
-            serialized["similarity"] = round(1.0 - float(
-                sum((x - y) ** 2 for x, y in zip(a.embedding, query_embedding)) ** 0.5
-            ), 4)
+        serialized["similarity"] = round(1.0 - float(dist), 4)
         data.append(serialized)
 
-    return {"data": data, "meta": {"total": len(data), "query": q}}
+    # `q` is stored hashed, never as text (see collector.audit).
+    await record_read(
+        request, tenant_id=tenant_id, status_code=200, response_count=len(data),
+        asset_ids=[a["id"] for a in data],
+    )
+    return {"data": data, "meta": {"total": len(data), "query": q, "mode": "semantic"}}
+
+
+_KEYWORD_FIELDS = (
+    AIAsset.vendor,
+    AIAsset.model,
+    AIAsset.use_case_name,
+    AIAsset.business_unit,
+    AIAsset.data_classification,
+)
+
+
+async def _keyword_search(db, tenant_id, q: str, limit: int) -> list[dict]:
+    """Rank assets by how many query terms start a word in their metadata.
+
+    Runs entirely in Postgres, so it works with embeddings disabled and sends
+    nothing off-box. Prefix-of-word matching keeps "hr" from hitting "anthropic".
+    """
+    words = re.findall(r"\w[\w.-]*", q.lower())
+    terms = list(dict.fromkeys(t for t in words if len(t) > 1))[:10]
+    if not terms:
+        return []
+
+    hits = [
+        case(
+            (or_(*(f.regexp_match(r"\m" + re.escape(t), flags="i") for f in _KEYWORD_FIELDS)), 1),
+            else_=0,
+        )
+        for t in terms
+    ]
+    score = reduce(operator.add, hits).label("score")
+    stmt = (
+        select(AIAsset, score)
+        .where(AIAsset.tenant_id == tenant_id)
+        .where(score > 0)
+        .order_by(score.desc(), AIAsset.last_seen.desc().nulls_last(), AIAsset.id)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    data = []
+    for a, matched in result.all():
+        serialized = _serialize_asset(a)
+        serialized["score"] = round(matched / len(terms), 4)
+        data.append(serialized)
+    return data
 
 
 def _serialize_asset(a: AIAsset) -> dict:
@@ -173,6 +245,10 @@ def _serialize_asset(a: AIAsset) -> dict:
         "confidence": a.confidence,
         "first_seen": a.first_seen.isoformat() if a.first_seen else None,
         "last_seen": a.last_seen.isoformat() if a.last_seen else None,
+        "lifecycle_state": a.lifecycle_state or "active",
+        "lifecycle_changed_at": (
+            a.lifecycle_changed_at.isoformat() if a.lifecycle_changed_at else None
+        ),
     }
 
 

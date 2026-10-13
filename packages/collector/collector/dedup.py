@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import AIAsset
+from collector.lifecycle import reactivate
 
 
 CLASSIFICATION_ORDER = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
@@ -57,6 +58,7 @@ async def find_or_create_asset(
             asset.discovery_source = asset.discovery_source + [source]
         asset.confidence = compute_confidence(asset.discovery_source)
         asset.last_seen = now
+        reactivate(asset, now)
         if owner_email:
             asset.owner_email = owner_email
         if data_classification:
