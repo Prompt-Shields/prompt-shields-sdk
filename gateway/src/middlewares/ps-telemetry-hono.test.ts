@@ -92,14 +92,17 @@ describe('psTelemetry (Hono adapter)', () => {
       c.header('content-type', 'text/event-stream');
       return c.body('data: {}\n\n');
     });
-    await post(app, {
+    const res = await post(app, {
       model: 'gpt-4o',
       messages: [{ role: 'user', content: 'hi' }],
     });
+    // The event is sent once the client has read the stream (#72).
+    await res.text();
     await flush();
 
     expect(sent.events[0].source).toBe('gateway');
     expect(sent.events[0].tokens_in).toBeUndefined();
+    expect(sent.events[0].stream_truncated).toBe(true);
   });
 
   test('never throws when the collector fetch rejects (fail-open)', async () => {
