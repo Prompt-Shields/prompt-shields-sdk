@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.auth import resolve_tenant
+from collector.data_flows import record_event_flows
 from collector.dedup import find_or_create_asset
 from collector.embeddings import build_asset_text, get_embedding
 from collector.otel_mapping import GenAISpan, count_spans, iter_spans, map_span
@@ -92,16 +93,18 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
                 if embedding:
                     asset.embedding = embedding
 
-        db.add(
-            AIUsageEvent(
-                tenant_id=tenant_id,
-                asset_id=asset.id,
-                tokens_in=span.tokens_in,
-                tokens_out=span.tokens_out,
-                latency_ms=span.latency_ms,
-                source=OTEL_SOURCE,
-                session_id=span.session_id,
-            )
+        usage_event = AIUsageEvent(
+            tenant_id=tenant_id,
+            asset_id=asset.id,
+            tokens_in=span.tokens_in,
+            tokens_out=span.tokens_out,
+            latency_ms=span.latency_ms,
+            source=OTEL_SOURCE,
+            session_id=span.session_id,
+        )
+        db.add(usage_event)
+        await record_event_flows(
+            db, tenant_id, asset, usage_event, calling_service=span.calling_service
         )
     await db.commit()
     return assets_created
