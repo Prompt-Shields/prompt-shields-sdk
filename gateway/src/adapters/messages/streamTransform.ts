@@ -2,9 +2,19 @@
  * Stream Transform for Messages API Adapter
  *
  * Transforms Chat Completions SSE chunks to Anthropic Messages API SSE format.
+ *
+ * PS fork (#73): content blocks are opened lazily and numbered in the order
+ * they appear (thinking, text, tool_use), each block gets its own
+ * content_block_stop, reasoning streams as `thinking` blocks, the final
+ * message_delta carries cache token usage, and stop reasons share the
+ * non-streaming mapping.
  */
 
 import { randomUUID } from 'crypto';
+import { normalizeUsage, plainReasoningText, toMessagesUsage } from '../shared';
+import { toAnthropicStopReason } from './responseTransform';
+
+type BlockType = 'thinking' | 'text' | 'tool_use';
 
 interface StreamState {
   messageId: string;
@@ -13,8 +23,59 @@ interface StreamState {
   completed: boolean;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** Index the next content block will get */
   contentBlockIndex: number;
+  /** Currently open content block, if any */
+  openBlock: { index: number; type: BlockType } | null;
+  /** Chat tool_call index → Anthropic content block index */
+  toolBlocks: Record<number, { index: number; id: string }>;
+  hasToolUse: boolean;
+  finishReason: string | null;
   stopReason: string | null;
+}
+
+function sse(event: string, data: Record<string, unknown>): string {
+  return `event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`;
+}
+
+function closeOpenBlock(state: StreamState, events: string[]) {
+  if (!state.openBlock) return;
+  events.push(sse('content_block_stop', { index: state.openBlock.index }));
+  state.openBlock = null;
+}
+
+function openBlock(
+  state: StreamState,
+  events: string[],
+  type: BlockType,
+  contentBlock: Record<string, unknown>
+): number {
+  closeOpenBlock(state, events);
+  const index = state.contentBlockIndex++;
+  state.openBlock = { index, type };
+  events.push(
+    sse('content_block_start', { index, content_block: contentBlock })
+  );
+  return index;
+}
+
+/** Ensure an open block of the given type and return its index. */
+function ensureBlock(
+  state: StreamState,
+  events: string[],
+  type: 'thinking' | 'text'
+): number {
+  if (state.openBlock?.type === type) return state.openBlock.index;
+  return openBlock(
+    state,
+    events,
+    type,
+    type === 'thinking'
+      ? { type: 'thinking', thinking: '', signature: '' }
+      : { type: 'text', text: '' }
+  );
 }
 
 /**
@@ -31,21 +92,30 @@ export function transformStreamChunk(
     if (!state.hasStarted || state.completed) return undefined;
     state.completed = true;
 
-    // Emit message_delta and message_stop
-    return [
-      `event: message_delta\ndata: ${JSON.stringify({
-        type: 'message_delta',
-        delta: {
-          stop_reason: state.stopReason || 'end_turn',
-          stop_sequence: null,
-        },
-        usage: {
-          output_tokens: state.outputTokens,
-          input_tokens: state.inputTokens,
-        },
-      })}\n\n`,
-      `event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
-    ].join('');
+    const events: string[] = [];
+    closeOpenBlock(state, events);
+    state.stopReason = toAnthropicStopReason(
+      state.finishReason,
+      state.hasToolUse
+    );
+
+    const usage: Record<string, number> = {
+      input_tokens: state.inputTokens,
+      output_tokens: state.outputTokens,
+    };
+    if (state.cacheReadTokens || state.cacheCreationTokens) {
+      usage.cache_creation_input_tokens = state.cacheCreationTokens;
+      usage.cache_read_input_tokens = state.cacheReadTokens;
+    }
+
+    events.push(
+      sse('message_delta', {
+        delta: { stop_reason: state.stopReason, stop_sequence: null },
+        usage,
+      }),
+      sse('message_stop', {})
+    );
+    return events.join('');
   }
 
   // Skip non-data lines
@@ -61,16 +131,41 @@ export function transformStreamChunk(
 
   const events: string[] = [];
 
+  // PS fork (#73): a mid-stream provider error becomes an Anthropic `error`
+  // event, and the stream ends without message_stop (as Anthropic does).
+  if (parsed?.error) {
+    if (state.completed) return undefined;
+    state.completed = true;
+    const err = parsed.error;
+    return sse('error', {
+      error: {
+        type: err?.type || 'api_error',
+        message:
+          (typeof err === 'string' ? err : err?.message) || 'Stream error',
+      },
+    });
+  }
+
+  // Track usage (OpenAI sends it on a final chunk with empty choices)
+  if (parsed.usage) {
+    const u = normalizeUsage(parsed.usage);
+    const mu = toMessagesUsage(u);
+    if (u.promptTokens) {
+      state.inputTokens = mu.input_tokens;
+      state.cacheReadTokens = u.cacheReadTokens;
+      state.cacheCreationTokens = u.cacheCreationTokens;
+    }
+    if (u.completionTokens) state.outputTokens = u.completionTokens;
+  }
+
   // Initialize on first chunk
   if (!state.hasStarted) {
     state.hasStarted = true;
     state.messageId = `msg_${randomUUID()}`;
     state.model = parsed.model || '';
 
-    // Emit message_start
     events.push(
-      `event: message_start\ndata: ${JSON.stringify({
-        type: 'message_start',
+      sse('message_start', {
         message: {
           id: state.messageId,
           type: 'message',
@@ -81,94 +176,106 @@ export function transformStreamChunk(
           stop_sequence: null,
           usage: { input_tokens: state.inputTokens, output_tokens: 0 },
         },
-      })}\n\n`
-    );
-
-    // Emit content_block_start for text
-    events.push(
-      `event: content_block_start\ndata: ${JSON.stringify({
-        type: 'content_block_start',
-        index: 0,
-        content_block: { type: 'text', text: '' },
-      })}\n\n`
+      })
     );
   }
 
-  const delta = parsed.choices?.[0]?.delta;
+  const choice = parsed.choices?.[0];
+  const delta = choice?.delta;
 
-  // Handle content delta
-  if (delta?.content) {
+  // Thinking: content_blocks (Anthropic/Gemini/OpenRouter transforms) first,
+  // otherwise OpenAI-compatible reasoning_content / reasoning strings.
+  let sawBlockThinking = false;
+  for (const block of delta?.content_blocks || []) {
+    const d = block?.delta ?? {};
+    if (typeof d.thinking === 'string' && d.thinking) {
+      sawBlockThinking = true;
+      const index = ensureBlock(state, events, 'thinking');
+      events.push(
+        sse('content_block_delta', {
+          index,
+          delta: { type: 'thinking_delta', thinking: d.thinking },
+        })
+      );
+    }
+    if (typeof d.signature === 'string' && d.signature) {
+      sawBlockThinking = true;
+      const index = ensureBlock(state, events, 'thinking');
+      events.push(
+        sse('content_block_delta', {
+          index,
+          delta: { type: 'signature_delta', signature: d.signature },
+        })
+      );
+    }
+  }
+  if (!sawBlockThinking) {
+    const reasoning = plainReasoningText(delta);
+    if (reasoning) {
+      const index = ensureBlock(state, events, 'thinking');
+      events.push(
+        sse('content_block_delta', {
+          index,
+          delta: { type: 'thinking_delta', thinking: reasoning },
+        })
+      );
+    }
+  }
+
+  // Text
+  if (typeof delta?.content === 'string' && delta.content) {
+    const index = ensureBlock(state, events, 'text');
     events.push(
-      `event: content_block_delta\ndata: ${JSON.stringify({
-        type: 'content_block_delta',
-        index: 0,
+      sse('content_block_delta', {
+        index,
         delta: { type: 'text_delta', text: delta.content },
-      })}\n\n`
+      })
     );
   }
 
-  // Handle tool calls
-  if (delta?.tool_calls) {
+  // Tool calls
+  if (Array.isArray(delta?.tool_calls)) {
     for (const tc of delta.tool_calls) {
-      // Content block index 0 is reserved for the assistant text block.
-      // Tool calls are subsequent blocks starting at index 1.
-      const idx = (tc.index ?? 0) + 1;
-
-      if (tc.function?.name) {
-        // New tool call - emit content_block_start
-        events.push(
-          `event: content_block_start\ndata: ${JSON.stringify({
-            type: 'content_block_start',
-            index: idx,
-            content_block: {
-              type: 'tool_use',
-              id: tc.id || `toolu_${randomUUID()}`,
-              name: tc.function.name,
-              input: {},
-            },
-          })}\n\n`
-        );
+      if (!tc) continue;
+      const toolIdx = tc.index ?? 0;
+      const known = state.toolBlocks[toolIdx];
+      // A new id on a known index is a new call (Gemini restarts at 0)
+      const isNew = !known || (tc.id && tc.id !== known.id);
+      let index = known?.index;
+      if (isNew) {
+        const id = tc.id || `toolu_${randomUUID()}`;
+        index = openBlock(state, events, 'tool_use', {
+          type: 'tool_use',
+          id,
+          name: tc.function?.name || '',
+          input: {},
+        });
+        state.toolBlocks[toolIdx] = { index, id };
+        state.hasToolUse = true;
       }
 
       if (tc.function?.arguments) {
-        // Tool arguments delta
         events.push(
-          `event: content_block_delta\ndata: ${JSON.stringify({
-            type: 'content_block_delta',
-            index: idx,
+          sse('content_block_delta', {
+            index,
             delta: {
               type: 'input_json_delta',
               partial_json: tc.function.arguments,
             },
-          })}\n\n`
+          })
         );
       }
     }
   }
 
-  // Track usage
-  if (parsed.usage) {
-    state.inputTokens = parsed.usage.prompt_tokens || state.inputTokens;
-    state.outputTokens = parsed.usage.completion_tokens || state.outputTokens;
-  }
-
-  // Track stop reason
-  if (parsed.choices?.[0]?.finish_reason) {
-    const reason = parsed.choices[0].finish_reason;
-    state.stopReason =
-      reason === 'tool_calls'
-        ? 'tool_use'
-        : reason === 'length'
-          ? 'max_tokens'
-          : 'end_turn';
-
-    // Emit content_block_stop for all blocks
-    events.push(
-      `event: content_block_stop\ndata: ${JSON.stringify({
-        type: 'content_block_stop',
-        index: 0,
-      })}\n\n`
+  // Track stop reason; close the open block once the choice finishes
+  if (choice?.finish_reason) {
+    state.finishReason = choice.finish_reason;
+    state.stopReason = toAnthropicStopReason(
+      state.finishReason,
+      state.hasToolUse
     );
+    closeOpenBlock(state, events);
   }
 
   return events.length > 0 ? events.join('') : undefined;
@@ -185,7 +292,13 @@ export function createStreamState(): StreamState {
     completed: false,
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
     contentBlockIndex: 0,
+    openBlock: null,
+    toolBlocks: {},
+    hasToolUse: false,
+    finishReason: null,
     stopReason: null,
   };
 }
