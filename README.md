@@ -213,7 +213,7 @@ flowchart TD
 
 **An AI asset is a single AI use case as an auditor would describe it** — one vendor, one model, one business unit, one purpose, for example "HR screening interview transcripts with GPT-4o". **A discovery source is a mechanism that observes AI usage and reports it.** This repository contains two of them, the SDK and the gateway; the browser extensions and macOS desktop app that capture shadow AI live in separate repositories and feed the same collector.
 
-**The gateway is an HTTP proxy on the path between an application and a model provider, so calls can be observed without the application being modified.** Its telemetry middleware is registered in the request pipeline at [`gateway/src/index.ts:115`](gateway/src/index.ts).
+**The gateway is an HTTP proxy on the path between an application and a model provider, so calls can be observed without the application being modified.** Its telemetry middleware is registered in the request pipeline at [`gateway/src/index.ts:137`](gateway/src/index.ts).
 
 **Fail-open means the telemetry path is allowed to fail silently.** Events buffer locally in a bounded in-memory queue and the model call proceeds regardless of whether the collector is reachable.
 
