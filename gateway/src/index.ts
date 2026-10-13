@@ -17,6 +17,7 @@ import { hooks } from './middlewares/hooks';
 import { memoryCache } from './middlewares/cache';
 import { psRouter } from './middlewares/router/hono';
 import { psTelemetry } from './middlewares/ps-telemetry';
+import { otelConfig, psOtel } from './middlewares/psOtel';
 
 // Handlers
 import { proxyHandler } from './handlers/proxyHandler';
@@ -33,6 +34,7 @@ import { imageGenerationsHandler } from './handlers/imageGenerationsHandler';
 import { createSpeechHandler } from './handlers/createSpeechHandler';
 import { createTranscriptionHandler } from './handlers/createTranscriptionHandler';
 import { createTranslationHandler } from './handlers/createTranslationHandler';
+import { ocrHandler } from './handlers/ocrHandler';
 import { modelsHandler } from './handlers/modelsHandler';
 import { unifiedModelsHandler } from './handlers/unifiedModelsHandler';
 import { realTimeHandler } from './handlers/realtimeHandler';
@@ -138,6 +140,22 @@ if (process.env.PS_API_KEY) {
   app.use('*', psTelemetry());
 }
 
+// OpenTelemetry GenAI spans (semconv 1.40, OTLP/HTTP JSON). Opt-in via
+// PS_OTEL_ENDPOINT; prompt/completion content only with PS_OTEL_CAPTURE_CONTENT.
+const psOtelConfig = otelConfig();
+if (psOtelConfig) {
+  if (
+    process.env.PS_API_KEY &&
+    psOtelConfig.endpoint.includes('/ingest/otel/')
+  ) {
+    console.warn(
+      '[PS OTel] PS_API_KEY telemetry and PS_OTEL_ENDPOINT both send to the ' +
+        'Prompt Shields collector: every LLM call is ingested twice. Use one.'
+    );
+  }
+  app.use('*', psOtel(psOtelConfig));
+}
+
 // Use hooks middleware for all routes
 app.use('*', hooks);
 
@@ -237,6 +255,12 @@ app.post(
  * Handles requests by passing them to the createTranslationHandler.
  */
 app.post('/v1/audio/translations', requestValidator, createTranslationHandler);
+
+/**
+ * POST route for '/v1/ocr'.
+ * Handles requests by passing them to the ocrHandler.
+ */
+app.post('/v1/ocr', requestValidator, ocrHandler);
 
 // files
 app.get('/v1/files', requestValidator, filesHandler('listFiles', 'GET'));

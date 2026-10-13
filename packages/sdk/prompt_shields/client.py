@@ -17,8 +17,9 @@ import os
 import time
 from typing import Any
 
+from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.pii import scan_messages
-from prompt_shields.pricing import estimate_cost
+from prompt_shields.pricing import add_usage_detail_fields, estimate_cost
 from prompt_shields.providers import get_adapter
 from prompt_shields.streaming import (
     ShieldsStream,
@@ -158,9 +159,12 @@ class ShieldsClient:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 pricing_table=self._pricing_table,
+                tokens_cached=adapter_fields.get("tokens_cached"),
+                tokens_cache_write=adapter_fields.get("tokens_cache_write"),
             ),
             "api_key_fingerprint": self._api_key_fingerprint,
         }
+        add_usage_detail_fields(event, adapter_fields)
 
         # Map SDK field names to collector field names
         field_mapping = {"use_case": "use_case_name", "owner": "owner_email"}
@@ -192,6 +196,22 @@ class ShieldsClient:
                 event["detected_pii_types"] = categories
 
         return event
+
+    # --- telemetry delivery --------------------------------------------------
+
+    def telemetry_stats(self) -> dict:
+        """Delivery counters per destination: enqueued, sent, buffered and
+        dropped events by reason. "atlas" is None when that sink is off."""
+        return {
+            "collector": self._telemetry.stats(),
+            "atlas": self._atlas.stats() if self._atlas is not None else None,
+        }
+
+    def close(self) -> None:
+        """Final telemetry flush; anything still unsent is counted as dropped."""
+        self._telemetry.close_sync()
+        if self._atlas is not None:
+            self._atlas.close_sync()
 
 
 class ShieldsOpenAI(ShieldsClient):
@@ -257,8 +277,10 @@ class _CompletionsNamespace:
             hide_usage_chunk = request_openai_stream_usage(kwargs)
 
         start = time.monotonic()
-        response = self._call_upstream(model=model, messages=messages,
-                                        max_tokens=max_tokens, **kwargs)
+        # This client emits its own event; keep instrument() from adding one.
+        with suppress_instrumentation():
+            response = self._call_upstream(model=model, messages=messages,
+                                            max_tokens=max_tokens, **kwargs)
 
         if streaming:
             return self._wrap_stream(

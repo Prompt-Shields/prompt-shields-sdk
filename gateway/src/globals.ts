@@ -116,6 +116,16 @@ export const OVHCLOUD: string = 'ovhcloud';
 export const LATITUDE: string = 'latitude';
 export const DATABRICKS: string = 'databricks';
 export const PINECONE: string = 'pinecone';
+export const ELEVENLABS: string = 'elevenlabs';
+export const DEEPGRAM: string = 'deepgram';
+export const MINIMAX: string = 'minimax';
+export const BYTEPLUS: string = 'byteplus';
+export const LIGHTNING_AI: string = 'lightning-ai';
+export const BERGET: string = 'berget';
+export const SCALEWAY: string = 'scaleway';
+export const REGOLO: string = 'regolo';
+export const IONOS: string = 'ionos';
+export const STACKIT: string = 'stackit';
 
 export const VALID_PROVIDERS = [
   ANTHROPIC,
@@ -195,6 +205,16 @@ export const VALID_PROVIDERS = [
   LATITUDE,
   DATABRICKS,
   PINECONE,
+  ELEVENLABS,
+  DEEPGRAM,
+  MINIMAX,
+  BYTEPLUS,
+  LIGHTNING_AI,
+  BERGET,
+  SCALEWAY,
+  REGOLO,
+  IONOS,
+  STACKIT,
 ];
 
 export const CONTENT_TYPES = {

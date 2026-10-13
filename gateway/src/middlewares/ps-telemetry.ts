@@ -9,6 +9,12 @@ import {
   observeStream,
   StreamSummary,
 } from './psStreamObserver';
+import {
+  AttemptRecord,
+  attemptCountOf,
+  attemptsOf,
+  traceIdOf,
+} from './psAttempts';
 
 interface PSConfig {
   collectorUrl: string;
@@ -40,21 +46,73 @@ interface TelemetryEvent {
   // Messages/Responses adapters (#59) this can differ from what the provider
   // served, so it is recorded separately from vendor.
   api_surface?: string;
+  // What the asset works on (text, audio, image, document), so assets found
+  // on the audio and OCR endpoints are registered with the right modality.
+  modality?: string;
+  // Non-token usage: audio seconds, OCR pages or speech characters.
+  usage_units?: number;
+  usage_unit_type?: string;
   // Streamed (SSE) responses (#72): true when the upstream closed without a
   // terminal event ([DONE], message_stop, response.completed, ...), and
   // when the client disconnected before the stream ended.
   stream?: boolean;
   stream_truncated?: boolean;
   stream_cancelled?: boolean;
+  // Retries and fallbacks (#78): every upstream attempt, in order, linked by
+  // trace_id. retry_count is the number of attempts - 1; attempts holds at
+  // most MAX_ATTEMPT_RECORDS of them.
+  trace_id?: string;
+  retry_count?: number;
+  attempts?: AttemptRecord[];
 }
 
 /** The API surface of a gateway request, from its path. */
 export function apiSurfaceOf(path: string): string | undefined {
   const m = path.match(
-    /^\/v1\/(chat\/completions|completions|messages|responses|embeddings|rerank|images|audio)/
+    /^\/v1\/(chat\/completions|completions|messages|responses|embeddings|rerank|images|audio|ocr)/
   );
   if (!m) return undefined;
   return m[1] === 'chat/completions' ? 'chat' : m[1];
+}
+
+/** The modality of a gateway request, from its path. */
+export function modalityOf(path: string): string | undefined {
+  const surface = apiSurfaceOf(path);
+  if (!surface) return undefined;
+  if (surface === 'audio') return 'audio';
+  if (surface === 'images') return 'image';
+  if (surface === 'ocr') return 'document';
+  return 'text';
+}
+
+/**
+ * Non-token usage: transcription `usage: {type: 'duration', seconds}`,
+ * Mistral OCR `usage_info.pages_processed`, or text-to-speech characters
+ * from the request `input`.
+ */
+export function usageUnits(
+  path: string,
+  responseBody: any,
+  requestBody: any
+): { usage_units?: number; usage_unit_type?: string } {
+  const u = responseBody?.usage;
+  if (u?.type === 'duration' && typeof u.seconds === 'number') {
+    return { usage_units: u.seconds, usage_unit_type: 'seconds' };
+  }
+  const pages = responseBody?.usage_info?.pages_processed;
+  if (typeof pages === 'number') {
+    return { usage_units: pages, usage_unit_type: 'pages' };
+  }
+  if (
+    path.startsWith('/v1/audio/speech') &&
+    typeof requestBody?.input === 'string'
+  ) {
+    return {
+      usage_units: requestBody.input.length,
+      usage_unit_type: 'characters',
+    };
+  }
+  return {};
 }
 
 /** Token usage from Chat Completions or Messages/Responses-style usage. */
@@ -307,12 +365,15 @@ export function psTelemetry() {
         responseBody?.model ||
         'unknown';
 
+      const path = new URL(url).pathname;
       const event: TelemetryEvent = {
         vendor,
         model,
         source: 'gateway',
         ...usageTokens(responseBody),
-        api_surface: apiSurfaceOf(new URL(url).pathname),
+        api_surface: apiSurfaceOf(path),
+        modality: modalityOf(path),
+        ...usageUnits(path, responseBody, requestBody),
         latency_ms: Date.now() - startTime,
         ...psHeaders,
       };
@@ -323,6 +384,14 @@ export function psTelemetry() {
         event.route_group = route.group;
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
+      }
+
+      const attempts = attemptsOf(c);
+      if (attempts.length) {
+        // The caller's trace id links the event to the gateway logs.
+        event.trace_id = traceIdOf(headers['x-portkey-trace-id']);
+        event.retry_count = Math.max(attemptCountOf(c), attempts.length) - 1;
+        event.attempts = attempts.map((a) => ({ ...a }));
       }
 
       // A streamed response carries its usage at the end of the stream, so

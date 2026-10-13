@@ -1,12 +1,14 @@
 import hashlib
-from typing import Annotated
+from typing import Annotated, Any
 
 from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from collector import loss_accounting
 from collector.auth import resolve_tenant
 from collector.config import settings
+from collector.data_flows import record_event_flows
 from collector.dedup import find_or_create_asset
 from collector.embeddings import build_asset_text, get_embedding
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
@@ -31,10 +33,20 @@ class IngestEvent(BaseModel):
     session_id: str | None = None
     tool_calls_used: list[dict] | None = None
     prompt_text: str | None = None
+    # Data-flow metadata (ps_metadata on the SDK); see collector/data_flows.py.
+    # Loosely typed on purpose: these fields used to be ignored, so a malformed
+    # value must not 422 the whole batch. build_flow_context drops what it
+    # can't use.
+    data_sources: Any = None
+    output_destination: Any = None
+    detected_pii_types: Any = None
+    region: Any = None
 
 
 class IngestRequest(BaseModel):
     events: list[IngestEvent]
+    # SDK delivery accounting (#87); parsed leniently by loss_accounting.
+    metadata: dict | None = None
 
 
 def _enforce_rate_limit(
@@ -73,11 +85,40 @@ async def ingest_events(
     limiter: Annotated[FixedWindowRateLimiter, Depends(get_ingest_rate_limiter)],
 ):
     tenant_id = await resolve_tenant(request)
-    _enforce_rate_limit(limiter, tenant_id, response)
     db = request.state.db
+    meta = loss_accounting.parse_metadata(body.metadata)
+    try:
+        _enforce_rate_limit(limiter, tenant_id, response)
+    except HTTPException as exc:
+        if exc.status_code == 429:
+            await loss_accounting.record_rejected(
+                db, tenant_id, meta, len(body.events), "rate_limited"
+            )
+        raise
 
+    try:
+        assets_created = await _store_events(db, tenant_id, body.events)
+        if body.events:
+            ignored = loss_accounting.ignored_fields(
+                (await request.json()).get("events"), set(IngestEvent.model_fields)
+            )
+            await loss_accounting.record_received(
+                db, tenant_id, meta, len(body.events), ignored
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await loss_accounting.record_rejected(
+            db, tenant_id, meta, len(body.events), "write_failed"
+        )
+        raise
+
+    return {"ingested": len(body.events), "assets_created": assets_created}
+
+
+async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
     assets_created = 0
-    for event in body.events:
+    for event in events:
         asset, is_new = await find_or_create_asset(
             db=db,
             tenant_id=tenant_id,
@@ -125,7 +166,17 @@ async def ingest_events(
             prompt_hash=prompt_hash,
         )
         db.add(usage_event)
+        await record_event_flows(
+            db,
+            tenant_id,
+            asset,
+            usage_event,
+            data_sources=event.data_sources,
+            output_destination=event.output_destination,
+            pii_types=event.detected_pii_types,
+            region=event.region,
+            data_classification=event.data_classification,
+            calling_service=event.calling_service,
+        )
 
-    await db.commit()
-
-    return {"ingested": len(body.events), "assets_created": assets_created}
+    return assets_created

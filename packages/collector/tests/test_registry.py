@@ -67,3 +67,31 @@ async def test_list_vendors(seeded_db):
     assert resp.status_code == 200
     vendors = resp.json()["data"]
     assert set(vendors) == {"openai", "anthropic"}
+
+
+@pytest.mark.asyncio
+async def test_registry_reads_write_audit_rows(seeded_db):
+    from db.models import PartnerAuditLog
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await seed_assets(client)
+        list_resp = await client.get("/api/v1/registry/assets?business_unit=HR", headers=HEADERS)
+        asset_id = list_resp.json()["data"][0]["id"]
+        await client.get(f"/api/v1/registry/assets/{asset_id}", headers=HEADERS)
+
+    async with AsyncSession(seeded_db) as session:
+        rows = (
+            await session.execute(select(PartnerAuditLog).order_by(PartnerAuditLog.timestamp))
+        ).scalars().all()
+
+    assert [r.endpoint for r in rows] == [
+        "/api/v1/registry/assets",
+        "/api/v1/registry/assets/{asset_id}",
+    ]
+    assert all(r.partner_id is None and r.api_key_prefix for r in rows)
+    assert rows[0].query_params == {"business_unit": "HR"}
+    assert rows[0].response_count == 1
+    assert [str(i) for i in rows[1].asset_ids] == [asset_id]
