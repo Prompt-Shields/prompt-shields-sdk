@@ -12,7 +12,7 @@ Internal tool first, run as a standalone SaaS web app that we host.
 
 - Cost and tokens per deployment and model, today (estimated) and historically (billed)
 - Effective cost per 1M input / output tokens, and how it drifts over time
-- Spend by team, app and cost centre (tags plus Prompt Shields gateway attribution)
+- Spend by team, app and cost centre (tags and deployment naming; gateway attribution later)
 - PTU utilisation and idle provisioned capacity
 - Budget alerts and overnight spikes, sent to email, Slack or Teams
 
@@ -20,7 +20,7 @@ Internal tool first, run as a standalone SaaS web app that we host.
 
 0. Foundations: Entra ID login, RBAC, tenant-scoped schema, fake connector
 1. Azure MVP (internal): our own tenant, token metrics, cost exports, per-deployment cost
-2. Budgets, alerts, PTU reports, allocation, gateway attribution
+2. Budgets, alerts, PTU reports, tag / deployment-based allocation
 2b. Open to external users: signup, connection wizard, Google login, SAML
 3. GCP (Vertex AI)
 4. AWS (Bedrock)
