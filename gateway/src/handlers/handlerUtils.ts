@@ -43,6 +43,7 @@ import { ProviderContext } from './services/providerContext';
 import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
+import { recordAttempt } from '../middlewares/psAttempts';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
@@ -1037,6 +1038,11 @@ export function constructConfigFromRequestHeaders(
   };
 
   const openAiConfig = {
+    oauthTokenUrl: requestHeaders[`x-${POWERED_BY}-oauth-token-url`],
+    oauthClientId: requestHeaders[`x-${POWERED_BY}-oauth-client-id`],
+    oauthClientSecret: requestHeaders[`x-${POWERED_BY}-oauth-client-secret`],
+    oauthScope: requestHeaders[`x-${POWERED_BY}-oauth-scope`],
+    oauthAudience: requestHeaders[`x-${POWERED_BY}-oauth-audience`],
     openaiOrganization: requestHeaders[`x-${POWERED_BY}-openai-organization`],
     openaiProject: requestHeaders[`x-${POWERED_BY}-openai-project`],
     openaiBeta:
@@ -1051,6 +1057,7 @@ export function constructConfigFromRequestHeaders(
   const vertexConfig: Record<string, any> = {
     vertexProjectId: requestHeaders[`x-${POWERED_BY}-vertex-project-id`],
     vertexRegion: requestHeaders[`x-${POWERED_BY}-vertex-region`],
+    vertexAuthType: requestHeaders[`x-${POWERED_BY}-vertex-auth-type`],
     vertexStorageBucketName:
       requestHeaders[`x-${POWERED_BY}-vertex-storage-bucket-name`],
     filename: requestHeaders[`x-${POWERED_BY}-provider-file-name`],
@@ -1331,7 +1338,14 @@ export async function recursiveAfterRequestHookHandler(
     retry.onStatusCodes,
     requestTimeout,
     requestHandler,
-    retry.useRetryAfterHeader
+    retry.useRetryAfterHeader,
+    // PS fork (#78): record each upstream attempt for per-attempt telemetry.
+    (attempt) =>
+      recordAttempt(
+        c,
+        { provider: providerOption.provider, model: gatewayParams?.model },
+        attempt
+      )
   ));
 
   if (requestContext.customHost) {

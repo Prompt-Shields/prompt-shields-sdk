@@ -138,6 +138,14 @@ const nodeEnv = {
     process.env.AZURE_AMBIENT_CREDENTIALS_ENABLED,
     true
   ),
+  GCP_AMBIENT_CREDENTIALS_ENABLED: getValueOrFileContents(
+    process.env.GCP_AMBIENT_CREDENTIALS_ENABLED,
+    true
+  ),
+  OAUTH_TOKEN_URL_ALLOWED_HOSTS: getValueOrFileContents(
+    process.env.OAUTH_TOKEN_URL_ALLOWED_HOSTS,
+    true
+  ),
 
   SSE_ENCRYPTION_TYPE: getValueOrFileContents(process.env.SSE_ENCRYPTION_TYPE),
   KMS_KEY_ID: getValueOrFileContents(process.env.KMS_KEY_ID),

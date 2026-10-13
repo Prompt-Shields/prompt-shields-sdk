@@ -321,6 +321,17 @@ export function handleStreamingMode(
   const isSleepTimeRequired = proxyProvider === AZURE_OPEN_AI ? true : false;
   const encoder = new TextEncoder();
 
+  // When the client goes away, the readable side is cancelled and the
+  // writable side errors. Cancel the upstream body then, so the provider
+  // connection is closed instead of generating (and billing) tokens nobody
+  // reads. Cancelling a fetch body aborts the request on Node and Workers.
+  const cancelUpstream = (reason?: unknown) => {
+    reader.cancel(reason).catch(() => {});
+  };
+  writer.closed.catch(cancelUpstream);
+  // desiredSize is null once the writable side is errored (client gone).
+  const isClientGone = () => writer.desiredSize === null;
+
   if (proxyProvider === BEDROCK) {
     (async () => {
       try {
@@ -340,16 +351,25 @@ export function handleStreamingMode(
           await writer.write(encoder.encode(chunk));
         }
       } catch (error) {
-        console.error('Error during stream processing:', proxyProvider, error);
-      } finally {
-        try {
-          await writer.close();
-        } catch (closeError) {
+        cancelUpstream(error);
+        if (!isClientGone()) {
           console.error(
-            'Failed to close the writer:',
+            'Error during stream processing:',
             proxyProvider,
-            closeError
+            error
           );
+        }
+      } finally {
+        if (!isClientGone()) {
+          try {
+            await writer.close();
+          } catch (closeError) {
+            console.error(
+              'Failed to close the writer:',
+              proxyProvider,
+              closeError
+            );
+          }
         }
       }
     })();
@@ -374,16 +394,25 @@ export function handleStreamingMode(
           await writer.write(encoder.encode(chunk));
         }
       } catch (error) {
-        console.error('Error during stream processing:', proxyProvider, error);
-      } finally {
-        try {
-          await writer.close();
-        } catch (closeError) {
+        cancelUpstream(error);
+        if (!isClientGone()) {
           console.error(
-            'Failed to close the writer:',
+            'Error during stream processing:',
             proxyProvider,
-            closeError
+            error
           );
+        }
+      } finally {
+        if (!isClientGone()) {
+          try {
+            await writer.close();
+          } catch (closeError) {
+            console.error(
+              'Failed to close the writer:',
+              proxyProvider,
+              closeError
+            );
+          }
         }
       }
     })();
