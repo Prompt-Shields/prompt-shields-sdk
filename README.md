@@ -239,7 +239,16 @@ This is a discovery and inventory tool. It is not a control, and the statements 
 
 **The collector is not hardened for production.** It authenticates by looking up the bearer token as plaintext in the tenant record, which the source itself flags as a Phase 1 shortcut that must never be deployed to production or pilot environments. The per-tenant ingest rate limit (`rate_limit_per_minute`) and the Partner API limiter are in-process, so each worker counts separately. There is no TLS termination, no role-based access control, no encryption at rest, no data-retention or deletion policy, and no audit logging of registry reads. Tenant isolation is a `tenant_id` predicate applied per query, not database row-level security, so it holds only as far as the application code is correct.
 
-**Semantic search calls OpenAI.** When `OPENAI_API_KEY` is set on the collector, asset metadata — vendor, model, use case, business unit — is sent to OpenAI's embeddings API (`text-embedding-3-small`) to build the search index. Leave the variable unset and embeddings are skipped, disabling `/search` but keeping asset metadata inside your network.
+**Semantic search sends asset metadata wherever its embeddings backend lives.** Set `PS_EMBEDDINGS_BACKEND` on the collector:
+
+| Value | Where asset metadata (vendor, model, use case, business unit, classification) goes |
+|---|---|
+| `auto` (default) | `openai` if `OPENAI_API_KEY` is set, otherwise `none` |
+| `openai` | OpenAI's embeddings API (`text-embedding-3-small`), or any OpenAI-compatible endpoint set with `PS_EMBEDDINGS_OPENAI_BASE_URL` and `PS_EMBEDDINGS_MODEL` |
+| `local` | Nowhere. Embeddings are computed in-process with [fastembed](https://github.com/qdrant/fastembed) (ONNX, no PyTorch); install `prompt-shields-collector[local-embeddings]`. The model (default `BAAI/bge-small-en-v1.5`) is downloaded once; pre-seed `PS_EMBEDDINGS_CACHE_DIR` to run with no outbound access at all |
+| `none` | Nowhere. `/search` falls back to keyword matching in Postgres |
+
+Vectors narrower than the 1536-dim `ai_assets.embedding` column are zero-padded, which leaves cosine similarity unchanged. Vectors from different models are not comparable, so after changing backend or model run `python -m collector.reembed` to rebuild the index (with `none` it clears stored embeddings).
 
 **Cost figures are estimates.** Computed from a local pricing table against observed token counts. They will not reconcile to a provider invoice, and the table must be kept current by hand.
 
