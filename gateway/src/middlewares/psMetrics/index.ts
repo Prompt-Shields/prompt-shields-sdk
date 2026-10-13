@@ -1,6 +1,7 @@
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
 import { providerFromHeaders } from '../ps-telemetry';
+import { observeStream } from '../psStreamObserver';
 import {
   Counter,
   Histogram,
@@ -44,6 +45,13 @@ export const tokensTotal = registry.register(
     'direction',
     'business_unit',
   ])
+);
+export const streamsTotal = registry.register(
+  new Counter(
+    'ps_gateway_streams_total',
+    'Streamed responses by outcome: complete, truncated (upstream closed without a terminal event) or cancelled (client went away).',
+    ['route', 'provider', 'outcome']
+  )
 );
 
 // Bounded, printable label values; anything else collapses to "other".
@@ -107,15 +115,11 @@ export function psMetrics() {
         (Date.now() - start) / 1000
       );
 
-      if (
-        (c.res.headers.get('content-type') ?? '').includes('application/json')
-      ) {
-        const body: any = await c.res
-          .clone()
-          .json()
-          .catch(() => undefined);
-        const { input, output } = usageOf(body);
-        const model = labelValue(body?.model, 'unknown');
+      const countTokens = (
+        model: string,
+        input: number | undefined,
+        output: number | undefined
+      ) => {
         if (input)
           tokensTotal.inc(
             {
@@ -136,6 +140,39 @@ export function psMetrics() {
             },
             output
           );
+      };
+
+      // Streamed responses: usage and outcome are known only once the stream
+      // ends, so they are recorded then, without holding the response.
+      const stream = observeStream(c);
+      if (stream) {
+        stream
+          .then((s) => {
+            streamsTotal.inc({
+              route,
+              provider,
+              outcome: s.cancelled
+                ? 'cancelled'
+                : s.truncated
+                  ? 'truncated'
+                  : 'complete',
+            });
+            countTokens(
+              labelValue(s.model, 'unknown'),
+              s.tokens_in,
+              s.tokens_out
+            );
+          })
+          .catch(() => {});
+      } else if (
+        (c.res.headers.get('content-type') ?? '').includes('application/json')
+      ) {
+        const body: any = await c.res
+          .clone()
+          .json()
+          .catch(() => undefined);
+        const { input, output } = usageOf(body);
+        countTokens(labelValue(body?.model, 'unknown'), input, output);
       }
     } catch {
       // Metrics are best-effort and must never affect the response.
