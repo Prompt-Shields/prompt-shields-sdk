@@ -1,6 +1,7 @@
 import { Environment } from '../../utils/env';
 import { ProviderAPIConfig } from '../types';
 import {
+  assertAzureAuthModeAllowed,
   getAccessTokenFromEntraId,
   getAzureManagedIdentityToken,
   getAzureWorkloadIdentityToken,
@@ -21,6 +22,8 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
         Authorization: `Bearer ${azureAdToken?.replace('Bearer ', '')}`,
       };
     }
+
+    assertAzureAuthModeAllowed(azureAuthMode, c);
 
     if (azureAuthMode === 'entra') {
       const {
