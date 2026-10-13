@@ -2,6 +2,11 @@ import { GatewayError } from '../../errors/GatewayError';
 import { Options } from '../../types/requestBody';
 import { endpointStrings, ProviderAPIConfig } from '../types';
 import { getModelAndProvider, getAccessToken, getBucketAndFile } from './utils';
+import {
+  assertVertexAuthTypeAllowed,
+  assertWorkloadUpstreamIsGoogle,
+  getGcpHostAccessToken,
+} from '../../utils/gcpAmbientAuth';
 
 const getApiVersion = (provider: string) => {
   if (provider === 'meta') return 'v1beta1';
@@ -65,9 +70,15 @@ export const GoogleApiConfig: ProviderAPIConfig = {
     return `https://${vertexRegion}-aiplatform.googleapis.com`;
   },
   headers: async ({ c, providerOptions, gatewayRequestBody }) => {
-    const { apiKey, vertexServiceAccountJson } = providerOptions;
+    const { apiKey, vertexServiceAccountJson, vertexAuthType } =
+      providerOptions;
     let authToken = apiKey;
-    if (vertexServiceAccountJson) {
+    // PS fork (#76): host identity, gated by GCP_AMBIENT_CREDENTIALS_ENABLED.
+    assertVertexAuthTypeAllowed(vertexAuthType, c);
+    if (vertexAuthType === 'workload') {
+      assertWorkloadUpstreamIsGoogle(providerOptions, c);
+      authToken = await getGcpHostAccessToken(c);
+    } else if (vertexServiceAccountJson) {
       authToken = await getAccessToken(c, vertexServiceAccountJson);
     }
     const anthropicBeta =
