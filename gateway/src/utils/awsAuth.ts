@@ -7,8 +7,14 @@ import { externalServiceFetch } from './fetch';
 import { Environment } from './env';
 import { GatewayError } from '../errors/GatewayError';
 
-export const awsEndpointDomain =
-  Environment({}).AWS_ENDPOINT_DOMAIN || 'amazonaws.com';
+// Prompt Shields: read per request so Workers bindings apply (on Workers
+// `Environment({})` has no bindings at module load).
+export function getAwsEndpointDomain(env?: Record<string, any>): string {
+  return Environment(env).AWS_ENDPOINT_DOMAIN || 'amazonaws.com';
+}
+
+/** Node default; prefer getAwsEndpointDomain(env) where the env is known. */
+export const awsEndpointDomain = getAwsEndpointDomain();
 
 export interface AWSCredentials {
   source?: string;
@@ -61,14 +67,14 @@ export function isValidAwsRegion(region?: string): boolean {
   return !!region && AWS_REGION_RE.test(region);
 }
 
-export function assertAwsUrl(url: string): string {
+export function assertAwsUrl(url: string, env?: Record<string, any>): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     throw new GatewayError('Invalid AWS region or resource name', 400);
   }
-  const domain = awsEndpointDomain.toLowerCase();
+  const domain = getAwsEndpointDomain(env).toLowerCase();
   if (
     parsed.protocol !== 'https:' ||
     parsed.username ||
@@ -105,9 +111,10 @@ export const generateAWSHeaders = async (
   awsRegion: string,
   awsAccessKeyID: string,
   awsSecretAccessKey: string,
-  awsSessionToken: string | undefined
+  awsSessionToken: string | undefined,
+  env?: Record<string, any>
 ): Promise<Record<string, string>> => {
-  assertAwsUrl(url);
+  assertAwsUrl(url, env);
   const signer = new SignatureV4({
     service: awsService,
     region: awsRegion || 'us-east-1',
@@ -621,14 +628,15 @@ export async function fetchSTSAssumeRoleCredentials(
   accessKeyId: string,
   secretAccessKey: string,
   sessionToken?: string,
-  externalId?: string
+  externalId?: string,
+  env?: Record<string, any>
 ): Promise<AWSCredentials | null> {
   if (!isValidAwsRegion(awsRegion)) {
     logger.error({ message: 'Refusing STS AssumeRole: invalid region' });
     return null;
   }
   const service = 'sts';
-  const hostname = `sts.${awsRegion}.${awsEndpointDomain}`;
+  const hostname = `sts.${awsRegion}.${getAwsEndpointDomain(env)}`;
   const signer = new SignatureV4({
     service,
     region: awsRegion,

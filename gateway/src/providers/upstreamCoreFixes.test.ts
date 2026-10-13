@@ -7,6 +7,7 @@ import {
   BedrockConverseChatCompleteConfig,
 } from './bedrock/chatComplete';
 import BedrockConfig from './bedrock';
+import { BedrockCreateFinetuneConfig } from './bedrock/createFinetune';
 import { FireworksAIChatCompleteConfig } from './fireworks-ai/chatComplete';
 import { transformUsingProviderConfig } from '../services/transformToProviderRequest';
 
@@ -119,5 +120,16 @@ describe('fixes ported for #108', () => {
     expect(config.chatComplete).toBe(
       BedrockConverseAnthropicChatCompleteConfig
     );
+  });
+
+  test('Bedrock fine-tune: hyperparameters from the method form are kept', () => {
+    const hp = (BedrockCreateFinetuneConfig.hyperparameters as any).transform({
+      method: {
+        type: 'supervised',
+        supervised: { hyperparameters: { n_epochs: 3, batch_size: 8 } },
+      },
+    });
+    expect(hp.epochCount).toBe('3');
+    expect(hp.batchSize).toBe('8');
   });
 });

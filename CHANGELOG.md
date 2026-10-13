@@ -45,7 +45,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Config fan-out cap** — at most 100 root targets (1000 for conditional routing) and 50 nested targets per root target; override with `MAX_ROOT_CONFIG_TARGETS`, `MAX_CONDITIONAL_ROOT_CONFIG_TARGETS` and `MAX_NESTED_CONFIG_TARGETS` (#65).
 - **Custom-host response size cap** — responses from custom hosts are limited to 50 MiB (`PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`) (#65).
 - **Provider credentials win on proxy routes** — forwarded or proxied client headers no longer overwrite the credential headers a provider config sets (#65).
-- **Bedrock/SageMaker cannot borrow the gateway's AWS identity** — `awsAuthType=serviceRole`, and `assumedRole` without operator-configured keys, sign with the host's credentials only when `AWS_AMBIENT_CREDENTIALS_ENABLED=true`; otherwise `serviceRole` returns 403. Upstream 2.0 allows both for any caller (#108).
+- **Bedrock/SageMaker cannot borrow the gateway's AWS identity** — `awsAuthType=serviceRole`, and `assumedRole` without operator-configured keys, sign with the host's credentials only when `AWS_AMBIENT_CREDENTIALS_ENABLED=true`; otherwise `serviceRole` returns 403. `assumedRole` without a role ARN returns 400 instead of signing with the operator's assume-role keys. Upstream 2.0 allows all of these for any caller (#108).
 - **AWS signed requests stay on AWS** — a crafted `x-portkey-aws-region` (`x@evil.example/`) or S3 bucket name could point Bedrock, SageMaker or STS calls, and their signed headers (access key id, session token), at another host. Regions are now format-checked, signing is refused for hosts outside `AWS_ENDPOINT_DOMAIN`, and STS `RoleArn`/`ExternalId` are URL-encoded (#108).
 
 ### Documentation

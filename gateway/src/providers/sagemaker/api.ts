@@ -1,5 +1,5 @@
 import { GatewayError } from '../../errors/GatewayError';
-import { awsEndpointDomain, isValidAwsRegion } from '../../utils/awsAuth';
+import { getAwsEndpointDomain, isValidAwsRegion } from '../../utils/awsAuth';
 import {
   generateAWSHeaders,
   providerAssumedRoleCredentials,
@@ -7,11 +7,11 @@ import {
 import { ProviderAPIConfig } from '../types';
 import { env } from 'hono/adapter';
 const SagemakerAPIConfig: ProviderAPIConfig = {
-  getBaseURL: ({ providerOptions }) => {
+  getBaseURL: ({ providerOptions, c }) => {
     if (!isValidAwsRegion(providerOptions.awsRegion)) {
       throw new GatewayError('Invalid AWS region', 400);
     }
-    return `https://runtime.sagemaker.${providerOptions.awsRegion}.${awsEndpointDomain}`;
+    return `https://runtime.sagemaker.${providerOptions.awsRegion}.${getAwsEndpointDomain(env(c))}`;
   },
   headers: async ({
     providerOptions,
@@ -34,7 +34,8 @@ const SagemakerAPIConfig: ProviderAPIConfig = {
       providerOptions.awsRegion || '',
       providerOptions.awsAccessKeyId || '',
       providerOptions.awsSecretAccessKey || '',
-      providerOptions.awsSessionToken || ''
+      providerOptions.awsSessionToken || '',
+      env(c)
     );
 
     if (providerOptions.amznSagemakerCustomAttributes) {

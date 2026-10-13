@@ -11,6 +11,7 @@ import { externalServiceFetch } from '../../utils/fetch';
 import { Environment } from '../../utils/env';
 import { Options, Tool } from '../../types/requestBody';
 import { BEDROCK } from '../../globals';
+import { FinetuneRequest } from '../types';
 import {
   AWSCredentials,
   awsEndpointDomain,
@@ -27,12 +28,18 @@ import {
   getCredentialsFromSharedCredentialsFile,
   getRegionFromEnv,
   ambientAwsCredentialsEnabled,
+  getAwsEndpointDomain,
 } from '../../utils/awsAuth';
 import { GatewayError } from '../../errors/GatewayError';
 import { requestCache } from '../../services/cache/cacheService';
 
 // Re-export for backward compatibility
-export { awsEndpointDomain, generateAWSHeaders, getRegionFromEnv };
+export {
+  awsEndpointDomain,
+  generateAWSHeaders,
+  getAwsEndpointDomain,
+  getRegionFromEnv,
+};
 
 const CREDENTIAL_CACHE_TTL = 300; // 5 minutes
 
@@ -246,7 +253,8 @@ async function getSTSAssumedCredentials(
     accessKeyId,
     secretAccessKey,
     sessionToken,
-    awsExternalId
+    awsExternalId,
+    env
   );
 
   if (credentials) {
@@ -626,6 +634,11 @@ export async function providerAssumedRoleCredentials(
 ) {
   const { awsAuthType } = providerOptions;
   if (awsAuthType !== 'assumedRole' && awsAuthType !== 'serviceRole') return;
+  if (awsAuthType === 'assumedRole' && !providerOptions.awsRoleArn) {
+    // Without a role ARN, getAssumedRoleCredentials would hand back the
+    // operator's own assume-role keys.
+    throw new GatewayError('assumedRole requires an AWS role ARN', 400);
+  }
   if (awsAuthType === 'serviceRole' && !ambientAwsCredentialsEnabled(env)) {
     throw new GatewayError(
       'awsAuthType serviceRole is disabled on this gateway',
@@ -658,10 +671,24 @@ export async function providerAssumedRoleCredentials(
   providerOptions.awsAccessKeyId = credentials.accessKeyId;
   providerOptions.awsSecretAccessKey = credentials.secretAccessKey;
   providerOptions.awsSessionToken = credentials.sessionToken;
-  // Only fall back to the credentials' region if the caller set none.
-  providerOptions.awsRegion =
-    providerOptions.awsRegion || credentials.awsRegion;
+  // serviceRole only: fall back to the host's region if the caller set none.
+  // assumedRole keeps the caller's region; the base URL is already built.
+  if (awsAuthType === 'serviceRole') {
+    providerOptions.awsRegion =
+      providerOptions.awsRegion || credentials.awsRegion;
+  }
 }
+
+export const populateHyperParameters = (value: FinetuneRequest) => {
+  let hyperParameters = value.hyperparameters ?? {};
+
+  if (value.method) {
+    const method = value.method.type;
+    hyperParameters = value.method?.[method]?.hyperparameters ?? {};
+  }
+
+  return hyperParameters;
+};
 
 export const getInferenceProfile = async (
   inferenceProfileIdentifier: string,
@@ -682,7 +709,7 @@ export const getInferenceProfile = async (
   const awsSecretAccessKey = providerOptions.awsSecretAccessKey || '';
   const awsSessionToken = providerOptions.awsSessionToken || '';
 
-  const url = `https://bedrock.${awsRegion}.${awsEndpointDomain}/inference-profiles/${encodeURIComponent(decodeURIComponent(inferenceProfileIdentifier))}`;
+  const url = `https://bedrock.${awsRegion}.${getAwsEndpointDomain(env)}/inference-profiles/${encodeURIComponent(decodeURIComponent(inferenceProfileIdentifier))}`;
 
   const headers = await generateAWSHeaders(
     undefined,
@@ -693,7 +720,8 @@ export const getInferenceProfile = async (
     awsRegion,
     awsAccessKeyId,
     awsSecretAccessKey,
-    awsSessionToken
+    awsSessionToken,
+    env
   );
 
   try {

@@ -3,7 +3,6 @@ import { Options, Params } from '../../types/requestBody';
 import { endpointStrings, ProviderAPIConfig } from '../types';
 import { bedrockInvokeModels } from './constants';
 import {
-  awsEndpointDomain,
   generateAWSHeaders,
   getBedrockModelWithoutRegion,
   getFoundationModelFromInferenceProfile,
@@ -13,7 +12,11 @@ import {
 } from './utils';
 import { env } from 'hono/adapter';
 import { GatewayError } from '../../errors/GatewayError';
-import { assertAwsUrl, isValidAwsRegion } from '../../utils/awsAuth';
+import {
+  assertAwsUrl,
+  getAwsEndpointDomain,
+  isValidAwsRegion,
+} from '../../utils/awsAuth';
 import { getProviderAndModel } from '.';
 import { ANTHROPIC } from '../../globals';
 
@@ -137,6 +140,8 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
     ) {
       throw new GatewayError('Invalid AWS region', 400);
     }
+    const cEnv = env(c);
+    const awsEndpointDomain = getAwsEndpointDomain(cEnv);
     const model = decodeURIComponent(params?.model || '');
     if (model.includes('arn:aws') && params) {
       const foundationModel = model.includes('foundation-model/')
@@ -144,7 +149,7 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
         : await getFoundationModelFromInferenceProfile(
             model,
             providerOptions,
-            env(c)
+            cEnv
           );
       if (foundationModel) {
         providerOptions.foundationModel = foundationModel;
@@ -157,7 +162,8 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       );
       const bucketName = s3URL.replace('s3://', '').split('/')[0];
       return assertAwsUrl(
-        `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`
+        `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+        cEnv
       );
     }
     if (fn === 'retrieveFileContent') {
@@ -166,15 +172,18 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       );
       const bucketName = s3URL.replace('s3://', '').split('/')[0];
       return assertAwsUrl(
-        `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`
+        `https://${bucketName}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+        cEnv
       );
     }
     if (fn === 'uploadFile')
       return assertAwsUrl(
-        `https://${providerOptions.awsS3Bucket}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`
+        `https://${providerOptions.awsS3Bucket}.s3.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+        cEnv
       );
     return assertAwsUrl(
-      `https://${getControlPlaneEndpoint(fn)}.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`
+      `https://${getControlPlaneEndpoint(fn)}.${providerOptions.awsRegion || 'us-east-1'}.${awsEndpointDomain}`,
+      cEnv
     );
   },
   headers: async ({
@@ -233,7 +242,8 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
       providerOptions.awsRegion || '',
       providerOptions.awsAccessKeyId || '',
       providerOptions.awsSecretAccessKey || '',
-      providerOptions.awsSessionToken || ''
+      providerOptions.awsSessionToken || '',
+      cEnv
     );
   },
   getEndpoint: ({

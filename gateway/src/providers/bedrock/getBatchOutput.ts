@@ -6,7 +6,7 @@ import { getOctetStreamToOctetStreamTransformer } from '../../handlers/streamHan
 import { BedrockUploadFileResponseTransforms } from './uploadFileUtils';
 import { BEDROCK } from '../../globals';
 import {
-  awsEndpointDomain,
+  getAwsEndpointDomain,
   getBedrockFoundationModel,
   getRegionFromEnv,
 } from './utils';
@@ -124,7 +124,7 @@ export const BedrockGetBatchOutputRequestHandler = async ({
       providerOptions,
       env(c)
     );
-    const s3FileURL = `https://${awsS3Bucket}.s3.${awsRegion}.${awsEndpointDomain}/${awsS3ObjectKey}`;
+    const s3FileURL = `https://${awsS3Bucket}.s3.${awsRegion}.${getAwsEndpointDomain(env(c))}/${awsS3ObjectKey}`;
     const s3FileHeaders = await BedrockAPIConfig.headers({
       c,
       providerOptions,

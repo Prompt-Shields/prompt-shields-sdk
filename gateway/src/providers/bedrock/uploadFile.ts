@@ -1,4 +1,5 @@
 import { env } from 'hono/adapter';
+import { getAwsEndpointDomain } from '../../utils/awsAuth';
 import { getBoundaryFromContentType } from '../../handlers/streamHandlerUtils';
 import {
   BedrockUploadFileTransformerConfig,
@@ -20,6 +21,7 @@ class AwsMultipartUploadHandler {
   private bucket: string;
   private objectKey: string;
   private region: string;
+  private domain: string;
   private uploadId?: string;
   private url: URL;
   private parts: { PartNumber: number; ETag: string }[] = [];
@@ -37,8 +39,9 @@ class AwsMultipartUploadHandler {
     this.region = region;
     this.bucket = bucket;
     this.objectKey = objectKey;
+    this.domain = getAwsEndpointDomain(env(c));
     this.url = new URL(
-      `https://${bucket}.s3.${region}.amazonaws.com/${objectKey}?uploads`
+      `https://${bucket}.s3.${region}.${this.domain}/${objectKey}?uploads`
     );
     this.providerOptions = providerOptions;
     this.c = c;
@@ -171,7 +174,7 @@ class AwsMultipartUploadHandler {
   async uploadPart(partNumber: number, partData: Uint8Array | Buffer) {
     const method = 'PUT';
     const partUrl = new URL(
-      `https://${this.bucket}.s3.${this.region}.amazonaws.com/${this.objectKey}?partNumber=${partNumber}&uploadId=${this.uploadId}`
+      `https://${this.bucket}.s3.${this.region}.${this.domain}/${this.objectKey}?partNumber=${partNumber}&uploadId=${this.uploadId}`
     );
     const headers = await BedrockAPIConfig.headers({
       c: this.c,
@@ -208,7 +211,7 @@ class AwsMultipartUploadHandler {
   async completeMultipartUpload() {
     const method = 'POST';
     const completeUrl = new URL(
-      `https://${this.bucket}.s3.${this.region}.amazonaws.com/${this.objectKey}?uploadId=${this.uploadId}`
+      `https://${this.bucket}.s3.${this.region}.${this.domain}/${this.objectKey}?uploadId=${this.uploadId}`
     );
     const partsXml = this.parts
       .map(

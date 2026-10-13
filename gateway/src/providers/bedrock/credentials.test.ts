@@ -50,6 +50,36 @@ describe('providerAssumedRoleCredentials', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  test('assumedRole without a role ARN is rejected, not signed with operator keys', async () => {
+    mockEnv.AWS_ASSUME_ROLE_ACCESS_KEY_ID = 'AKIAOPERATOR';
+    mockEnv.AWS_ASSUME_ROLE_SECRET_ACCESS_KEY = 'operator-secret';
+    const opts = { provider: 'bedrock', awsAuthType: 'assumedRole' } as Options;
+    const err = await providerAssumedRoleCredentials(opts, {}).catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayError);
+    expect(err.status).toBe(400);
+    expect(opts.awsAccessKeyId).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('assumedRole keeps the region the base URL was built with', async () => {
+    mockEnv.AWS_ASSUME_ROLE_ACCESS_KEY_ID = 'AKIAOPERATOR';
+    mockEnv.AWS_ASSUME_ROLE_SECRET_ACCESS_KEY = 'operator-secret';
+    mockEnv.AWS_ASSUME_ROLE_REGION = 'eu-west-1';
+    fetchSpy.mockResolvedValue(
+      new Response(
+        '<AssumeRoleResponse><Credentials><AccessKeyId>ASIAROLE</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t</SessionToken></Credentials></AssumeRoleResponse>'
+      )
+    );
+    const opts = {
+      provider: 'bedrock',
+      awsAuthType: 'assumedRole',
+      awsRoleArn: 'arn:aws:iam::111122223333:role/region-test',
+    } as Options;
+    await providerAssumedRoleCredentials(opts, {});
+    expect(opts.awsAccessKeyId).toBe('ASIAROLE');
+    expect(opts.awsRegion).toBeUndefined();
+  });
+
   test('serviceRole uses host credentials when enabled', async () => {
     mockEnv.AWS_AMBIENT_CREDENTIALS_ENABLED = 'true';
     mockEnv.AWS_ACCESS_KEY_ID = 'AKIAHOST';
@@ -103,6 +133,15 @@ describe('AWS host guard', () => {
     'https://evil.example#.s3.us-east-1.amazonaws.com',
   ])('refuses to sign for %s', (url) => {
     expect(() => assertAwsUrl(url)).toThrow(GatewayError);
+  });
+
+  test('uses the per-request AWS_ENDPOINT_DOMAIN (China partition)', () => {
+    mockEnv.AWS_ENDPOINT_DOMAIN = 'amazonaws.com.cn';
+    const url = 'https://bedrock-runtime.cn-north-1.amazonaws.com.cn';
+    expect(assertAwsUrl(url, {})).toBe(url);
+    expect(() =>
+      assertAwsUrl('https://bedrock-runtime.us-east-1.amazonaws.com', {})
+    ).toThrow(GatewayError);
   });
 
   test('allows AWS hosts', () => {
