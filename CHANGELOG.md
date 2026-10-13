@@ -9,6 +9,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 
 - **Gateway: Gemini 3 tool calling across turns** — thought signatures are returned on tool calls (`function.thought_signature`, non-strict mode) and sent back to Gemini/Vertex; per-part `media_resolution` for images. Ported from Portkey 2.0.0 (#108).
+- **Gateway: Bedrock on Portkey 2.0's provider code** — Converse and Messages for Claude (`anthropic_beta` as header string or body array, cache reads and writes in `prompt_tokens`), inference-profile ARNs, batch, files and fine-tuning; IRSA, pod identity, ECS and IMDS credentials for `serviceRole` behind `AWS_AMBIENT_CREDENTIALS_ENABLED` (#108).
 - **Gateway: Anthropic structured outputs and effort** — `response_format` JSON schema and `reasoning_effort` map to Anthropic `output_config` (#108).
 
 - **Gateway: Responses and Messages API on any provider** — when a provider lacks native support, `/v1/responses` and `/v1/messages` requests (JSON and streaming) are translated through Chat Completions and back, decided per target. Ported from Portkey 2.0.0 (#59).
@@ -44,6 +45,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Config fan-out cap** — at most 100 root targets (1000 for conditional routing) and 50 nested targets per root target; override with `MAX_ROOT_CONFIG_TARGETS`, `MAX_CONDITIONAL_ROOT_CONFIG_TARGETS` and `MAX_NESTED_CONFIG_TARGETS` (#65).
 - **Custom-host response size cap** — responses from custom hosts are limited to 50 MiB (`PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`) (#65).
 - **Provider credentials win on proxy routes** — forwarded or proxied client headers no longer overwrite the credential headers a provider config sets (#65).
+- **Bedrock/SageMaker cannot borrow the gateway's AWS identity** — `awsAuthType=serviceRole`, and `assumedRole` without operator-configured keys, sign with the host's credentials only when `AWS_AMBIENT_CREDENTIALS_ENABLED=true`; otherwise `serviceRole` returns 403. Upstream 2.0 allows both for any caller (#108).
+- **AWS signed requests stay on AWS** — a crafted `x-portkey-aws-region` (`x@evil.example/`) or S3 bucket name could point Bedrock, SageMaker or STS calls, and their signed headers (access key id, session token), at another host. Regions are now format-checked, signing is refused for hosts outside `AWS_ENDPOINT_DOMAIN`, and STS `RoleArn`/`ExternalId` are URL-encoded (#108).
 
 ### Documentation
 

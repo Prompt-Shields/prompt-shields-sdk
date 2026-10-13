@@ -122,3 +122,17 @@ export type RawMessageStreamEvent =
   | RawContentBlockDeltaEvent
   | RawContentBlockStopEvent
   | RawPingEvent;
+
+/** Legacy Bedrock invoke-model stream chunk for Anthropic models. */
+export interface AnthropicMessagesStreamResponse {
+  id: string;
+  type: string;
+  role: string;
+  content: {
+    type: string;
+    text: string;
+  }[];
+  model: string;
+  stop_reason: string;
+  stop_sequence: string | null;
+}

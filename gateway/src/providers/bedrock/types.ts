@@ -82,7 +82,7 @@ export interface BedrockInferenceProfile {
 }
 
 // https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html#API_runtime_Converse_ResponseSyntax
-export enum BEDROCK_STOP_REASON {
+export enum BEDROCK_CONVERSE_STOP_REASON {
   end_turn = 'end_turn',
   tool_use = 'tool_use',
   max_tokens = 'max_tokens',
@@ -107,34 +107,6 @@ export interface BedrockMessagesParams extends MessageCreateParamsBase {
   };
   anthropic_version?: string;
   countPenalty?: number;
-}
-
-/**
- * Tool parameter interface for Bedrock Messages API.
- * Includes advanced tool use properties supported via Invoke API
- * with appropriate beta headers (e.g., tool-search-tool-2025-10-19).
- */
-export interface BedrockMessagesToolParam {
-  name: string;
-  description?: string;
-  input_schema?: Record<string, any>;
-  type?: string;
-  cache_control?: { type: string };
-  /**
-   * When true, this tool is not loaded into context initially.
-   * Requires beta header: tool-search-tool-2025-10-19 (Bedrock Invoke API only)
-   */
-  defer_loading?: boolean;
-  /**
-   * List of tool types that can call this tool programmatically.
-   * Requires appropriate beta header.
-   */
-  allowed_callers?: string[];
-  /**
-   * Example inputs demonstrating how to use this tool.
-   * Requires beta header: tool-examples-2025-10-29 (Bedrock Invoke API only)
-   */
-  input_examples?: Record<string, any>[];
 }
 export interface BedrockChatCompletionResponse {
   metrics: {
@@ -239,6 +211,7 @@ export interface BedrockChatCompleteStreamChunk {
       input?: object;
     };
   };
+  message?: string;
   stopReason?: BEDROCK_CONVERSE_STOP_REASON;
   metrics?: {
     latencyMs: number;
@@ -252,16 +225,6 @@ export interface BedrockChatCompleteStreamChunk {
     cacheWriteInputTokenCount?: number;
     cacheWriteInputTokens?: number;
   };
-  message?: string;
-}
-
-export enum BEDROCK_CONVERSE_STOP_REASON {
-  end_turn = 'end_turn',
-  tool_use = 'tool_use',
-  max_tokens = 'max_tokens',
-  stop_sequence = 'stop_sequence',
-  guardrail_intervened = 'guardrail_intervened',
-  content_filtered = 'content_filtered',
 }
 
 export enum TITAN_STOP_REASON {

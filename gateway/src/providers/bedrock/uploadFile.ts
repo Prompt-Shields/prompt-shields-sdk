@@ -1,3 +1,4 @@
+import { env } from 'hono/adapter';
 import { getBoundaryFromContentType } from '../../handlers/streamHandlerUtils';
 import {
   BedrockUploadFileTransformerConfig,
@@ -333,9 +334,7 @@ export const BedrockUploadFileRequestHandler: RequestHandler<
 }) => {
   try {
     // get aws credentials and parse provider options
-    if (providerOptions.awsAuthType === 'assumedRole') {
-      await providerAssumedRoleCredentials(c, providerOptions);
-    }
+    await providerAssumedRoleCredentials(providerOptions, env(c));
     const {
       awsRegion,
       awsS3Bucket,
@@ -367,9 +366,9 @@ export const BedrockUploadFileRequestHandler: RequestHandler<
       const foundationModel = awsBedrockModel.includes('foundation-model/')
         ? awsBedrockModel.split('/').pop()
         : await getFoundationModelFromInferenceProfile(
-            c,
             awsBedrockModel,
-            providerOptions
+            providerOptions,
+            env(c)
           );
       if (foundationModel) {
         awsBedrockModel = foundationModel;

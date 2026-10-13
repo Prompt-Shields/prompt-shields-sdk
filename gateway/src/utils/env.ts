@@ -46,6 +46,8 @@ const nodeEnv = {
   TLS_CERT_PATH: getValueOrFileContents(process.env.TLS_CERT_PATH, true),
   TLS_CA_PATH: getValueOrFileContents(process.env.TLS_CA_PATH, true),
 
+  HOME: getValueOrFileContents(process.env.HOME, true),
+  USERPROFILE: getValueOrFileContents(process.env.USERPROFILE, true),
   AWS_ACCESS_KEY_ID: getValueOrFileContents(process.env.AWS_ACCESS_KEY_ID),
   AWS_SECRET_ACCESS_KEY: getValueOrFileContents(
     process.env.AWS_SECRET_ACCESS_KEY
@@ -55,6 +57,22 @@ const nodeEnv = {
   AWS_PROFILE: getValueOrFileContents(process.env.AWS_PROFILE, true),
   AWS_WEB_IDENTITY_TOKEN_FILE: getValueOrFileContents(
     process.env.AWS_WEB_IDENTITY_TOKEN_FILE,
+    true
+  ),
+  AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: getValueOrFileContents(
+    process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE,
+    true
+  ),
+  AWS_CONTAINER_CREDENTIALS_FULL_URI: getValueOrFileContents(
+    process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI,
+    true
+  ),
+  ECS_CONTAINER_METADATA_URI: getValueOrFileContents(
+    process.env.ECS_CONTAINER_METADATA_URI,
+    true
+  ),
+  ECS_CONTAINER_METADATA_URI_V4: getValueOrFileContents(
+    process.env.ECS_CONTAINER_METADATA_URI_V4,
     true
   ),
   AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: getValueOrFileContents(
@@ -73,6 +91,17 @@ const nodeEnv = {
   AWS_REGION: getValueOrFileContents(process.env.AWS_REGION),
   AWS_ENDPOINT_DOMAIN: getValueOrFileContents(process.env.AWS_ENDPOINT_DOMAIN),
   AWS_IMDS_V1: getValueOrFileContents(process.env.AWS_IMDS_V1),
+  AWS_DEFAULT_REGION: getValueOrFileContents(process.env.AWS_DEFAULT_REGION),
+  AWS_ASSUME_ROLE_SOURCE_ARN: getValueOrFileContents(
+    process.env.AWS_ASSUME_ROLE_SOURCE_ARN
+  ),
+  AWS_ASSUME_ROLE_SOURCE_EXTERNAL_ID: getValueOrFileContents(
+    process.env.AWS_ASSUME_ROLE_SOURCE_EXTERNAL_ID
+  ),
+  AWS_AMBIENT_CREDENTIALS_ENABLED: getValueOrFileContents(
+    process.env.AWS_AMBIENT_CREDENTIALS_ENABLED,
+    true
+  ),
 
   AZURE_AUTH_MODE: getValueOrFileContents(process.env.AZURE_AUTH_MODE),
   AZURE_ENTRA_CLIENT_ID: getValueOrFileContents(
@@ -135,12 +164,17 @@ const nodeEnv = {
   ),
 };
 
-export const Environment = (c?: Context) => {
+// Portkey 2.0 passes the runtime env record (`env(c)`) where this fork passed
+// the Hono context. Accept both so ported providers and our callers agree.
+export const Environment = (c?: Context | Record<string, any>) => {
   if (isNodeInstance) {
     return nodeEnv;
   }
-  if (c) {
-    return env(c);
+  if (!c) {
+    return {};
   }
-  return {};
+  if (c instanceof Object && 'req' in c && 'env' in c) {
+    return env(c as Context);
+  }
+  return c as Record<string, any>;
 };

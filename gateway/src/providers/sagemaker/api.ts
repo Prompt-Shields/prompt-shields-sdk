@@ -1,13 +1,17 @@
 import { GatewayError } from '../../errors/GatewayError';
+import { awsEndpointDomain, isValidAwsRegion } from '../../utils/awsAuth';
 import {
   generateAWSHeaders,
-  getAssumedRoleCredentials,
+  providerAssumedRoleCredentials,
 } from '../bedrock/utils';
 import { ProviderAPIConfig } from '../types';
 import { env } from 'hono/adapter';
 const SagemakerAPIConfig: ProviderAPIConfig = {
   getBaseURL: ({ providerOptions }) => {
-    return `https://runtime.sagemaker.${providerOptions.awsRegion}.amazonaws.com`;
+    if (!isValidAwsRegion(providerOptions.awsRegion)) {
+      throw new GatewayError('Invalid AWS region', 400);
+    }
+    return `https://runtime.sagemaker.${providerOptions.awsRegion}.${awsEndpointDomain}`;
   },
   headers: async ({
     providerOptions,
@@ -19,40 +23,7 @@ const SagemakerAPIConfig: ProviderAPIConfig = {
       'content-type': 'application/json',
     };
 
-    if (providerOptions.awsAuthType === 'assumedRole') {
-      try {
-        // Assume the role in the source account
-        const sourceRoleCredentials = await getAssumedRoleCredentials(
-          c,
-          env(c).AWS_ASSUME_ROLE_SOURCE_ARN, // Role ARN in the source account
-          env(c).AWS_ASSUME_ROLE_SOURCE_EXTERNAL_ID || '', // External ID for source role (if needed)
-          providerOptions.awsRegion || ''
-        );
-
-        if (!sourceRoleCredentials) {
-          throw new Error('Server Error while assuming internal role');
-        }
-
-        // Assume role in destination account using temporary creds obtained in first step
-        const { accessKeyId, secretAccessKey, sessionToken } =
-          (await getAssumedRoleCredentials(
-            c,
-            providerOptions.awsRoleArn || '',
-            providerOptions.awsExternalId || '',
-            providerOptions.awsRegion || '',
-            {
-              accessKeyId: sourceRoleCredentials.accessKeyId,
-              secretAccessKey: sourceRoleCredentials.secretAccessKey,
-              sessionToken: sourceRoleCredentials.sessionToken,
-            }
-          )) || {};
-        providerOptions.awsAccessKeyId = accessKeyId;
-        providerOptions.awsSecretAccessKey = secretAccessKey;
-        providerOptions.awsSessionToken = sessionToken;
-      } catch (e) {
-        throw new GatewayError('Error while assuming sagemaker role');
-      }
-    }
+    await providerAssumedRoleCredentials(providerOptions, env(c));
 
     const awsHeaders = await generateAWSHeaders(
       transformedRequestBody,
