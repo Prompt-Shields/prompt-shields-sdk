@@ -121,6 +121,16 @@ export const getAccessToken = async (
   };
   // client id is only set for managed identity
   if (azureAuthMode === 'managed') {
+    // Prompt Shields: the guardrail config comes from the caller, and a
+    // managed identity token is the gateway host's own Azure identity.
+    if (
+      String(env?.AZURE_AMBIENT_CREDENTIALS_ENABLED).toLowerCase() !== 'true'
+    ) {
+      return {
+        token: '',
+        error: 'azureAuthMode managed is disabled on this gateway',
+      };
+    }
     tokenResult = await getAzureManagedIdentityToken(
       credentials?.resourceName ?? '',
       check,
