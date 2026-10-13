@@ -38,6 +38,7 @@ Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b3
 | Anthropic (#108) | `src/providers/anthropic/{chatComplete,types,api,complete}.ts` | Cached tokens counted in `prompt_tokens`; structured outputs and effort via `output_config`; tool `strict` not forwarded (reverted upstream in enterprise 2.4.4); Vertex Claude uses the shared Anthropic transforms |
 | Batch output, Fireworks, Bedrock fixes (#108) | `cohere`/`azure-ai-inference` `getBatchOutput.ts`, `fireworks-ai/*` | `src/utils/fetch.ts` is a plain-fetch shim of upstream's names; OpenAI batch fallback and two Bedrock chat fixes hand-ported; Fireworks keeps this fork's `index.ts` |
 | Bedrock full port (#108) | `src/providers/bedrock/*`, `src/providers/anthropic-base/{messages,utils/streamGenerator}.ts`, `src/utils/awsAuth.ts`, `src/providers/sagemaker/api.ts` | `Environment()` accepts the runtime env record (2.0) or a Hono context (ours); `services/cache/cacheService.ts` is an in-process TTL shim of upstream's Redis/KV `requestCache`; `assumedRole`/`serviceRole` resolve through one helper (`providerAssumedRoleCredentials`); host credentials (env, shared files, IRSA, pod identity, ECS, IMDS) only with `AWS_AMBIENT_CREDENTIALS_ENABLED=true`, and are no longer read at module load; signing only for `https` hosts under `AWS_ENDPOINT_DOMAIN`, region format checked, STS query encoded; `uploadFile` keeps this fork's web-stream implementation |
+| Batch output streaming, Vertex batch upload (#108) | `src/providers/{openai,azure-openai,google-vertex-ai}/getBatchOutput.ts`, `src/providers/google-vertex-ai/{uploadFile,createBatch}.ts`, `createLineSplitter` in `src/handlers/streamHandlerUtils.ts` | Upstream switches to `node-fetch` plus Node streams (`nodeLineReader`) so its proxy agents apply; this fork keeps one web-stream path for Node and Workers on plain `fetch`, so `nodeLineReader` and `externalServiceFetchWithNodeFetch` are not ported. Ported: octet-stream pass-through, `createLineSplitter` emitting bytes and decoding with `stream: true`, Vertex output-file probe, row-id fix and error responses, resource-name models in `createBatch`. Upstream resolves custom-model base models via the Vertex API (`getModelProviderFromModelID`); not ported, upload and output use the name's last segment. PS hardening: provider-returned output locations are followed only to GCS (`gs://`) and Azure Blob Storage hosts |
 
 Not ported:
 - `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
@@ -53,9 +54,11 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `deployment.yaml`
 - `src/globals.ts`
 - `src/handlers/handlerUtils.ts`
+- `src/handlers/proxyHandler.ts`
 - `src/handlers/retryHandler.ts`
 - `src/handlers/services/cacheService.ts`
 - `src/handlers/services/requestContext.ts`
+- `src/handlers/streamHandlerUtils.ts`
 - `src/index.ts`
 - `src/middlewares/cache/index.ts`
 - `src/middlewares/log/index.ts`
@@ -73,6 +76,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/azure-ai-inference/getBatchOutput.ts`
 - `src/providers/azure-ai-inference/messages.ts`
 - `src/providers/azure-openai/chatComplete.ts`
+- `src/providers/azure-openai/getBatchOutput.ts`
 - `src/providers/azure-openai/imageGenerate.ts`
 - `src/providers/azure-openai/index.ts`
 - `src/providers/bedrock/api.ts`
@@ -106,10 +110,12 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/fireworks-ai/uploadFile.ts`
 - `src/providers/fireworks-ai/utils.ts`
 - `src/providers/google-vertex-ai/chatComplete.ts`
+- `src/providers/google-vertex-ai/createBatch.ts`
 - `src/providers/google-vertex-ai/getBatchOutput.ts`
 - `src/providers/google-vertex-ai/index.ts`
 - `src/providers/google-vertex-ai/transformGenerationConfig.ts`
 - `src/providers/google-vertex-ai/types.ts`
+- `src/providers/google-vertex-ai/uploadFile.ts`
 - `src/providers/google-vertex-ai/utils.ts`
 - `src/providers/google/chatComplete.ts`
 - `src/providers/google/embed.ts`
@@ -189,6 +195,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
    Limits: the upstream URL check is hostname-only (no DNS resolution, so no DNS-rebinding or redirect protection), rejects every IPv6 literal not listed in `TRUSTED_CUSTOM_HOSTS`, and does not cover providers with custom request handlers, which build their own URLs. The response size cap applies to custom-host upstreams only.
 7. **Ported with changes** the upstream admin login (`src/middlewares/adminAuth`, the login modal in `src/public/index.html`): the token comes from `PS_GATEWAY_ADMIN_TOKEN` instead of `conf.json`, malformed session cookies are treated as absent, and expired sessions are pruned. The session cookie is `HttpOnly; SameSite=Strict` but not `Secure`, because the console is served over plain HTTP on localhost
 8. **Hardened** AWS credential handling in the Bedrock/SageMaker port (#108): Portkey 2.0 lets a caller pick `awsAuthType=serviceRole`, or `assumedRole` with no configured keys, and then signs with the gateway host's own AWS identity. Here both need `AWS_AMBIENT_CREDENTIALS_ENABLED=true` (otherwise `serviceRole` is 403 and `assumedRole` must use `AWS_ASSUME_ROLE_ACCESS_KEY_ID`/`SECRET` or `AWS_ASSUME_ROLE_SOURCE_ARN`). `assumedRole` without a role ARN is a 400, so a caller can never get the operator's assume-role keys themselves. `AWS_ENDPOINT_DOMAIN` is read per request, so Workers bindings apply. Requests are only signed for `https://*.<AWS_ENDPOINT_DOMAIN>` hosts, so a crafted `x-portkey-aws-region` or S3 bucket cannot send signed headers (access key id, session token) to another host.
+9. **Hardened** Azure host-identity auth: Portkey lets a caller send `x-portkey-azure-auth-mode: managed` (a token for the host's managed identity from IMDS) or `workload` (the host's federated token from `AZURE_FEDERATED_TOKEN_FILE`) and calls Azure OpenAI or Azure AI Inference as the gateway. Here both need `AZURE_AMBIENT_CREDENTIALS_ENABLED=true` and otherwise return 403 (`assertAzureAuthModeAllowed` in `src/providers/azure-openai/utils.ts`). The Azure guardrail plugins (`plugins/azure/`) refuse `managed` credentials the same way and fail closed (verdict `false`) instead of skipping the check; other token errors still fail open as upstream. `shieldPrompt` and `protectedMaterial` now pass the runtime env and cache options to `getAccessToken`, like `contentSafety` and `pii`.
 
 ## Original License
 

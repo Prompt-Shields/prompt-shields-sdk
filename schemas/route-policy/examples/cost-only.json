@@ -1,0 +1,49 @@
+{
+  "$schema": "../route-policy.v1.schema.json",
+  "schema_version": "route-policy.v1",
+  "policy_version": "cost-only-1",
+  "default_group": "balanced",
+  "quality_to_group": {
+    "draft": "cheap",
+    "balanced": "balanced",
+    "critical": "frontier"
+  },
+  "groups": {
+    "cheap": [
+      {
+        "model": "gpt-4o-mini",
+        "provider": "openai",
+        "input_cost_per_1k": 0.00015,
+        "output_cost_per_1k": 0.0006
+      },
+      {
+        "model": "claude-3-5-haiku-20241022",
+        "provider": "anthropic",
+        "input_cost_per_1k": 0.0008,
+        "output_cost_per_1k": 0.004
+      }
+    ],
+    "balanced": [
+      {
+        "model": "gpt-4o",
+        "provider": "openai",
+        "input_cost_per_1k": 0.0025,
+        "output_cost_per_1k": 0.01
+      }
+    ],
+    "frontier": [
+      {
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "input_cost_per_1k": 0.003,
+        "output_cost_per_1k": 0.015
+      },
+      {
+        "model": "gpt-4o",
+        "provider": "openai",
+        "input_cost_per_1k": 0.0025,
+        "output_cost_per_1k": 0.01
+      }
+    ]
+  }
+}

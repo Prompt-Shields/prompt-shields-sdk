@@ -66,7 +66,11 @@ export const handler: PluginHandler<{
 
   const url = `${credentials.customHost || `https://${credentials.resourceName}.cognitiveservices.azure.com`}/contentsafety/text:analyze?api-version=${apiVersion}`;
 
-  const { token, error: tokenError } = await getAccessToken(
+  const {
+    token,
+    error: tokenError,
+    denied,
+  } = await getAccessToken(
     credentials as any,
     'contentSafety',
     pluginOptions,
@@ -76,7 +80,7 @@ export const handler: PluginHandler<{
   if (tokenError) {
     return {
       error: tokenError,
-      verdict: true,
+      verdict: !denied,
       data,
     };
   }
