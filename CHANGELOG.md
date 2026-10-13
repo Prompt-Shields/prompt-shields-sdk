@@ -8,6 +8,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Gateway: unified, provider-backed `GET /v1/models`** — goes through the same validation as other `/v1` routes, proxies to the configured provider, and returns Anthropic's list shape (with `limit` / `after_id` / `before_id`) when the caller sends `anthropic-version`, so Claude Code can discover models through the gateway; other callers get OpenAI's shape (#79).
+- **`route-policy.v1` JSON Schema and golden decision vectors** — `schemas/route-policy/` holds the shared routing contract (JSON Schema 2020-12): groups, quality mapping, sensitivity levels, PII escalation, data policy, per-use-case quality bar and fallback. It also has three example policies and decision vectors in `vectors/*.json`. The gateway router runs every active vector through `resolveRoute`. The SDK checks the schema, the examples and `RouteHint` encoding. Sensitivity, data-policy and quality-bar vectors are marked `pending` and skipped with their reason until those P1 features land (#11).
+
+- **Gateway: token usage and truncation for streamed responses** — gateway telemetry now reads usage from SSE streams as they pass to the client (OpenAI chat `usage` chunks, Anthropic `message_start`/`message_delta`, Responses `response.completed`) and sends the event when the stream ends, so streamed calls are no longer costed at zero. A stream that ends without its terminal event is marked `stream_truncated`, a client disconnect `stream_cancelled`; `/metrics` gains `ps_gateway_streams_total{outcome}` and counts streamed tokens (#72).
+
+- **TypeScript Partner SDK (`@prompt-shields/partner`)** in `packages/partner-ts/`: a typed, dependency-free client for every `/partner/v1` endpoint. It supports OAuth client credentials with token caching or API-key auth, cursor pagination (async iterator, `toArray()`, `listPage()`), retries on 429 that honour `Retry-After`, and typed errors (`APIError`, `RateLimitError`, and others). `assets.usageSummary()` needs the collector endpoint from #99. The package is not yet published to npm (#105).
 - **SDK: telemetry for streamed calls** — `stream=True` on the sync and async clients now emits one event when the stream ends, with usage from OpenAI's final usage chunk (when the client points at api.openai.com the SDK requests `stream_options.include_usage` and hides that chunk unless you asked for it; other OpenAI-compatible hosts are left untouched, since some reject the parameter) or Anthropic's `message_start`/`message_delta`, and a ~4-chars-per-token estimate (`tokens_estimated`) otherwise. Events carry `stream_completed` (false on early close or error) and `stream_error`. Chunks pass through unchanged; telemetry failures never break the stream (#91).
 - **`ps-scan` repository scanner (SDK)** — `ps-scan [PATH]` statically finds AI usage: LLM SDK imports and clients (OpenAI, Anthropic, Google GenAI, Bedrock, Mistral, Cohere, LangChain, LlamaIndex, LiteLLM), model names, provider base URLs and API-key env var names (never values) in Python, TypeScript/JavaScript, Java and Go. Prints a summary, a JSON report, collector `/ingest/events` bodies with `source="code_scan"`, or SARIF. Standard library only, no network; skips `.env*`, `.git`, `node_modules`, virtualenvs, binaries and large files (#95).
 
@@ -32,11 +38,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **Gateway: batch output streams instead of buffering** — OpenAI, Azure OpenAI and Vertex batch output files are passed through as `application/octet-stream`. Vertex embedding batches read `000000000000.jsonl`, row ids lose a stray `-`, provider errors return error responses, and batch uploads keep multi-byte characters split across chunks. The shared line splitter now emits bytes, which also stops Fireworks dataset uploads from dropping every line. Batch output follows provider-returned locations only to GCS and Azure Blob Storage, and Vertex output resolves `publishers/<provider>/models/...` names to that provider's transform. Ported from Portkey 2.0.0 (#108).
 - **Anthropic `prompt_tokens` excluded cached tokens** — they are now included, matching OpenAI's usage convention, so cost and usage reports count cached input (#108).
 - **OpenAI batch output fetched `/files/undefined/content`** when a batch had neither an output nor an error file; it now uses the error file, or returns 400 (#108).
 - **Bedrock** no longer crashes on a tool call with empty arguments, and adds the text block Converse requires next to a document (#108).
 
 - **Gateway telemetry dropped Messages/Responses token counts** — `input_tokens`/`output_tokens` usage is now counted, which also fixes native Anthropic `/v1/messages` events. Events now carry `api_surface`.
+
+- **Gateway proxy returned 500 for GET/DELETE without a `content-type`** — the catch-all `/v1/*` proxy left the request params undefined, so `tryPost` crashed reading `stream`. Most SDKs send GETs (e.g. `/v1/files`) this way. Body-less requests now proxy with no body, the same method and the upstream response.
 
 - **Gateway telemetry reported vendor `unknown`** — the gateway's telemetry middleware looked for the vendor in the gateway's own URL. It now uses `x-portkey-provider`, or the provider in `x-portkey-config`.
 

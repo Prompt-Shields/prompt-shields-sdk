@@ -92,6 +92,50 @@ describe('psMetrics', () => {
     expect(text).toContain('business_unit="other"');
     expect(text).not.toContain('evil');
   });
+
+  test('streamed responses record usage and outcome when the stream ends', async () => {
+    process.env.PS_METRICS_ENABLED = 'true';
+    const app = new Hono();
+    app.get('/metrics', metricsHandler);
+    app.use('*', psMetrics());
+    const sse = (body: string) => () =>
+      new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+    app.post(
+      '/v1/messages',
+      sse(
+        'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-s","usage":{"input_tokens":9,"output_tokens":1}}}\n\n' +
+          'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":4}}\n\n' +
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+      )
+    );
+    app.post(
+      '/v1/chat/completions',
+      sse(
+        'data: {"choices":[{"delta":{"content":"x"},"finish_reason":null}]}\n\n'
+      )
+    );
+    const call = (path: string) =>
+      app.request(path, {
+        method: 'POST',
+        headers: { 'x-portkey-provider': 'anthropic' },
+        body: '{}',
+      });
+
+    await (await call('/v1/messages')).text();
+    await (await call('/v1/chat/completions')).text();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const text = await (await app.request('/metrics')).text();
+    expect(text).toMatch(
+      /ps_gateway_streams_total\{route="\/v1\/messages",provider="anthropic",outcome="complete"\} \d+/
+    );
+    expect(text).toMatch(
+      /ps_gateway_streams_total\{route="\/v1\/chat\/completions",provider="anthropic",outcome="truncated"\} \d+/
+    );
+    expect(text).toMatch(
+      /ps_gateway_tokens_total\{provider="anthropic",model="claude-s",direction="output",business_unit="none"\} \d+/
+    );
+  });
 });
 
 describe('registry cardinality guard', () => {
