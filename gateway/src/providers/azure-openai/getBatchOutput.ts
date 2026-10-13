@@ -4,6 +4,8 @@ import { Options } from '../../types/requestBody';
 import { RetrieveBatchResponse } from '../types';
 import { AZURE_OPEN_AI } from '../../globals';
 import { generateErrorResponse } from '../utils';
+import { externalServiceFetch } from '../../utils/fetch';
+import { logger } from '../../apm';
 
 // Return a ReadableStream containing batches output data
 export const AzureOpenAIGetBatchOutputRequestHandler = async ({
@@ -43,7 +45,7 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
     transformedRequestUrl: retrieveBatchURL,
     gatewayRequestBody: {},
   });
-  const retrieveBatchesResponse = await fetch(retrieveBatchURL, {
+  const retrieveBatchesResponse = await externalServiceFetch(retrieveBatchURL, {
     method: 'GET',
     headers: retrieveBatchesHeaders,
   });
@@ -93,7 +95,7 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
       transformedRequestUrl: retrieveFileContentURL,
       gatewayRequestBody: {},
     });
-    response = fetch(retrieveFileContentURL, {
+    response = externalServiceFetch(retrieveFileContentURL, {
       method: 'GET',
       headers: retrieveFileContentHeaders,
     });
@@ -110,7 +112,7 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
       transformedRequestUrl: outputBlob,
       gatewayRequestBody: {},
     });
-    response = fetch(outputBlob, {
+    response = externalServiceFetch(outputBlob, {
       method: 'GET',
       headers: {
         ...retrieveBlobHeaders,
@@ -119,14 +121,43 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
       },
     });
   }
-  const responseData = await response;
-  if (!responseData || !responseData.ok) {
-    const errorResponse = (await responseData?.text()) || 'no output found';
+  try {
+    const responseData = await response;
+    if (!responseData || !responseData.ok) {
+      const errorResponse =
+        (await responseData?.text()) || 'Failed to retrieve batch output';
+      return new Response(
+        JSON.stringify(
+          generateErrorResponse(
+            {
+              message: errorResponse,
+              type: null,
+              param: null,
+              code: null,
+            },
+            AZURE_OPEN_AI
+          )
+        ),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    }
+    // Ported from Portkey 2.0.0: label the file as octet-stream so the
+    // response handler streams it through instead of buffering it as JSON.
+    return new Response(responseData.body, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
+  } catch (error: any) {
+    logger.error('Error in AzureOpenAIGetBatchOutputRequestHandler', error);
     return new Response(
       JSON.stringify(
         generateErrorResponse(
           {
-            message: errorResponse,
+            message: 'Unable to get batch output',
             type: null,
             param: null,
             code: null,
@@ -135,12 +166,11 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
         )
       ),
       {
-        status: 400,
+        status: 500,
         headers: {
           'Content-Type': 'application/json',
         },
       }
     );
   }
-  return responseData;
 };

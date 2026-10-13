@@ -17,6 +17,7 @@ import { createLineSplitter } from '../../handlers/streamHandlerUtils';
 import GoogleApiConfig from './api';
 import { VertexBatchEmbedConfig } from './embed';
 import { GatewayError } from '../../errors/GatewayError';
+import { externalServiceFetch } from '../../utils/fetch';
 
 const PROVIDER_CONFIG: Record<
   string,
@@ -39,6 +40,21 @@ const PROVIDER_CONFIG: Record<
 };
 
 const encoder = new TextEncoder();
+
+// Ported from Portkey 2.0.0: custom and base models may be given as resource
+// names (`projects/.../models/<id>`, `publishers/<provider>/models/<id>`).
+// Upstream resolves custom models to their base model through the Vertex API;
+// that lookup is not ported, so they use the last path segment.
+const resolveBatchModelName = (modelName: string) => {
+  if (modelName.startsWith('publishers/')) {
+    const [, provider, , model] = modelName.split('/');
+    return provider && model ? `${provider}.${model}` : modelName;
+  }
+  if (modelName.startsWith('projects/')) {
+    return modelName.split('/').at(-1) || '';
+  }
+  return modelName;
+};
 
 export const GoogleFileUploadRequestHandler: RequestHandler<
   ReadableStream
@@ -63,7 +79,9 @@ export const GoogleFileUploadRequestHandler: RequestHandler<
 
   const objectKey = filename ?? `${crypto.randomUUID()}.jsonl`;
   const bytes = requestHeaders['content-length'];
-  const { provider } = getModelAndProvider(vertexModelName ?? '');
+  const { provider } = getModelAndProvider(
+    resolveBatchModelName(vertexModelName ?? '')
+  );
   const providerConfigMap =
     PROVIDER_CONFIG[provider as keyof typeof PROVIDER_CONFIG];
 
@@ -80,6 +98,7 @@ export const GoogleFileUploadRequestHandler: RequestHandler<
   let isPurposeHeader = false;
   let transformStream: ReadableStream<any> | TransformStream<any, any> =
     requestBody;
+  const decoder = new TextDecoder();
   let uploadMethod = 'PUT';
   // Create a reusable line splitter stream
   const lineSplitter = createLineSplitter();
@@ -92,7 +111,7 @@ export const GoogleFileUploadRequestHandler: RequestHandler<
       transform: function (chunk, controller) {
         let buffer;
         try {
-          const _chunk = chunk.toString();
+          const _chunk = decoder.decode(chunk);
 
           const match = _chunk.match(/name="([^"]+)"/);
           const headerKey = match ? match[1] : null;
@@ -112,7 +131,7 @@ export const GoogleFileUploadRequestHandler: RequestHandler<
             return;
           }
 
-          const json = JSON.parse(chunk.toString());
+          const json = JSON.parse(_chunk);
 
           if (json && !purpose) {
             // Close the stream.
@@ -148,10 +167,13 @@ export const GoogleFileUploadRequestHandler: RequestHandler<
         controller.terminate();
       },
     });
-    requestBody.pipeThrough(lineSplitter).pipeTo(transformStream.writable);
+    // The transform terminates early when no purpose is set, and the client
+    // can hang up; either rejects the pipe, so catch it.
+    requestBody
+      .pipeThrough(lineSplitter)
+      .pipeTo(transformStream.writable)
+      .catch(() => {});
   }
-
-  // Pipe the node stream through our line splitter and into the transform stream.
 
   const providerHeaders = await GoogleApiConfig.headers({
     c,
@@ -197,7 +219,7 @@ export const GoogleFileUploadRequestHandler: RequestHandler<
   };
 
   try {
-    const request = await fetch(url, { ...options });
+    const request = await externalServiceFetch(url, { ...options });
     if (!request.ok) {
       const error = await request.text();
       return GoogleResponseHandler(error, request.status);

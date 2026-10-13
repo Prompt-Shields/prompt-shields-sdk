@@ -11,6 +11,9 @@ import { BatchEndpoints, GOOGLE_VERTEX_AI } from '../../globals';
 import { createLineSplitter } from '../../handlers/streamHandlerUtils';
 import GoogleApiConfig from './api';
 import { GoogleEmbedResponseTransform } from './embed';
+import { externalServiceFetch } from '../../utils/fetch';
+import { generateErrorResponse } from '../utils';
+import { logger } from '../../apm';
 
 const responseTransforms = {
   google: {
@@ -62,7 +65,7 @@ const getOpenAIBatchRow = ({
     endpoint === BatchEndpoints.EMBEDDINGS
       ? ((row ?? {}) as Record<string, unknown>)
       : ((row['response'] ?? {}) as Record<string, unknown>);
-  const id = `batch-${batchId}-${response.responseId ? `-${response.responseId}` : ''}`;
+  const id = `batch-${batchId}${response.responseId ? `-${response.responseId}` : ''}`;
 
   let error = null;
   try {
@@ -84,6 +87,29 @@ const getOpenAIBatchRow = ({
     error: error,
   };
 };
+
+const headObject = async (url: string, headers: Record<string, string>) => {
+  try {
+    const response = await externalServiceFetch(url, {
+      method: 'HEAD',
+      headers,
+    });
+    return response.status === 200;
+  } catch {
+    return false;
+  }
+};
+
+const errorResponse = (message: string, status: number) =>
+  new Response(
+    JSON.stringify(
+      generateErrorResponse(
+        { message, type: null, param: null, code: null },
+        GOOGLE_VERTEX_AI
+      )
+    ),
+    { status, headers: { 'Content-Type': 'application/json' } }
+  );
 
 export const BatchOutputRequestHandler: RequestHandler = async ({
   requestURL,
@@ -127,29 +153,28 @@ export const BatchOutputRequestHandler: RequestHandler = async ({
   const batchesURL = `${baseURL}${endpoint}`;
   let modelName = '';
   let outputURL;
+  // Ported from Portkey 2.0.0: provider errors come back as error responses
+  // instead of exceptions.
   try {
-    const response = await fetch(batchesURL, options);
+    const response = await externalServiceFetch(batchesURL, options);
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(error);
+      return errorResponse(await response.text(), response.status);
     }
     const data = (await response.json()) as GoogleBatchRecord;
     outputURL = data.outputInfo?.gcsOutputDirectory ?? '';
     modelName = data.model;
   } catch (error) {
-    const errorMessage =
-      (error as Error).message || 'Failed to retrieve batch output';
-    throw new Error(errorMessage);
+    return errorResponse(
+      (error as Error).message || 'Failed to retrieve batch output',
+      500
+    );
   }
 
   if (!outputURL) {
-    throw new Error('Failed to retrieve batch details');
+    return errorResponse('Failed to retrieve batch details', 500);
   }
 
   const { provider } = getModelAndProvider(modelName ?? '');
-  let responseTransform =
-    responseTransforms[provider as keyof typeof responseTransforms] ||
-    responseTransforms['endpoints'];
 
   const batchEndpoint = isEmbeddingModel(modelName)
     ? BatchEndpoints.EMBEDDINGS
@@ -163,35 +188,42 @@ export const BatchOutputRequestHandler: RequestHandler = async ({
 
   if (!providerConfig) {
     throw new Error(
-      `Endpoint ${endpoint} not supported for provider ${provider}`
+      `Endpoint ${batchEndpoint} not supported for provider ${provider}`
     );
   }
 
   outputURL = outputURL.replace('gs://', 'https://storage.googleapis.com/');
 
-  const predictionFileId =
-    endpoint === BatchEndpoints.EMBEDDINGS
-      ? '000000000000.jsonl'
-      : 'predictions.jsonl';
+  // Ported from Portkey 2.0.0: chat jobs write `predictions.jsonl` and
+  // embedding jobs `000000000000.jsonl`, so probe for the file that exists.
+  let predictionFileId = 'predictions.jsonl';
+  if (!(await headObject(`${outputURL}/predictions.jsonl`, headers))) {
+    if (await headObject(`${outputURL}/000000000000.jsonl`, headers)) {
+      predictionFileId = '000000000000.jsonl';
+    }
+  }
 
-  const outputResponse = await fetch(
+  const outputResponse = await externalServiceFetch(
     `${outputURL}/${predictionFileId}`,
     options
   );
 
-  const reader = outputResponse.body;
-  if (!reader) {
-    throw new Error('Failed to retrieve batch output');
+  if (!outputResponse.ok || !outputResponse.body) {
+    return errorResponse(
+      (await outputResponse.text()) || 'Failed to retrieve batch output',
+      outputResponse.ok ? 500 : outputResponse.status
+    );
   }
 
+  const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
   // Prepare a transform stream to process complete lines.
-  const responseStream = new TransformStream({
+  const responseStream = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       let buffer;
       try {
-        const json = JSON.parse(chunk.toString());
+        const json = JSON.parse(decoder.decode(chunk));
         const row = getOpenAIBatchRow({
           row: json,
           batchId: batchId ?? '',
@@ -201,22 +233,24 @@ export const BatchOutputRequestHandler: RequestHandler = async ({
         });
         buffer = JSON.stringify(row);
       } catch (error) {
+        logger.error('Failed to transform vertex batch output line', {
+          error,
+        });
         return;
       }
       controller.enqueue(encoder.encode(buffer + '\n'));
     },
-    flush(controller) {
-      controller.terminate();
-    },
   });
 
-  const [safeStream] = responseStream.readable.tee();
+  // Pipe the provider stream through the line splitter and then to the
+  // response stream. A client or socket hang-up rejects the pipe; catch it so
+  // it cannot surface as an unhandled rejection.
+  outputResponse.body
+    .pipeThrough(createLineSplitter())
+    .pipeTo(responseStream.writable)
+    .catch(() => {});
 
-  // Pipe the node stream through the line splitter and then to the response stream.
-  const lineSplitter = createLineSplitter();
-  reader.pipeThrough(lineSplitter).pipeTo(responseStream.writable);
-
-  return new Response(safeStream, {
+  return new Response(responseStream.readable, {
     headers: { 'Content-Type': 'application/octet-stream' },
   });
 };

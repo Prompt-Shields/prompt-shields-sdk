@@ -38,6 +38,7 @@ Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b3
 | Anthropic (#108) | `src/providers/anthropic/{chatComplete,types,api,complete}.ts` | Cached tokens counted in `prompt_tokens`; structured outputs and effort via `output_config`; tool `strict` not forwarded (reverted upstream in enterprise 2.4.4); Vertex Claude uses the shared Anthropic transforms |
 | Batch output, Fireworks, Bedrock fixes (#108) | `cohere`/`azure-ai-inference` `getBatchOutput.ts`, `fireworks-ai/*` | `src/utils/fetch.ts` is a plain-fetch shim of upstream's names; OpenAI batch fallback and two Bedrock chat fixes hand-ported; Fireworks keeps this fork's `index.ts` |
 | Bedrock full port (#108) | `src/providers/bedrock/*`, `src/providers/anthropic-base/{messages,utils/streamGenerator}.ts`, `src/utils/awsAuth.ts`, `src/providers/sagemaker/api.ts` | `Environment()` accepts the runtime env record (2.0) or a Hono context (ours); `services/cache/cacheService.ts` is an in-process TTL shim of upstream's Redis/KV `requestCache`; `assumedRole`/`serviceRole` resolve through one helper (`providerAssumedRoleCredentials`); host credentials (env, shared files, IRSA, pod identity, ECS, IMDS) only with `AWS_AMBIENT_CREDENTIALS_ENABLED=true`, and are no longer read at module load; signing only for `https` hosts under `AWS_ENDPOINT_DOMAIN`, region format checked, STS query encoded; `uploadFile` keeps this fork's web-stream implementation |
+| Batch output streaming, Vertex batch upload (#108) | `src/providers/{openai,azure-openai,google-vertex-ai}/getBatchOutput.ts`, `src/providers/google-vertex-ai/{uploadFile,createBatch}.ts`, `createLineSplitter` in `src/handlers/streamHandlerUtils.ts` | Upstream switches to `node-fetch` plus Node streams (`nodeLineReader`) so its proxy agents apply; this fork keeps one web-stream path for Node and Workers on plain `fetch`, so `nodeLineReader` and `externalServiceFetchWithNodeFetch` are not ported. Ported: octet-stream pass-through, `createLineSplitter` emitting bytes and decoding with `stream: true`, Vertex output-file probe, row-id fix and error responses, resource-name models in `createBatch`. Upstream resolves custom-model base models via the Vertex API (`getModelProviderFromModelID`); not ported, upload uses the name's last segment |
 
 Not ported:
 - `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
@@ -56,6 +57,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/handlers/retryHandler.ts`
 - `src/handlers/services/cacheService.ts`
 - `src/handlers/services/requestContext.ts`
+- `src/handlers/streamHandlerUtils.ts`
 - `src/index.ts`
 - `src/middlewares/cache/index.ts`
 - `src/middlewares/log/index.ts`
@@ -73,6 +75,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/azure-ai-inference/getBatchOutput.ts`
 - `src/providers/azure-ai-inference/messages.ts`
 - `src/providers/azure-openai/chatComplete.ts`
+- `src/providers/azure-openai/getBatchOutput.ts`
 - `src/providers/azure-openai/imageGenerate.ts`
 - `src/providers/azure-openai/index.ts`
 - `src/providers/bedrock/api.ts`
@@ -106,10 +109,12 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/fireworks-ai/uploadFile.ts`
 - `src/providers/fireworks-ai/utils.ts`
 - `src/providers/google-vertex-ai/chatComplete.ts`
+- `src/providers/google-vertex-ai/createBatch.ts`
 - `src/providers/google-vertex-ai/getBatchOutput.ts`
 - `src/providers/google-vertex-ai/index.ts`
 - `src/providers/google-vertex-ai/transformGenerationConfig.ts`
 - `src/providers/google-vertex-ai/types.ts`
+- `src/providers/google-vertex-ai/uploadFile.ts`
 - `src/providers/google-vertex-ai/utils.ts`
 - `src/providers/google/chatComplete.ts`
 - `src/providers/google/embed.ts`
