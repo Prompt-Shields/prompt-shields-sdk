@@ -57,7 +57,9 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/handlers/proxyHandler.ts`
 - `src/handlers/retryHandler.ts`
 - `src/handlers/services/cacheService.ts`
+- `src/handlers/services/logsService.ts`
 - `src/handlers/services/requestContext.ts`
+- `src/handlers/streamHandler.ts`
 - `src/handlers/streamHandlerUtils.ts`
 - `src/index.ts`
 - `src/middlewares/cache/index.ts`

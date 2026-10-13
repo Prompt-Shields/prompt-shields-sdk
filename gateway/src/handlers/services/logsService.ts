@@ -299,7 +299,21 @@ export class LogObjectBuilder {
     response: Response,
     originalResponseJson: Record<string, any> | null | undefined
   ) {
-    this.logData.response = response.clone();
+    // Streams are not read back from logs (see middlewares/log). Cloning one
+    // tees it, and the unread branch would keep the upstream request alive
+    // after the client disconnects (and buffer the whole stream), so keep
+    // only status and headers.
+    const isStream = (response.headers.get('content-type') ?? '').includes(
+      'text/event-stream'
+    );
+    this.logData.response =
+      isStream && response.body
+        ? new Response(null, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          })
+        : response.clone();
     this.logData.originalResponse = {
       body: originalResponseJson,
     };
