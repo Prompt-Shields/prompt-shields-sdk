@@ -35,6 +35,7 @@ import { createTranscriptionHandler } from './handlers/createTranscriptionHandle
 import { createTranslationHandler } from './handlers/createTranslationHandler';
 import { ocrHandler } from './handlers/ocrHandler';
 import { modelsHandler } from './handlers/modelsHandler';
+import { unifiedModelsHandler } from './handlers/unifiedModelsHandler';
 import { realTimeHandler } from './handlers/realtimeHandler';
 import filesHandler from './handlers/filesHandler';
 import batchesHandler from './handlers/batchesHandler';
@@ -340,6 +341,9 @@ app.post('/v1/proxy/*', proxyHandler);
 
 // Support the /v1 proxy endpoint after all defined endpoints so this does not interfere.
 app.post('/v1/*', requestValidator, proxyHandler);
+
+// Provider-backed /v1/models, Anthropic-shaped for anthropic-version callers (#79).
+app.get('/v1/models', requestValidator, unifiedModelsHandler);
 
 // Support the /v1 proxy endpoint after all defined endpoints so this does not interfere.
 app.get('/v1/:path{(?!realtime).*}', requestValidator, proxyHandler);

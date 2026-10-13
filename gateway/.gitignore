@@ -146,4 +146,5 @@ plugins/**/.creds.json
 plugins/**/creds.json
 plugins/**/.parameters.json
 src/handlers/tests/.creds.json
+tests/integration/src/handlers/.creds.json
 .cursor/

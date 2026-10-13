@@ -297,26 +297,29 @@ export const formDataToOctetStreamTransformer = (
   return transformStream;
 };
 
-const decoder = new TextDecoder();
-
-export function createLineSplitter(): TransformStream {
+// Ported from Portkey 2.0.0: decode per stream with `stream: true` so a
+// multi-byte character split across chunks survives, and emit bytes so the
+// output can be piped straight into a request or response body.
+export function createLineSplitter(): TransformStream<Uint8Array, Uint8Array> {
   let leftover = '';
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
   return new TransformStream({
     transform(_chunk, controller) {
-      const chunk = decoder.decode(_chunk);
-      leftover += chunk.toString();
+      const chunk = decoder.decode(_chunk, { stream: true });
+      leftover += chunk;
       const lines = leftover.split('\n');
       leftover = lines.pop() || '';
       for (const line of lines) {
         if (line.trim()) {
-          controller.enqueue(line.trim());
+          controller.enqueue(encoder.encode(line.trim()));
         }
       }
-      return;
     },
     flush(controller) {
+      leftover += decoder.decode();
       if (leftover.trim()) {
-        controller.enqueue(leftover);
+        controller.enqueue(encoder.encode(leftover.trim()));
       }
     },
   });

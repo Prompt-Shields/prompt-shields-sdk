@@ -1,0 +1,135 @@
+{
+  "$schema": "../vectors.schema.json",
+  "description": "The data policy filters candidates before any strategy or hint. Within the remaining candidates the usual precedence applies. An explicit group with no compliant candidate fails closed with PolicyViolation (fallback.no_compliant_candidate = fail_closed); it is never served by a non-compliant model.",
+  "policy": "nordic-sovereign",
+  "vectors": [
+    {
+      "id": "public-allows-any-jurisdiction",
+      "status": "pending",
+      "pending_reason": "Jurisdiction constraint stage is not implemented yet (backlog item 14, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "public",
+        "hints": { "quality": "draft" }
+      },
+      "expected": {
+        "model": "scaleway-small",
+        "group": "cheap",
+        "sensitivity_level": "public"
+      }
+    },
+    {
+      "id": "internal-allows-us",
+      "status": "pending",
+      "pending_reason": "Jurisdiction constraint stage is not implemented yet (backlog item 14, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "internal",
+        "hints": { "quality": "balanced" }
+      },
+      "expected": {
+        "model": "gpt-4o",
+        "group": "balanced",
+        "sensitivity_level": "internal"
+      }
+    },
+    {
+      "id": "confidential-excludes-us-and-non-zdr",
+      "status": "pending",
+      "pending_reason": "Jurisdiction constraint stage is not implemented yet (backlog item 14, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "confidential",
+        "hints": { "quality": "critical" }
+      },
+      "expected": {
+        "model": "mistral-large-eu",
+        "group": "frontier",
+        "sensitivity_level": "confidential"
+      }
+    },
+    {
+      "id": "unclassified-is-constrained-as-default",
+      "status": "pending",
+      "pending_reason": "Jurisdiction constraint stage is not implemented yet (backlog item 14, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "balanced" }
+      },
+      "expected": {
+        "model": "berget-llama-70b",
+        "group": "balanced",
+        "sensitivity_level": "confidential",
+        "sensitivity_source": "default"
+      }
+    },
+    {
+      "id": "restricted-provider-allow-list",
+      "status": "pending",
+      "pending_reason": "Jurisdiction constraint stage is not implemented yet (backlog item 14, P1).",
+      "description": "scaleway-small is EEA and ZDR but not on the restricted provider allow-list.",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "restricted",
+        "hints": { "quality": "draft" }
+      },
+      "expected": {
+        "model": "mistral-small-eu",
+        "group": "cheap",
+        "sensitivity_level": "restricted"
+      }
+    },
+    {
+      "id": "pii-escalation-tightens-constraints",
+      "status": "pending",
+      "pending_reason": "Sensitivity classification and jurisdiction constraints are not implemented yet (backlog items 13 and 14, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "internal",
+        "pii_detected": ["national_id"],
+        "hints": { "quality": "balanced" }
+      },
+      "expected": {
+        "model": "berget-llama-70b",
+        "group": "balanced",
+        "sensitivity_level": "restricted",
+        "sensitivity_source": "pii_escalated"
+      }
+    },
+    {
+      "id": "explicit-group-without-compliant-candidate-fails-closed",
+      "status": "pending",
+      "pending_reason": "Fail-closed PolicyViolation is not implemented yet (backlog item 14, P1).",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "restricted",
+        "hints": { "model_group": "us-hosted" }
+      },
+      "expected": { "error": "PolicyViolation" }
+    },
+    {
+      "id": "budget-never-overrides-data-policy",
+      "status": "pending",
+      "pending_reason": "Jurisdiction constraint stage is not implemented yet (backlog item 14, P1).",
+      "description": "The budget clamp chooses only among compliant candidates. Unconstrained it would pick gpt-4o (US); constrained, the most capable compliant model under 0.0012 is mistral-small-eu.",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "data_classification": "confidential",
+        "hints": { "quality": "critical", "max_cost": 0.0012 }
+      },
+      "expected": {
+        "model": "mistral-small-eu",
+        "group": "cheap",
+        "sensitivity_level": "confidential"
+      }
+    }
+  ]
+}

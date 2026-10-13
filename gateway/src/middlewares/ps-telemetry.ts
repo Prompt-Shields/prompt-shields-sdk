@@ -4,6 +4,8 @@
  * to the Prompt Shields collector service.
  */
 
+import { observeStream, StreamSummary } from './psStreamObserver';
+
 interface PSConfig {
   collectorUrl: string;
   apiKey: string;
@@ -40,6 +42,12 @@ interface TelemetryEvent {
   // Non-token usage: audio seconds, OCR pages or speech characters.
   usage_units?: number;
   usage_unit_type?: string;
+  // Streamed (SSE) responses (#72): true when the upstream closed without a
+  // terminal event ([DONE], message_stop, response.completed, ...), and
+  // when the client disconnected before the stream ended.
+  stream?: boolean;
+  stream_truncated?: boolean;
+  stream_cancelled?: boolean;
 }
 
 /** The API surface of a gateway request, from its path. */
@@ -272,9 +280,26 @@ export function psTelemetryMiddleware() {
   };
 }
 
+/** Folds a stream's usage and completion state into its telemetry event. */
+export function withStreamSummary(
+  event: TelemetryEvent,
+  summary: StreamSummary,
+  routed = false
+): TelemetryEvent {
+  const out: TelemetryEvent = { ...event, stream: true };
+  if (summary.tokens_in !== undefined) out.tokens_in = summary.tokens_in;
+  if (summary.tokens_out !== undefined) out.tokens_out = summary.tokens_out;
+  if (routed && summary.model) out.served_model = summary.model;
+  if (summary.truncated) out.stream_truncated = true;
+  if (summary.cancelled) out.stream_cancelled = true;
+  return out;
+}
+
 /**
  * Hono adapter — emits one telemetry event per request after the response is
- * produced. Reads token usage + served model from a non-streaming JSON body,
+ * produced. Reads token usage + served model from a JSON body or, for a
+ * streamed (SSE) response, from the stream as it passes to the client (the
+ * event is then sent when the stream ends, marked if it was truncated). It
  * merges business `X-PS-*` headers, and folds in the routing decision from
  * `c.get('psRoute')` (set by ps-router). Fire-and-forget and fail-open.
  *
@@ -345,7 +370,18 @@ export function psTelemetry() {
         event.route_est_cost = route.estCost;
       }
 
-      sendTelemetry(event).catch(() => {});
+      // A streamed response carries its usage at the end of the stream, so
+      // the event is sent once the client has received the whole stream.
+      const stream = observeStream(c);
+      if (!stream) {
+        sendTelemetry(event).catch(() => {});
+        return;
+      }
+      stream
+        .then((summary) =>
+          sendTelemetry(withStreamSummary(event, summary, !!route))
+        )
+        .catch(() => {});
     } catch (err) {
       // Fail-open: telemetry must never affect the response.
       console.warn('[PS Telemetry] hono adapter skipped:', err);
