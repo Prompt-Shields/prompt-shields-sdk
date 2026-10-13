@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from collector.auth import resolve_tenant
 from collector.config import settings
+from collector.data_flows import record_event_flows
 from collector.dedup import find_or_create_asset
 from collector.embeddings import build_asset_text, get_embedding
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
@@ -31,6 +32,11 @@ class IngestEvent(BaseModel):
     session_id: str | None = None
     tool_calls_used: list[dict] | None = None
     prompt_text: str | None = None
+    # Data-flow metadata (ps_metadata on the SDK); see collector/data_flows.py.
+    data_sources: list[str] | None = None
+    output_destination: str | None = None
+    detected_pii_types: list[str] | None = None
+    region: str | None = None
 
 
 class IngestRequest(BaseModel):
@@ -125,6 +131,18 @@ async def ingest_events(
             prompt_hash=prompt_hash,
         )
         db.add(usage_event)
+        await record_event_flows(
+            db,
+            tenant_id,
+            asset,
+            usage_event,
+            data_sources=event.data_sources,
+            output_destination=event.output_destination,
+            pii_types=event.detected_pii_types,
+            region=event.region,
+            data_classification=event.data_classification,
+            calling_service=event.calling_service,
+        )
 
     await db.commit()
 

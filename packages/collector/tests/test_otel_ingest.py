@@ -255,9 +255,11 @@ async def test_write_spans_stores_metadata_only():
     db.flush = AsyncMock()
     db.commit = AsyncMock()
     find = AsyncMock(return_value=(asset, True))
+    flows = AsyncMock()
     with (
         patch.object(otel_ingest, "find_or_create_asset", find),
         patch.object(otel_ingest, "get_embedding", AsyncMock(return_value=None)),
+        patch.object(otel_ingest, "record_event_flows", flows),
     ):
         created = await otel_ingest.write_spans(db, TENANT, [mapped])
 
@@ -270,6 +272,9 @@ async def test_write_spans_stores_metadata_only():
     assert event.source == "otel"
     assert (event.tokens_in, event.tokens_out, event.latency_ms) == (150, 300, 450)
     assert event.prompt_hash is None
+    flows.assert_awaited_once_with(
+        db, TENANT, asset, event, calling_service="hr-screener"
+    )
     db.commit.assert_awaited_once()
 
 
