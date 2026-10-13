@@ -7,10 +7,8 @@ last_seen. A unique index on (tenant_id, asset_id, source_system,
 destination_system, direction) is the upsert key; duplicate rows that would
 violate it are collapsed to one first.
 
-Other open branches also add a 005; this may be renumbered at merge.
-
-Revision ID: 005
-Revises: 004
+Revision ID: 008
+Revises: 007
 Create Date: 2026-10-13
 """
 
@@ -20,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "005"
-down_revision: str | None = "004"
+revision: str = "008"
+down_revision: str | None = "007"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
