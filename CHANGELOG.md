@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Collector: data retention and tenant erasure** — per-tenant `retention_days` (default `PS_RETENTION_DAYS_DEFAULT=365`), a batched, idempotent purge of old `ai_usage_events` (`python -m collector.retention purge` or `POST /api/v1/operator/retention/purge`), and `DELETE /api/v1/operator/tenants/{id}` for erasure. Operator routes need `PS_ADMIN_TOKEN`. Purges and erasures are recorded in the new `retention_audit_log` table (migration 005). Read paths can use `retention_cutoff(tenant)` (#85).
 - **Gateway: Gemini 3 tool calling across turns** — thought signatures are returned on tool calls (`function.thought_signature`, non-strict mode) and sent back to Gemini/Vertex; per-part `media_resolution` for images. Ported from Portkey 2.0.0 (#108).
 - **Gateway: Bedrock on Portkey 2.0's provider code** — Converse and Messages for Claude (`anthropic_beta` as header string or body array, cache reads and writes in `prompt_tokens`), inference-profile ARNs, batch, files and fine-tuning; IRSA, pod identity, ECS and IMDS credentials for `serviceRole` behind `AWS_AMBIENT_CREDENTIALS_ENABLED` (#108).
 - **Gateway: Anthropic structured outputs and effort** — `response_format` JSON schema and `reasoning_effort` map to Anthropic `output_config` (#108).
