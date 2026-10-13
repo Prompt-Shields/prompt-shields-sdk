@@ -44,6 +44,7 @@ import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
+import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 
 function constructRequestBody(
@@ -299,7 +300,63 @@ export function convertHooksShorthand(
  * @returns {Promise<CompletionResponse>} - The response from the POST request.
  * @throws Will throw an error if the response is not ok or if all retry attempts fail.
  */
+/**
+ * Makes the upstream call for one target. When the target provider does not
+ * speak the requested Messages or Responses API natively, the request is
+ * translated to Chat Completions and the response translated back (adapters
+ * ported from Portkey 2.0.0, #59). The decision is per target, so mixed
+ * fallback or load-balance configs use native passthrough where available.
+ */
 export async function tryPost(
+  c: Context,
+  providerOption: Options,
+  requestBody: Params | FormData | ArrayBuffer | ReadableStream,
+  requestHeaders: Record<string, string>,
+  fn: endpointStrings,
+  currentIndex: number | string,
+  method: string = 'POST'
+): Promise<Response> {
+  const isRawBody =
+    requestBody instanceof FormData ||
+    requestBody instanceof ReadableStream ||
+    requestBody instanceof ArrayBuffer;
+  const params = (isRawBody ? {} : requestBody) as Params;
+  const adapterResult = applyAdapterRequestTransform(
+    fn,
+    providerOption.provider ?? '',
+    params,
+    requestBody,
+    Boolean(params.stream),
+    method
+  );
+  if (adapterResult instanceof Response) return adapterResult;
+  if (!adapterResult) {
+    return tryPostToProvider(
+      c,
+      providerOption,
+      requestBody,
+      requestHeaders,
+      fn,
+      currentIndex,
+      method
+    );
+  }
+
+  // Ask the provider transform for its non-strict output; the adapters
+  // read provider extras (e.g. reasoning content) to rebuild the response.
+  const response = await tryPostToProvider(
+    c,
+    { ...providerOption, strictOpenAiCompliance: false },
+    adapterResult.requestBody,
+    requestHeaders,
+    adapterResult.fn,
+    currentIndex,
+    method
+  );
+  return adaptResponse(response, adapterResult.adapterCtx, c);
+}
+
+async function tryPostToProvider(
   c: Context,
   providerOption: Options,
   requestBody: Params | FormData | ArrayBuffer | ReadableStream,

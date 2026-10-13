@@ -2227,6 +2227,11 @@ export interface ResponseUsage {
   input_tokens: number;
 
   /**
+   * A detailed breakdown of the input tokens (e.g. cached tokens).
+   */
+  input_tokens_details?: { cached_tokens?: number; [key: string]: unknown };
+
+  /**
    * The number of output tokens.
    */
   output_tokens: number;

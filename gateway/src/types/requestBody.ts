@@ -440,6 +440,8 @@ export interface Params {
   stream?: boolean;
   logprobs?: number;
   top_logprobs?: boolean;
+  stream_options?: { include_usage?: boolean; [key: string]: unknown };
+  parallel_tool_calls?: boolean;
   echo?: boolean;
   stop?: string | string[];
   presence_penalty?: number;

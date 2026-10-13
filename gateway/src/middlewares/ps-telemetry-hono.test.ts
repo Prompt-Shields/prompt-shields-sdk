@@ -156,4 +156,30 @@ describe('psTelemetry (Hono adapter)', () => {
     await flush();
     expect(sent.events[0].vendor).toBe('azure-openai');
   });
+  test('Messages/Responses usage and the API surface are recorded', async () => {
+    const app = new Hono();
+    app.use('*', psTelemetry());
+    app.post('/v1/messages', (c) =>
+      c.json({
+        type: 'message',
+        model: 'mistral-small',
+        usage: { input_tokens: 5, output_tokens: 2 },
+      })
+    );
+    await app.request('/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-portkey-provider': 'mistral-ai',
+      },
+      body: JSON.stringify({ model: 'mistral-small', messages: [] }),
+    });
+    await flush();
+    expect(sent.events[0]).toMatchObject({
+      vendor: 'mistral-ai',
+      api_surface: 'messages',
+      tokens_in: 5,
+      tokens_out: 2,
+    });
+  });
 });

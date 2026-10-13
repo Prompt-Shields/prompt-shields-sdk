@@ -30,6 +30,32 @@ interface TelemetryEvent {
   // Exact-match cache (populated by emitCacheTelemetry)
   cache_status?: string;
   est_tokens_saved?: number;
+  // Which API the caller spoke (chat, messages, responses, ...). With the
+  // Messages/Responses adapters (#59) this can differ from what the provider
+  // served, so it is recorded separately from vendor.
+  api_surface?: string;
+}
+
+/** The API surface of a gateway request, from its path. */
+export function apiSurfaceOf(path: string): string | undefined {
+  const m = path.match(
+    /^\/v1\/(chat\/completions|completions|messages|responses|embeddings|rerank|images|audio)/
+  );
+  if (!m) return undefined;
+  return m[1] === 'chat/completions' ? 'chat' : m[1];
+}
+
+/** Token usage from Chat Completions or Messages/Responses-style usage. */
+export function usageTokens(body: any): {
+  tokens_in?: number;
+  tokens_out?: number;
+} {
+  const u = body?.usage;
+  if (!u || typeof u !== 'object') return {};
+  return {
+    tokens_in: u.prompt_tokens ?? u.input_tokens,
+    tokens_out: u.completion_tokens ?? u.output_tokens,
+  };
 }
 
 const PS_COLLECTOR_URL =
@@ -177,8 +203,7 @@ export function psTelemetryMiddleware() {
         vendor,
         model,
         source: 'gateway',
-        tokens_in: response.body?.usage?.prompt_tokens,
-        tokens_out: response.body?.usage?.completion_tokens,
+        ...usageTokens(response.body),
         latency_ms: latencyMs,
         ...psHeaders,
       };
@@ -257,8 +282,8 @@ export function psTelemetry() {
         vendor,
         model,
         source: 'gateway',
-        tokens_in: responseBody?.usage?.prompt_tokens,
-        tokens_out: responseBody?.usage?.completion_tokens,
+        ...usageTokens(responseBody),
+        api_surface: apiSurfaceOf(new URL(url).pathname),
         latency_ms: Date.now() - startTime,
         ...psHeaders,
       };
