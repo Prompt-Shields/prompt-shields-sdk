@@ -415,6 +415,7 @@ The SDK runs a **local pattern-based PII scanner** on every prompt before sendin
 | `credit_card` | 13-19 digits with optional separators |
 | `ip_address` | IPv4 dotted-quad |
 | `iban` | IBAN format |
+| `national_id` | Nordic national IDs, checksum- and date-validated: Swedish personnummer, Norwegian fødselsnummer, Danish CPR, Finnish HETU |
 | `health_data` | Keywords: `diagnosis`, `prescription`, `medication`, `patient id`, `icd-10`, etc. |
 | `financial_data` | Keywords: `account number`, `routing number`, `swift code`, `tax id`, etc. |
 
