@@ -23,6 +23,9 @@ def main():
             "tokens_in": 250,
             "tokens_out": 500,
             "latency_ms": 320,
+            "data_sources": ["candidates_db", "linkedin_api"],
+            "output_destination": "hiring_dashboard",
+            "detected_pii_types": ["email", "national_id"],
         }]
     })
     print(f"   Ingested: {resp.json()}\n")
@@ -42,6 +45,15 @@ def main():
     print("\n4. Listing all AI vendors in use...")
     resp = httpx.get(f"{COLLECTOR_URL}/api/v1/registry/vendors", headers=HEADERS)
     print(f"   Vendors: {resp.json()['data']}")
+
+    print("\n5. Data flows derived from the telemetry...")
+    for a in assets["data"]:
+        resp = httpx.get(
+            f"{COLLECTOR_URL}/api/v1/registry/assets/{a['id']}/data-flows", headers=HEADERS
+        )
+        for f in resp.json()["data"]:
+            print(f"   - {f['source_system']} -> {f['destination_system']} "
+                  f"({f['direction']}, PII: {f['detected_pii_types']})")
 
     print("\n=== Demo complete ===")
     print(f"Registry endpoint: GET {COLLECTOR_URL}/api/v1/registry/assets")

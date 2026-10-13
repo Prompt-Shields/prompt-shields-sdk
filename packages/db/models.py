@@ -100,6 +100,9 @@ class AIUsageEvent(Base):
     session_id = Column(Text)
     tool_calls_used = Column(JSONB)
     prompt_hash = Column(Text)
+    # Flow-relevant event metadata (data sources, output destination, PII
+    # categories, ...) kept so data flows can be rebuilt. See collector/data_flows.py.
+    flow_context = Column(JSONB)
 
     asset = relationship("AIAsset", back_populates="usage_events")
 
@@ -120,11 +123,22 @@ class DataFlow(Base):
     data_classification = Column(Text)
     direction = Column(Text, nullable=False)
     detected_pii_types = Column(JSONB)
+    # Derived from telemetry (collector/data_flows.py). Hand-entered rows keep
+    # event_count 0 and null first/last seen.
+    event_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    first_seen = Column(TIMESTAMP(timezone=True))
+    last_seen = Column(TIMESTAMP(timezone=True))
 
     asset = relationship("AIAsset", back_populates="data_flows")
 
     __table_args__ = (
         Index("ix_data_flows_tenant_asset", "tenant_id", "asset_id"),
+        # Upsert key for derived flows.
+        Index(
+            "ux_data_flows_flow_key",
+            "tenant_id", "asset_id", "source_system", "destination_system", "direction",
+            unique=True,
+        ),
     )
 
 

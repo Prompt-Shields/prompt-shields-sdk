@@ -1,5 +1,5 @@
 import hashlib
-from typing import Annotated
+from typing import Annotated, Any
 
 from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from collector import loss_accounting
 from collector.auth import resolve_tenant
 from collector.config import settings
+from collector.data_flows import record_event_flows
 from collector.dedup import find_or_create_asset
 from collector.embeddings import build_asset_text, get_embedding
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
@@ -32,6 +33,14 @@ class IngestEvent(BaseModel):
     session_id: str | None = None
     tool_calls_used: list[dict] | None = None
     prompt_text: str | None = None
+    # Data-flow metadata (ps_metadata on the SDK); see collector/data_flows.py.
+    # Loosely typed on purpose: these fields used to be ignored, so a malformed
+    # value must not 422 the whole batch. build_flow_context drops what it
+    # can't use.
+    data_sources: Any = None
+    output_destination: Any = None
+    detected_pii_types: Any = None
+    region: Any = None
 
 
 class IngestRequest(BaseModel):
@@ -157,5 +166,17 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             prompt_hash=prompt_hash,
         )
         db.add(usage_event)
+        await record_event_flows(
+            db,
+            tenant_id,
+            asset,
+            usage_event,
+            data_sources=event.data_sources,
+            output_destination=event.output_destination,
+            pii_types=event.detected_pii_types,
+            region=event.region,
+            data_classification=event.data_classification,
+            calling_service=event.calling_service,
+        )
 
     return assets_created
