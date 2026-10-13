@@ -1,7 +1,7 @@
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
 import { providerFromHeaders } from '../ps-telemetry';
-import { observeStream } from '../psStreamObserver';
+import { inputTokensOf, observeStream } from '../psStreamObserver';
 import {
   Counter,
   Histogram,
@@ -78,7 +78,7 @@ const usageOf = (body: any): { input?: number; output?: number } => {
   const u = body?.usage;
   if (!u || typeof u !== 'object') return {};
   return {
-    input: u.prompt_tokens ?? u.input_tokens,
+    input: inputTokensOf(u),
     output: u.completion_tokens ?? u.output_tokens,
   };
 };

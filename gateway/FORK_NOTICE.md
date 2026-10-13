@@ -31,7 +31,7 @@ Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b3
 | JSON payload-size limit (#62) | `src/middlewares/payloadSizeValidator.ts` | Limit read per request from `MAX_JSON_PAYLOAD_SIZE_IN_MB`; matches `application/json; charset=...`; Prometheus bookkeeping dropped |
 | `/v1/rerank` (#58) | `src/handlers/rerankHandler.ts`, `src/types/rerankRequestBody.ts`, `src/utils/idGenerator.ts`, `src/providers/{cohere,jina,voyage,bedrock}/rerank.ts` | Handler reads the body from the Hono request (our style); Bedrock routes rerank to `bedrock-agent-runtime` |
 | Databricks, Latitude, Pinecone providers (#57) | `src/providers/{databricks,latitude,pinecone}/` | Databricks workspace header plumbed through `constructConfigFromRequestHeaders` |
-| Responses/Messages adapters (#59) | `src/adapters/`, `src/handlers/adapterUtils.ts` | `tryPost` wraps the unchanged pipeline (`tryPostToProvider`); native Responses list matches this tree; `normalizeTokenLimitForProvider` renames `max_completion_tokens` for chat configs that only map `max_tokens`; upstream tests updated for the `max_completion_tokens` change |
+| Responses/Messages adapters (#59) | `src/adapters/`, `src/handlers/adapterUtils.ts` | `tryPost` wraps the unchanged pipeline (`tryPostToProvider`); native Responses list matches this tree; `normalizeTokenLimitForProvider` renames `max_completion_tokens` for chat configs that only map `max_tokens`; upstream tests updated for the `max_completion_tokens` change; #73: shared `adapters/shared.ts` maps cached/reasoning usage, provider-native stop reasons, thinking blocks and Anthropic error shapes in both adapters |
 | `/v1/health` (#61) | route in `src/index.ts` | Same response shape; used by `deployment.yaml` probes |
 | Provider fixes (#60) | `openai`, `azure-openai`, `azure-ai-inference`, `z-ai`, `cohere`, `ollama`, `ai21` | Stand-alone fixes only; per-provider `pricing` configs dropped. Google/Vertex, Bedrock, Anthropic, Fireworks and batch-output fixes need 2.0.0's core: #108 |
 | Gemini/Vertex chat (#108) | `src/providers/google/{chatComplete,types,embed}.ts`, `src/providers/google-vertex-ai/{chatComplete,types,transformGenerationConfig,utils}.ts`, upstream tests | Thought signatures, media resolution, tool-message content; `getAccessToken` kept from this fork (context cache, plain fetch); workload-identity and model-lookup helpers not ported |
@@ -72,8 +72,10 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/anthropic/chatComplete.ts`
 - `src/providers/anthropic/complete.ts`
 - `src/providers/anthropic/types.ts`
+- `src/providers/azure-ai-inference/api.ts`
 - `src/providers/azure-ai-inference/chatComplete.ts`
 - `src/providers/azure-ai-inference/getBatchOutput.ts`
+- `src/providers/azure-ai-inference/index.ts`
 - `src/providers/azure-ai-inference/messages.ts`
 - `src/providers/azure-openai/chatComplete.ts`
 - `src/providers/azure-openai/getBatchOutput.ts`
@@ -123,6 +125,8 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/index.ts`
 - `src/providers/jina/api.ts`
 - `src/providers/jina/index.ts`
+- `src/providers/mistral-ai/api.ts`
+- `src/providers/mistral-ai/index.ts`
 - `src/providers/ollama/chatComplete.ts`
 - `src/providers/ollama/embed.ts`
 - `src/providers/open-ai-base/index.ts`
@@ -196,6 +200,8 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 7. **Ported with changes** the upstream admin login (`src/middlewares/adminAuth`, the login modal in `src/public/index.html`): the token comes from `PS_GATEWAY_ADMIN_TOKEN` instead of `conf.json`, malformed session cookies are treated as absent, and expired sessions are pruned. The session cookie is `HttpOnly; SameSite=Strict` but not `Secure`, because the console is served over plain HTTP on localhost
 8. **Hardened** AWS credential handling in the Bedrock/SageMaker port (#108): Portkey 2.0 lets a caller pick `awsAuthType=serviceRole`, or `assumedRole` with no configured keys, and then signs with the gateway host's own AWS identity. Here both need `AWS_AMBIENT_CREDENTIALS_ENABLED=true` (otherwise `serviceRole` is 403 and `assumedRole` must use `AWS_ASSUME_ROLE_ACCESS_KEY_ID`/`SECRET` or `AWS_ASSUME_ROLE_SOURCE_ARN`). `assumedRole` without a role ARN is a 400, so a caller can never get the operator's assume-role keys themselves. `AWS_ENDPOINT_DOMAIN` is read per request, so Workers bindings apply. Requests are only signed for `https://*.<AWS_ENDPOINT_DOMAIN>` hosts, so a crafted `x-portkey-aws-region` or S3 bucket cannot send signed headers (access key id, session token) to another host.
 9. **Hardened** Azure host-identity auth: Portkey lets a caller send `x-portkey-azure-auth-mode: managed` (a token for the host's managed identity from IMDS) or `workload` (the host's federated token from `AZURE_FEDERATED_TOKEN_FILE`) and calls Azure OpenAI or Azure AI Inference as the gateway. Here both need `AZURE_AMBIENT_CREDENTIALS_ENABLED=true` and otherwise return 403 (`assertAzureAuthModeAllowed` in `src/providers/azure-openai/utils.ts`). The Azure guardrail plugins (`plugins/azure/`) refuse `managed` credentials the same way and fail closed (verdict `false`) instead of skipping the check; other token errors still fail open as upstream. `shieldPrompt` and `protectedMaterial` now pass the runtime env and cache options to `getAccessToken`, like `contentSafety` and `pii`.
+
+10. **Added** (re-implemented from the Portkey enterprise changelog 2.18-2.23, #75): `POST /v1/ocr` in the Mistral OCR request shape for `mistral-ai`, Vertex-hosted Mistral (`mistralai.<model>`, `rawPredict`) and Azure AI Foundry (`<azureFoundryUrl>/ocr`); `elevenlabs` and `deepgram` providers for `/v1/audio/speech` and `/v1/audio/transcriptions`, on fixed vendor hosts (the ElevenLabs voice must match a voice-ID pattern before it becomes a path segment). Their transcription calls use provider request handlers, which ignore custom hosts. `ps-telemetry` emits `modality` and non-token `usage_units`/`usage_unit_type` (seconds, pages, characters).
 
 ## Original License
 

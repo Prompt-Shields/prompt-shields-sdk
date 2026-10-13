@@ -67,7 +67,9 @@ export function transformMessagesToChatCompletions(req: any): Params {
 
   // Transform tool_choice
   if (req.tool_choice) {
-    if (req.tool_choice.type === 'auto') {
+    if (req.tool_choice.type === 'none') {
+      result.tool_choice = 'none';
+    } else if (req.tool_choice.type === 'auto') {
       result.tool_choice = 'auto';
     } else if (req.tool_choice.type === 'any') {
       result.tool_choice = 'required';
@@ -77,6 +79,17 @@ export function transformMessagesToChatCompletions(req: any): Params {
         function: { name: req.tool_choice.name },
       };
     }
+  }
+
+  // PS fork (#73): disable_parallel_tool_use → parallel_tool_calls: false
+  if (req.tool_choice?.disable_parallel_tool_use === true && result.tools) {
+    result.parallel_tool_calls = false;
+  }
+
+  // PS fork (#73): extended thinking passes through; providers that support
+  // it (e.g. Gemini thinking_config) map it, others drop it.
+  if (req.thinking) {
+    (result as any).thinking = req.thinking;
   }
 
   // Transform metadata.user_id
@@ -124,7 +137,12 @@ function transformMessage(msg: any): Message | Message[] | null {
         break;
 
       case 'image':
-        if (block.source) {
+        if (block.source?.type === 'url' && block.source.url) {
+          contentParts.push({
+            type: 'image_url',
+            image_url: { url: block.source.url },
+          });
+        } else if (block.source) {
           contentParts.push({
             type: 'image_url',
             image_url: {
@@ -153,31 +171,41 @@ function transformMessage(msg: any): Message | Message[] | null {
         toolResults.push({
           role: 'tool',
           tool_call_id: block.tool_use_id || '',
-          content:
-            typeof block.content === 'string'
-              ? block.content
-              : JSON.stringify(block.content),
+          content: toolResultText(block),
         });
         break;
     }
   }
 
-  // Handle tool results (need to return array)
+  // Handle tool results (need to return array). PS fork (#73): content
+  // sent alongside tool results follows them as its own message instead of
+  // being dropped.
   if (toolResults.length > 0) {
+    if (contentParts.length > 0) {
+      toolResults.push({
+        role: msg.role,
+        content: simplifyContent(contentParts),
+      });
+    }
     return toolResults;
   }
 
-  // Handle assistant message with tool calls
+  // Handle assistant message with tool calls (all text blocks kept)
   if (toolCalls.length > 0) {
+    const text = contentParts
+      .filter((p) => p.type === 'text')
+      .map((p: any) => p.text || '')
+      .join('');
     return {
       role: 'assistant',
-      content:
-        contentParts.length > 0 && contentParts[0].type === 'text'
-          ? (contentParts[0] as any).text
-          : null,
+      content: (text || null) as any,
       tool_calls: toolCalls,
     };
   }
+
+  // PS fork (#73): a message left empty (e.g. only thinking blocks, which
+  // other providers cannot verify) is dropped rather than sent as [].
+  if (contentParts.length === 0) return null;
 
   // Simple text content
   if (contentParts.length === 1 && contentParts[0].type === 'text') {
@@ -192,6 +220,29 @@ function transformMessage(msg: any): Message | Message[] | null {
     role: msg.role,
     content: contentParts,
   };
+}
+
+/** A single text part collapses to a string, as before. */
+function simplifyContent(parts: ContentType[]): string | ContentType[] {
+  if (parts.length === 1 && parts[0].type === 'text') {
+    return (parts[0] as any).text || '';
+  }
+  return parts;
+}
+
+/**
+ * PS fork (#73): tool_result content as plain text. Text blocks are joined;
+ * other block types fall back to JSON. Errors are flagged for the model.
+ */
+function toolResultText(block: any): string {
+  const c = block.content;
+  let text: string;
+  if (c == null) text = '';
+  else if (typeof c === 'string') text = c;
+  else if (Array.isArray(c) && c.every((b: any) => b?.type === 'text')) {
+    text = c.map((b: any) => b.text || '').join('\n');
+  } else text = JSON.stringify(c);
+  return block.is_error ? `Error: ${text}` : text;
 }
 
 export default transformMessagesToChatCompletions;
