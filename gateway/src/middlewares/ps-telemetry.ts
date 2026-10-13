@@ -9,6 +9,7 @@ import {
   observeStream,
   StreamSummary,
 } from './psStreamObserver';
+import { AttemptRecord, attemptsOf } from './psAttempts';
 
 interface PSConfig {
   collectorUrl: string;
@@ -52,6 +53,11 @@ interface TelemetryEvent {
   stream?: boolean;
   stream_truncated?: boolean;
   stream_cancelled?: boolean;
+  // Retries and fallbacks (#78): every upstream attempt, in order, linked by
+  // trace_id. retry_count is attempts.length - 1.
+  trace_id?: string;
+  retry_count?: number;
+  attempts?: AttemptRecord[];
 }
 
 /** The API surface of a gateway request, from its path. */
@@ -372,6 +378,14 @@ export function psTelemetry() {
         event.route_group = route.group;
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
+      }
+
+      const attempts = attemptsOf(c);
+      if (attempts.length) {
+        // The caller's trace id links the event to the gateway logs.
+        event.trace_id = headers['x-portkey-trace-id'] || crypto.randomUUID();
+        event.retry_count = attempts.length - 1;
+        event.attempts = attempts.map((a) => ({ ...a }));
       }
 
       // A streamed response carries its usage at the end of the stream, so

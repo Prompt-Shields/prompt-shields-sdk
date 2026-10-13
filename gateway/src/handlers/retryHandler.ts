@@ -1,6 +1,7 @@
 import retry from 'async-retry';
 import { MAX_RETRY_LIMIT_MS, POSSIBLE_RETRY_STATUS_HEADERS } from '../globals';
 import { redactSecrets, redactString } from '../utils/redact';
+import { AttemptStatus, errorClassOf } from '../middlewares/psAttempts';
 
 async function fetchWithTimeout(
   url: string,
@@ -59,6 +60,7 @@ async function fetchWithTimeout(
  * @param {RequestInit} options - The options for the request, such as method, headers, and body.
  * @param {number} retryCount - The maximum number of times to retry the request.
  * @param {number[]} statusCodesToRetry - The HTTP status codes that should trigger a retry.
+ * @param {Function} onAttempt - PS fork (#78): called once per attempt with its status, latency and error class.
  * @returns {Promise<[Response, number | undefined]>} - The response from the request and the number of attempts it took to get a successful response.
  *                                                     If all attempts fail, the error message and status code are returned as a Response object, and the number of attempts is undefined.
  * @throws Will throw an error if the request fails after all retry attempts, with the error message and status code in the thrown error.
@@ -70,7 +72,8 @@ export const retryRequest = async (
   statusCodesToRetry: number[],
   timeout: number | null,
   requestHandler?: () => Promise<Response>,
-  followProviderRetry?: boolean
+  followProviderRetry?: boolean,
+  onAttempt?: (attempt: AttemptStatus) => void
 ): Promise<{
   response: Response;
   attempt: number | undefined;
@@ -87,6 +90,22 @@ export const retryRequest = async (
   try {
     await retry(
       async (bail: any, attempt: number, rateLimiter: any) => {
+        // PS fork (#78): report each attempt once, before any retry-after wait.
+        const attemptStart = Date.now();
+        let reported = false;
+        const report = (status?: number, errorName?: string) => {
+          if (reported || !onAttempt) return;
+          reported = true;
+          try {
+            onAttempt({
+              status,
+              latency_ms: Date.now() - attemptStart,
+              error_class: errorClassOf(status, errorName),
+            });
+          } catch {
+            /* fail-open */
+          }
+        };
         try {
           let response: Response;
           if (timeout) {
@@ -101,6 +120,7 @@ export const retryRequest = async (
           } else {
             response = await fetch(url, options);
           }
+          report(response.status);
           if (statusCodesToRetry.includes(response.status)) {
             const errorObj: any = new Error(await response.text());
             errorObj.status = response.status;
@@ -165,6 +185,7 @@ export const retryRequest = async (
           }
           lastResponse = response;
         } catch (error: any) {
+          report(error?.status, error?.name);
           if (attempt >= retryCount + 1) {
             bail(error);
             return;
