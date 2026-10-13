@@ -9,6 +9,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 
 - **Gateway: unified, provider-backed `GET /v1/models`** — goes through the same validation as other `/v1` routes, proxies to the configured provider, and returns Anthropic's list shape (with `limit` / `after_id` / `before_id`) when the caller sends `anthropic-version`, so Claude Code can discover models through the gateway; other callers get OpenAI's shape (#79).
+- **SDK: telemetry for streamed calls** — `stream=True` on the sync and async clients now emits one event when the stream ends, with usage from OpenAI's final usage chunk (when the client points at api.openai.com the SDK requests `stream_options.include_usage` and hides that chunk unless you asked for it; other OpenAI-compatible hosts are left untouched, since some reject the parameter) or Anthropic's `message_start`/`message_delta`, and a ~4-chars-per-token estimate (`tokens_estimated`) otherwise. Events carry `stream_completed` (false on early close or error) and `stream_error`. Chunks pass through unchanged; telemetry failures never break the stream (#91).
+- **`ps-scan` repository scanner (SDK)** — `ps-scan [PATH]` statically finds AI usage: LLM SDK imports and clients (OpenAI, Anthropic, Google GenAI, Bedrock, Mistral, Cohere, LangChain, LlamaIndex, LiteLLM), model names, provider base URLs and API-key env var names (never values) in Python, TypeScript/JavaScript, Java and Go. Prints a summary, a JSON report, collector `/ingest/events` bodies with `source="code_scan"`, or SARIF. Standard library only, no network; skips `.env*`, `.git`, `node_modules`, virtualenvs, binaries and large files (#95).
+
+- **SDK: Nordic national-ID detection** — new `national_id` PII category for Swedish personnummer/samordningsnummer (Luhn), Norwegian fødselsnummer/D-/H-numbers (two mod-11 digits), Danish CPR (date, plus mod-11 when unhyphenated) and Finnish HETU (century marker and check character). Dates and checksums are validated to keep phone numbers, order IDs and dates out (#10).
 - **Gateway: Gemini 3 tool calling across turns** — thought signatures are returned on tool calls (`function.thought_signature`, non-strict mode) and sent back to Gemini/Vertex; per-part `media_resolution` for images. Ported from Portkey 2.0.0 (#108).
 - **Gateway: Bedrock on Portkey 2.0's provider code** — Converse and Messages for Claude (`anthropic_beta` as header string or body array, cache reads and writes in `prompt_tokens`), inference-profile ARNs, batch, files and fine-tuning; IRSA, pod identity, ECS and IMDS credentials for `serviceRole` behind `AWS_AMBIENT_CREDENTIALS_ENABLED` (#108).
 - **Gateway: Anthropic structured outputs and effort** — `response_format` JSON schema and `reasoning_effort` map to Anthropic `output_config` (#108).
@@ -34,6 +38,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Bedrock** no longer crashes on a tool call with empty arguments, and adds the text block Converse requires next to a document (#108).
 
 - **Gateway telemetry dropped Messages/Responses token counts** — `input_tokens`/`output_tokens` usage is now counted, which also fixes native Anthropic `/v1/messages` events. Events now carry `api_surface`.
+
+- **Gateway proxy returned 500 for GET/DELETE without a `content-type`** — the catch-all `/v1/*` proxy left the request params undefined, so `tryPost` crashed reading `stream`. Most SDKs send GETs (e.g. `/v1/files`) this way. Body-less requests now proxy with no body, the same method and the upstream response.
 
 - **Gateway telemetry reported vendor `unknown`** — the gateway's telemetry middleware looked for the vendor in the gateway's own URL. It now uses `x-portkey-provider`, or the provider in `x-portkey-config`.
 
