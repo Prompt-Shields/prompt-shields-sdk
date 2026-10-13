@@ -43,6 +43,7 @@ import { ProviderContext } from './services/providerContext';
 import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
+import { recordAttempt } from '../middlewares/psAttempts';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
@@ -1337,7 +1338,14 @@ export async function recursiveAfterRequestHookHandler(
     retry.onStatusCodes,
     requestTimeout,
     requestHandler,
-    retry.useRetryAfterHeader
+    retry.useRetryAfterHeader,
+    // PS fork (#78): record each upstream attempt for per-attempt telemetry.
+    (attempt) =>
+      recordAttempt(
+        c,
+        { provider: providerOption.provider, model: gatewayParams?.model },
+        attempt
+      )
   ));
 
   if (requestContext.customHost) {
