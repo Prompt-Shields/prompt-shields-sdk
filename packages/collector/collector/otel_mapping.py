@@ -9,6 +9,7 @@ reach the database.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,7 +50,10 @@ class GenAISpan:
 
     @property
     def model(self) -> str | None:
-        return self.served_model or self.requested_model
+        # Asset merge key. The SDK and /ingest/events key assets on the
+        # requested model, so prefer it here too; otherwise every dated
+        # snapshot the provider serves would become a separate asset.
+        return self.requested_model or self.served_model
 
 
 def is_content_attribute(key: str) -> bool:
@@ -96,13 +100,19 @@ def _str(value: Any) -> str | None:
     return None
 
 
+# Usage columns are Postgres INTEGER. A value outside it would fail the
+# INSERT and drop every span in the request, so it is treated as missing.
+_PG_INT_MAX = 2**31 - 1
+
+
 def _int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        return int(value)
+        # json.loads accepts Infinity and NaN, which int() cannot convert.
+        return int(value) if math.isfinite(value) else None
     if isinstance(value, str):
         try:
             return int(value)
@@ -111,12 +121,18 @@ def _int(value: Any) -> int | None:
     return None
 
 
+def _count(value: Any) -> int | None:
+    """A non-negative value that fits an INTEGER column, else None."""
+    n = _int(value)
+    return n if n is not None and 0 <= n <= _PG_INT_MAX else None
+
+
 def _duration_ms(span: dict) -> int | None:
     start = _int(span.get("startTimeUnixNano"))
     end = _int(span.get("endTimeUnixNano"))
     if start is None or end is None or end < start:
         return None
-    return (end - start) // 1_000_000
+    return _count((end - start) // 1_000_000)
 
 
 def is_genai_span(attrs: dict[str, Any]) -> bool:
@@ -136,12 +152,12 @@ def map_span(span: dict, resource_attrs: dict[str, Any]) -> GenAISpan | None:
     if vendor is None:
         return None
 
-    tokens_in = _int(attrs.get("gen_ai.usage.input_tokens"))
+    tokens_in = _count(attrs.get("gen_ai.usage.input_tokens"))
     if tokens_in is None:  # pre-1.27 semconv name
-        tokens_in = _int(attrs.get("gen_ai.usage.prompt_tokens"))
-    tokens_out = _int(attrs.get("gen_ai.usage.output_tokens"))
+        tokens_in = _count(attrs.get("gen_ai.usage.prompt_tokens"))
+    tokens_out = _count(attrs.get("gen_ai.usage.output_tokens"))
     if tokens_out is None:
-        tokens_out = _int(attrs.get("gen_ai.usage.completion_tokens"))
+        tokens_out = _count(attrs.get("gen_ai.usage.completion_tokens"))
 
     status = span.get("status") if isinstance(span.get("status"), dict) else {}
     environment = _str(resource_attrs.get("deployment.environment.name")) or _str(

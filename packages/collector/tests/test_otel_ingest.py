@@ -99,7 +99,7 @@ def test_maps_genai_semconv_attributes():
     assert m.vendor == "openai"
     assert m.requested_model == "gpt-4o"
     assert m.served_model == "gpt-4o-2024-08-06"
-    assert m.model == "gpt-4o-2024-08-06"
+    assert m.model == "gpt-4o"
     assert m.api_surface == "chat"
     assert (m.tokens_in, m.tokens_out) == (150, 300)
     assert m.latency_ms == 450
@@ -265,7 +265,7 @@ async def test_write_spans_stores_metadata_only():
     kwargs = find.await_args.kwargs
     assert kwargs["source"] == "otel"
     assert kwargs["vendor"] == "openai"
-    assert kwargs["model"] == "gpt-4o-2024-08-06"
+    assert kwargs["model"] == "gpt-4o"
     event = db.add.call_args.args[0]
     assert event.source == "otel"
     assert (event.tokens_in, event.tokens_out, event.latency_ms) == (150, 300, 450)
