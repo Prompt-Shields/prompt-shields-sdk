@@ -762,7 +762,7 @@ Workaround: collect tokens manually and call `client._telemetry.enqueue(...)` af
 ### Q: How do I run a local collector for development?
 
 ```bash
-git clone https://github.com/jun-bit-pulse-ai/prompt-shields-sdk
+git clone https://github.com/Prompt-Shields/prompt-shields-sdk
 cd prompt-shields-sdk
 docker compose up -d
 # Run migrations
@@ -808,4 +808,4 @@ client = ShieldsOpenAI(
 - [docs/integrations/ardoq.mdx](docs/integrations/ardoq.mdx) — Ardoq Integration Builder setup
 - [`packages/sdk/prompt_shields/`](packages/sdk/prompt_shields/) — SDK source code
 
-Questions? Open an issue at [github.com/jun-bit-pulse-ai/prompt-shields-sdk/issues](https://github.com/jun-bit-pulse-ai/prompt-shields-sdk/issues).
+Questions? Open an issue at [github.com/Prompt-Shields/prompt-shields-sdk/issues](https://github.com/Prompt-Shields/prompt-shields-sdk/issues).
