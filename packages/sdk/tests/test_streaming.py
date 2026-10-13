@@ -417,6 +417,23 @@ async def test_async_context_manager_break_marks_incomplete():
     assert events[0]["stream_completed"] is False
 
 
+async def test_async_aclose_emits_truncated_event():
+    # openai.AsyncStream exposes aclose(); contextlib.aclosing() calls it.
+    # It must not be forwarded upstream past the wrapper's telemetry.
+    upstream = FakeAsyncStream(_oa_chunks())
+    upstream.aclose = upstream.close
+    client, events = _async_client("openai", upstream)
+    stream = await client.chat.completions.create(
+        model="gpt-4o", messages=MESSAGES, stream=True
+    )
+    async for _ in stream:
+        break
+    await stream.aclose()
+    assert upstream.closed
+    assert len(events) == 1
+    assert events[0]["stream_completed"] is False
+
+
 async def test_async_stream_error_is_reraised_and_recorded():
     client, events = _async_client(
         "openai", FakeAsyncStream(_oa_chunks(), error_after=2)

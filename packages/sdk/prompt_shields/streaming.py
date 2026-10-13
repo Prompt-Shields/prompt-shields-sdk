@@ -313,6 +313,14 @@ class AsyncShieldsStream(_StreamBase):
         finally:
             await self._finish(completed=False)
 
+    async def aclose(self) -> None:
+        """Alias of `close()` (openai's AsyncStream, `contextlib.aclosing`).
+
+        Defined explicitly so `__getattr__` does not forward it upstream and
+        skip the truncated-stream event.
+        """
+        await self.close()
+
     async def __aenter__(self):
         return self
 
