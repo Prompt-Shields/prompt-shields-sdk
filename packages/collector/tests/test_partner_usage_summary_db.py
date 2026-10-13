@@ -122,3 +122,24 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
             select(PartnerAuditLog.status_code).where(PartnerAuditLog.partner_id == partner_a)
         )).scalars().all()
     assert sorted(audits) == [200, 200, 200, 404, 404]
+
+
+@pytest.mark.asyncio
+async def test_usage_summary_is_clamped_to_tenant_retention(seeded_db):
+    asset_a, _asset_b, token_a, _token_b, _ = await _seed(seeded_db)
+    async with async_sessionmaker(seeded_db, class_=AsyncSession)() as s:
+        tenant = (
+            await s.execute(select(Tenant).where(Tenant.name == "Tenant A"))
+        ).scalar_one()
+        tenant.settings = {"retention_days": 5}
+        await s.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r90 = await c.get(
+            f"/partner/v1/assets/{asset_a}/usage-summary?period=90d",
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+    # Only events inside 5 days (1h, 2d, 3d) count, not older unpurged ones.
+    assert r90.status_code == 200, r90.text
+    body = r90.json()
+    assert (body["total_requests"], body["total_tokens_in"], body["period"]) == (3, 150, "90d")
