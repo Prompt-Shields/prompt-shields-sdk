@@ -7,6 +7,9 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.scripts]
+ps-scan = "prompt_shields.scan:main"
+
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.34"]

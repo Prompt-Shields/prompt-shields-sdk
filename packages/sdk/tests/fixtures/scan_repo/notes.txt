@@ -1,0 +1,1 @@
+Not scanned: COHERE_API_KEY in a .txt file is ignored by extension.
