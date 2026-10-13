@@ -1,0 +1,20 @@
+{
+  "vendor": "openai",
+  "model": "o1",
+  "note": "Public pricing: input $15.00/M, cached input $7.50/M, output (incl. reasoning) $60.00/M.",
+  "response": {
+    "id": "chatcmpl-fixture-2",
+    "object": "chat.completion",
+    "model": "o1-2024-12-17",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok", "tool_calls": null}, "finish_reason": "stop"}],
+    "usage": {
+      "prompt_tokens": 1200,
+      "completion_tokens": 2500,
+      "total_tokens": 3700,
+      "prompt_tokens_details": {"cached_tokens": 1024},
+      "completion_tokens_details": {"reasoning_tokens": 2048}
+    }
+  },
+  "expected_fields": {"tokens_in": 1200, "tokens_out": 2500, "tokens_cached": 1024, "tokens_reasoning": 2048},
+  "expected_cost_usd": 0.16032
+}

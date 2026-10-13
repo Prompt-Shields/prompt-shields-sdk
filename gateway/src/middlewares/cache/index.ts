@@ -19,6 +19,19 @@ const CACHE_STATUS = {
   DISABLED: 'DISABLED',
 };
 
+// Only JSON-shaped bodies are cacheable. FormData (audio transcriptions,
+// uploads), Blob, ArrayBuffer/typed arrays and ReadableStream bodies all
+// JSON.stringify to `{}` (or a lossy form), so they would share one key and
+// serve each other's responses. Hashing their bytes would mean buffering
+// arbitrarily large uploads (and a stream is already consumed by the
+// upstream call), so we bypass the cache for them instead.
+export const isCacheableBody = (body: unknown): boolean => {
+  if (Array.isArray(body)) return true;
+  if (body === null || typeof body !== 'object') return false;
+  const proto = Object.getPrototypeOf(body);
+  return proto === Object.prototype || proto === null;
+};
+
 const getCacheKey = async (requestBody: any, url: string) => {
   const stringToHash = `${JSON.stringify(requestBody)}-${url}`;
   const myText = new TextEncoder().encode(stringToHash);
@@ -46,6 +59,9 @@ export const getFromCache = async (
   if ('x-portkey-cache-force-refresh' in requestHeaders) {
     return [null, CACHE_STATUS.REFRESH, null];
   }
+  if (!isCacheableBody(requestBody)) {
+    return [null, CACHE_STATUS.DISABLED, null];
+  }
   try {
     const cacheKey = await getCacheKey(requestBody, url);
     const entry = await store.get(cacheKey);
@@ -67,8 +83,8 @@ export const putInCache = async (
   cacheMode: string | null,
   cacheMaxAge: number | null
 ) => {
-  if (requestBody.stream === true) {
-    // Do not cache streamed responses
+  if (!isCacheableBody(requestBody) || requestBody.stream === true) {
+    // Do not cache multipart/binary bodies (see isCacheableBody) or streamed responses
     return;
   }
 

@@ -1038,6 +1038,11 @@ export function constructConfigFromRequestHeaders(
   };
 
   const openAiConfig = {
+    oauthTokenUrl: requestHeaders[`x-${POWERED_BY}-oauth-token-url`],
+    oauthClientId: requestHeaders[`x-${POWERED_BY}-oauth-client-id`],
+    oauthClientSecret: requestHeaders[`x-${POWERED_BY}-oauth-client-secret`],
+    oauthScope: requestHeaders[`x-${POWERED_BY}-oauth-scope`],
+    oauthAudience: requestHeaders[`x-${POWERED_BY}-oauth-audience`],
     openaiOrganization: requestHeaders[`x-${POWERED_BY}-openai-organization`],
     openaiProject: requestHeaders[`x-${POWERED_BY}-openai-project`],
     openaiBeta:
@@ -1052,6 +1057,7 @@ export function constructConfigFromRequestHeaders(
   const vertexConfig: Record<string, any> = {
     vertexProjectId: requestHeaders[`x-${POWERED_BY}-vertex-project-id`],
     vertexRegion: requestHeaders[`x-${POWERED_BY}-vertex-region`],
+    vertexAuthType: requestHeaders[`x-${POWERED_BY}-vertex-auth-type`],
     vertexStorageBucketName:
       requestHeaders[`x-${POWERED_BY}-vertex-storage-bucket-name`],
     filename: requestHeaders[`x-${POWERED_BY}-provider-file-name`],

@@ -181,27 +181,38 @@ class PartnerCredential(Base):
 
 
 class PartnerAuditLog(Base):
-    """Append-only log of every Partner API request.
+    """Append-only log of every registry read.
 
-    Used for compliance, debugging, and tenant-visible activity feeds.
+    Covers both the Partner API (`partner_id` set) and the tenant registry
+    `/api/v1/registry/*` (`partner_id` NULL, `api_key_prefix` set). Written
+    by `collector.audit.record_read`. Used for compliance, debugging, and
+    tenant-visible activity feeds.
     """
 
     __tablename__ = "partner_audit_log"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
-    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=False)
+    # NULL for tenant registry reads (no partner involved).
+    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True)
+    # SHA-256 lookup prefix of the caller's API key, never the key itself.
+    api_key_prefix = Column(Text)
     endpoint = Column(Text, nullable=False)
     method = Column(Text, nullable=False)
     status_code = Column(Integer, nullable=False)
     timestamp = Column(TIMESTAMP(timezone=True), default=utcnow)
     response_count = Column(Integer)
+    # Asset ids in the path or returned by the read (capped).
+    asset_ids = Column(ARRAY(UUID(as_uuid=True)))
+    # Query parameters with secrets redacted and free-text search hashed.
+    query_params = Column(JSONB)
     ip_address = Column(Text)
     user_agent = Column(Text)
 
     __table_args__ = (
         Index("ix_partner_audit_tenant_ts", "tenant_id", "timestamp"),
         Index("ix_partner_audit_partner_ts", "partner_id", "timestamp"),
+        Index("ix_partner_audit_ts", "timestamp"),
     )
 
 

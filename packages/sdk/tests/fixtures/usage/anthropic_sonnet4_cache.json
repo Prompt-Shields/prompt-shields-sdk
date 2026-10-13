@@ -1,0 +1,21 @@
+{
+  "vendor": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+  "note": "Public pricing: input $3.00/M, cache read $0.30/M, 5-minute cache write $3.75/M, output $15.00/M.",
+  "response": {
+    "id": "msg_fixture_3",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-4-20250514",
+    "content": [{"type": "text", "text": "ok"}],
+    "stop_reason": "end_turn",
+    "usage": {
+      "input_tokens": 50,
+      "cache_creation_input_tokens": 2000,
+      "cache_read_input_tokens": 10000,
+      "output_tokens": 500
+    }
+  },
+  "expected_fields": {"tokens_in": 12050, "tokens_out": 500, "tokens_cached": 10000, "tokens_cache_write": 2000},
+  "expected_cost_usd": 0.01815
+}
