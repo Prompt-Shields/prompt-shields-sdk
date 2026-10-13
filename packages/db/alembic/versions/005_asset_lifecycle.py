@@ -8,8 +8,8 @@ Adds telemetry-driven lifecycle tracking to ai_assets:
 Existing rows start as `active`; the first lifecycle sweep moves them to
 `stale` or `retired` based on `last_seen`.
 
-Revision ID: 004_asset_lifecycle
-Revises: 003
+Revision ID: 005_asset_lifecycle
+Revises: 004
 Create Date: 2026-10-13
 """
 
@@ -18,8 +18,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "004_asset_lifecycle"
-down_revision: str | None = "003"
+revision: str = "005_asset_lifecycle"
+down_revision: str | None = "004"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

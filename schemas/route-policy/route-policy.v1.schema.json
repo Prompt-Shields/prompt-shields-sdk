@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://promptshields.com/schemas/route-policy/route-policy.v1.schema.json",
+  "title": "Prompt Shields route policy (route-policy.v1)",
+  "description": "One routing policy shared by the gateway router (TypeScript), the SDK local router and the teardown replay (Python). Precedence: data policy constraints > explicit group (X-PS-Route) > hints (quality, max_cost) > use-case quality bar > default strategy. Cross-field rules JSON Schema cannot express: default_group, quality_to_group values, group_order entries and use_cases.*.min_group must name keys of groups; sensitivity.unclassified_default, pii_escalation values and data_policy keys must be entries of sensitivity.levels.",
+  "type": "object",
+  "required": ["schema_version", "default_group", "groups", "quality_to_group"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional pointer to this schema, for editors."
+    },
+    "schema_version": {
+      "const": "route-policy.v1"
+    },
+    "policy_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-form version of this policy document. Recorded as policy_version on every routed event."
+    },
+    "default_group": {
+      "$ref": "#/$defs/identifier",
+      "description": "Group used when no hint applies, and the fallback target for an unknown or empty group."
+    },
+    "group_order": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/identifier" },
+      "uniqueItems": true,
+      "minItems": 1,
+      "description": "Groups from least to most capable. Needed to compare against a use case's min_group."
+    },
+    "groups": {
+      "type": "object",
+      "description": "Group name -> candidate models. Order inside a group does not matter; the router ranks by estimated cost.",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/modelTier" }
+      }
+    },
+    "quality_to_group": {
+      "type": "object",
+      "description": "Maps the SDK quality intent (X-PS-Quality) to a group.",
+      "required": ["draft", "balanced", "critical"],
+      "additionalProperties": false,
+      "properties": {
+        "draft": { "$ref": "#/$defs/identifier" },
+        "balanced": { "$ref": "#/$defs/identifier" },
+        "critical": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "strategy": {
+      "enum": ["heuristic", "cheapest", "latency", "learned"],
+      "default": "heuristic",
+      "description": "Strategy used on the transparent path (no explicit group, no quality hint)."
+    },
+    "sensitivity": { "$ref": "#/$defs/sensitivity" },
+    "data_policy": {
+      "type": "object",
+      "description": "Sensitivity level -> constraints a candidate must meet. Applied before any strategy. No compliant candidate means the call fails closed with PolicyViolation.",
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/dataPolicyRule" }
+    },
+    "use_cases": {
+      "type": "object",
+      "description": "Per-use-case quality bar, keyed by the use_case the caller declares.",
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/qualityBar" }
+    },
+    "fallback": { "$ref": "#/$defs/fallback" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "jurisdiction": {
+      "type": "string",
+      "pattern": "^(any|[A-Z]{2,3})$",
+      "description": "ISO 3166-1 alpha-2 country code, a bloc such as EEA, or 'any'."
+    },
+    "modelTier": {
+      "type": "object",
+      "required": ["model", "input_cost_per_1k", "output_cost_per_1k"],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "provider": { "$ref": "#/$defs/identifier" },
+        "input_cost_per_1k": { "type": "number", "minimum": 0 },
+        "output_cost_per_1k": { "type": "number", "minimum": 0 },
+        "jurisdiction": { "$ref": "#/$defs/jurisdiction" },
+        "zdr": {
+          "type": "boolean",
+          "description": "Provider offers zero data retention for this model."
+        },
+        "us_cloud_act_exposure": { "type": "boolean" }
+      }
+    },
+    "sensitivity": {
+      "type": "object",
+      "required": ["levels", "unclassified_default"],
+      "additionalProperties": false,
+      "properties": {
+        "levels": {
+          "type": "array",
+          "description": "Sensitivity levels from least to most sensitive.",
+          "items": { "$ref": "#/$defs/identifier" },
+          "uniqueItems": true,
+          "minItems": 1,
+          "default": ["public", "internal", "confidential", "restricted"]
+        },
+        "unclassified_default": {
+          "$ref": "#/$defs/identifier",
+          "default": "confidential",
+          "description": "Level used when the caller declares none or classification fails. Never 'lowest level' by accident."
+        },
+        "pii_escalation": {
+          "type": "object",
+          "description": "Detected PII category -> minimum level. Escalate-only: effective level = max(declared or default, every escalated level).",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    },
+    "dataPolicyRule": {
+      "type": "object",
+      "required": ["jurisdictions"],
+      "additionalProperties": false,
+      "properties": {
+        "jurisdictions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jurisdiction" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "providers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/identifier" },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Allow-list of providers. Omitted means any provider in an allowed jurisdiction."
+        },
+        "require_zdr": { "type": "boolean", "default": false },
+        "us_cloud_act_exposure": {
+          "type": "boolean",
+          "description": "false excludes candidates exposed to the US CLOUD Act. Omitted means no constraint."
+        }
+      }
+    },
+    "qualityBar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_group": {
+          "$ref": "#/$defs/identifier",
+          "description": "Lowest group (per group_order) this use case may be routed to."
+        },
+        "eval_set": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Eval set id. When set, only models in eligible_models may serve this use case."
+        },
+        "min_parity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.95
+        },
+        "eligible_models": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Models that passed eval_set at min_parity. Written back by the eval harness."
+        }
+      }
+    },
+    "fallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unknown_group": {
+          "enum": ["default_group"],
+          "default": "default_group",
+          "description": "Unknown or empty group (explicit or mapped): route within default_group."
+        },
+        "budget_unsatisfiable": {
+          "enum": ["cheapest", "fail"],
+          "default": "cheapest",
+          "description": "No candidate fits max_cost: serve the cheapest candidate and flag it, or fail."
+        },
+        "no_compliant_candidate": {
+          "const": "fail_closed",
+          "default": "fail_closed",
+          "description": "Never downgraded to a non-compliant model."
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Upper bound on provider attempts per call, all within the same constraint set."
+        },
+        "retry_after_max_wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Longest Retry-After honored on 429 before moving to the next candidate."
+        },
+        "content_filter_refusal": {
+          "const": "raise",
+          "default": "raise",
+          "description": "A provider content-filter refusal is never retried on a laxer model."
+        }
+      }
+    }
+  }
+}

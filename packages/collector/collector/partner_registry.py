@@ -17,7 +17,8 @@ Errors follow RFC 7807 Problem Details:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -29,7 +30,14 @@ from collector.partner_auth import (
     require_scope,
 )
 from collector.partner_rate_limit import get_rate_limiter
-from db.models import AIAsset, DataFlow, PartnerAuditLog, PartnerCredential, RiskMapping
+from db.models import (
+    AIAsset,
+    AIUsageEvent,
+    DataFlow,
+    PartnerAuditLog,
+    PartnerCredential,
+    RiskMapping,
+)
 
 router = APIRouter(prefix="/partner/v1", tags=["Partner API"])
 
@@ -328,6 +336,100 @@ async def get_risks(
         request, principal, f"/partner/v1/assets/{asset_id}/risks", "GET", 200, len(rows)
     )
     return {"data": [_risk_dict(r) for r in rows]}
+
+
+# Supported `period` values for /usage-summary, in days.
+USAGE_PERIODS: dict[str, int] = {"7d": 7, "30d": 30, "90d": 90}
+
+
+@router.get(
+    "/assets/{asset_id}/usage-summary", summary="Get usage summary for an asset"
+)
+async def get_usage_summary(
+    asset_id: UUID,
+    request: Request,
+    response: Response,
+    period: Literal["7d", "30d", "90d"] = Query(
+        default="30d", description="Time period for aggregation"
+    ),
+    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+):
+    """Aggregated usage for one asset over the trailing `period`.
+
+    Aggregates `ai_usage_events` only; never returns individual events or
+    prompt content. An asset outside the caller's tenant is a 404, the same
+    as an asset that does not exist, so existence does not leak.
+    """
+    await _enforce_rate_limit(request, response, principal)
+    db = request.state.db
+    endpoint = f"/partner/v1/assets/{asset_id}/usage-summary"
+
+    owned = (
+        await db.execute(
+            select(AIAsset.id).where(
+                AIAsset.id == asset_id,
+                AIAsset.tenant_id == principal.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if owned is None:
+        await _audit(request, principal, endpoint, "GET", 404)
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "type": "about:blank",
+                "title": "Not Found",
+                "status": 404,
+                "detail": "Asset not found",
+            },
+        )
+
+    since = datetime.now(UTC) - timedelta(days=USAGE_PERIODS[period])
+    row = (
+        (
+            await db.execute(
+                select(
+                    func.count(AIUsageEvent.id).label("total_requests"),
+                    func.sum(AIUsageEvent.tokens_in).label("total_tokens_in"),
+                    func.sum(AIUsageEvent.tokens_out).label("total_tokens_out"),
+                    func.sum(AIUsageEvent.cost).label("estimated_cost_usd"),
+                    func.count(func.distinct(AIUsageEvent.session_id)).label(
+                        "unique_sessions"
+                    ),
+                    func.avg(AIUsageEvent.latency_ms).label("avg_latency_ms"),
+                ).where(
+                    AIUsageEvent.asset_id == asset_id,
+                    AIUsageEvent.tenant_id == principal.tenant_id,
+                    AIUsageEvent.timestamp >= since,
+                )
+            )
+        )
+        .mappings()
+        .one()
+    )
+
+    await _audit(request, principal, endpoint, "GET", 200, 1)
+    return _usage_summary_dict(row, period)
+
+
+def _usage_summary_dict(row, period: str) -> dict:
+    """Shape an aggregate row into the documented `UsageSummary` schema.
+
+    Counts and token totals are 0 when there were no events. Cost and
+    latency are null when no event in the window reported them, because
+    0 would claim a measurement that was never taken.
+    """
+    cost = row["estimated_cost_usd"]
+    latency = row["avg_latency_ms"]
+    return {
+        "total_requests": int(row["total_requests"] or 0),
+        "total_tokens_in": int(row["total_tokens_in"] or 0),
+        "total_tokens_out": int(row["total_tokens_out"] or 0),
+        "estimated_cost_usd": round(float(cost), 6) if cost is not None else None,
+        "unique_sessions": int(row["unique_sessions"] or 0),
+        "avg_latency_ms": round(float(latency)) if latency is not None else None,
+        "period": period,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────
