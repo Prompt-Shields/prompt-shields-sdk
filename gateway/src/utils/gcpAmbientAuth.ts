@@ -8,6 +8,7 @@
  * GCP_AMBIENT_CREDENTIALS_ENABLED=true (same pattern as AWS #111, Azure #115).
  */
 import { GatewayError } from '../errors/GatewayError';
+import { HEADER_KEYS } from '../globals';
 import { Environment } from './env';
 import { externalServiceFetch } from './fetch';
 
@@ -42,6 +43,32 @@ export function assertVertexAuthTypeAllowed(
       'vertexAuthType workload is disabled on this gateway',
       403
     );
+  }
+}
+
+/**
+ * The host token is a bearer token for the gateway's own service account, so
+ * it may only go to Google: refuse a caller custom host, and a region that
+ * could rewrite the `https://<region>-aiplatform.googleapis.com` host.
+ * Call before minting the token.
+ */
+export function assertWorkloadUpstreamIsGoogle(
+  providerOptions: { customHost?: string; vertexRegion?: string },
+  c?: { req?: { header?: (name: string) => string | undefined } }
+) {
+  const headerHost =
+    typeof c?.req?.header === 'function'
+      ? c.req.header(HEADER_KEYS.CUSTOM_HOST)
+      : undefined;
+  if (providerOptions.customHost || headerHost) {
+    throw new GatewayError(
+      'vertexAuthType workload cannot be used with a custom host',
+      400
+    );
+  }
+  const region = providerOptions.vertexRegion;
+  if (region !== undefined && !/^[a-z0-9-]{1,63}$/.test(region)) {
+    throw new GatewayError('Invalid vertexRegion', 400);
   }
 }
 

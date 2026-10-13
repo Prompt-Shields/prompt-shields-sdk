@@ -4,6 +4,7 @@ import { endpointStrings, ProviderAPIConfig } from '../types';
 import { getModelAndProvider, getAccessToken, getBucketAndFile } from './utils';
 import {
   assertVertexAuthTypeAllowed,
+  assertWorkloadUpstreamIsGoogle,
   getGcpHostAccessToken,
 } from '../../utils/gcpAmbientAuth';
 
@@ -75,6 +76,7 @@ export const GoogleApiConfig: ProviderAPIConfig = {
     // PS fork (#76): host identity, gated by GCP_AMBIENT_CREDENTIALS_ENABLED.
     assertVertexAuthTypeAllowed(vertexAuthType, c);
     if (vertexAuthType === 'workload') {
+      assertWorkloadUpstreamIsGoogle(providerOptions, c);
       authToken = await getGcpHostAccessToken(c);
     } else if (vertexServiceAccountJson) {
       authToken = await getAccessToken(c, vertexServiceAccountJson);

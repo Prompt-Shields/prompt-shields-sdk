@@ -72,6 +72,8 @@ GCP_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Vertex cal
 OAUTH_TOKEN_URL_ALLOWED_HOSTS=login.example.com       # optional; restrict caller OAuth client-credentials token URLs to these hosts
 ```
 
+OAuth client credentials (`x-portkey-oauth-*` headers, `openai` provider) take precedence over `x-portkey-api-key` / `Authorization` when supplied. The token URL check is hostname-only and does not resolve DNS, so it cannot stop DNS rebinding; set `OAUTH_TOKEN_URL_ALLOWED_HOSTS` whenever callers are not fully trusted.
+
 Liveness: `GET /v1/health` (no auth, no upstream call). Metrics are labelled with route, status, provider, model and the `X-PS-Business-Unit` / `X-PS-Environment` values; prompt and completion content never appear in metrics.
 
 Per-request annotations:

@@ -104,6 +104,57 @@ describe('Vertex workload identity (host Google identity)', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  test.each([
+    ['a config custom host', { customHost: 'https://attacker.example' }],
+    ['a region that rewrites the host', { vertexRegion: 'attacker.example#' }],
+    ['a region with a path', { vertexRegion: 'x.attacker.example/a?' }],
+  ])('refuses %s before minting the host token', async (_name, extra) => {
+    mockEnv.GCP_AMBIENT_CREDENTIALS_ENABLED = 'true';
+    fetchSpy.mockResolvedValue(tokenResponse('host-token'));
+    await expect(
+      vertexHeaders({ vertexAuthType: 'workload', ...extra })
+    ).rejects.toMatchObject({ status: 400 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('refuses a custom host request header before minting the host token', async () => {
+    mockEnv.GCP_AMBIENT_CREDENTIALS_ENABLED = 'true';
+    fetchSpy.mockResolvedValue(tokenResponse('host-token'));
+    const c = {
+      req: {
+        header: (n: string) =>
+          n === 'x-portkey-custom-host'
+            ? 'https://attacker.example'
+            : undefined,
+      },
+    };
+    await expect(
+      GoogleApiConfig.headers({
+        providerOptions: {
+          provider: 'vertex-ai',
+          vertexRegion: 'us-central1',
+          vertexAuthType: 'workload',
+        } as Options,
+        fn: 'chatComplete',
+        c: c as any,
+        gatewayRequestBody: {},
+      } as any)
+    ).rejects.toMatchObject({ status: 400 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('a failed metadata request is not cached', async () => {
+    mockEnv.GCP_AMBIENT_CREDENTIALS_ENABLED = 'true';
+    fetchSpy.mockResolvedValueOnce(new Response('', { status: 500 }));
+    await expect(
+      vertexHeaders({ vertexAuthType: 'workload' })
+    ).rejects.toMatchObject({ status: 502 });
+    fetchSpy.mockResolvedValueOnce(tokenResponse('host-token'));
+    const headers: any = await vertexHeaders({ vertexAuthType: 'workload' });
+    expect(headers.Authorization).toBe('Bearer host-token');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   test('a caller API key or service account is unaffected by the gate', async () => {
     const headers: any = await vertexHeaders({ apiKey: 'caller-key' });
     expect(headers.Authorization).toBe('Bearer caller-key');
@@ -200,6 +251,31 @@ describe('OAuth client credentials for OpenAI-compatible upstreams', () => {
     );
     expect(tokens).toEqual(['shared', 'shared', 'shared']);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed token request is not cached', async () => {
+    fetchSpy.mockResolvedValueOnce(new Response('', { status: 503 }));
+    await expect(getOAuthClientCredentialsToken(oauth)).rejects.toMatchObject({
+      status: 502,
+    });
+    fetchSpy.mockResolvedValueOnce(tokenResponse('fresh'));
+    expect(await getOAuthClientCredentialsToken(oauth)).toBe('fresh');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    'https://LOCALHOST/token',
+    'https://localhost./token',
+    'https://0x7f.1/token',
+    'https://0177.0.0.1/token',
+    'https://[::ffff:127.0.0.1]/token',
+    'https://metadata.google.internal./token',
+    'https://idp.internal:8443/token',
+  ])('refuses bypass attempt %s without any request', async (oauthTokenUrl) => {
+    await expect(
+      openaiHeaders({ ...oauth, oauthTokenUrl })
+    ).rejects.toMatchObject({ status: 400 });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   test('refreshes before expiry', async () => {
