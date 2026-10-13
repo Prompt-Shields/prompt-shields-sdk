@@ -140,9 +140,7 @@ export function buildCacheEvent(
   vendor: string
 ): TelemetryEvent {
   const isHit = cacheStatus === 'HIT' || cacheStatus === 'SEMANTIC HIT';
-  const estTokens = isHit
-    ? Math.ceil(JSON.stringify(requestBody ?? {}).length / 4)
-    : 0;
+  const estTokens = isHit ? Math.ceil(JSON.stringify(requestBody ?? {}).length / 4) : 0;
   return {
     vendor,
     model: requestBody?.model || 'unknown',
@@ -153,16 +151,10 @@ export function buildCacheEvent(
 }
 
 // Fail-open emit from a spot that already knows cacheStatus (handlerUtils).
-export function emitCacheTelemetry(
-  cacheStatus: string,
-  requestBody: any,
-  vendor: string
-): void {
+export function emitCacheTelemetry(cacheStatus: string, requestBody: any, vendor: string): void {
   try {
     if (!cacheStatus || cacheStatus === 'DISABLED') return;
-    sendTelemetry(buildCacheEvent(cacheStatus, requestBody, vendor)).catch(
-      () => {}
-    );
+    sendTelemetry(buildCacheEvent(cacheStatus, requestBody, vendor)).catch(() => {});
   } catch {
     /* fail-open */
   }

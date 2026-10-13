@@ -40,10 +40,7 @@ describe('ps-telemetry routing fields', () => {
       },
     };
     mw.afterResponse(request, {
-      body: {
-        model: 'gpt-4o-mini',
-        usage: { prompt_tokens: 5, completion_tokens: 7 },
-      },
+      body: { model: 'gpt-4o-mini', usage: { prompt_tokens: 5, completion_tokens: 7 } },
       status: 200,
     });
     await flush();
