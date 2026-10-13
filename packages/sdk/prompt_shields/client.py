@@ -193,6 +193,22 @@ class ShieldsClient:
 
         return event
 
+    # --- telemetry delivery --------------------------------------------------
+
+    def telemetry_stats(self) -> dict:
+        """Delivery counters per destination: enqueued, sent, buffered and
+        dropped events by reason. "atlas" is None when that sink is off."""
+        return {
+            "collector": self._telemetry.stats(),
+            "atlas": self._atlas.stats() if self._atlas is not None else None,
+        }
+
+    def close(self) -> None:
+        """Final telemetry flush; anything still unsent is counted as dropped."""
+        self._telemetry.close_sync()
+        if self._atlas is not None:
+            self._atlas.close_sync()
+
 
 class ShieldsOpenAI(ShieldsClient):
     """Typed convenience: ShieldsOpenAI(api_key=..., ps_api_key=...)."""

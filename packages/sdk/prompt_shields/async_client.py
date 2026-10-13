@@ -155,6 +155,14 @@ class AsyncShieldsClient:
 
         return event
 
+    def telemetry_stats(self) -> dict:
+        """Delivery counters per destination: enqueued, sent, buffered and
+        dropped events by reason. "atlas" is None when that sink is off."""
+        return {
+            "collector": self._telemetry.stats(),
+            "atlas": self._atlas.stats() if self._atlas is not None else None,
+        }
+
     async def aclose(self):
         await self._telemetry.close()
         if self._atlas is not None:
