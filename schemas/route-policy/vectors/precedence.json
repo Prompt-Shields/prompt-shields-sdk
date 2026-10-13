@@ -1,0 +1,169 @@
+{
+  "$schema": "../vectors.schema.json",
+  "description": "Hint precedence and the heuristic transparent path: explicit group > quality > strategy. Within a group the cheapest candidate wins.",
+  "policy": "deterministic",
+  "vectors": [
+    {
+      "id": "transparent-simple-to-cheap",
+      "description": "No hints, short prompt: heuristic picks the cheap group, and the cheapest model in it (mini, not mini-plus).",
+      "request": {
+        "model": "auto",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "heuristic:simple",
+        "est_cost": 0.0000401
+      }
+    },
+    {
+      "id": "transparent-code-fence-to-frontier",
+      "request": {
+        "messages": [
+          { "role": "user", "content": "Fix this:\n```\nx = 1\n```" }
+        ],
+        "max_tokens": 100
+      },
+      "expected": {
+        "model": "big",
+        "group": "frontier",
+        "reason": "heuristic:complex"
+      }
+    },
+    {
+      "id": "transparent-json-schema-to-frontier",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply in strict JSON that matches the json schema below."
+          }
+        ],
+        "max_tokens": 100
+      },
+      "expected": {
+        "model": "big",
+        "group": "frontier",
+        "reason": "heuristic:complex"
+      }
+    },
+    {
+      "id": "transparent-long-input-to-frontier",
+      "description": "More than 2000 input tokens counts as complex.",
+      "request": {
+        "messages": [{ "role": "user", "content": "summarize" }],
+        "approx_input_tokens": 2500,
+        "max_tokens": 100
+      },
+      "expected": {
+        "model": "big",
+        "group": "frontier",
+        "reason": "heuristic:complex",
+        "est_cost": 0.0435
+      }
+    },
+    {
+      "id": "transparent-at-threshold-stays-cheap",
+      "description": "Exactly 2000 input tokens is not above the threshold.",
+      "request": {
+        "messages": [{ "role": "user", "content": "summarize" }],
+        "approx_input_tokens": 2000,
+        "max_tokens": 100
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "heuristic:simple",
+        "est_cost": 0.00024
+      }
+    },
+    {
+      "id": "quality-draft-to-cheap",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "draft" }
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "quality:draft",
+        "est_cost": 0.0000401
+      }
+    },
+    {
+      "id": "quality-balanced-to-balanced",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "balanced" }
+      },
+      "expected": {
+        "model": "mid",
+        "group": "balanced",
+        "reason": "quality:balanced",
+        "est_cost": 0.0010025
+      }
+    },
+    {
+      "id": "quality-critical-to-frontier",
+      "description": "A quality hint skips the strategy, even for a short prompt.",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "critical" }
+      },
+      "expected": {
+        "model": "big",
+        "group": "frontier",
+        "reason": "quality:critical",
+        "est_cost": 0.006015
+      }
+    },
+    {
+      "id": "explicit-group-beats-quality",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 100,
+        "hints": { "quality": "critical", "model_group": "cheap" }
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "override",
+        "est_cost": 0.0000401
+      }
+    },
+    {
+      "id": "explicit-group-beats-strategy",
+      "request": {
+        "messages": [
+          { "role": "user", "content": "Fix this:\n```\nx = 1\n```" }
+        ],
+        "max_tokens": 100,
+        "hints": { "model_group": "balanced" }
+      },
+      "expected": {
+        "model": "mid",
+        "group": "balanced",
+        "reason": "override"
+      }
+    },
+    {
+      "id": "default-output-tokens-is-512",
+      "description": "Without max_tokens, cost estimation assumes 512 output tokens.",
+      "request": {
+        "messages": [{ "role": "user", "content": "hi" }],
+        "hints": { "quality": "draft" }
+      },
+      "expected": {
+        "model": "mini",
+        "group": "cheap",
+        "reason": "quality:draft",
+        "est_cost": 0.0002049
+      }
+    }
+  ]
+}

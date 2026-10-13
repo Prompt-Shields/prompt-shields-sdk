@@ -168,7 +168,7 @@ It listens on port 8787. See the [gateway README](gateway/README.md) for Docker,
 |---|---|
 | Vendor, model, tokens, latency, cost | Built-in pricing table for OpenAI, Anthropic and Google models |
 | Ownership metadata | Business unit, use case, owner, environment, data classification |
-| PII categories | `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `health_data`, `financial_data` — categories only, never the matched value |
+| PII categories | `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `national_id`, `health_data`, `financial_data` — categories only, never the matched value |
 | Tool and function calls | OpenAI `tool_calls` and Anthropic `tool_use` blocks |
 | API key fingerprint | Truncated SHA-256, never the raw key |
 | Requested versus served model | Makes cost-routing savings provable |
@@ -237,7 +237,7 @@ This is a discovery and inventory tool. It is not a control, and the statements 
 
 **The register is not an audit log.** Telemetry is fail-open and lossy by design. Events buffer in memory, up to 1,000 per client, and the oldest are dropped on overflow; the buffer is not persisted, so anything unsent is lost when the process exits. Nothing reconciles what was sent against what was received. Do not present the register as a complete record of AI usage in a regulatory or evidentiary context.
 
-**The collector is not hardened for production.** It authenticates by looking up the bearer token as plaintext in the tenant record, which the source itself flags as a Phase 1 shortcut that must never be deployed to production or pilot environments. The `rate_limit_per_minute` setting in `config.py` is defined but not enforced anywhere — only the Partner API has a working rate limiter. There is no TLS termination, no role-based access control, no encryption at rest, no data-retention or deletion policy, and no audit logging of registry reads. Tenant isolation is a `tenant_id` predicate applied per query, not database row-level security, so it holds only as far as the application code is correct.
+**The collector is not hardened for production.** It authenticates by looking up the bearer token as plaintext in the tenant record, which the source itself flags as a Phase 1 shortcut that must never be deployed to production or pilot environments. The per-tenant ingest rate limit (`rate_limit_per_minute`) and the Partner API limiter are in-process, so each worker counts separately. There is no TLS termination, no role-based access control, no encryption at rest, no data-retention or deletion policy, and no audit logging of registry reads. Tenant isolation is a `tenant_id` predicate applied per query, not database row-level security, so it holds only as far as the application code is correct.
 
 **Semantic search calls OpenAI.** When `OPENAI_API_KEY` is set on the collector, asset metadata — vendor, model, use case, business unit — is sent to OpenAI's embeddings API (`text-embedding-3-small`) to build the search index. Leave the variable unset and embeddings are skipped, disabling `/search` but keeping asset metadata inside your network.
 
