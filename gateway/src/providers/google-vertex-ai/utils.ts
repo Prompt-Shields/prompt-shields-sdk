@@ -156,6 +156,21 @@ export const getAccessToken = async (
   }
 };
 
+// Ported from Portkey 2.0.0: custom and base models may be given as resource
+// names (`projects/.../models/<id>`, `publishers/<provider>/models/<id>`).
+// Upstream resolves custom models to their base model through the Vertex API;
+// that lookup is not ported, so they use the last path segment.
+export const resolveBatchModelName = (modelName: string) => {
+  if (modelName.startsWith('publishers/')) {
+    const [, provider, , model] = modelName.split('/');
+    return provider && model ? `${provider}.${model}` : modelName;
+  }
+  if (modelName.startsWith('projects/')) {
+    return modelName.split('/').at(-1) || '';
+  }
+  return modelName;
+};
+
 export const getModelAndProvider = (modelString: string) => {
   let provider = 'google';
   let model = modelString;
