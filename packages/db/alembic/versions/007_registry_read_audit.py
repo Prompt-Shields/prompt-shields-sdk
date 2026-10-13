@@ -12,8 +12,8 @@ so tenant `/api/v1/registry/*` reads can be recorded in the same table:
 Downgrade deletes tenant-read rows (partner_id IS NULL) before restoring
 NOT NULL, since they cannot satisfy it.
 
-Revision ID: 005_registry_read_audit
-Revises: 004
+Revision ID: 007
+Revises: 006
 Create Date: 2026-10-13
 """
 
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "005_registry_read_audit"
-down_revision: str | None = "004"
+revision: str = "007"
+down_revision: str | None = "006"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
