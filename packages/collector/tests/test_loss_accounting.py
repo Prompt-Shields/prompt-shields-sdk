@@ -221,3 +221,44 @@ async def test_loss_endpoint_requires_auth():
     async with _client() as client:
         resp = await client.get("/telemetry/loss")
     assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_counters_are_tenant_scoped(seeded_db):
+    from db.api_keys import api_key_lookup_prefix, hash_api_key
+    from db.models import Tenant
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    key_b = "ps-other-key-67890"
+    async with async_sessionmaker(seeded_db, class_=AsyncSession)() as db:
+        db.add(
+            Tenant(
+                name="Other Corp",
+                settings={},
+                api_key_prefix=api_key_lookup_prefix(key_b),
+                api_key_hash=hash_api_key(key_b),
+            )
+        )
+        await db.commit()
+    headers_b = {"Authorization": f"Bearer {key_b}"}
+
+    async with _client() as client:
+        # Same client_id in both tenants: B's batch must not touch A's row.
+        await client.post(
+            "/ingest/events",
+            headers=HEADERS,
+            json={"events": [_event()], "metadata": _meta(1, 1)},
+        )
+        await client.post(
+            "/ingest/events",
+            headers=headers_b,
+            json={"events": [_event()] * 3, "metadata": _meta(5, 9)},
+        )
+        loss_a = await _loss(client)
+        resp_b = await client.get("/telemetry/loss", headers=headers_b)
+
+    (a,) = loss_a["clients"]
+    assert (a["received_events"], a["last_seq"], a["sdk_enqueued_total"]) == (1, 1, 1)
+    assert loss_a["totals"]["received_events"] == 1
+    (b,) = resp_b.json()["clients"]
+    assert (b["received_events"], b["last_seq"], b["sdk_enqueued_total"]) == (3, 5, 9)

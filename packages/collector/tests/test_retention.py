@@ -27,6 +27,7 @@ from db.models import (
     PartnerCredential,
     RetentionAuditLog,
     RiskMapping,
+    TelemetryClientStats,
     Tenant,
 )
 from httpx import ASGITransport, AsyncClient
@@ -60,6 +61,7 @@ TENANT_TABLES = (
     PartnerAuditLog,
     PartnerCredential,
     AIAsset,
+    TelemetryClientStats,
 )
 
 
@@ -147,6 +149,8 @@ async def seed_full_tenant(db, name: str, **tenant_settings) -> uuid.UUID:
                 method="GET",
                 status_code=200,
             ),
+            TelemetryClientStats(tenant_id=tid, client_id="c1", received_events=1),
+            TelemetryClientStats(tenant_id=tid, client_id="c2", received_events=2),
         ]
     )
     await db.commit()

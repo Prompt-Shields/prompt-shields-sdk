@@ -48,6 +48,7 @@ from db.models import (
     PartnerCredential,
     RetentionAuditLog,
     RiskMapping,
+    TelemetryClientStats,
     Tenant,
 )
 from sqlalchemy import Table, delete, func, select
@@ -72,6 +73,7 @@ ERASE_ORDER: tuple[type, ...] = (
     PartnerAuditLog,
     PartnerCredential,
     AIAsset,
+    TelemetryClientStats,
 )
 
 # Tables with a tenant_id that erasure keeps on purpose.
@@ -186,8 +188,14 @@ async def _delete_in_batches(
     """Delete rows matching ``conditions`` in batches, committing each one.
 
     ``DELETE ... WHERE id IN (SELECT id ... LIMIT n)`` keeps each transaction
-    short, so ingest and reads are not blocked behind a long delete.
+    short, so ingest and reads are not blocked behind a long delete. Tables
+    without an ``id`` column (small per-tenant counter tables) are deleted in
+    one statement.
     """
+    if "id" not in table.c:
+        result = await db.execute(delete(table).where(*conditions))
+        await db.commit()
+        return result.rowcount or 0
     total = 0
     while True:
         ids = select(table.c.id).where(*conditions).limit(batch_size)
