@@ -1,5 +1,6 @@
 import { Context } from 'hono';
 import { InMemoryLruStore } from './store';
+import { isSensitiveKey } from '../../utils/redact';
 
 const store = new InMemoryLruStore({
   maxEntries: parseInt(process.env.PS_CACHE_MAX_ENTRIES || '1000', 10),
@@ -32,19 +33,124 @@ export const isCacheableBody = (body: unknown): boolean => {
   return proto === Object.prototype || proto === null;
 };
 
-const getCacheKey = async (requestBody: any, url: string) => {
-  const stringToHash = `${JSON.stringify(requestBody)}-${url}`;
-  const myText = new TextEncoder().encode(stringToHash);
-  let cacheDigest = await crypto.subtle.digest(
-    {
-      name: 'SHA-256',
-    },
-    myText
+const sha256Hex = async (value: string): Promise<string> => {
+  const digest = await crypto.subtle.digest(
+    { name: 'SHA-256' },
+    new TextEncoder().encode(value)
   );
-  return Array.from(new Uint8Array(cacheDigest))
+  return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 };
+
+// PS fork: the cache key is scoped to the caller. Upstream keyed on body +
+// endpoint only, so with caching on, caller B was served caller A's cached
+// response for an identical body. The scope covers every provider option and
+// incoming header that decides whose upstream account answers: anything
+// `isSensitiveKey` treats as a credential (API keys, secrets, tokens,
+// Authorization) plus the identity fields below (virtual key, service
+// account, role ARN, tenant, org/project, account, auth mode).
+const IDENTITY_KEY =
+  /(virtual[-_]?key|auth|passphrase|fingerprint|tenan|organi[sz]ation|project|account|role[-_]?arn|external[-_]?id|client[-_]?id|workspace|oracle[-_]?user)/i;
+
+const isIdentityKey = (key: string): boolean =>
+  isSensitiveKey(key) || IDENTITY_KEY.test(key);
+
+// With awsAuthType assumedRole/serviceRole the gateway resolves these itself
+// and writes them back onto the provider options before the cache lookup.
+// They rotate with the STS session, and the caller's identity is already in
+// awsAuthType/awsRoleArn/awsExternalId, so leave them out to keep keys stable.
+const GATEWAY_DERIVED_AWS_KEYS = [
+  'awsAccessKeyId',
+  'awsSecretAccessKey',
+  'awsSessionToken',
+];
+
+const canonicalJSON = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJSON(record[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+};
+
+const pickIdentity = (
+  record: Record<string, unknown> | undefined | null,
+  skip: string[] = []
+): [string, string][] =>
+  Object.entries(record ?? {})
+    .filter(
+      ([k, v]) =>
+        isIdentityKey(k) &&
+        !skip.includes(k) &&
+        v !== undefined &&
+        v !== null &&
+        v !== ''
+    )
+    .map(([k, v]): [string, string] => [k.toLowerCase(), canonicalJSON(v)])
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+
+export interface CacheScopeInput {
+  provider?: string;
+  providerOption?: Record<string, any> | null;
+  requestHeaders?: Record<string, string> | null;
+  endpoint?: string;
+  requestURL?: string;
+}
+
+/**
+ * SHA-256 of who is calling which upstream: provider, the caller's credential
+ * and identity fields (provider options and incoming headers), and for
+ * `/v1/proxy` the upstream URL (path and query). Only this digest reaches the
+ * cache key; raw credentials never do.
+ */
+export const computeCacheScope = async ({
+  provider,
+  providerOption,
+  requestHeaders,
+  endpoint,
+  requestURL,
+}: CacheScopeInput): Promise<string> => {
+  const ambientAws = ['assumedRole', 'serviceRole'].includes(
+    providerOption?.awsAuthType
+  );
+  return sha256Hex(
+    canonicalJSON({
+      v: 1,
+      provider: provider || providerOption?.provider || '',
+      options: pickIdentity(
+        providerOption,
+        ambientAws ? GATEWAY_DERIVED_AWS_KEYS : []
+      ),
+      headers: pickIdentity(requestHeaders),
+      upstream: endpoint === 'proxy' ? requestURL ?? '' : null,
+    })
+  );
+};
+
+const getCacheKey = async (requestBody: any, url: string, scope: string) =>
+  sha256Hex(`${JSON.stringify(requestBody)}-${url}-${scope}`);
+
+const CACHE_SCOPES_CONTEXT_KEY = 'psCacheScopes';
+
+/** Records the scope a target's cache read used (see memoryCache). */
+export const setCacheScopeForTarget = (
+  c: Context,
+  targetIndex: number | string | undefined,
+  scope: string
+) => {
+  const scopes = c.get(CACHE_SCOPES_CONTEXT_KEY) ?? {};
+  c.set(CACHE_SCOPES_CONTEXT_KEY, { ...scopes, [String(targetIndex)]: scope });
+};
+
+const getCacheScopeForTarget = (
+  c: Context,
+  targetIndex: number | string | undefined
+): string | undefined => c.get(CACHE_SCOPES_CONTEXT_KEY)?.[String(targetIndex)];
 
 // Cache Handling
 export const getFromCache = async (
@@ -54,8 +160,13 @@ export const getFromCache = async (
   url: string,
   organisationId: string,
   cacheMode: string,
-  cacheMaxAge: number | null
+  cacheMaxAge: number | null,
+  cacheScope?: string
 ) => {
+  // Without a caller scope there is no tenant isolation: never read.
+  if (!cacheScope) {
+    return [null, CACHE_STATUS.DISABLED, null];
+  }
   if ('x-portkey-cache-force-refresh' in requestHeaders) {
     return [null, CACHE_STATUS.REFRESH, null];
   }
@@ -63,7 +174,7 @@ export const getFromCache = async (
     return [null, CACHE_STATUS.DISABLED, null];
   }
   try {
-    const cacheKey = await getCacheKey(requestBody, url);
+    const cacheKey = await getCacheKey(requestBody, url, cacheScope);
     const entry = await store.get(cacheKey);
     if (entry) return [entry.responseBody, CACHE_STATUS.HIT, cacheKey];
     return [null, CACHE_STATUS.MISS, null];
@@ -81,14 +192,17 @@ export const putInCache = async (
   url: string,
   organisationId: string,
   cacheMode: string | null,
-  cacheMaxAge: number | null
+  cacheMaxAge: number | null,
+  cacheScope?: string
 ) => {
+  // Without a caller scope there is no tenant isolation: never write.
+  if (!cacheScope) return;
   if (!isCacheableBody(requestBody) || requestBody.stream === true) {
     // Do not cache multipart/binary bodies (see isCacheableBody) or streamed responses
     return;
   }
 
-  const cacheKey = await getCacheKey(requestBody, url);
+  const cacheKey = await getCacheKey(requestBody, url, cacheScope);
   await store.set(cacheKey, {
     responseBody: JSON.stringify(responseBody),
     maxAge: cacheMaxAge,
@@ -110,7 +224,13 @@ export const memoryCache = () => {
       requestOptions[0].requestParams.stream !== true
     ) {
       requestOptions = requestOptions[0];
-      if (requestOptions.cacheMode === 'simple') {
+      // Reuse the scope the read computed for this target: the logged
+      // provider options are a snapshot taken before credentials resolve.
+      const cacheScope = getCacheScopeForTarget(
+        c,
+        requestOptions.lastUsedOptionIndex
+      );
+      if (requestOptions.cacheMode === 'simple' && cacheScope) {
         try {
           const parsed = await requestOptions.response.clone().json();
           await putInCache(
@@ -122,7 +242,8 @@ export const memoryCache = () => {
             '',
             null,
             new Date().getTime() +
-              (requestOptions.cacheMaxAge || 24 * 60 * 60 * 1000)
+              (requestOptions.cacheMaxAge || 24 * 60 * 60 * 1000),
+            cacheScope
           );
         } catch (error) {
           console.error('memoryCache write-back error (fail-open):', error);

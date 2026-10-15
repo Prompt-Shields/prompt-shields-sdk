@@ -210,6 +210,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
    Limits: the token URL check is hostname-only like the custom-host check (no DNS resolution, so no DNS-rebinding protection); operators who accept untrusted callers should set `OAUTH_TOKEN_URL_ALLOWED_HOSTS`.
 
 11. **Added** (first slice of #74, written from the vendors' public OpenAI-compatible API docs, no enterprise code): `minimax`, `byteplus`, `lightning-ai` from the Portkey enterprise changelog 2.9-2.16, and the EU-hosted `berget`, `scaleway`, `regolo`, `ionos` and `stackit` for sovereignty routing. Each reuses the `open-ai-base` chat (and, where the vendor offers it, embeddings) transforms on a fixed vendor base URL.
+12. **Hardened** the response cache key (`src/middlewares/cache/index.ts`, `src/handlers/services/cacheService.ts`): upstream keys on request body + endpoint only, so callers with different credentials shared cached responses. The key now includes `computeCacheScope`, a SHA-256 of the provider, the caller's credential/identity provider options and incoming headers, and for `proxy` the upstream URL. The write-back in `memoryCache` reuses the scope the read recorded per target (`psCacheScopes` on the Hono context) instead of recomputing it from the logged options; a read or write without a scope is skipped.
 
 ## Original License
 

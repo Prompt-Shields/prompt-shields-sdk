@@ -5,6 +5,10 @@ import { HooksService } from './hooksService';
 import { endpointStrings } from '../../providers/types';
 import { env } from 'hono/adapter';
 import { RequestContext } from './requestContext';
+import {
+  computeCacheScope,
+  setCacheScopeForTarget,
+} from '../../middlewares/cache';
 
 export interface CacheResponseObject {
   cacheResponse: Response | undefined;
@@ -101,6 +105,17 @@ export class CacheService {
       return this.noCacheObject;
     }
 
+    // PS fork: scope the key to the caller (and proxy path); see
+    // computeCacheScope. memoryCache reuses this scope for the write-back.
+    const cacheScope = await computeCacheScope({
+      provider: context.provider,
+      providerOption: context.providerOption,
+      requestHeaders: context.requestHeaders,
+      endpoint: context.endpoint,
+      requestURL: context.requestURL,
+    });
+    setCacheScopeForTarget(this.honoContext, context.index, cacheScope);
+
     const [cacheResponse, cacheStatus, cacheKey] =
       await this.getFromCacheFunction(
         env(context.honoContext),
@@ -109,7 +124,8 @@ export class CacheService {
         context.endpoint,
         this.getCacheIdentifier,
         mode,
-        maxAge
+        maxAge,
+        cacheScope
       );
 
     if (!cacheResponse) {

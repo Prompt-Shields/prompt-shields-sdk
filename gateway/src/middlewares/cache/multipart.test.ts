@@ -3,6 +3,7 @@ import { getFromCache, putInCache, __resetCacheForTests } from './index';
 const maxAge = () => Date.now() + 10000;
 const headers = { authorization: 'Bearer sk-same' };
 const endpoint = 'createTranscription';
+const scope = 'scope-a';
 
 const audioForm = (bytes: number[]) => {
   const form = new FormData();
@@ -27,7 +28,8 @@ describe('cache: multipart and binary bodies', () => {
       endpoint,
       '',
       'simple',
-      maxAge()
+      maxAge(),
+      scope
     );
     const [resp, status, key] = await getFromCache(
       {},
@@ -36,7 +38,8 @@ describe('cache: multipart and binary bodies', () => {
       endpoint,
       '',
       'simple',
-      maxAge()
+      maxAge(),
+      scope
     );
     expect(resp).toBeNull();
     expect(status).not.toBe('HIT');
@@ -58,7 +61,8 @@ describe('cache: multipart and binary bodies', () => {
       endpoint,
       '',
       'simple',
-      maxAge()
+      maxAge(),
+      scope
     );
     const [resp, status] = await getFromCache(
       {},
@@ -67,7 +71,8 @@ describe('cache: multipart and binary bodies', () => {
       endpoint,
       '',
       'simple',
-      maxAge()
+      maxAge(),
+      scope
     );
     expect(resp).toBeNull();
     expect(status).toBe('DISABLED');
@@ -83,7 +88,8 @@ describe('cache: multipart and binary bodies', () => {
       'embed',
       '',
       'simple',
-      maxAge()
+      maxAge(),
+      scope
     );
     const [, status] = await getFromCache(
       {},
@@ -92,7 +98,8 @@ describe('cache: multipart and binary bodies', () => {
       'embed',
       '',
       'simple',
-      maxAge()
+      maxAge(),
+      scope
     );
     expect(status).toBe('HIT');
   });
