@@ -35,6 +35,7 @@ from .test_instrumentation_vendors import (  # noqa: F401 - fixtures
     COHERE_V1_BODY,
     COHERE_V2_BODY,
     MESSAGES,
+    RecordingSender,
     _events,
     _json_transport,
     aws,
@@ -378,12 +379,27 @@ def test_bedrock_event_stream_abandoned():
     assert _assert_one_abandoned_event()["vendor"] == "bedrock"
 
 
-def test_cohere_stream_loop_exited_emits_once():
+def _flush_counter():
+    sender = RecordingSender.instances[0]
+    flushes = []
+    sender.flush_sync = lambda: flushes.append("sync")
+
+    async def flush():
+        flushes.append("async")
+
+    sender.flush = flush
+    return flushes
+
+
+def test_cohere_stream_loop_exited_is_an_early_close_enqueued():
     # cohere's `chat_stream` is a generator: dropping it closes the observed
-    # event stream inside it, a plain early close.
+    # event stream inside it (`yield from`), possibly from the garbage
+    # collector. That is an early close, as `close()` on an OpenAI stream:
+    # not marked abandoned, and only enqueued (no blocking flush there).
     cohere = pytest.importorskip("cohere")
     transport, _ = _sse(httpx, COHERE_V2_EVENTS)
     prompt_shields.instrument(ps_api_key="ps_key")
+    flushes = _flush_counter()
     client = cohere.ClientV2(api_key="co-key",
                              httpx_client=httpx.Client(transport=transport))
     for _event in client.chat_stream(model="command-r-08-2024", messages=MESSAGES):
@@ -391,6 +407,89 @@ def test_cohere_stream_loop_exited_emits_once():
     _collect()
     assert len(_events()) == 1
     assert _events()[0]["stream_completed"] is False
+    assert "stream_abandoned" not in _events()[0]
+    assert flushes == []
+
+    # Read to the end, it is sent as before.
+    list(client.chat_stream(model="command-r-08-2024", messages=MESSAGES))
+    assert _events()[1]["stream_completed"] is True
+    assert flushes == ["sync"]
+
+
+def test_cohere_async_stream_loop_exited_is_an_early_close():
+    cohere = pytest.importorskip("cohere")
+    transport, _ = _sse(httpx, COHERE_V2_EVENTS)
+    prompt_shields.instrument(ps_api_key="ps_key")
+    flushes = _flush_counter()
+
+    async def run():
+        client = cohere.AsyncClientV2(api_key="co-key", httpx_client=httpx.AsyncClient(
+            transport=transport))
+        async for _event in client.chat_stream(model="command-r-08-2024",
+                                               messages=MESSAGES):
+            break
+
+    asyncio.run(run())
+    _collect()
+    assert len(_events()) == 1
+    assert _events()[0]["stream_completed"] is False
+    assert "stream_abandoned" not in _events()[0]
+    assert flushes == []
+
+
+@pytest.mark.filterwarnings("ignore:coroutine .* was never awaited")
+def test_unentered_cohere_stream_context_releases_its_claim():
+    cohere = pytest.importorskip("cohere")
+    transport, _ = _sse(httpx, COHERE_V2_EVENTS)
+    prompt_shields.instrument(ps_api_key="ps_key")
+    clients = (
+        cohere.ClientV2(api_key="co-key",
+                        httpx_client=httpx.Client(transport=transport)),
+        cohere.AsyncClientV2(api_key="co-key"),
+    )
+    for client in clients:
+        fc = inst.FrameworkCall("langchain")
+        token = inst._FRAMEWORK_CALL.set(fc)
+        try:
+            context = client._raw_client.chat_stream(
+                model="command-r-08-2024", messages=MESSAGES)
+            assert fc.captured
+            del context
+            _collect()
+            assert not fc.captured
+        finally:
+            inst._FRAMEWORK_CALL.reset(token)
+
+    # An entered one keeps it.
+    fc = inst.FrameworkCall("langchain")
+    token = inst._FRAMEWORK_CALL.set(fc)
+    try:
+        with clients[0]._raw_client.chat_stream(
+                model="command-r-08-2024", messages=MESSAGES) as response:
+            list(response.data)
+        del response
+        _collect()
+    finally:
+        inst._FRAMEWORK_CALL.reset(token)
+    assert fc.captured
+    assert len(_events()) == 1
+    assert _events()[0]["framework"] == "langchain"
+
+
+def test_abandoned_latency_runs_to_the_last_chunk_read():
+    import time
+
+    openai, http = _openai()
+    prompt_shields.instrument(ps_api_key="ps_key")
+    transport, _ = _sse(http, OPENAI_CHUNKS, done=True)
+    client = openai.OpenAI(api_key="sk", http_client=http.Client(transport=transport))
+    stream = client.chat.completions.create(model="gpt-4o", messages=MESSAGES,
+                                            stream=True)
+    next(stream)
+    time.sleep(0.3)  # the caller holds the stream, unread
+    del stream
+    _collect()
+    assert _assert_one_abandoned_event()["latency_ms"] < 300
 
 
 def test_abandon_errors_never_raise(monkeypatch):

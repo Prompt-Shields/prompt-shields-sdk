@@ -31,6 +31,8 @@ from prompt_shields.telemetry import (
     AtlasTelemetrySender,
     TelemetrySender,
     build_atlas_event,
+    register_exit_flush,
+    unregister_exit_flush,
 )
 from prompt_shields.types import PSMetadata, RouteHint
 
@@ -89,6 +91,9 @@ class ShieldsClient:
             if atlas_url and atlas_api_key
             else None
         )
+        # Best-effort flush of whatever is still buffered (an abandoned
+        # stream's event, a failed send) when the interpreter exits.
+        register_exit_flush(self._telemetry, self._atlas)
         self._scan_pii = scan_pii
         self._send_prompt_text = send_prompt_text
         self._pricing_table = pricing_table
@@ -206,6 +211,7 @@ class ShieldsClient:
 
     def close(self) -> None:
         """Final telemetry flush; anything still unsent is counted as dropped."""
+        unregister_exit_flush(self._telemetry, self._atlas)
         self._telemetry.close_sync()
         if self._atlas is not None:
             self._atlas.close_sync()
@@ -298,13 +304,15 @@ class _CompletionsNamespace:
         self._send(event, messages)
         return response
 
-    def _send(self, event: dict, messages: list) -> None:
+    def _send(self, event: dict, messages: list, flush: bool = True) -> None:
         self._parent._telemetry.enqueue(event)
-        self._parent._telemetry.flush_sync()
+        if flush:
+            self._parent._telemetry.flush_sync()
 
         if self._parent._atlas is not None:
             self._parent._atlas.enqueue(build_atlas_event(event, messages))
-            self._parent._atlas.flush_sync()
+            if flush:
+                self._parent._atlas.flush_sync()
 
     def _wrap_stream(self, response: Any, *, model: str, messages: list,
                      ps_metadata: PSMetadata | None, start: float,
@@ -312,7 +320,7 @@ class _CompletionsNamespace:
         """Wrap a stream so one event is emitted when it ends. Fail-open."""
 
         def on_finish(adapter_fields: dict, stream_fields: dict,
-                      latency_ms: int) -> None:
+                      latency_ms: int, flush: bool = True) -> None:
             event = self._parent._build_event(
                 model=model, messages=messages, response=None,
                 latency_ms=latency_ms, ps_metadata=ps_metadata,
@@ -321,7 +329,7 @@ class _CompletionsNamespace:
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):
                 event["tokens_estimated"] = True
-            self._send(event, messages)
+            self._send(event, messages, flush=flush)
 
         try:
             return ShieldsStream(
@@ -330,6 +338,9 @@ class _CompletionsNamespace:
                 on_finish,
                 start,
                 hide_usage_chunk=hide_usage_chunk,
+                # Garbage-collected unfinished: enqueued, sent by a later
+                # flush (no I/O inside the garbage collector).
+                on_abandon=lambda *args: on_finish(*args, flush=False),
             )
         except Exception:  # noqa: BLE001 - fail-open: return the raw stream
             return response

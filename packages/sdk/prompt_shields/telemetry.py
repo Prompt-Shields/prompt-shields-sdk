@@ -1,7 +1,11 @@
 import asyncio
+import atexit
+import contextlib
 import hashlib
 import logging
 import math
+import os
+import threading
 import time
 import uuid
 import weakref
@@ -129,6 +133,22 @@ def _warn_unsent_at_exit(buffer: deque, url: str) -> None:
         )
 
 
+# Every sender, held weakly, so a forked child can drop the parent's buffered
+# events (otherwise both processes send them: on the child's next flush, or
+# by its exit flush, e.g. a gunicorn worker forked after events were queued).
+_live_senders: "weakref.WeakSet[TelemetrySender]" = weakref.WeakSet()
+
+
+def _reset_senders_after_fork() -> None:
+    for sender in list(_live_senders):
+        with contextlib.suppress(Exception):
+            sender._reset_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_senders_after_fork)
+
+
 class TelemetrySender:
     """Buffers telemetry events and sends to collector. Fail-open: never blocks LLM calls.
 
@@ -180,6 +200,19 @@ class TelemetrySender:
         self._retry_at = 0.0  # time.monotonic() before which sends pause
         self._closed = False
         weakref.finalize(self, _warn_unsent_at_exit, self._buffer, self._url)
+        _live_senders.add(self)
+
+    def _reset_after_fork(self) -> None:
+        """In a forked child: the buffered events are the parent's (it sends
+        them), so start empty, with a client id and counters of its own."""
+        self._buffer.clear()
+        self._client_id = uuid.uuid4().hex
+        self._seq = 0
+        self._enqueued = 0
+        self._sent = 0
+        self._dropped = dict.fromkeys(DROP_REASONS, 0)
+        self._rate_limited_responses = 0
+        self._backlog_reason = None
 
     def enqueue(self, event: dict) -> None:
         """Add event to buffer. If buffer full, oldest event is dropped (fail-open)."""
@@ -321,6 +354,39 @@ class TelemetrySender:
                     self._rebuffer(rest)
                 return
 
+    def flush_at_exit(self, timeout: float) -> None:
+        """Best-effort final flush within `timeout` seconds (see
+        `register_exit_flush`). Each request's timeouts are the time left;
+        what is not sent in time stays buffered. Respects a 429 back-off.
+        Never raises."""
+        try:
+            if self._closed or not self._buffer or self._backing_off():
+                return
+            deadline = time.monotonic() + timeout
+            chunks = self._drain_chunks()
+            for i, chunk in enumerate(chunks):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    for rest in chunks[i:]:
+                        self._rebuffer(rest)
+                    return
+                try:
+                    resp = self._sync_client.post(
+                        self._url,
+                        json=self._payload(chunk),
+                        headers=self._headers,
+                        timeout=remaining,
+                    )
+                except Exception as e:  # noqa: BLE001 - re-buffered
+                    self._handle_error(e, chunk)
+                    continue
+                if not self._handle_response(resp, chunk):
+                    for rest in chunks[i + 1:]:
+                        self._rebuffer(rest)
+                    return
+        except Exception:  # noqa: BLE001, S110 - never raise at exit
+            pass
+
     def _account_shutdown(self) -> None:
         if self._closed:
             return
@@ -366,3 +432,92 @@ class AtlasTelemetrySender(TelemetrySender):
             # atlas envelopes are extra="forbid": never add a metadata key.
             report_loss=False,
         )
+
+
+# --- flush at interpreter exit -------------------------------------------------
+#
+# Events still buffered when a short script exits (a stream abandoned just
+# before the end, a send that failed) would be lost: one `atexit` hook makes a
+# best-effort flush of every registered sender, bounded by a total time budget.
+
+EXIT_FLUSH_TIMEOUT = 2.0  # seconds, all senders together
+EXIT_FLUSH_TIMEOUT_ENV = "PS_EXIT_FLUSH_TIMEOUT"
+EXIT_FLUSH_DISABLE_ENV = "PS_DISABLE_EXIT_FLUSH"
+
+_exit_senders: "weakref.WeakSet[TelemetrySender]" = weakref.WeakSet()
+_exit_lock = threading.Lock()
+_exit_hook_registered = False
+_exit_timeout_override: float | None = None
+
+
+def _exit_flush_disabled() -> bool:
+    value = os.environ.get(EXIT_FLUSH_DISABLE_ENV, "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def exit_flush_timeout() -> float:
+    """The exit flush budget in seconds: the value given to `instrument()`,
+    else `PS_EXIT_FLUSH_TIMEOUT`, else EXIT_FLUSH_TIMEOUT (0 turns it off)."""
+    timeout = _exit_timeout_override
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get(EXIT_FLUSH_TIMEOUT_ENV, EXIT_FLUSH_TIMEOUT))
+        except ValueError:
+            timeout = EXIT_FLUSH_TIMEOUT
+    if math.isnan(timeout):
+        return EXIT_FLUSH_TIMEOUT
+    return max(0.0, timeout)
+
+
+def set_exit_flush_timeout(timeout: float | None) -> None:
+    """Override the exit flush budget (None: back to the environment/default)."""
+    global _exit_timeout_override
+    _exit_timeout_override = timeout
+
+
+def register_exit_flush(*senders) -> None:
+    """Flush these senders (best effort, bounded) when the interpreter exits.
+
+    Held weakly: a sender that is collected is simply skipped. The `atexit`
+    hook is registered once, on the first sender, and removed when the last
+    one is unregistered. Off when `PS_DISABLE_EXIT_FLUSH` is set.
+    """
+    with _exit_lock:
+        global _exit_hook_registered
+        for sender in senders:
+            if sender is not None:
+                with contextlib.suppress(TypeError):  # not weak-referenceable
+                    _exit_senders.add(sender)
+        if not _exit_hook_registered and len(_exit_senders):
+            atexit.register(_flush_at_exit)
+            _exit_hook_registered = True
+
+
+def unregister_exit_flush(*senders) -> None:
+    with _exit_lock:
+        global _exit_hook_registered
+        for sender in senders:
+            if sender is not None:
+                with contextlib.suppress(TypeError):
+                    _exit_senders.discard(sender)
+        if _exit_hook_registered and not len(_exit_senders):
+            atexit.unregister(_flush_at_exit)
+            _exit_hook_registered = False
+
+
+def _flush_at_exit() -> None:
+    """The `atexit` hook. Never raises; gives up when the budget is spent."""
+    try:
+        if _exit_flush_disabled():
+            return
+        deadline = time.monotonic() + exit_flush_timeout()
+        for sender in list(_exit_senders):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            try:
+                sender.flush_at_exit(remaining)
+            except Exception:  # noqa: BLE001, S112 - one sender's failure
+                continue
+    except BaseException:  # noqa: BLE001, S110 - never raise or block at exit
+        pass

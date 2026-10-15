@@ -31,7 +31,15 @@ through an import hook that `uninstrument()` removes.
 Streams (`stream=True` or a streaming method) are wrapped so they emit one
 event when they end or are closed; chunks reach the caller unchanged. A
 stream left unfinished and unclosed (a `break` out of the loop) emits its
-event, marked `stream_abandoned`, when it is garbage-collected.
+event, marked `stream_abandoned`, when it is garbage-collected. cohere's
+`chat_stream` is a generator that closes its event stream itself when it is
+closed or collected, so a `break` out of it is an early close, as a
+`close()` of an OpenAI or Anthropic stream is (`stream_completed=False`,
+not `stream_abandoned`). Events emitted from the garbage collector or from
+that close are only enqueued (no network I/O there): they go out with the
+next flush, or with the bounded flush at interpreter exit
+(`exit_flush_timeout`, `PS_EXIT_FLUSH_TIMEOUT`, off with
+`PS_DISABLE_EXIT_FLUSH=1`).
 
 Guarantees:
   - Idempotent: a second `instrument()` is a no-op and returns False.
@@ -86,6 +94,9 @@ from prompt_shields.telemetry import (
     AtlasTelemetrySender,
     TelemetrySender,
     build_atlas_event,
+    register_exit_flush,
+    set_exit_flush_timeout,
+    unregister_exit_flush,
 )
 
 logger = logging.getLogger("prompt_shields.instrumentation")
@@ -440,6 +451,7 @@ def instrument(
     atlas_api_key: str | None = None,
     vendors: tuple[str, ...] | list[str] | None = None,
     azure_deployments: dict[str, str] | None = None,
+    exit_flush_timeout: float | None = None,
 ) -> bool:
     """Patch installed provider SDKs so every call emits a telemetry event.
 
@@ -454,6 +466,9 @@ def instrument(
     "azure_openai" to instrument Azure without plain OpenAI.
     `azure_deployments` maps Azure deployment names to model ids for
     pricing, e.g. `{"prod-chat": "gpt-4o"}` (see `AzureOpenAIAdapter`).
+    `exit_flush_timeout` bounds the best-effort flush of still-buffered
+    events at interpreter exit, in seconds (default `PS_EXIT_FLUSH_TIMEOUT`,
+    else 2; 0 turns it off, as does `PS_DISABLE_EXIT_FLUSH=1`).
     Returns True if this call instrumented, False if already instrumented.
     Raises ValueError when no Prompt Shields API key is available.
     """
@@ -521,6 +536,9 @@ def instrument(
             _patch(state, module, target)
 
         _state = state
+        if exit_flush_timeout is not None:
+            set_exit_flush_timeout(exit_flush_timeout)
+        register_exit_flush(state.telemetry, state.atlas)
         in_progress = []
         if lazy:
             # Installed before looking at `sys.modules`, so a module imported
@@ -658,6 +676,8 @@ def uninstrument() -> bool:
             # Only restore what is still ours; leave later patches alone.
             if cls.__dict__.get(name) is wrapper:
                 setattr(cls, name, original)
+        unregister_exit_flush(_state.telemetry, _state.atlas)
+        set_exit_flush_timeout(None)
         _state = None
         return True
 
@@ -1032,16 +1052,17 @@ async def _finish_async(call: dict, response: Any, start: float) -> Any:
 
 
 def _wrap_stream(call: dict, stream: Any, start: float,
-                 is_async: bool = False) -> Any:
+                 is_async: bool = False, close_flush: bool = True) -> Any:
     """`ShieldsStream`, or `AsyncShieldsStream` for an async iterator (an
-    async generator such as cohere's `chat_stream` is returned unawaited)."""
+    async generator such as cohere's `chat_stream` is returned unawaited).
+    `close_flush=False`: a `close()` enqueues the event, does not send it."""
     def on_abandon(adapter_fields, stream_fields, latency_ms):
         # Runs in the garbage collector: enqueued, sent by the next flush.
         _send_later(call, _stream_event(call, adapter_fields, stream_fields,
                                         latency_ms))
 
     options = {"hide_usage_chunk": call["hide_usage_chunk"],
-               "on_abandon": on_abandon}
+               "on_abandon": on_abandon, "close_flush": close_flush}
     if call["vendor"] in _LAZY_STREAM_VENDORS:
         options["on_failed_start"] = lambda: _release_framework_call(call)
     if is_async or (hasattr(stream, "__aiter__") and not hasattr(stream, "__iter__")):
@@ -1053,9 +1074,12 @@ def _wrap_stream(call: dict, stream: Any, start: float,
         return AsyncShieldsStream(stream, _accumulator(call), on_finish_async,
                                   start, **options)
 
-    def on_finish(adapter_fields, stream_fields, latency_ms):
-        _send_sync(call, _stream_event(call, adapter_fields,
-                                       stream_fields, latency_ms))
+    def on_finish(adapter_fields, stream_fields, latency_ms, flush=True):
+        event = _stream_event(call, adapter_fields, stream_fields, latency_ms)
+        if flush:
+            _send_sync(call, event)
+        else:
+            _send_later(call, event)
 
     return ShieldsStream(stream, _accumulator(call), on_finish, start, **options)
 
@@ -1247,11 +1271,25 @@ class _MessageStreamManager:
 class _StreamContext:
     """Stands in for a raw streaming context manager (cohere's raw
     `chat_stream`): the request is sent on enter, and the event stream of
-    the response it yields (`.data`) is observed."""
+    the response it yields (`.data`) is observed.
+
+    Leaving the context ends that stream: one not read to the end is an
+    early close (`stream_completed=False`). cohere's public `chat_stream`
+    generator iterates inside this context, so it is left (and, sync, the
+    stream closed by `yield from`) when that generator is closed or
+    garbage-collected: the event is then only enqueued, never sent there.
+    A context never entered made no request: its framework claim is given
+    back when it is collected."""
 
     def __init__(self, manager: Any, call: dict):
         self._manager = manager
         self._call = call
+        self._wrapped = None
+        if call["framework"] is not None:
+            try:
+                weakref.finalize(self, _release_unentered, call).atexit = False
+            except Exception as e:  # noqa: BLE001 - fail-open
+                logger.debug(f"Instrumentation stream context error: {e}")
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
@@ -1259,6 +1297,7 @@ class _StreamContext:
         return getattr(self._manager, name)
 
     def __enter__(self):
+        self._call["entered"] = True
         start = time.monotonic()
         try:
             response = self._manager.__enter__()
@@ -1268,9 +1307,17 @@ class _StreamContext:
         return self._observe(response, start, is_async=False)
 
     def __exit__(self, *exc):
-        return self._manager.__exit__(*exc)
+        try:
+            return self._manager.__exit__(*exc)
+        finally:
+            wrapped, self._wrapped = self._wrapped, None
+            if wrapped is not None:
+                result = wrapped._finish(completed=False, flush=False)
+                if inspect.iscoroutine(result):  # an async stream: drop it
+                    result.close()
 
     async def __aenter__(self):
+        self._call["entered"] = True
         start = time.monotonic()
         try:
             response = await self._manager.__aenter__()
@@ -1280,13 +1327,20 @@ class _StreamContext:
         return self._observe(response, start, is_async=True)
 
     async def __aexit__(self, *exc):
-        return await self._manager.__aexit__(*exc)
+        try:
+            return await self._manager.__aexit__(*exc)
+        finally:
+            wrapped, self._wrapped = self._wrapped, None
+            if wrapped is not None:
+                await wrapped._finish(completed=False, flush=False)
 
     def _observe(self, response: Any, start: float, is_async: bool) -> Any:
         wrapped = None
         try:
-            wrapped = _wrap_stream(self._call, response._data, start, is_async)
+            wrapped = _wrap_stream(self._call, response._data, start, is_async,
+                                   close_flush=False)
             response._data = wrapped
+            self._wrapped = wrapped
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"Instrumentation stream context error: {e}")
             if wrapped is not None:

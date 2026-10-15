@@ -26,7 +26,6 @@ call. See `prompt_shields.integrations` for delivery and double-counting
 rules.
 """
 
-import contextlib
 import inspect
 import logging
 import threading
@@ -408,7 +407,11 @@ _register_lock = threading.Lock()
 def register(use_case: str | None = None) -> PromptShieldsEventHandler | None:
     """Attach the handlers to LlamaIndex's root dispatcher once; return the
     event handler. Fail-open: if this LlamaIndex version's dispatcher does
-    not take them, logs a warning, attaches nothing and returns None."""
+    not take them, logs a warning, attaches nothing and returns None.
+
+    Handlers are only forgotten once removed: if removing a previous (or a
+    half-attached) pair fails, it stays tracked so `unregister()` can retry,
+    and no second pair is attached next to it."""
     global _registered
     with _register_lock:
         try:
@@ -418,8 +421,16 @@ def register(use_case: str | None = None) -> PromptShieldsEventHandler | None:
                     and any(h is _registered[0] for h in dispatcher.event_handlers) \
                     and any(h is _registered[1] for h in dispatcher.span_handlers):
                 return _registered[0]
+        except Exception as e:  # noqa: BLE001 - fail-open
+            _register_failed(e)
+            return None
+        try:
             _remove(_registered)
-            _registered = None
+        except Exception as e:  # noqa: BLE001 - fail-open: keep it tracked
+            _register_failed(e)
+            return None
+        _registered = None
+        try:
             events = PromptShieldsEventHandler(use_case=use_case)
             spans = PromptShieldsSpanHandler()
             spans._events = events
@@ -428,37 +439,56 @@ def register(use_case: str | None = None) -> PromptShieldsEventHandler | None:
             dispatcher.add_event_handler(events)
             return events
         except Exception as e:  # noqa: BLE001 - fail-open
-            logger.warning(
-                f"Prompt Shields: LlamaIndex handlers not registered ({e!r}); "
-                "LlamaIndex calls are not reported by this integration")
-            with contextlib.suppress(Exception):
+            _register_failed(e)
+            try:
                 _remove(_registered)  # a half-attached pair
-            _registered = None
+            except Exception:  # noqa: BLE001, S110 - stays tracked
+                pass
+            else:
+                _registered = None
             return None
+
+
+def _register_failed(e: Exception) -> None:
+    logger.warning(
+        f"Prompt Shields: LlamaIndex handlers not registered ({e!r}); "
+        "LlamaIndex calls are not reported by this integration")
 
 
 def unregister() -> None:
     """Remove the handlers added by `register()` from every dispatcher.
-    Fail-open: errors are logged."""
+    Fail-open: errors are logged, and handlers that could not be removed
+    stay tracked, so a later `unregister()` or `register()` retries."""
     global _registered
     with _register_lock:
         try:
             _remove(_registered)
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.warning(f"Prompt Shields: LlamaIndex unregister failed ({e!r})")
+            return
         _registered = None
 
 
 def _remove(handlers: Any) -> None:
+    """Detach `handlers` from every dispatcher, carrying on past a dispatcher
+    that fails; then raise the first error, if any."""
     if handlers is None:
         return
     dispatchers = getattr(_root_manager, "dispatchers", None)
+    error: Exception | None = None
     for dispatcher in (list(dispatchers.values()) if dispatchers is not None
                        else [get_dispatcher()]):
-        dispatcher.event_handlers = [
-            h for h in dispatcher.event_handlers if not any(h is x for x in handlers)]
-        dispatcher.span_handlers = [
-            h for h in dispatcher.span_handlers if not any(h is x for x in handlers)]
+        try:
+            dispatcher.event_handlers = [
+                h for h in dispatcher.event_handlers
+                if not any(h is x for x in handlers)]
+            dispatcher.span_handlers = [
+                h for h in dispatcher.span_handlers
+                if not any(h is x for x in handlers)]
+        except Exception as e:  # noqa: BLE001 - try the others first
+            error = error or e
+    if error is not None:
+        raise error  # still attached somewhere: keep its pending runs
     # Streams still pending will never be reported: drop their calls.
     events = handlers[0]
     with events._lock:
