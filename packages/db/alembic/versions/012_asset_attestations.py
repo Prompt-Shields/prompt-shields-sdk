@@ -8,8 +8,8 @@ comment and a snapshot of the attested value. Triggers reject UPDATE, and
 DELETE unless the transaction has set prompt_shields.erasing_tenant to the
 row's tenant (tenant erasure), so history cannot be rewritten (#98).
 
-Revision ID: 010
-Revises: 009
+Revision ID: 012
+Revises: 011
 Create Date: 2026-10-15
 """
 
@@ -19,8 +19,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "010"
-down_revision: str | None = "009"
+revision: str = "012"
+down_revision: str | None = "011"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

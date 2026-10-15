@@ -5,7 +5,7 @@ Tenant registry (tenant API key):
   POST /api/v1/registry/assets/{asset_id}/attestations
 
 Partner API:
-  GET  /partner/v1/assets/{asset_id}/attestations   scope registry:read
+  GET  /partner/v1/assets/{asset_id}/attestations   scope assets:read
   POST /partner/v1/assets/{asset_id}/attestations   scope attestations:write
 
 Every call, reads and writes, writes a `partner_audit_log` row through
@@ -32,7 +32,7 @@ from collector.partner_auth import PartnerPrincipal, require_scope
 from collector.partner_registry import _audit, _enforce_rate_limit
 
 WRITE_SCOPE = "attestations:write"
-_READ_SCOPE = Depends(require_scope("registry:read"))
+_READ_SCOPE = Depends(require_scope("assets:read"))
 _WRITE_SCOPE = Depends(require_scope(WRITE_SCOPE))
 
 tenant_router = APIRouter(prefix="/api/v1/registry", tags=["Registry"])

@@ -358,3 +358,11 @@ def test_registered_field_is_attestable_and_summarized():
 def test_asset_snapshot_is_json_normalised():
     value = attestation.current_value(_asset(environment=uuid.UUID(int=1)), "asset")
     assert value["environment"] == str(uuid.UUID(int=1))
+
+
+def test_write_scope_is_opt_in():
+    from collector.partner_scopes import DEFAULT_SCOPES, SCOPES, expand_scopes
+
+    assert "attestations:write" in SCOPES
+    assert "attestations:write" not in DEFAULT_SCOPES
+    assert "attestations:write" not in expand_scopes(["registry:read"])
