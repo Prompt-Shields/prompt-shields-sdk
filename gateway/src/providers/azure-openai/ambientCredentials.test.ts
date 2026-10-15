@@ -7,6 +7,10 @@ import { GatewayError } from '../../errors/GatewayError';
 import { Options } from '../../types/requestBody';
 import AzureOpenAIAPIConfig from './api';
 import AzureAIInferenceAPI from '../azure-ai-inference/api';
+import {
+  getAzureManagedIdentityToken,
+  getAzureWorkloadIdentityToken,
+} from './utils';
 
 const fetchSpy = jest.spyOn(globalThis, 'fetch');
 const readFileSpy = jest.spyOn(fs, 'readFileSync');
@@ -329,3 +333,40 @@ describe.each(configs)(
     });
   }
 );
+
+describe('host-identity token helpers', () => {
+  // Defense in depth: a caller that skips the headers() checks still cannot
+  // mint a host token without the operator opt-in.
+  test('managed identity refuses without the opt-in', async () => {
+    const err = await getAzureManagedIdentityToken(
+      {},
+      'https://cognitiveservices.azure.com/'
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GatewayError);
+    expect((err as GatewayError).status).toBe(403);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('workload identity refuses without the opt-in', async () => {
+    const err = await getAzureWorkloadIdentityToken(
+      {},
+      'https://login.microsoftonline.com',
+      'tenant',
+      'client',
+      'federated-token'
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GatewayError);
+    expect((err as GatewayError).status).toBe(403);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('managed identity fetches once enabled', async () => {
+    mockEnv.AZURE_AMBIENT_CREDENTIALS_ENABLED = 'true';
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ access_token: 'host-token' }))
+    );
+    await expect(
+      getAzureManagedIdentityToken({}, 'https://cognitiveservices.azure.com/')
+    ).resolves.toBe('host-token');
+  });
+});

@@ -83,7 +83,9 @@ describe('azure guardrails fail closed on host Azure identity', () => {
         { env: {} }
       );
       expect(result.verdict).toBe(false);
-      expect(String(result.error?.message ?? result.error)).toMatch(/disabled/);
+      // An Error, so the hooks layer can report error.name / error.message.
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error.message).toMatch(/disabled/);
       expect(fetchSpy).not.toHaveBeenCalled();
     }
   );

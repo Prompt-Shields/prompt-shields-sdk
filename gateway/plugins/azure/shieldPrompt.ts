@@ -100,7 +100,8 @@ export const handler = async (
 
   if (tokenError) {
     return {
-      error: tokenError,
+      // The hooks layer reports error.name / error.message.
+      error: new Error(tokenError),
       verdict: !denied,
       data,
     };

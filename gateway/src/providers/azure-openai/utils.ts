@@ -213,10 +213,23 @@ export async function getAccessTokenFromEntraId(
   }
 }
 
+// Prompt Shields: the two host-identity token helpers check the opt-in
+// themselves, so a new caller cannot mint a host token without it.
+function assertAmbientAzureCredentialsEnabled(env: Record<string, any>) {
+  if (!ambientAzureCredentialsEnabled(env)) {
+    throw new GatewayError(
+      'Azure host identity is disabled on this gateway',
+      403
+    );
+  }
+}
+
 export async function getAzureManagedIdentityToken(
+  env: Record<string, any>,
   resource: string,
   clientId?: string
 ) {
+  assertAmbientAzureCredentialsEnabled(env);
   try {
     const response = await fetch(
       `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encodeURIComponent(resource)}${clientId ? `&client_id=${encodeURIComponent(clientId)}` : ''}`,
@@ -242,12 +255,14 @@ export async function getAzureManagedIdentityToken(
 }
 
 export async function getAzureWorkloadIdentityToken(
+  env: Record<string, any>,
   authorityHost: string,
   tenantId: string,
   clientId: string,
   federatedToken: string,
   scope = 'https://cognitiveservices.azure.com/.default'
 ) {
+  assertAmbientAzureCredentialsEnabled(env);
   try {
     const url = `${authorityHost}/${tenantId}/oauth2/v2.0/token`;
     const params = new URLSearchParams({
