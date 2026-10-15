@@ -192,6 +192,38 @@ async def test_azure_lists_deployments_with_region_and_tags():
     assert {c.method for c in calls if c.url.host == "management.azure.com"} == {"GET"}
 
 
+async def test_azure_token_is_renewed_before_it_expires():
+    now = [0.0]
+
+    def clock() -> float:
+        now[0] += 120.0
+        return now[0]
+
+    state = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            state["n"] += 1
+            state["token"] = f"tok-{state['n']}"
+            # Some endpoints send expires_in as a string.
+            return httpx.Response(
+                200, json={"access_token": state["token"], "expires_in": "600"}
+            )
+        # Always the latest token.
+        assert request.headers["authorization"] == f"Bearer {state['token']}"
+        return httpx.Response(200, json={"value": []})
+
+    subs = [f"aaaaaaaa-0000-0000-0000-00000000000{i}" for i in range(1, 7)]
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=subs),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+        clock=clock,
+    )
+    assert summary == {"accounts": 0} and deps == []
+    assert state["n"] >= 3
+
+
 async def test_configured_subscriptions_skip_enumeration():
     calls: list[httpx.Request] = []
     await ci.fetch_azure_deployments(

@@ -29,7 +29,7 @@ the token is unset) or ``python -m collector.cloud_inventory --tenant <uuid>``.
 
 Credentials come from the operator's environment only, per tenant, in
 ``PS_CLOUD_INVENTORY`` (JSON, see ``CloudInventorySettings``); never from a
-request body. Short-lived credentials (assumed AWS roles, GCP access tokens)
+request body. Short-lived credentials (assumed AWS roles, Azure and GCP access tokens)
 are renewed shortly before they expire, so long runs do not fail part-way.
 A failing Azure subscription, AWS region or GCP project/region is reported
 and does not stop the others. Secrets are held as ``SecretStr`` and are
@@ -102,6 +102,9 @@ STS_MAX_SESSION_SECONDS = 43200
 # Short-lived credentials (assumed-role keys, GCP access tokens) are renewed
 # when less than this is left, so a long run never signs with expired ones.
 CREDENTIAL_REFRESH_MARGIN_S = 300
+# Access token lifetime assumed when a token response carries no usable
+# ``expires_in``, and the most that is trusted (Azure ARM, GCP).
+TOKEN_DEFAULT_LIFETIME_S = 3600
 # Commercial and GovCloud regions (the amazonaws.com partitions), e.g.
 # "eu-central-1", "us-gov-west-1", "ap-southeast-4".
 _AWS_REGION = re.compile(
@@ -133,8 +136,6 @@ AWS_CUSTOM_MODEL_UNUSABLE = AWS_INACTIVE_STATES | {"creating"}
 GCP_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GCP_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 GCP_JWT_LIFETIME_S = 600
-# Assumed when a token response carries no usable ``expires_in``.
-GCP_TOKEN_DEFAULT_LIFETIME_S = 3600
 VERTEX_HOST = "{region}-aiplatform.googleapis.com"
 VERTEX_PAGE_SIZE = 100
 # Vertex AI regions, e.g. "us-central1", "europe-west4", "me-central2",
@@ -524,7 +525,7 @@ async def _arm_list(
     client: httpx.AsyncClient,
     path: str,
     api_version: str,
-    headers: dict[str, str],
+    auth: _AzureAuth,
     what: str,
     sleep: Sleep,
 ):
@@ -532,7 +533,13 @@ async def _arm_list(
     params: dict | None = {"api-version": api_version}
     for _ in range(MAX_PAGES):
         body = await _request(
-            client, "GET", url, what=what, sleep=sleep, params=params, headers=headers
+            client,
+            "GET",
+            url,
+            what=what,
+            sleep=sleep,
+            params=params,
+            headers=await auth.headers(),
         )
         items = body.get("value") if isinstance(body, dict) else None
         if not isinstance(body, dict) or not isinstance(items, list | None):
@@ -552,7 +559,8 @@ async def _arm_list(
 
 async def _azure_token(
     client: httpx.AsyncClient, creds: AzureInventoryCredentials, sleep: Sleep
-) -> str:
+) -> tuple[str, float]:
+    """An ARM access token and its lifetime in seconds."""
     body = await _request(
         client,
         "POST",
@@ -569,7 +577,47 @@ async def _azure_token(
     token = body.get("access_token") if isinstance(body, dict) else None
     if not isinstance(token, str) or not token:
         raise CloudInventoryError("azure: token response had no access_token")
-    return token
+    return token, _token_lifetime(body.get("expires_in"))
+
+
+def _token_lifetime(value) -> float:
+    """Seconds an access token is valid, from ``expires_in`` (a number, or
+    a numeric string from some token endpoints); at most an hour, and an
+    hour when missing or unusable."""
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        return float(TOKEN_DEFAULT_LIFETIME_S)
+    return min(float(value), TOKEN_DEFAULT_LIFETIME_S)
+
+
+class _AzureAuth:
+    """Bearer headers for ARM calls. The access token (60-90 minutes) is
+    requested again shortly before it expires, so a run over many
+    subscriptions does not fail part-way."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        creds: AzureInventoryCredentials,
+        sleep: Sleep,
+        clock: Callable[[], float],
+    ):
+        self._client, self._creds, self._sleep, self._clock = client, creds, sleep, clock
+        self._token: str | None = None
+        self._expires = 0.0
+
+    async def headers(self) -> dict[str, str]:
+        if (
+            self._token is None
+            or self._clock() >= self._expires - CREDENTIAL_REFRESH_MARGIN_S
+        ):
+            issued = self._clock()
+            self._token, lifetime = await _azure_token(
+                self._client, self._creds, self._sleep
+            )
+            self._expires = issued + lifetime
+        return {"Authorization": f"Bearer {self._token}"}
 
 
 def _tags(value) -> dict[str, str]:
@@ -583,6 +631,7 @@ async def fetch_azure_deployments(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     sleep: Sleep = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[dict, list[CloudDeployment]]:
     """Return (summary, model deployments) for one service principal.
 
@@ -597,16 +646,16 @@ async def fetch_azure_deployments(
     async with httpx.AsyncClient(
         transport=transport, timeout=30.0, follow_redirects=False
     ) as client:
-        headers = {
-            "Authorization": f"Bearer {await _azure_token(client, creds, sleep)}"
-        }
+        auth = _AzureAuth(client, creds, sleep, clock)
+        # Fail the whole cloud (not each subscription) when the token is refused.
+        await auth.headers()
         subscriptions = list(creds.subscription_ids)
         if not subscriptions:
             async for sub in _arm_list(
                 client,
                 "/subscriptions",
                 ARM_SUBSCRIPTIONS_API,
-                headers,
+                auth,
                 "subscription list",
                 sleep,
             ):
@@ -616,7 +665,7 @@ async def fetch_azure_deployments(
 
         for sid in subscriptions:
             try:
-                accounts, found = await _azure_subscription(client, sid, headers, sleep)
+                accounts, found = await _azure_subscription(client, sid, auth, sleep)
             except CloudInventoryError as exc:
                 errors[sid] = str(exc)
                 continue
@@ -637,7 +686,7 @@ def _str_or_none(value) -> str | None:
 async def _azure_subscription(
     client: httpx.AsyncClient,
     sid: str,
-    headers: dict[str, str],
+    auth: _AzureAuth,
     sleep: Sleep,
 ) -> tuple[int, list[CloudDeployment]]:
     """(AI accounts seen, model deployments) in one subscription."""
@@ -647,7 +696,7 @@ async def _azure_subscription(
         client,
         f"/subscriptions/{sid}/providers/Microsoft.CognitiveServices/accounts",
         ARM_COGNITIVE_API,
-        headers,
+        auth,
         "account list",
         sleep,
     ):
@@ -664,7 +713,7 @@ async def _azure_subscription(
             client,
             f"{account_id}/deployments",
             ARM_COGNITIVE_API,
-            headers,
+            auth,
             "deployment list",
             sleep,
         ):
@@ -1252,14 +1301,7 @@ async def _gcp_token(
     token = body.get("access_token") if isinstance(body, dict) else None
     if not isinstance(token, str) or not token:
         raise CloudInventoryError("gcp: token response had no access_token")
-    lifetime = body.get("expires_in")
-    if (
-        isinstance(lifetime, bool)
-        or not isinstance(lifetime, int | float)
-        or lifetime <= 0
-    ):
-        lifetime = GCP_TOKEN_DEFAULT_LIFETIME_S
-    return token, min(float(lifetime), GCP_TOKEN_DEFAULT_LIFETIME_S)
+    return token, _token_lifetime(body.get("expires_in"))
 
 
 class _GcpAuth:
