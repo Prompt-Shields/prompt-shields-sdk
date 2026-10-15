@@ -1,7 +1,10 @@
 """Rule-based risk classification suggestions (EU AI Act, ISO 42001, NIST AI RMF).
 
 Rules are data: each JSON file in ``risk_rules/`` is a versioned ruleset
-(``eu_ai_act_annex_iii.json`` is the EU AI Act Annex III use-case taxonomy).
+(``eu_ai_act_annex_iii.json`` is the EU AI Act Annex III use-case taxonomy,
+``eu_ai_act_article_5.json`` the Article 5 prohibited practices, flagged
+``critical``, and ``eu_ai_act_article_50.json`` the Article 50 transparency
+obligations).
 A rule maps signals about an asset to a framework, category and level:
 
 * registry fields: ``use_case``, ``business_unit``, ``calling_service``,
@@ -14,7 +17,13 @@ A rule maps signals about an asset to a framework, category and level:
 destinations, i.e. what the system does and touches.
 
 A rule fires when every ``when.all`` condition and at least one ``when.any``
-condition match and no ``unless`` condition does. ``supporting`` conditions
+condition match and no ``unless`` condition does. A condition can carry its
+own ``context`` (at least one of these conditions must also match, e.g.
+``applicant*`` counts only next to employment words) and ``exclude`` (none
+of these may match, e.g. ``admission*`` not next to ``hospital*``), so an
+ambiguous keyword can be scoped without dropping the rest of the rule.
+``context`` and ``exclude`` look at the whole asset, like ``unless``; context
+matches are recorded in the evidence with ``role: context``. ``supporting`` conditions
 never fire a rule on their own; they add evidence and raise confidence.
 Confidence is ``low`` when only ``"strength": "weak"`` triggers matched,
 ``high`` when a supporting condition also matched, else ``medium``.
@@ -25,7 +34,11 @@ the evidence (which signal, which value, which keyword or PII category). The
 engine never touches a row a human set: it only creates, refreshes or
 withdraws rows that are still ``suggested``. A confirmed or rejected rule is
 not suggested again, and no rule suggests a framework/category pair that
-already has a hand-entered mapping on the asset.
+already has a hand-entered mapping on the asset. That holds across ruleset
+versions: a review is a decision about the asset and the rule id, so a new
+version never re-opens it. Narrowing a rule cannot make a rejection wrong;
+a rule whose meaning changes materially should get a new id instead, which is
+suggested afresh.
 
 Entry points:
 
@@ -43,7 +56,7 @@ import json
 import re
 import sys
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -109,6 +122,8 @@ class Condition:
     present: bool = False
     at_least: str | None = None
     strength: str = "strong"
+    context: tuple[Condition, ...] = ()
+    exclude: tuple[Condition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,6 +164,21 @@ def _resolve_list(value: Any, lists: dict[str, list[str]], where: str) -> list[s
 
 
 def _parse_condition(raw: Any, lists: dict[str, list[str]], where: str) -> Condition:
+    cond = _parse_base_condition(raw, lists, where)
+    scoped = {}
+    for key in ("context", "exclude"):
+        if key not in raw:
+            continue
+        items = raw[key]
+        if not isinstance(items, list) or not items:
+            raise ValueError(f"{where}: {key} must be a non-empty list of conditions")
+        scoped[key] = tuple(_parse_condition(c, lists, where) for c in items)
+    return replace(cond, **scoped) if scoped else cond
+
+
+def _parse_base_condition(
+    raw: Any, lists: dict[str, list[str]], where: str
+) -> Condition:
     if not isinstance(raw, dict):
         raise ValueError(f"{where}: condition must be an object")  # noqa: TRY004
     signal = raw.get("signal")
@@ -319,7 +349,22 @@ def _field_values(signals: AssetSignals, name: str) -> list[str]:
 
 
 def _match(cond: Condition, signals: AssetSignals) -> list[dict]:
-    """Evidence items for a matching condition, [] when it does not match."""
+    """Evidence items for a matching condition, [] when it does not match.
+    Scoped by the condition's ``context`` and ``exclude``."""
+    out = _match_base(cond, signals)
+    if not out:
+        return []
+    if any(_match(c, signals) for c in cond.exclude):
+        return []
+    if cond.context:
+        ctx = [e for c in cond.context for e in _match(c, signals)]
+        if not ctx:
+            return []
+        out += [dict(e, role="context") for e in ctx if e not in out]
+    return out
+
+
+def _match_base(cond: Condition, signals: AssetSignals) -> list[dict]:
     if cond.keywords:
         fields = TEXT_FIELDS if cond.signal == "text" else (cond.signal,)
         out = []
@@ -394,7 +439,7 @@ def evaluate_rule(rule: Rule, signals: AssetSignals) -> Suggestion | None:
     else:
         confidence = "medium"
 
-    items = [dict(e, role="trigger") for _, ev in triggers for e in ev]
+    items = [dict(e, role=e.get("role", "trigger")) for _, ev in triggers for e in ev]
     items += [dict(e, role="supporting") for e in support]
     evidence = {
         "rule_title": rule.title,
