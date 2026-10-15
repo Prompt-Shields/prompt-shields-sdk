@@ -258,3 +258,45 @@ def test_exit_flush_is_bounded_when_the_collector_hangs():
     finally:
         sock.close()
     assert hanging - quick < 2.5
+
+
+FORK_SCRIPT = textwrap.dedent("""
+    import json
+    import os
+    import sys
+
+    import httpx
+    from prompt_shields.telemetry import TelemetrySender, register_exit_flush
+
+    def post(url, json=None, headers=None, timeout=None):
+        with open(sys.argv[1], "a") as f:
+            f.write(dumps([e["id"] for e in json["events"]]) + "\\n")
+        return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+
+    dumps = json.dumps
+    sender = TelemetrySender("http://collector.test", "ps_key")
+    sender._sync_client.post = post
+    register_exit_flush(sender)
+    sender.enqueue({"id": "parent"})
+    pid = os.fork()
+    if pid == 0:
+        sender.enqueue({"id": "child"})
+        assert sender.stats()["enqueued"] == 1
+        sys.exit(0)
+    os.waitpid(pid, 0)
+""")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_forked_child_does_not_send_the_parents_buffered_events(tmp_path):
+    # A worker forked with events still buffered (gunicorn --preload): only
+    # the parent sends them; the child's flush (here, at exit) sends its own.
+    log = tmp_path / "posts"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PS_")}
+    env["PYTHONPATH"] = SDK_DIR
+    result = subprocess.run([sys.executable, "-c", FORK_SCRIPT, str(log)],
+                            check=False, env=env, capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    batches = sorted(json.loads(line) for line in log.read_text().splitlines())
+    assert batches == [["child"], ["parent"]]

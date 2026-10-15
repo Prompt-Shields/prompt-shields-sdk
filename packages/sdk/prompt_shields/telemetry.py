@@ -133,6 +133,22 @@ def _warn_unsent_at_exit(buffer: deque, url: str) -> None:
         )
 
 
+# Every sender, held weakly, so a forked child can drop the parent's buffered
+# events (otherwise both processes send them: on the child's next flush, or
+# by its exit flush, e.g. a gunicorn worker forked after events were queued).
+_live_senders: "weakref.WeakSet[TelemetrySender]" = weakref.WeakSet()
+
+
+def _reset_senders_after_fork() -> None:
+    for sender in list(_live_senders):
+        with contextlib.suppress(Exception):
+            sender._reset_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_senders_after_fork)
+
+
 class TelemetrySender:
     """Buffers telemetry events and sends to collector. Fail-open: never blocks LLM calls.
 
@@ -184,6 +200,19 @@ class TelemetrySender:
         self._retry_at = 0.0  # time.monotonic() before which sends pause
         self._closed = False
         weakref.finalize(self, _warn_unsent_at_exit, self._buffer, self._url)
+        _live_senders.add(self)
+
+    def _reset_after_fork(self) -> None:
+        """In a forked child: the buffered events are the parent's (it sends
+        them), so start empty, with a client id and counters of its own."""
+        self._buffer.clear()
+        self._client_id = uuid.uuid4().hex
+        self._seq = 0
+        self._enqueued = 0
+        self._sent = 0
+        self._dropped = dict.fromkeys(DROP_REASONS, 0)
+        self._rate_limited_responses = 0
+        self._backlog_reason = None
 
     def enqueue(self, event: dict) -> None:
         """Add event to buffer. If buffer full, oldest event is dropped (fail-open)."""
