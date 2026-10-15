@@ -8,7 +8,7 @@
 
 `instrument()` patches the official SDK resource classes, sync and async:
   - openai:    `chat.completions.create`, `responses.create` (if present)
-  - anthropic: `messages.create`
+  - anthropic: `messages.create`, `beta.messages.create` (MCP connector)
 Missing packages, or methods an installed version lacks, are skipped.
 
 Guarantees:
@@ -36,7 +36,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-from prompt_shields.providers import _field, _int, get_adapter
+from prompt_shields.providers import _field, _int, get_adapter, mcp_tool_call
 from prompt_shields.streaming import (
     AsyncShieldsStream,
     ShieldsStream,
@@ -60,6 +60,10 @@ _TARGETS = (
     ("openai", "openai.resources.responses", "AsyncResponses", "responses"),
     ("anthropic", "anthropic.resources.messages", "Messages", "messages"),
     ("anthropic", "anthropic.resources.messages", "AsyncMessages", "messages"),
+    ("anthropic", "anthropic.resources.beta.messages.messages", "Messages",
+     "messages"),
+    ("anthropic", "anthropic.resources.beta.messages.messages", "AsyncMessages",
+     "messages"),
 )
 
 # Discovery metadata: argument name -> environment variable.
@@ -406,11 +410,12 @@ async def _send_async(call: dict, event: dict, flush: bool = True) -> None:
 def _extract_responses(response: Any) -> dict:
     """`ProviderAdapter.extract` equivalent for a Responses API object."""
     usage = getattr(response, "usage", None)
-    tool_calls = [
-        {"name": getattr(item, "name", None), "type": "function"}
-        for item in getattr(response, "output", None) or []
-        if getattr(item, "type", None) == "function_call"
-    ]
+    tool_calls: list[dict] = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) == "function_call":
+            tool_calls.append({"name": getattr(item, "name", None), "type": "function"})
+        elif (mcp := mcp_tool_call(item)) is not None:
+            tool_calls.append(mcp)
     # Like Chat Completions, `input_tokens` includes cached tokens and
     # `output_tokens` includes reasoning tokens; the details are subsets.
     input_details = _field(usage, "input_tokens_details")
@@ -452,6 +457,12 @@ class _ResponsesAccumulator(StreamAccumulator):
             item = getattr(event, "item", None)
             if getattr(item, "type", None) == "function_call":
                 self._tool_calls[len(self._tool_calls)] = getattr(item, "name", None)
+        elif etype == "response.output_item.done":
+            # MCP calls are recorded once complete: the item then carries the
+            # server label and tool name, and `added` would double count.
+            mcp = mcp_tool_call(getattr(event, "item", None))
+            if mcp is not None:
+                self._mcp_calls.append(mcp)
 
 
 def _accumulator(call: dict) -> StreamAccumulator:

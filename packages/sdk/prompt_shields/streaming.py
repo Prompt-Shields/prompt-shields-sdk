@@ -31,6 +31,7 @@ from prompt_shields.providers import (
     _field,
     _int,
     anthropic_usage_fields,
+    mcp_tool_call,
     openai_usage_fields,
 )
 
@@ -108,6 +109,7 @@ class StreamAccumulator:
         self.served_model: str | None = None
         self.output_chars = 0
         self._tool_calls: dict[Any, str | None] = {}
+        self._mcp_calls: list[dict] = []
 
     def observe(self, chunk: Any) -> None:
         if self._vendor == "openai":
@@ -157,6 +159,8 @@ class StreamAccumulator:
             block = getattr(event, "content_block", None)
             if getattr(block, "type", None) == "tool_use":
                 self._tool_calls[len(self._tool_calls)] = getattr(block, "name", None)
+            elif (mcp := mcp_tool_call(block)) is not None:
+                self._mcp_calls.append(mcp)
         elif etype == "content_block_delta":
             text = getattr(getattr(event, "delta", None), "text", None)
             if isinstance(text, str):
@@ -191,7 +195,7 @@ class StreamAccumulator:
         tool_type = "tool_use" if self._vendor == "anthropic" else "function"
         tool_calls = [
             {"name": name, "type": tool_type} for name in self._tool_calls.values()
-        ]
+        ] + self._mcp_calls
         fields: dict = {
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,

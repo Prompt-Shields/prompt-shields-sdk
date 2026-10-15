@@ -135,6 +135,36 @@ def _openai_like_extract(response: Any) -> dict:
     }
 
 
+# Provider-hosted MCP tool calls: the provider, not this process, called a
+# remote MCP server. Only the tool and server names are recorded; arguments,
+# results and the server URL (which can carry credentials) never are.
+MCP_TOOL_CALL_TYPES = {
+    "mcp_tool_use": "server_name",  # Anthropic MCP connector content block
+    "mcp_call": "server_label",  # OpenAI Responses output item
+}
+_MCP_LABEL_MAX = 200
+
+
+def mcp_tool_call(item: Any) -> dict | None:
+    """`{"name", "type": "mcp", "server"}` for a provider-hosted MCP tool
+    call block or output item, else None."""
+    item_type = _field(item, "type")
+    server_field = (
+        MCP_TOOL_CALL_TYPES.get(item_type) if isinstance(item_type, str) else None
+    )
+    if server_field is None:
+        return None
+
+    def label(value: Any) -> str | None:
+        return value[:_MCP_LABEL_MAX] if isinstance(value, str) else None
+
+    return {
+        "name": label(_field(item, "name")),
+        "type": "mcp",
+        "server": label(_field(item, server_field)),
+    }
+
+
 class ProviderAdapter:
     """Base class — subclasses MUST set `vendor` and implement `extract`."""
 
@@ -205,6 +235,8 @@ class AnthropicAdapter(ProviderAdapter):
                     "name": getattr(block, "name", None),
                     "type": "tool_use",
                 })
+            elif (mcp := mcp_tool_call(block)) is not None:
+                tool_calls.append(mcp)
 
         return {
             **usage_fields,
@@ -393,6 +425,8 @@ class BedrockAdapter(ProviderAdapter):
         for block in _items(_field(response, "content")):  # Anthropic body
             if _field(block, "type") == "tool_use":
                 tool_calls.append({"name": _field(block, "name"), "type": "tool_use"})
+            elif (mcp := mcp_tool_call(block)) is not None:
+                tool_calls.append(mcp)
 
         return {
             **anthropic_usage_fields(*counts),
