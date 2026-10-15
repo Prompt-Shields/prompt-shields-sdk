@@ -62,6 +62,7 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
       const resource =
         azureEntraScope || 'https://cognitiveservices.azure.com/';
       const accessToken = await getAzureManagedIdentityToken(
+        c,
         resource,
         azureManagedClientId
       );
@@ -86,6 +87,7 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
           const scope =
             azureEntraScope || 'https://cognitiveservices.azure.com/.default';
           const accessToken = await getAzureWorkloadIdentityToken(
+            c,
             authorityHost,
             tenantId,
             clientId,
