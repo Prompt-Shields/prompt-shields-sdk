@@ -352,14 +352,18 @@ async def rebuild_flows(db: AsyncSession, tenant_id: UUID) -> int:
 async def _run_cli(tenant_ids: list[UUID] | None, database_url: str) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from collector import rls
+
     engine = create_async_engine(database_url)
     session_factory = async_sessionmaker(engine, class_=AsyncSession)
     try:
         if tenant_ids is None:
             async with session_factory() as db:
+                await rls.bypass(db, "data-flows-cli:list-tenants", actor="cli")
                 tenant_ids = list((await db.execute(select(Tenant.id))).scalars())
         for tenant_id in tenant_ids:
             async with session_factory() as db:
+                await rls.set_tenant(db, tenant_id)
                 n = await rebuild_flows(db, tenant_id)
                 await db.commit()
             print(f"{tenant_id}: {n} flows")

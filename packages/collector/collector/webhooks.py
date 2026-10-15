@@ -72,7 +72,7 @@ from sqlalchemy import delete, inspect, or_, select, update
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import egress
+from collector import egress, rls
 from collector.config import settings
 from collector.partner_scopes import expand_scopes
 
@@ -582,11 +582,15 @@ def _ineligible(
 async def _attempt(
     session_factory,
     delivery_id: UUID,
+    tenant_id: UUID,
     transport,
     sem: asyncio.Semaphore,
     lease_until: datetime,
 ) -> str:
     async with sem, session_factory() as db:
+        # Row-level security: an attempt only ever touches its own tenant's
+        # delivery, subscription and partner credential.
+        await rls.set_tenant(db, tenant_id)
         # Not enough lease left to finish within the attempt deadline (e.g.
         # queued behind slow attempts): leave it, the lease expires and the
         # row is claimed again. Sending now could overlap another worker.
@@ -650,6 +654,13 @@ async def _attempt(
         return outcome
 
 
+def worker_session_factory(session_factory):
+    """Sessions that bypass row-level security, for the cross-tenant claim
+    and purge. The bypass is logged once, when this is called."""
+    info = rls.bypass_info("webhook-worker")
+    return lambda: session_factory(info=info)
+
+
 async def deliver_due(
     session_factory,
     *,
@@ -657,14 +668,20 @@ async def deliver_due(
     concurrency: int = 8,
     transport: httpx.AsyncBaseTransport | None = None,
     now: datetime | None = None,
+    claim_factory=None,
 ) -> DeliveryRun:
-    """Claim up to `limit` due deliveries and attempt each once."""
+    """Claim up to `limit` due deliveries and attempt each once.
+
+    The claim spans tenants (``claim_factory``, an RLS bypass; built from
+    ``session_factory`` when not given). Each attempt runs as its tenant.
+    """
     _aead()  # fail fast when the key is missing, without burning attempts
     now = now or _utcnow()
-    async with session_factory() as db:
-        ids = (
+    claim_factory = claim_factory or worker_session_factory(session_factory)
+    async with claim_factory() as db:
+        claimed = (
             await db.execute(
-                select(WebhookDelivery.id)
+                select(WebhookDelivery.id, WebhookDelivery.tenant_id)
                 .where(
                     WebhookDelivery.status == "pending",
                     WebhookDelivery.next_attempt_at <= now,
@@ -673,7 +690,8 @@ async def deliver_due(
                 .limit(limit)
                 .with_for_update(skip_locked=True)
             )
-        ).scalars().all()
+        ).all()
+        ids = [row.id for row in claimed]
         if ids:
             await db.execute(
                 update(WebhookDelivery)
@@ -685,7 +703,10 @@ async def deliver_due(
     run = DeliveryRun(claimed=len(ids))
     sem = asyncio.Semaphore(concurrency)
     outcomes = await asyncio.gather(
-        *(_attempt(session_factory, i, transport, sem, now + CLAIM_LEASE) for i in ids),
+        *(
+            _attempt(session_factory, row.id, row.tenant_id, transport, sem, now + CLAIM_LEASE)
+            for row in claimed
+        ),
         return_exceptions=True,
     )
     for outcome in outcomes:
@@ -714,11 +735,12 @@ async def purge_old_deliveries(db: AsyncSession, *, now: datetime | None = None)
 async def run_worker(session_factory, interval: float) -> None:
     """Deliver forever, every `interval` seconds; purge once an hour."""
     last_purge = 0.0
+    claim_factory = worker_session_factory(session_factory)
     while True:
         try:
-            await deliver_due(session_factory)
+            await deliver_due(session_factory, claim_factory=claim_factory)
             if time.monotonic() - last_purge > 3600:
-                async with session_factory() as db:
+                async with claim_factory() as db:
                     await purge_old_deliveries(db)
                 last_purge = time.monotonic()
         except asyncio.CancelledError:
@@ -740,7 +762,7 @@ async def _run_cli(command: str, loop: bool, interval: float) -> None:
     try:
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         if command == "purge":
-            async with factory() as db:
+            async with worker_session_factory(factory)() as db:
                 print(f"webhook deliveries purged: {await purge_old_deliveries(db)}")
         elif loop:
             await run_worker(factory, interval)

@@ -57,6 +57,7 @@ from pydantic import BaseModel, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import rls
 from collector.dedup import compute_confidence
 from collector.lifecycle import reactivate
 from collector.provider_usage_admin import require_operator
@@ -1067,6 +1068,8 @@ async def pull_cloud_inventory_endpoint(
     body: CloudInventoryPullBody, request: Request
 ) -> dict:
     db = request.state.db
+    # One tenant per pull: scope the session to it instead of bypassing RLS.
+    await rls.set_tenant(db, body.tenant_id)
     if await db.get(Tenant, body.tenant_id) is None:
         raise HTTPException(
             status_code=404,
@@ -1085,6 +1088,7 @@ async def _main(tenant: UUID, clouds: list[str] | None) -> dict:
 
     try:
         async with SessionLocal() as db:
+            await rls.set_tenant(db, tenant)
             return await pull_cloud_inventory(db, tenant, clouds=clouds)
     finally:
         await engine.dispose()
