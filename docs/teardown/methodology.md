@@ -5,7 +5,7 @@
 | **Status** | v0.1 draft. Parts of the pipeline are not built yet; see [§1](#1-what-is-built-and-what-is-pending). |
 | **Applies to** | Concierge teardowns (Gate 1) and the `ps-teardown` CLI once it ships |
 | **Spec** | PRD 0001 §7.6 (teardown), §7.10 (baseline), §7.4 (eval harness) |
-| **Report template** | [template.md](template.md) |
+| **Report template** | [teardown-report-template.md](teardown-report-template.md) |
 | **Issue** | #15 |
 
 This appendix explains how a teardown report gets its numbers. It covers what the
@@ -173,6 +173,7 @@ Every priced call has a cost source. The report gives spend and call counts for 
 | `provider_reported` | The provider returned the cost | Highest; used as is |
 | `pricing_table` | Provider-reported token counts × list price | Exact at list price, up to the catalog's accuracy |
 | `pricing_table_estimated_tokens` | Token counts were estimated (~4 characters per token) because a stream ended without usage (`tokens_estimated=true`) | Rough. If this is above 5% of baseline spend, say so in the summary. |
+| `litellm` | The SDK table has no price, so the LiteLLM integration used LiteLLM's own `response_cost` | LiteLLM's price list, not ours; not tied to the catalog version. Report separately. |
 | *(none — cost null)* | See [§4.5](#45-null-cost-calls) | Not priced |
 
 Provider usage exports count as `pricing_table` when they give token counts by type,
@@ -375,10 +376,12 @@ earlier one exactly within a chosen TTL (record it; default 1 hour). **Pending #
 - **Parity** for a (use case, candidate model) cell is the share of sampled prompts
   where the candidate's answer is acceptable: correct for exact match, valid for
   schema, win or tie for the judge.
-- **Interval.** Give a 95% Wilson interval for each cell. Do not give a point estimate
-  without its interval.
-- **Sample size.** With zero failures, the 95% Wilson lower bound reaches 0.95 only
-  at n ≥ 73. A cell with fewer samples cannot show that parity ≥ 95% is likely, even if
+- **Interval.** Give a two-sided 95% Wilson interval (z = 1.96) for each cell. Do not
+  give a point estimate without its interval.
+- **Sample size.** With zero failures, the lower bound of the two-sided 95% Wilson
+  interval is n / (n + 1.96²), which reaches 0.95 only at n ≥ 73 (0.9500 at 73, 0.9493
+  at 72). Other intervals give other thresholds (one-sided 95% Clopper–Pearson,
+  0.05^(1/n): n ≥ 59), so record the method with the threshold. A cell with fewer samples cannot show that parity ≥ 95% is likely, even if
   every answer passed. Cells below `min_cell_samples` (record it; default 30) are shown
   as "insufficient sample", and their model is not counted as at parity.
 - **Headline rule.** "At parity" in the headline means the point estimate is ≥
@@ -456,7 +459,7 @@ A field for a step that has not been built reads "pending #N".
 | Currency and FX rate (source, date) | |
 | Baseline definition ([§3](#3-baseline)) | observed historical mix, window as above |
 | Invoice reconciliation | gap %, reconciled / unreconciled / not available |
-| Calls by cost source ([§4.3](#43-provider-reported-estimated-and-null)) | provider_reported / pricing_table / estimated tokens / null |
+| Calls by cost source ([§4.3](#43-provider-reported-estimated-and-null)) | provider_reported / pricing_table / estimated tokens / litellm / null |
 | Null-cost calls by reason ([§4.5](#45-null-cost-calls)) | |
 | `requested_model ≠ served_model` calls | |
 | Route policy file, `policy_version`, SHA-256 | |

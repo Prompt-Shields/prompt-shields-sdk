@@ -71,6 +71,7 @@ Based on: {{point estimate and conservative (Wilson lower bound) figures, M§7.2
 | provider_reported | {{n}} | {{amount}} |
 | pricing_table | {{n}} | {{amount}} |
 | pricing_table_estimated_tokens | {{n}} | {{amount}} |
+| litellm (LiteLLM's own price) | {{n}} | {{amount}} |
 | null (not priced) | {{n}} | — |
 
 Calls where requested model ≠ served model: {{n}} ({{pct}}%). {{Re-priced from tokens at served_model, per M§4.2.}}
@@ -211,7 +212,7 @@ Fill in every field from M§9. "n/a" needs a reason. Unbuilt steps read "pending
 | Judge model, provider, jurisdiction, prompt version | {{judge}} or pending #14 |
 | Re-execution temperature, spend | {{reexec}} or pending #14 |
 | `min_parity`, `min_cell_samples`, `min_cell_calls` | {{0.95}}, {{30}}, {{10}} |
-| CI methods | Wilson 95% per cell; bootstrap {{n_resamples}} resamples, seed {{seed}} |
+| CI methods | Wilson 95% two-sided per cell; bootstrap {{n_resamples}} resamples, seed {{seed}} |
 | Known limits specific to this run | {{limits}} |
 | Intermediate data deleted on | {{date}} |
 
