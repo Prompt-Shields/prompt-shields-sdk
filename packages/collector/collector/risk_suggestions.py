@@ -22,7 +22,9 @@ own ``context`` (at least one of these conditions must also match, e.g.
 ``applicant*`` counts only next to employment words) and ``exclude`` (none
 of these may match, e.g. ``admission*`` not next to ``hospital*``), so an
 ambiguous keyword can be scoped without dropping the rest of the rule.
-``context`` and ``exclude`` look at the whole asset, like ``unless``; context
+``context`` and ``exclude`` look at the whole asset, like ``unless``, so an
+exclusion that should only count next to the ambiguous word is written as
+phrases (``loan* applicant*``: every word ending in ``*`` is a prefix); context
 matches are recorded in the evidence with ``role: context``. ``supporting`` conditions
 never fire a rule on their own; they add evidence and raise confidence.
 Confidence is ``low`` when only ``"strength": "weak"`` triggers matched,
@@ -106,12 +108,19 @@ def _normalise(text: str) -> str:
 
 
 def _keyword_pattern(keyword: str) -> re.Pattern:
-    prefix = keyword.endswith("*")
-    words = _normalise(keyword.rstrip("*"))
-    if not words:
+    """Whole words; a word ending in ``*`` is a prefix, so ``loan* applicant*``
+    matches 'loans applicants' and 'loan applicant scoring'. A phrase scopes an
+    ambiguous term to its neighbour (``university applicant*`` does not match
+    'applicants for university staff roles')."""
+    parts = []
+    for word in keyword.split():
+        prefix = word.endswith("*")
+        norm = _normalise(word.rstrip("*"))
+        if norm:
+            parts.append(re.escape(norm) + (r"[a-z0-9]*" if prefix else ""))
+    if not parts:
         raise ValueError(f"empty keyword {keyword!r}")
-    tail = "" if prefix else r"(?![a-z0-9])"
-    return re.compile(r"(?<![a-z0-9])" + re.escape(words) + tail)
+    return re.compile(r"(?<![a-z0-9])" + " ".join(parts) + r"(?![a-z0-9])")
 
 
 @dataclass(frozen=True)

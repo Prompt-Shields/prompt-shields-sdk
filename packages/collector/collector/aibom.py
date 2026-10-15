@@ -89,6 +89,39 @@ def _prop(name: str, value: Any) -> dict[str, str]:
     return {"name": f"{NS}:{name}", "value": str(value)}
 
 
+_LEVEL_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _risk_props(risks: Iterable[RiskMapping]) -> list[dict[str, str]]:
+    """One ``risk:<framework>:<category>`` (or ``risk-suggestion:…``) property
+    per framework and category, valued with the highest level among its
+    mappings, so property names stay unique when several rules (for example
+    the Article 5 points, all ``prohibited_practice``) hit one asset. When
+    rule-based mappings contributed, ``…:<category>:rules`` lists their rule
+    ids, sorted and comma-separated."""
+    groups: dict[str, tuple[str, set[str]]] = {}
+    for r in risks:
+        if r.status == "rejected":
+            continue
+        framework = r.framework or "unspecified"
+        # Rule-based suggestions nobody has confirmed are kept apart from
+        # risk classifications (#97).
+        kind = "risk-suggestion" if r.status == "suggested" else "risk"
+        name = f"{kind}:{framework}:{r.risk_category}"
+        level, rule_ids = groups.get(name, (r.risk_level, set()))
+        if _LEVEL_RANK.get(r.risk_level, -1) > _LEVEL_RANK.get(level, -1):
+            level = r.risk_level
+        if r.rule_id:
+            rule_ids.add(r.rule_id)
+        groups[name] = (level, rule_ids)
+    props = []
+    for name, (level, rule_ids) in groups.items():
+        props.append(_prop(name, level))
+        if rule_ids:
+            props.append(_prop(f"{name}:rules", ",".join(sorted(rule_ids))))
+    return props
+
+
 def _iso(dt: datetime | None) -> str | None:
     if dt is None:
         return None
@@ -186,14 +219,7 @@ def build_bom(
             ("last_seen", _iso(a.last_seen)),
         ]
         props.extend(_prop(k, v) for k, v in optional if v)
-        for r in risks_by_asset.get(a.id, []):
-            if r.status == "rejected":
-                continue
-            framework = r.framework or "unspecified"
-            # Rule-based suggestions nobody has confirmed are kept apart from
-            # risk classifications (#97).
-            kind = "risk-suggestion" if r.status == "suggested" else "risk"
-            props.append(_prop(f"{kind}:{framework}:{r.risk_category}", r.risk_level))
+        props.extend(_risk_props(risks_by_asset.get(a.id, [])))
 
         components.append(
             {

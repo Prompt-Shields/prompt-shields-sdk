@@ -293,6 +293,35 @@ GOLDEN_FALSE_POSITIVES = [
         A + "8b.elections",
         [],
     ),
+    # Non-employment applicant phrases still win over an HR context (#97
+    # follow-up 2): the exclusion is a phrase around the applicant term.
+    (
+        "applicants for loans with HR unit",
+        AssetSignals(use_case="applicants for loans: scoring", business_unit="Talent"),
+        A + "4a.recruitment",
+        [],
+    ),
+    (
+        "university applicant with HR unit",
+        AssetSignals(use_case="university applicant ranking", business_unit="HR"),
+        A + "4a.recruitment",
+        [],
+    ),
+    (
+        "campaign event scheduling",
+        AssetSignals(use_case="political campaign event scheduling"),
+        A + "8b.elections",
+        [],
+    ),
+    (
+        "campaign office administration",
+        AssetSignals(
+            use_case="campaign office administration assistant",
+            calling_service="election-hq",
+        ),
+        A + "8b.elections",
+        [],
+    ),
 ]
 
 # The scoped keywords still fire with the right context.
@@ -350,6 +379,72 @@ GOLDEN_SCOPED_MATCHES = [
         AssetSignals(use_case="campaign logistics and voter microtargeting"),
         A + "8b.elections",
     ),
+    # #97 follow-up 2: an education, credit or benefits word elsewhere on the
+    # asset no longer hides a job applicant or candidate.
+    (
+        "job applicants for university staff roles",
+        AssetSignals(
+            use_case="HR screening of job applicants for university staff roles"
+        ),
+        A + "4a.recruitment",
+    ),
+    (
+        "applicants for university staff roles",
+        AssetSignals(
+            use_case="screening of applicants for university staff roles",
+            business_unit="Human Resources",
+        ),
+        A + "4a.recruitment",
+    ),
+    (
+        "applicant shortlisting for university vacancies",
+        AssetSignals(
+            use_case="applicant shortlisting for university lecturer vacancies"
+        ),
+        A + "4a.recruitment",
+    ),
+    (
+        "applicant ranking with a benefits service",
+        AssetSignals(
+            use_case="applicant ranking",
+            business_unit="Talent",
+            calling_service="benefits-and-credit-check",
+        ),
+        A + "4a.recruitment",
+    ),
+    (
+        "candidate ranking mentioning benefits",
+        AssetSignals(
+            use_case="candidate ranking for open roles incl. benefits package summary"
+        ),
+        A + "4a.recruitment",
+    ),
+    (
+        "applicants to student-support jobs",
+        AssetSignals(use_case="interview notes for applicants to student-support jobs"),
+        A + "4a.recruitment",
+    ),
+    # Scheduling or administrative wording is no longer campaign logistics.
+    (
+        "election ad scheduling",
+        AssetSignals(use_case="election ad scheduling"),
+        A + "8b.elections",
+    ),
+    (
+        "referendum message scheduling",
+        AssetSignals(use_case="referendum message scheduling"),
+        A + "8b.elections",
+    ),
+    (
+        "voter eligibility administrative review",
+        AssetSignals(use_case="voter eligibility administrative review"),
+        A + "8b.elections",
+    ),
+    (
+        "event scheduling with voter microtargeting",
+        AssetSignals(use_case="campaign event scheduling with voter microtargeting"),
+        A + "8b.elections",
+    ),
 ]
 
 P = "eu_ai_act.article_5."
@@ -401,6 +496,47 @@ GOLDEN_ARTICLE_5 = [
     (
         "1f emotion in class",
         AssetSignals(use_case="emotion recognition", business_unit="School of Law"),
+        [P + "1f.emotion_recognition_workplace_education"],
+    ),
+    # "safety" alone is not the medical-or-safety exception (#97 follow-up 2).
+    (
+        "1f emotion at work for workplace safety",
+        AssetSignals(
+            use_case="employee emotion recognition for workplace safety compliance"
+        ),
+        [P + "1f.emotion_recognition_workplace_education"],
+    ),
+    (
+        "1f emotion in class for child safety",
+        AssetSignals(
+            use_case="student emotion detection for child safety in classrooms"
+        ),
+        [P + "1f.emotion_recognition_workplace_education"],
+    ),
+    (
+        "1f safety-named service",
+        AssetSignals(
+            use_case="emotion analytics on staff video calls",
+            calling_service="safety-insights",
+        ),
+        [P + "1f.emotion_recognition_workplace_education"],
+    ),
+    (
+        "1f health and safety unit",
+        AssetSignals(
+            use_case="emotion recognition",
+            business_unit="Health and Safety",
+            calling_service="worker-wellbeing",
+        ),
+        [P + "1f.emotion_recognition_workplace_education"],
+    ),
+    (
+        # A patient-facing metric is not a medical reason for reading the
+        # employees' emotions.
+        "1f staff emotion for patient satisfaction",
+        AssetSignals(
+            use_case="employee emotion recognition to improve patient satisfaction"
+        ),
         [P + "1f.emotion_recognition_workplace_education"],
     ),
     (
@@ -471,6 +607,25 @@ GOLDEN_NOT_ARTICLE_5 = [
     (
         "1f driver safety",
         AssetSignals(use_case="driver drowsiness emotion detection for workers"),
+    ),
+    (
+        "1f driver fatigue",
+        AssetSignals(
+            use_case="driver fatigue and emotion detection for delivery workers"
+        ),
+    ),
+    (
+        "1f pilot alertness",
+        AssetSignals(
+            use_case="pilot alertness emotion recognition for flight crew staff"
+        ),
+    ),
+    (
+        "1f drowsiness service",
+        AssetSignals(
+            use_case="emotion detection for employees",
+            calling_service="driver-drowsiness-monitoring",
+        ),
     ),
     (
         "1f clinical",
@@ -634,7 +789,7 @@ def test_golden_not_article_50(signals):
 
 def test_article_5_rules_are_critical_and_cover_every_point():
     (art5,) = [rs for rs in load_rulesets() if rs.name == "eu_ai_act_article_5"]
-    assert art5.version == "1.0.0"
+    assert art5.version == "1.1.0"
     assert {r.level for r in art5.rules} == {"critical"}
     assert {r.category for r in art5.rules} == {"prohibited_practice"}
     assert all("human review required" in r.title for r in art5.rules)
@@ -667,7 +822,7 @@ def test_suggestion_carries_rule_and_evidence():
         "high",
     )
     assert s.rule.reference == "Annex III, point 4(a)"
-    assert s.rule.ruleset_version == "1.2.0"
+    assert s.rule.ruleset_version == "1.3.0"
     assert s.confidence == "high"
     signals = s.evidence["signals"]
     assert {
@@ -757,6 +912,38 @@ def test_keywords_match_whole_words_unless_starred():
     assert (
         _annex(AssetSignals(data_sources=["stats_api"])) == []
     )  # "ats" is a whole word
+
+
+def test_starred_words_inside_phrases():
+    # Every word of a phrase can be a prefix ("loan* applicant*").
+    rs = parse_ruleset(
+        {
+            "ruleset": "x",
+            "version": "1",
+            "rules": [
+                {
+                    "id": "r1",
+                    "framework": "custom",
+                    "category": "c",
+                    "level": "low",
+                    "reference": "ref",
+                    "title": "t",
+                    "when": {
+                        "any": [{"signal": "text", "keywords": ["loan* applicant*"]}]
+                    },
+                }
+            ],
+        }
+    )
+
+    def fires(text):
+        return [s.rule.id for s in evaluate(AssetSignals(use_case=text), [rs])]
+
+    assert fires("loans applicants triage") == ["r1"]
+    assert fires("loan-applicant") == ["r1"]
+    assert fires("loan officer applicant") == []
+    assert fires("applicants for loans") == []
+    assert fires("payloan applicant") == []
 
 
 def test_data_protection_rules():

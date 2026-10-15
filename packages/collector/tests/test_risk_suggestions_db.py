@@ -155,7 +155,7 @@ async def test_suggestions_from_registry_and_telemetry_flows(seeded_db):
         "high",
     )
     assert (r.status, r.source, r.confidence) == ("suggested", "rules", "high")
-    assert (r.framework_ref, r.ruleset_version) == ("Annex III, point 4(a)", "1.2.0")
+    assert (r.framework_ref, r.ruleset_version) == ("Annex III, point 4(a)", "1.3.0")
     assert r.reviewed_at is None and r.created_at is not None
     signals = {(e["signal"], e["role"]): e for e in r.evidence["signals"]}
     # Data sources and PII come from the telemetry-derived data flows.
@@ -299,7 +299,7 @@ async def test_rejection_survives_a_ruleset_version_bump(seeded_db):
     risks = await _risks(seeded_db, tenant)
     # The human decision stands; open suggestions move to the new version.
     assert risks[RECRUITMENT].status == "rejected"
-    assert risks[RECRUITMENT].ruleset_version == "1.2.0"
+    assert risks[RECRUITMENT].ruleset_version == "1.3.0"
     assert risks[ISO_A7].ruleset_version == "9.9.9"
     assert (result.updated, result.skipped_human_set) == (3, 1)
 

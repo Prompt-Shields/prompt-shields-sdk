@@ -238,6 +238,61 @@ class TestBuildBom:
         for name, _ in p1 + p2:
             assert name.startswith("promptshields:")
 
+    def test_risk_properties_are_unique_per_framework_and_category(self):
+        assets, flows, _ = _registry(TENANT_A)
+        a1 = assets[0]
+
+        def risk(category, level, *, rule_id=None, status="suggested"):
+            return RiskMapping(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A,
+                asset_id=a1.id,
+                framework="EU_AI_ACT",
+                risk_category=category,
+                risk_level=level,
+                rule_id=rule_id,
+                status=status,
+            )
+
+        art5 = "eu_ai_act.article_5."
+        risks = [
+            risk("prohibited_practice", "critical", rule_id=art5 + "1f.emotion"),
+            risk("prohibited_practice", "critical", rule_id=art5 + "1a.manipulative"),
+            risk("prohibited_practice", "critical", rule_id=art5 + "1g.biometric"),
+            risk(
+                "prohibited_practice",
+                "critical",
+                rule_id=art5 + "1c.x",
+                status="rejected",
+            ),
+            risk("biometrics", "high", rule_id="eu_ai_act.annex_iii.1c.emotion"),
+            risk("biometrics", "medium", rule_id="eu_ai_act.annex_iii.1a.rbi"),
+            # Hand-entered mappings of one category: the highest level wins.
+            risk("employment", "medium", status="confirmed"),
+            risk("employment", "high", status="confirmed"),
+        ]
+        bom = aibom.build_bom(TENANT_A, assets, flows, risks)
+        assert_valid(bom)
+        comp = next(
+            c
+            for c in bom["components"]
+            if c["bom-ref"] == f"promptshields:asset:{a1.id}"
+        )
+        names = [n for n, _ in _props(comp) if n.startswith("promptshields:risk")]
+        assert len(names) == len(set(names)) == 5
+        props = dict(_props(comp))
+        ns = "promptshields:risk-suggestion:EU_AI_ACT"
+        assert props[f"{ns}:prohibited_practice"] == "critical"
+        assert props[f"{ns}:prohibited_practice:rules"] == ",".join(
+            [art5 + "1a.manipulative", art5 + "1f.emotion", art5 + "1g.biometric"]
+        )
+        assert props[f"{ns}:biometrics"] == "high"
+        assert props[f"{ns}:biometrics:rules"] == (
+            "eu_ai_act.annex_iii.1a.rbi,eu_ai_act.annex_iii.1c.emotion"
+        )
+        assert props["promptshields:risk:EU_AI_ACT:employment"] == "high"
+        assert "promptshields:risk:EU_AI_ACT:employment:rules" not in props
+
     def test_drops_rows_from_other_tenants(self):
         a_assets, a_flows, a_risks = _registry(TENANT_A, prefix="A ")
         b_assets, b_flows, b_risks = _registry(TENANT_B, prefix="B ")
