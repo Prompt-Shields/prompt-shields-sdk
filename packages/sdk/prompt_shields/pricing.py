@@ -14,8 +14,24 @@ the remainder is charged at the full input rate. Reasoning/thinking tokens
 are already inside `tokens_out` and are charged at the output rate.
 
 A pricing-table entry is `(input_per_1k, output_per_1k)` or, to override the
-vendor defaults below, `(input_per_1k, output_per_1k, cached_input_per_1k)`
-or `(..., cached_input_per_1k, cache_write_per_1k)`.
+vendor defaults below, `(input_per_1k, output_per_1k, cached_input_per_1k)`,
+`(..., cached_input_per_1k, cache_write_per_1k)` or
+`(..., cache_write_per_1k, cache_write_1h_per_1k)`.
+
+Further pricing dimensions (#71):
+- `service_tier`: batch and flex traffic is discounted (`SERVICE_TIER_MULTIPLIER`).
+  A tier with no known price (e.g. OpenAI `priority`, `scale`) returns None
+  rather than a wrong standard-rate number.
+- 1-hour cache writes (`tokens_cache_write_1h`, a subset of
+  `tokens_cache_write`) at their own rate.
+- Long-context bands (`LONG_CONTEXT_PRICING`): prompts above a threshold are
+  priced at the band's rates. Applies to the default table only.
+- Audio tokens (`tokens_audio_in` / `tokens_audio_out`, subsets of
+  `tokens_in` / `tokens_out`) at `AUDIO_PRICING` rates. Audio tokens on a model
+  with no audio rate return None.
+- Per-request tool fees (`web_search_requests`), not discounted by tier.
+- A cost the provider reports (OpenRouter `usage.cost`) is preferred over
+  the table by `usage_cost` and recorded as `cost_source="provider_reported"`.
 """
 
 # Cache rates as a multiple of the input rate, when a table entry does not
@@ -30,6 +46,46 @@ CACHE_READ_MULTIPLIER: dict[str, float] = {
 }
 CACHE_WRITE_MULTIPLIER: dict[str, float] = {
     "anthropic": 1.25,
+}
+# Anthropic 1-hour TTL cache writes are billed at 2x the input rate. Vendors
+# not listed bill them at the (5-minute) cache-write rate.
+CACHE_WRITE_1H_MULTIPLIER: dict[str, float] = {
+    "anthropic": 2.0,
+}
+
+# Service tiers, as a multiplier on every token rate (cache rates included;
+# Anthropic documents that batch and caching discounts stack). Standard
+# tiers ("default", "standard", "auto", None) cost 1.0 for every vendor. Any
+# other tier not listed here is unpriced, so the cost is None. OpenAI
+# "priority" is not a flat multiple of standard and needs per-model rates.
+STANDARD_SERVICE_TIERS = frozenset({"default", "standard", "auto"})
+SERVICE_TIER_MULTIPLIER: dict[str, dict[str, float]] = {
+    "openai": {"batch": 0.5, "flex": 0.5},
+    "anthropic": {"batch": 0.5},
+    "google": {"batch": 0.5},
+}
+
+# Per-request server tool fees in USD. Anthropic web search: $10 / 1,000.
+WEB_SEARCH_FEE: dict[str, float] = {
+    "anthropic": 0.01,
+}
+
+# Long-context bands: (threshold, rates). When `tokens_in` (the whole prompt,
+# cache reads and writes included) exceeds `threshold`, the whole request is
+# priced at `rates` (same tuple layout as DEFAULT_PRICING).
+LONG_CONTEXT_PRICING: dict[tuple[str, str], tuple[int, tuple[float, ...]]] = {
+    # Gemini 2.5 Pro, prompts > 200k: $2.50 in / $15 out / $0.25 cached.
+    ("google", "gemini-2.5-pro"): (200_000, (0.0025, 0.015, 0.00025, 0.0025)),
+    # Claude Sonnet 4 1M context, prompts > 200k: $6 in / $22.50 out; cache
+    # multipliers apply to the $6 rate ($0.60 read, $7.50 / $12 write).
+    ("anthropic", "claude-sonnet-4-20250514"): (200_000, (0.006, 0.0225)),
+}
+
+# Audio token rates (input_per_1k, output_per_1k) in USD, for models that
+# bill audio tokens apart from text tokens.
+AUDIO_PRICING: dict[tuple[str, str], tuple[float, float]] = {
+    ("openai", "gpt-4o-audio-preview"): (0.040, 0.080),
+    ("openai", "gpt-4o-mini-audio-preview"): (0.010, 0.020),
 }
 
 # Vendors that resell another vendor's models at its list prices: a missing
@@ -51,6 +107,12 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
     ("openai", "gpt-3.5-turbo"): (0.0005, 0.0015),
     ("openai", "o1"): (0.015, 0.060),
     ("openai", "o1-mini"): (0.003, 0.012),
+    # o3 / o4-mini cached input is 25% of input, not the OpenAI default 50%.
+    ("openai", "o3"): (0.002, 0.008, 0.0005),
+    ("openai", "o4-mini"): (0.0011, 0.0044, 0.000275),
+    # Text rates; audio tokens are priced from AUDIO_PRICING.
+    ("openai", "gpt-4o-audio-preview"): (0.0025, 0.010),
+    ("openai", "gpt-4o-mini-audio-preview"): (0.00015, 0.0006),
 
     # Anthropic
     ("anthropic", "claude-opus-4-20250514"): (0.015, 0.075),
@@ -97,6 +159,12 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
 }
 
 
+def _tier_multiplier(vendor: str, service_tier: str | None) -> float | None:
+    if service_tier is None or service_tier in STANDARD_SERVICE_TIERS:
+        return 1.0
+    return SERVICE_TIER_MULTIPLIER.get(vendor, {}).get(service_tier)
+
+
 def estimate_cost(
     vendor: str,
     model: str | None,
@@ -105,6 +173,12 @@ def estimate_cost(
     pricing_table: dict | None = None,
     tokens_cached: int | None = None,
     tokens_cache_write: int | None = None,
+    *,
+    tokens_cache_write_1h: int | None = None,
+    tokens_audio_in: int | None = None,
+    tokens_audio_out: int | None = None,
+    web_search_requests: int | None = None,
+    service_tier: str | None = None,
 ) -> float | None:
     """Estimate USD cost for a single call.
 
@@ -112,6 +186,7 @@ def estimate_cost(
     - model is None
     - (vendor, model) not in pricing table
     - either token count is None
+    - the service tier, or audio tokens, have no known price
     """
     if model is None or tokens_in is None or tokens_out is None:
         return None
@@ -124,6 +199,24 @@ def estimate_cost(
     if rates is None:
         return None
 
+    tier = _tier_multiplier(vendor, service_tier)
+    if tier is None:
+        return None
+
+    if pricing_table is None:
+        band = LONG_CONTEXT_PRICING.get((vendor, model))
+        if band is not None and tokens_in > band[0]:
+            rates = band[1]
+
+    audio_in = tokens_audio_in or 0
+    audio_out = tokens_audio_out or 0
+    audio_in_rate = audio_out_rate = 0.0
+    if audio_in or audio_out:
+        audio_rates = AUDIO_PRICING.get((vendor, model))
+        if audio_rates is None:
+            return None
+        audio_in_rate, audio_out_rate = audio_rates
+
     in_rate, out_rate = rates[0], rates[1]
     cached_rate = (
         rates[2] if len(rates) > 2
@@ -133,24 +226,82 @@ def estimate_cost(
         rates[3] if len(rates) > 3
         else in_rate * CACHE_WRITE_MULTIPLIER.get(vendor, 1.0)
     )
+    if len(rates) > 4:
+        write_1h_rate = rates[4]
+    elif vendor in CACHE_WRITE_1H_MULTIPLIER:
+        write_1h_rate = in_rate * CACHE_WRITE_1H_MULTIPLIER[vendor]
+    else:
+        write_1h_rate = write_rate
     cached = tokens_cached or 0
     cache_write = tokens_cache_write or 0
-    # Never charge a negative uncached remainder if counts are inconsistent.
-    uncached = max(tokens_in - cached - cache_write, 0)
-    cost = (
+    write_1h = min(tokens_cache_write_1h or 0, cache_write)
+    # Never charge a negative remainder if counts are inconsistent.
+    uncached = max(tokens_in - cached - cache_write - audio_in, 0)
+    text_out = max(tokens_out - audio_out, 0)
+    token_cost = (
         uncached * in_rate
         + cached * cached_rate
-        + cache_write * write_rate
-        + tokens_out * out_rate
+        + (cache_write - write_1h) * write_rate
+        + write_1h * write_1h_rate
+        + audio_in * audio_in_rate
+        + text_out * out_rate
+        + audio_out * audio_out_rate
     ) / 1000.0
-    return round(cost, 6)
+    fees = (web_search_requests or 0) * WEB_SEARCH_FEE.get(vendor, 0.0)
+    return round(token_cost * tier + fees, 6)
 
 
-USAGE_DETAIL_FIELDS = ("tokens_cached", "tokens_cache_write", "tokens_reasoning")
+# Adapter fields, besides tokens_in/out, that estimate_cost prices.
+PRICING_DIMENSIONS = (
+    "tokens_cached",
+    "tokens_cache_write",
+    "tokens_cache_write_1h",
+    "tokens_audio_in",
+    "tokens_audio_out",
+    "web_search_requests",
+    "service_tier",
+)
+
+
+def usage_cost(
+    vendor: str,
+    model: str | None,
+    fields: dict,
+    pricing_table: dict | None = None,
+) -> float | None:
+    """Cost of one call from adapter fields.
+
+    A cost the provider reported (`provider_cost`, e.g. OpenRouter
+    `usage.cost`) wins over the pricing table, even for unknown models.
+    """
+    provider_cost = fields.get("provider_cost")
+    if provider_cost is not None:
+        return round(float(provider_cost), 6)
+    return estimate_cost(
+        vendor,
+        model,
+        fields.get("tokens_in"),
+        fields.get("tokens_out"),
+        pricing_table,
+        **{key: fields.get(key) for key in PRICING_DIMENSIONS},
+    )
+
+
+USAGE_DETAIL_FIELDS = (
+    "tokens_cached",
+    "tokens_cache_write",
+    "tokens_cache_write_1h",
+    "tokens_reasoning",
+    "tokens_audio_in",
+    "tokens_audio_out",
+    "web_search_requests",
+    "service_tier",
+)
 
 # `cost_source` values: how the event's `cost` was produced.
 COST_SOURCE_PRICING_TABLE = "pricing_table"
 COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS = "pricing_table_estimated_tokens"
+COST_SOURCE_PROVIDER_REPORTED = "provider_reported"
 
 
 def add_usage_detail_fields(event: dict, adapter_fields: dict) -> None:
@@ -164,6 +315,9 @@ def add_usage_detail_fields(event: dict, adapter_fields: dict) -> None:
         if value is not None:
             event[key] = value
     if event.get("cost") is not None:
+        if adapter_fields.get("provider_cost") is not None:
+            event["cost_source"] = COST_SOURCE_PROVIDER_REPORTED
+            return
         event["cost_source"] = (
             COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS
             if adapter_fields.get("tokens_estimated")

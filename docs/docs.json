@@ -103,7 +103,8 @@
       "group": "Sync",
       "pages": [
         "api-reference/sync/get-changes",
-        "api-reference/sync/export"
+        "api-reference/sync/export",
+        "api-reference/sync/webhooks"
       ]
     },
     {

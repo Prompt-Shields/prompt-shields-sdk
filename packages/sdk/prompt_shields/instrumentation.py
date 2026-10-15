@@ -53,6 +53,7 @@ from prompt_shields.providers import (
     AzureOpenAIAdapter,
     _field,
     _int,
+    _str,
     get_adapter,
 )
 from prompt_shields.streaming import (
@@ -697,6 +698,7 @@ def _extract_responses(response: Any) -> dict:
         "tokens_cached": _int(_field(input_details, "cached_tokens")),
         "tokens_cache_write": None,
         "tokens_reasoning": _int(_field(output_details, "reasoning_tokens")),
+        "service_tier": _str(getattr(response, "service_tier", None)),
         "tool_calls_used": tool_calls or None,
         "served_model": getattr(response, "model", None),
     }
@@ -720,6 +722,7 @@ class _ResponsesAccumulator(StreamAccumulator):
                 self.tokens_cached = fields["tokens_cached"]
             if fields["tokens_reasoning"] is not None:
                 self.tokens_reasoning = fields["tokens_reasoning"]
+            self._update_pricing(fields)
         elif etype == "response.output_text.delta":
             delta = getattr(event, "delta", None)
             if isinstance(delta, str):

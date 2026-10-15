@@ -40,6 +40,7 @@ SCOPES: dict[str, str] = {
     "changes:read": "Read the /changes delta feed",
     "export:read": "Bulk export the registry (JSON or CycloneDX)",
     "webhooks:manage": "Create, list and delete webhook subscriptions",
+    "attestations:write": "Record human attestations of asset fields",
 }
 
 # What `registry:read` meant in Phase 1: every read route. Frozen on

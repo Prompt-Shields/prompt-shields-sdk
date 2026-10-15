@@ -28,6 +28,23 @@ class Settings(BaseSettings):
     embeddings_openai_base_url: str = "https://api.openai.com/v1"
     embeddings_cache_dir: str | None = None  # fastembed model cache (local backend)
 
+    # Partner change webhooks (#103); see collector/webhooks.py.
+    # Key that encrypts subscription signing secrets at rest. Empty disables
+    # creating subscriptions and delivering.
+    webhook_secret_key: str = ""
+    # Dev/test only: allow http:// targets and private, loopback or
+    # link-local destinations.
+    webhook_allow_http: bool = False
+    webhook_allow_private_destinations: bool = False
+    # Deadline for one whole delivery attempt. Keep it well under the
+    # 5-minute claim lease (webhooks.CLAIM_LEASE).
+    webhook_timeout_seconds: float = 10.0
+    webhook_max_attempts: int = 8
+    # In-process delivery loop interval; 0 disables it (then run
+    # `python -m collector.webhooks deliver` from a worker or cron).
+    webhook_worker_interval_seconds: float = 0
+    webhook_delivery_retention_days: int = 30
+
     model_config = {"env_prefix": "PS_"}
 
 
