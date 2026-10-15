@@ -2,10 +2,12 @@ import { getRuntimeKey } from 'hono/adapter';
 import { GITHUB } from '../../globals';
 import { Environment } from '../../utils/env';
 import {
+  assertAzureAmbientUpstreamIsAzure,
   assertAzureAuthModeAllowed,
   getAccessTokenFromEntraId,
   getAzureManagedIdentityToken,
   getAzureWorkloadIdentityToken,
+  isAzureAmbientAuthMode,
 } from '../azure-openai/utils';
 import { ProviderAPIConfig } from '../types';
 
@@ -42,7 +44,7 @@ const AzureAIInferenceAPI: ProviderAPIConfig = {
 
     return '';
   },
-  headers: async ({ providerOptions, fn, c }) => {
+  headers: async ({ providerOptions, fn, c, transformedRequestUrl }) => {
     const {
       apiKey,
       azureExtraParameters,
@@ -90,6 +92,15 @@ const AzureAIInferenceAPI: ProviderAPIConfig = {
     }
 
     assertAzureAuthModeAllowed(azureAuthMode, c);
+    // PS fork: the host's token may only go to Azure; check before minting it.
+    if (isAzureAmbientAuthMode(azureAuthMode)) {
+      assertAzureAmbientUpstreamIsAzure(
+        providerOptions,
+        transformedRequestUrl,
+        c,
+        fn
+      );
+    }
 
     if (azureAuthMode === 'entra') {
       const {

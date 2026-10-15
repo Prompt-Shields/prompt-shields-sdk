@@ -1,0 +1,35 @@
+{
+  "vendor": "bedrock",
+  "model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+  "note": "boto3 bedrock-runtime converse response. Bedrock on-demand Claude 3.5 Sonnet v2: input $3/M, cache read $0.30/M, cache write $3.75/M, output $15/M. totalTokens = input + output + cache read + cache write.",
+  "response": {
+    "ResponseMetadata": {"HTTPStatusCode": 200, "HTTPHeaders": {"content-type": "application/json"}},
+    "output": {
+      "message": {
+        "role": "assistant",
+        "content": [
+          {"text": "Looking that up."},
+          {"toolUse": {"toolUseId": "tooluse_1", "name": "get_weather", "input": {"city": "Paris"}}}
+        ]
+      }
+    },
+    "stopReason": "tool_use",
+    "usage": {
+      "inputTokens": 200,
+      "outputTokens": 500,
+      "totalTokens": 9700,
+      "cacheReadInputTokens": 8000,
+      "cacheWriteInputTokens": 1000
+    },
+    "metrics": {"latencyMs": 1234}
+  },
+  "expected_fields": {
+    "tokens_in": 9200,
+    "tokens_out": 500,
+    "tokens_cached": 8000,
+    "tokens_cache_write": 1000,
+    "tool_calls_used": [{"name": "get_weather", "type": "tool_use"}],
+    "served_model": null
+  },
+  "expected_cost_usd": 0.01425
+}

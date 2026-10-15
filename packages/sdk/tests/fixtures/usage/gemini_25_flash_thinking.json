@@ -1,0 +1,28 @@
+{
+  "vendor": "google",
+  "model": "gemini-2.5-flash",
+  "note": "google-genai generate_content response with thinking. Gemini 2.5 Flash: input $0.30/M, output (thinking included) $2.50/M.",
+  "response": {
+    "candidates": [
+      {
+        "content": {"role": "model", "parts": [{"functionCall": {"name": "find_flights", "args": {"to": "NRT"}}}]},
+        "finishReason": "STOP"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 1000,
+      "candidatesTokenCount": 200,
+      "thoughtsTokenCount": 800,
+      "totalTokenCount": 2000
+    },
+    "modelVersion": "gemini-2.5-flash"
+  },
+  "expected_fields": {
+    "tokens_in": 1000,
+    "tokens_out": 1000,
+    "tokens_reasoning": 800,
+    "tool_calls_used": [{"name": "find_flights", "type": "function"}],
+    "served_model": "gemini-2.5-flash"
+  },
+  "expected_cost_usd": 0.0028
+}

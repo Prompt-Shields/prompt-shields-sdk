@@ -1,10 +1,12 @@
 import { Environment } from '../../utils/env';
 import { ProviderAPIConfig } from '../types';
 import {
+  assertAzureAmbientUpstreamIsAzure,
   assertAzureAuthModeAllowed,
   getAccessTokenFromEntraId,
   getAzureManagedIdentityToken,
   getAzureWorkloadIdentityToken,
+  isAzureAmbientAuthMode,
 } from './utils';
 import { getRuntimeKey } from 'hono/adapter';
 
@@ -15,7 +17,7 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
     const { resourceName } = providerOptions;
     return `https://${resourceName}.openai.azure.com/openai`;
   },
-  headers: async ({ providerOptions, fn, c }) => {
+  headers: async ({ providerOptions, fn, c, transformedRequestUrl }) => {
     const { apiKey, azureAdToken, azureAuthMode } = providerOptions;
     if (azureAdToken) {
       return {
@@ -24,6 +26,15 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
     }
 
     assertAzureAuthModeAllowed(azureAuthMode, c);
+    // PS fork: the host's token may only go to Azure; check before minting it.
+    if (isAzureAmbientAuthMode(azureAuthMode)) {
+      assertAzureAmbientUpstreamIsAzure(
+        providerOptions,
+        transformedRequestUrl,
+        c,
+        fn
+      );
+    }
 
     if (azureAuthMode === 'entra') {
       const {
