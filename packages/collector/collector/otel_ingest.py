@@ -20,6 +20,7 @@ from collector.data_flows import record_event_flows
 from collector.dedup import find_or_create_asset
 from collector.embeddings import build_asset_text, get_embedding
 from collector.otel_mapping import GenAISpan, count_spans, iter_spans, map_span
+from collector.webhooks import AssetChanges
 
 router = APIRouter()
 
@@ -63,6 +64,7 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
     content attributes never reach this point.
     """
     assets_created = 0
+    changes = AssetChanges()
     for span in spans:
         asset, is_new = await find_or_create_asset(
             db=db,
@@ -77,6 +79,7 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
             environment=span.environment,
             data_classification=None,
         )
+        changes.record(asset, is_new)
         if is_new:
             assets_created += 1
             await db.flush()
@@ -106,6 +109,7 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
         await record_event_flows(
             db, tenant_id, asset, usage_event, calling_service=span.calling_service
         )
+    await changes.enqueue(db, tenant_id)
     await db.commit()
     return assets_created
 
