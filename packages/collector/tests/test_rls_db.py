@@ -811,6 +811,89 @@ async def test_webhook_attestation_events_and_rekey_under_rls(rls_db, monkeypatc
     assert any("reason=webhook-rekey" in r.getMessage() for r in caplog.records)
 
 
+async def test_webhook_patch_and_secret_sweep_under_rls(rls_db, monkeypatch, caplog):
+    """PATCH runs as the caller's tenant (another tenant's subscription is
+    a 404, and the audit row lands under the caller); the expired-secret
+    sweep lists tenants through a logged bypass and clears each tenant's
+    rows as that tenant."""
+    from collector import webhooks
+
+    monkeypatch.setattr(settings, "webhook_secret_key", "s" * 40)
+    monkeypatch.setattr(settings, "webhook_secret_keys", "")
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 0)
+
+    async def public(host, port):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(webhooks, "_resolve_host", public)
+    async with rls_db["admin"]() as s:
+        partners = dict(
+            (await s.execute(select(PartnerCredential.tenant_id, PartnerCredential.id))).all()
+        )
+    subs = {}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key, tenant in ((KEY_A, rls_db["a"]), (KEY_B, rls_db["b"])):
+            h = {"Authorization": f"Bearer {key}"}
+            resp = await c.post(
+                "/api/v1/admin/webhooks/subscriptions",
+                headers=h,
+                json={"partner_id": str(partners[tenant]), "url": "https://hooks.example/x"},
+            )
+            assert resp.status_code == 201, resp.text
+            subs[tenant] = resp.json()["id"]
+            resp = await c.post(
+                f"/api/v1/admin/webhooks/subscriptions/{subs[tenant]}/rotate-secret",
+                headers=h,
+                json={"grace_period_seconds": 60},
+            )
+            assert resp.status_code == 200, resp.text
+
+        h_a = {"Authorization": f"Bearer {KEY_A}"}
+        url = "/api/v1/admin/webhooks/subscriptions/{}"
+        resp = await c.patch(url.format(subs[rls_db["b"]]), headers=h_a, json={"is_active": False})
+        assert resp.status_code == 404
+        resp = await c.patch(
+            url.format(subs[rls_db["a"]]),
+            headers=h_a,
+            json={"is_active": False, "event_types": ["asset.retired"]},
+        )
+        assert resp.status_code == 200, resp.text
+
+    async with rls_db["admin"]() as s:
+        b_row = await s.get(WebhookSubscription, uuid.UUID(subs[rls_db["b"]]))
+        audit = (
+            await s.execute(
+                select(PartnerAuditLog.tenant_id, PartnerAuditLog.status_code).where(
+                    PartnerAuditLog.method == "PATCH"
+                )
+            )
+        ).all()
+    assert sorted((str(t), code) for t, code in audit) == [
+        (str(rls_db["a"]), 200),
+        (str(rls_db["a"]), 404),
+    ]
+    assert b_row.is_active is True
+
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    # Without the bypass the listing sees no tenant's subscriptions.
+    cleared = await webhooks.clear_expired_previous_secrets(
+        rls_db["plain"], now=later, list_factory=rls_db["plain"]
+    )
+    assert cleared == 0
+    caplog.set_level(logging.INFO, logger="collector.rls")
+    assert await webhooks.clear_expired_previous_secrets(rls_db["plain"], now=later) == 2
+    assert any("reason=webhook-secret-sweep" in r.getMessage() for r in caplog.records)
+    async with rls_db["admin"]() as s:
+        left = (
+            await s.execute(
+                select(WebhookSubscription.id).where(
+                    WebhookSubscription.previous_secret_ciphertext.is_not(None)
+                )
+            )
+        ).all()
+    assert left == []
+
+
 async def test_risk_suggestions_run_and_all_tenants_cli_under_rls(rls_db):
     """The tenant route and the --all-tenants job each write suggestions
     for the right tenant only."""
