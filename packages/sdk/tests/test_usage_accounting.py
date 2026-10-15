@@ -18,6 +18,7 @@ from prompt_shields.providers import (
     GeminiAdapter,
     OpenAIAdapter,
     gemini_usage_fields,
+    get_adapter,
 )
 from prompt_shields.streaming import StreamAccumulator
 
@@ -46,12 +47,14 @@ def _load(path):
 @pytest.mark.parametrize("path", FIXTURES, ids=lambda p: p.stem)
 def test_fixture_fields_and_cost_within_2_percent(path):
     fx = _load(path)
-    fields = ADAPTERS[fx["vendor"]].extract(_ns(fx["response"]))
+    adapter = get_adapter(fx["vendor"])
+    fields = adapter.extract(_ns(fx["response"]))
     for key, expected in fx["expected_fields"].items():
         assert fields[key] == expected, key
 
+    model = adapter.pricing_model(fx["model"], fields["served_model"])
     cost = estimate_cost(
-        fx["vendor"], fx["model"], fields["tokens_in"], fields["tokens_out"],
+        fx["vendor"], model, fields["tokens_in"], fields["tokens_out"],
         tokens_cached=fields["tokens_cached"],
         tokens_cache_write=fields["tokens_cache_write"],
     )

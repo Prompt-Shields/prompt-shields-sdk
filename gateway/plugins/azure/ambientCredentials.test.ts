@@ -8,7 +8,7 @@ import { handler as piiHandler } from './pii';
 const fetchSpy = jest.spyOn(globalThis, 'fetch');
 
 const managed = {
-  resourceName: 'https://cognitiveservices.azure.com/',
+  resourceName: 'my-resource',
   azureAuthMode: 'managed',
 } as AzureCredentials;
 
@@ -37,6 +37,9 @@ describe('azure guardrail host Azure identity', () => {
     );
     expect(result).toEqual({ token: 'host-token', error: null });
     expect(String(fetchSpy.mock.calls[0][0])).toContain('169.254.169.254');
+    expect(String(fetchSpy.mock.calls[0][0])).toContain(
+      `resource=${encodeURIComponent('https://cognitiveservices.azure.com/')}`
+    );
   });
 });
 
@@ -97,4 +100,69 @@ describe('azure guardrails fail closed on host Azure identity', () => {
       expect(String(fetchSpy.mock.calls[0][0])).toContain('169.254.169.254');
     }
   );
+});
+
+describe('azure guardrails keep the host token on Azure', () => {
+  const enabled = { AZURE_AMBIENT_CREDENTIALS_ENABLED: 'true' };
+  const context = {
+    request: {
+      text: 'hello',
+      json: { messages: [{ role: 'user', content: 'hello' }] },
+    },
+    requestType: 'chatComplete',
+  } as any;
+
+  test.each([
+    [{ customHost: 'https://evil.example' }, /custom host/],
+    [{ resourceName: 'evil.example#' }, /resource name/],
+    [{ resourceName: 'evil.example/' }, /resource name/],
+    [{ resourceName: 'https://cognitiveservices.azure.com/' }, /resource name/],
+    [{ resourceName: '' }, /resource name/],
+  ])('refuses %p before any token request', async (override, message) => {
+    const result = await getAccessToken(
+      { ...managed, ...override } as AzureCredentials,
+      'contentSafety',
+      {},
+      enabled
+    );
+    expect(result).toMatchObject({ token: '', denied: true });
+    expect(result.error).toMatch(message);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['contentSafety', contentSafetyHandler, 'contentSafety'],
+    ['pii', piiHandler, 'pii'],
+  ] as const)(
+    '%s fails closed on a custom host with managed identity',
+    async (_name, handler, credKey) => {
+      const result = await (handler as any)(
+        context,
+        {
+          credentials: {
+            [credKey]: { ...managed, customHost: 'https://evil.example' },
+          },
+        },
+        'beforeRequestHook',
+        { env: enabled }
+      );
+      expect(result.verdict).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  test('api key with a custom host is unaffected', async () => {
+    const result = await getAccessToken(
+      {
+        resourceName: 'x',
+        azureAuthMode: 'apiKey',
+        apiKey: 'caller-key',
+        customHost: 'https://my-private-link.example',
+      } as AzureCredentials,
+      'contentSafety',
+      {},
+      enabled
+    );
+    expect(result).toEqual({ token: 'caller-key', error: null });
+  });
 });
