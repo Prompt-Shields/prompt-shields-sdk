@@ -249,7 +249,8 @@ def test_self_hosted_mapping_is_configurable():
 
 
 @pytest.mark.parametrize(
-    "last_seen", [12345, 1.5, ["2026"], {"a": 1}, True, "nope", ""]
+    "last_seen",
+    [12345, 1.5, ["2026"], {"a": 1}, True, "nope", "", "0001-01-01T00:00:00+05:00"],
 )
 def test_malformed_last_seen_is_dropped_not_raised(last_seen):
     item = sn.asset_item(_asset(last_seen=last_seen), _connection())
@@ -268,6 +269,14 @@ async def test_malformed_partner_data_is_a_failed_or_ok_run_not_a_500():
     assert "source_recency_timestamp" not in sent
     # Non-string changed_at does not move the cursor.
     assert db.tenant.settings["connectors"]["servicenow"]["cursor"] == cursor
+
+
+async def test_out_of_range_changed_at_is_a_failed_run_not_a_500():
+    db = FakeSession({"connectors": {"servicenow": {"cursor": "2026-10-15T00:00:00Z"}}})
+    fakes = Fakes(changes=[{"asset": _asset(), "changed_at": "0001-01-01T00:01:00Z"}])
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "error", out
+    assert out["error"] == "invalid response data"
 
 
 # ──────────────────────────────────────────────────────────────────────

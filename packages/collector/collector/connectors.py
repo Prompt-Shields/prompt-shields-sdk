@@ -465,7 +465,9 @@ class PartnerApiClient:
         raise ConnectorError(f"partner-api: changes: more than {MAX_PAGES} pages")
 
     async def data_flows(self, asset_id: str) -> list[dict]:
-        path = f"/partner/v1/assets/{quote(str(UUID(asset_id)))}/data-flows"
+        # str(): a non-string id from the API must raise ValueError (a failed
+        # run), not the AttributeError UUID() raises for it (HTTP 500).
+        path = f"/partner/v1/assets/{quote(str(UUID(str(asset_id))))}/data-flows"
         return _dicts((await self._get(path, "data flows")).get("data"))
 
 

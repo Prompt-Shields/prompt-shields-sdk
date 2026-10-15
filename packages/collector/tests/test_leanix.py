@@ -655,6 +655,15 @@ async def test_malformed_partner_dates_do_not_fail_the_sync():
     assert out["status"] == "ok", out
 
 
+@pytest.mark.parametrize("bad_id", [12345, 1.5, True, {"a": 1}])
+async def test_non_string_asset_id_fails_the_run_not_the_request(bad_id):
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(aid=bad_id)])
+    out = await lx.sync_leanix(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "error", out
+    assert out["error"] == "invalid response data"
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Token refresh
 # ──────────────────────────────────────────────────────────────────────

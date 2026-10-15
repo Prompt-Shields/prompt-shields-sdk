@@ -289,9 +289,9 @@ def _sn_datetime(value: Any) -> str | None:
         return None
     try:
         dt = datetime.fromisoformat(value)
-    except ValueError:
+        dt = dt.astimezone(UTC) if dt.tzinfo else dt
+    except (ValueError, OverflowError):  # e.g. 0001-01-01T00:00:00+05:00
         return None
-    dt = dt.astimezone(UTC) if dt.tzinfo else dt
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -585,7 +585,7 @@ async def sync_servicenow(
                     relations += len(payload["relations"])
                     for op, n in ops.items():
                         operations[op] = operations.get(op, 0) + n
-    except (ConnectorError, ValueError, TypeError) as exc:
+    except (ConnectorError, ValueError, TypeError, OverflowError) as exc:
         # Malformed Partner API data is a failed run, not a server error.
         error = str(exc) if isinstance(exc, ConnectorError) else "invalid response data"
         logger.warning("servicenow sync failed for tenant %s: %s", tenant_id, error)

@@ -596,7 +596,7 @@ async def sync_leanix(
                     run_id = await lx.start_run(ldif)
                     run_ids.append(run_id)
                     await lx.wait_for_run(run_id)
-    except (ConnectorError, ValueError, TypeError) as exc:
+    except (ConnectorError, ValueError, TypeError, OverflowError) as exc:
         # Malformed Partner API data is a failed run, not a server error.
         error = str(exc) if isinstance(exc, ConnectorError) else "invalid response data"
         logger.warning("leanix sync failed for tenant %s: %s", tenant_id, error)
