@@ -18,14 +18,20 @@
   - mistral:      mistralai `chat.complete` / `chat.complete_async`,
                   `chat.stream` / `chat.stream_async`
   - cohere:       `chat` and `chat_stream` on v1 (`Client`) and v2
-                  (`ClientV2`) clients
+                  (`ClientV2`) clients, through the raw clients they call, so
+                  clients created before `instrument()` are covered too
   - bedrock:      boto3 `bedrock-runtime` `converse`, `converse_stream`,
                   `invoke_model` and `invoke_model_with_response_stream`, via
                   botocore's `BaseClient._make_api_call`. `invoke_model` usage
                   comes from response headers; its body stream is never read.
 Missing packages, or methods an installed version lacks, are skipped.
+openai and anthropic are imported and patched by `instrument()`; the other
+SDKs are patched when the app imports them (at once if already imported),
+through an import hook that `uninstrument()` removes.
 Streams (`stream=True` or a streaming method) are wrapped so they emit one
-event when they end or are closed; chunks reach the caller unchanged.
+event when they end or are closed; chunks reach the caller unchanged. A
+stream left unfinished and unclosed (a `break` out of the loop) emits its
+event, marked `stream_abandoned`, when it is garbage-collected.
 
 Guarantees:
   - Idempotent: a second `instrument()` is a no-op and returns False.
@@ -55,6 +61,7 @@ import os
 import sys
 import threading
 import time
+import weakref
 from types import SimpleNamespace
 from typing import Any
 
@@ -123,6 +130,26 @@ _TARGETS = (
     ("mistral", "mistralai.client.chat", "Chat", "stream_async", "mistral_stream"),
     ("mistral", "mistralai.chat", "Chat", "stream", "mistral_stream"),
     ("mistral", "mistralai.chat", "Chat", "stream_async", "mistral_stream"),
+    # cohere: the raw clients, which the public methods call through
+    # `self._raw_client`. `Client.__init__` stores bound public methods on
+    # the instance, so patching those would miss clients created before
+    # `instrument()`. The public methods below are a fallback for versions
+    # without raw clients (see `_SUPERSEDED_BY`).
+    ("cohere", "cohere.raw_base_client", "RawBaseCohere", "chat",
+     "cohere_v1_raw"),
+    ("cohere", "cohere.raw_base_client", "AsyncRawBaseCohere", "chat",
+     "cohere_v1_raw"),
+    ("cohere", "cohere.v2.raw_client", "RawV2Client", "chat", "cohere_v2_raw"),
+    ("cohere", "cohere.v2.raw_client", "AsyncRawV2Client", "chat",
+     "cohere_v2_raw"),
+    ("cohere", "cohere.raw_base_client", "RawBaseCohere", "chat_stream",
+     "cohere_v1_raw_stream"),
+    ("cohere", "cohere.raw_base_client", "AsyncRawBaseCohere", "chat_stream",
+     "cohere_v1_raw_stream"),
+    ("cohere", "cohere.v2.raw_client", "RawV2Client", "chat_stream",
+     "cohere_v2_raw_stream"),
+    ("cohere", "cohere.v2.raw_client", "AsyncRawV2Client", "chat_stream",
+     "cohere_v2_raw_stream"),
     ("cohere", "cohere.base_client", "BaseCohere", "chat", "cohere_v1"),
     ("cohere", "cohere.base_client", "AsyncBaseCohere", "chat", "cohere_v1"),
     ("cohere", "cohere.v2.client", "V2Client", "chat", "cohere_v2"),
@@ -141,6 +168,32 @@ _TARGETS = (
 
 # Patched for either vendor: Azure clients reuse the OpenAI resource classes.
 _TARGET_VENDORS = {"openai": ("openai", "azure_openai")}
+
+# Vendors patched when their SDK is first imported (at once if it already
+# is), so `instrument()` does not import them: together they add ~1s to
+# startup. openai and anthropic are imported and patched up front.
+_LAZY_VENDORS = ("google", "mistral", "cohere", "bedrock")
+
+# (module, class) -> the (module, class) that replaces it when present: the
+# public cohere clients are only patched when there is no raw client (the
+# public modules import the raw ones, so these are loaded first).
+_SUPERSEDED_BY = {
+    ("cohere.base_client", "BaseCohere"): ("cohere.raw_base_client",
+                                           "RawBaseCohere"),
+    ("cohere.base_client", "AsyncBaseCohere"): ("cohere.raw_base_client",
+                                                "AsyncRawBaseCohere"),
+    ("cohere.v2.client", "V2Client"): ("cohere.v2.raw_client", "RawV2Client"),
+    ("cohere.v2.client", "AsyncV2Client"): ("cohere.v2.raw_client",
+                                            "AsyncRawV2Client"),
+}
+
+# Raw (HTTP-level) APIs -> the API whose call details they share. Their
+# results hold the SDK's response in `.data`; a streaming one is a context
+# manager that sends the request on enter and yields such a result, whose
+# `.data` is the event stream.
+_HTTP_RESPONSE_APIS = {"cohere_v1_raw": "cohere_v1", "cohere_v2_raw": "cohere_v2"}
+_STREAM_CONTEXT_APIS = {"cohere_v1_raw_stream": "cohere_v1",
+                        "cohere_v2_raw_stream": "cohere_v2"}
 
 # Streaming operations -> the response key holding the botocore EventStream.
 _BEDROCK_STREAMS = {"ConverseStream": "stream",
@@ -178,7 +231,8 @@ _SUPPRESSED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "prompt_shields_instrumentation_suppressed", default=False
 )
 
-_lock = threading.Lock()
+# Reentrant: a module patched on import may be imported while it is held.
+_lock = threading.RLock()
 _state: "_State | None" = None
 
 
@@ -362,6 +416,7 @@ class _State:
         self.send_prompt_text = send_prompt_text
         self.pricing_table = pricing_table
         self.patches: list[tuple[type, str, Any, Any]] = []
+        self.finder: _PatchOnImport | None = None
 
 
 def is_instrumented() -> bool:
@@ -450,25 +505,144 @@ def instrument(
             azure_deployments=azure_deployments,
         )
 
-        for vendor, module_name, class_name, method, api in _TARGETS:
+        lazy: dict[str, list[tuple]] = {}
+        for target in _TARGETS:
+            vendor, module_name = target[:2]
             covers = _TARGET_VENDORS.get(vendor, (vendor,))
             if vendors is not None and not any(v in vendors for v in covers):
+                continue
+            if vendor in _LAZY_VENDORS:
+                lazy.setdefault(module_name, []).append(target)
                 continue
             try:
                 module = importlib.import_module(module_name)
             except Exception:  # noqa: BLE001, S112 - not installed or broken
                 continue
-            cls = getattr(module, class_name, None)
-            original = cls.__dict__.get(method) if cls is not None else None
-            if original is None or getattr(original, "__ps_original__", None):
-                continue
-            wrapper = _make_wrapper(original, vendor, api)
-            setattr(cls, method, wrapper)
-            state.patches.append((cls, method, original, wrapper))
+            _patch(state, module, target)
 
         _state = state
+        in_progress = []
+        if lazy:
+            # Installed before looking at `sys.modules`, so a module imported
+            # meanwhile (by another thread) is patched by one or the other.
+            state.finder = _PatchOnImport(state, lazy)
+            sys.meta_path.insert(0, state.finder)
+            for module_name in list(lazy):
+                module = sys.modules.get(module_name)
+                if module is not None:
+                    state.finder.patch(module_name, module)
+                    if module_name in lazy and getattr(
+                            getattr(module, "__spec__", None),
+                            "_initializing", False):
+                        in_progress.append(module_name)
         logger.debug(f"Instrumented {len(state.patches)} provider methods")
+
+    # A module another thread was still running when the hook went in (found
+    # before it, so not hooked): wait for that import to finish, then patch
+    # it. Outside `_lock`, which that import may need for its own targets.
+    for module_name in in_progress:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:  # noqa: BLE001, S112 - its import failed
+            continue
+        state.finder.patch(module_name, module)
+    return True
+
+
+def _patch(state: _State, module: Any, target: tuple) -> bool:
+    """Patch one target of an imported module. Returns False when its class
+    is missing (a module still being imported, or another SDK version)."""
+    vendor, module_name, class_name, method, api = target
+    superseded = _SUPERSEDED_BY.get((module_name, class_name))
+    if superseded is not None and getattr(
+            sys.modules.get(superseded[0]), superseded[1], None) is not None:
         return True
+    cls = getattr(module, class_name, None)
+    if cls is None:
+        return False
+    original = cls.__dict__.get(method)
+    if original is None or getattr(original, "__ps_original__", None):
+        return True
+    wrapper = _make_wrapper(original, vendor, api)
+    setattr(cls, method, wrapper)
+    state.patches.append((cls, method, original, wrapper))
+    return True
+
+
+class _PatchOnImport:
+    """Meta path finder that patches a module's targets when it is first
+    imported: it takes the spec the finders after it return and puts a
+    `_PatchingLoader` in front of its loader. Removed by `uninstrument()`.
+    Fail-open: on any error the import goes ahead unpatched."""
+
+    def __init__(self, state: _State, targets: dict[str, list[tuple]]):
+        self._state = state
+        self._targets = targets
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname not in self._targets:
+            return None
+        try:
+            for finder in list(sys.meta_path):
+                find_spec = getattr(finder, "find_spec", None)
+                if finder is self or find_spec is None:
+                    continue
+                spec = find_spec(fullname, path, target)
+                if spec is not None:
+                    break
+            else:
+                return None
+            if spec.loader is not None and hasattr(spec.loader, "exec_module"):
+                spec.loader = _PatchingLoader(spec.loader, self, fullname)
+            return spec
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.debug(f"Instrumentation import hook error: {e}")
+            return None
+
+    def patch(self, fullname: str, module: Any) -> None:
+        with _lock:
+            if _state is not self._state:
+                return  # uninstrumented meanwhile
+            pending = []
+            for target in self._targets.get(fullname, ()):
+                try:
+                    if not _patch(self._state, module, target):
+                        pending.append(target)
+                except Exception as e:  # noqa: BLE001 - fail-open
+                    logger.debug(f"Instrumentation patch error: {e}")
+            if pending:
+                self._targets[fullname] = pending
+            else:
+                self._targets.pop(fullname, None)
+
+
+class _PatchingLoader:
+    """Runs a module with its own loader, then patches it. The module's
+    `__loader__` and `__spec__.loader` are set back to that loader."""
+
+    def __init__(self, loader: Any, finder: _PatchOnImport, fullname: str):
+        self._loader = loader
+        self._finder = finder
+        self._fullname = fullname
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._loader, name)
+
+    def create_module(self, spec):
+        create = getattr(self._loader, "create_module", None)
+        return create(spec) if create is not None else None
+
+    def exec_module(self, module):
+        try:
+            self._loader.exec_module(module)
+        finally:
+            with contextlib.suppress(Exception):
+                if getattr(module, "__loader__", None) is self:
+                    module.__loader__ = self._loader
+                spec = getattr(module, "__spec__", None)
+                if getattr(spec, "loader", None) is self:
+                    spec.loader = self._loader
+        self._finder.patch(self._fullname, module)
 
 
 def uninstrument() -> bool:
@@ -477,6 +651,9 @@ def uninstrument() -> bool:
     with _lock:
         if _state is None:
             return False
+        if _state.finder is not None:
+            with contextlib.suppress(ValueError):
+                sys.meta_path.remove(_state.finder)
         for cls, name, original, wrapper in reversed(_state.patches):
             # Only restore what is still ours; leave later patches alone.
             if cls.__dict__.get(name) is wrapper:
@@ -546,7 +723,15 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
         call_kwargs = dict(kwargs)
         helper = api == "messages_stream"  # returns a stream *manager*
         stream_key = _BEDROCK_STREAMS.get(args[0]) if api == "bedrock" else None
-        if api in _STREAM_ONLY_APIS:
+        http_response = api in _HTTP_RESPONSE_APIS
+        stream_context = api in _STREAM_CONTEXT_APIS
+        if http_response:
+            api = _HTTP_RESPONSE_APIS[api]
+            streaming = False
+        elif stream_context:
+            api = _STREAM_CONTEXT_APIS[api]
+            streaming = True
+        elif api in _STREAM_ONLY_APIS:
             api = _STREAM_ONLY_APIS[api]
             streaming = True
         else:
@@ -592,6 +777,8 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             "messages": details["messages"],
             "streaming": streaming,
             "stream_helper": helper,
+            "stream_context": stream_context,
+            "http_response": http_response,
             "stream_key": stream_key,
             "hide_usage_chunk": hide_usage_chunk,
             "api_key": api_key if isinstance(api_key, str) and api_key else None,
@@ -817,6 +1004,8 @@ def _finish_sync(call: dict, response: Any, start: float) -> Any:
     try:
         if call["stream_helper"]:
             return _observe_stream_manager(call, response)
+        if call["stream_context"]:
+            return _StreamContext(response, call)
         if call["stream_key"] is not None:
             # Bedrock: the EventStream sits in the response dict.
             key = call["stream_key"]
@@ -846,7 +1035,13 @@ def _wrap_stream(call: dict, stream: Any, start: float,
                  is_async: bool = False) -> Any:
     """`ShieldsStream`, or `AsyncShieldsStream` for an async iterator (an
     async generator such as cohere's `chat_stream` is returned unawaited)."""
-    options = {"hide_usage_chunk": call["hide_usage_chunk"]}
+    def on_abandon(adapter_fields, stream_fields, latency_ms):
+        # Runs in the garbage collector: enqueued, sent by the next flush.
+        _send_later(call, _stream_event(call, adapter_fields, stream_fields,
+                                        latency_ms))
+
+    options = {"hide_usage_chunk": call["hide_usage_chunk"],
+               "on_abandon": on_abandon}
     if call["vendor"] in _LAZY_STREAM_VENDORS:
         options["on_failed_start"] = lambda: _release_framework_call(call)
     if is_async or (hasattr(stream, "__aiter__") and not hasattr(stream, "__iter__")):
@@ -934,6 +1129,7 @@ def _observe_event_stream(call: dict, stream: Any, start: float) -> Any:
     observed = _wrap_stream(call, _Upstream(stream, type(stream)), start)
     if _observe_in_place(stream, _ObservedEventStream, observed):
         return stream
+    observed.discard()
     return _wrap_stream(call, stream, start)
 
 
@@ -944,11 +1140,15 @@ def _observe_helper_stream(call: dict, stream: Any, start: float,
     `get_final_message()` and plain iteration are all observed, and closing
     it emits the event. If that attribute is missing (a different SDK
     version) the stream is returned unobserved."""
+    wrapped = None
     try:
         raw = stream.__dict__["_raw_stream"]
-        stream._raw_stream = _wrap_stream(call, raw, start, is_async)
+        wrapped = _wrap_stream(call, raw, start, is_async)
+        stream._raw_stream = wrapped
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"Instrumentation stream helper error: {e}")
+        if wrapped is not None:
+            wrapped.discard()
         _release_framework_call(call)  # no event: a framework may report it
     return stream
 
@@ -959,6 +1159,7 @@ class _ObservedStreamManager:
 
     def __enter__(self):
         call = self.__dict__["_ps_observed"]
+        call["entered"] = True
         start = time.monotonic()
         try:
             stream = super(type(self), self).__enter__()
@@ -973,6 +1174,7 @@ class _ObservedAsyncStreamManager:
 
     async def __aenter__(self):
         call = self.__dict__["_ps_observed"]
+        call["entered"] = True
         start = time.monotonic()
         try:
             stream = await super(type(self), self).__aenter__()
@@ -986,9 +1188,20 @@ def _observe_stream_manager(call: dict, manager: Any) -> Any:
     """Anthropic's stream manager, observed in place (or wrapped)."""
     is_async = not hasattr(manager, "__enter__")
     mixin = _ObservedAsyncStreamManager if is_async else _ObservedStreamManager
-    if _observe_in_place(manager, mixin, call):
-        return manager
-    return _MessageStreamManager(manager, call)
+    if not _observe_in_place(manager, mixin, call):
+        manager = _MessageStreamManager(manager, call)
+    if call["framework"] is not None:
+        # A manager never entered makes no request: give its claim back.
+        try:
+            weakref.finalize(manager, _release_unentered, call).atexit = False
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.debug(f"Instrumentation stream manager error: {e}")
+    return manager
+
+
+def _release_unentered(call: dict) -> None:
+    if not call.get("entered"):
+        _release_framework_call(call)
 
 
 class _MessageStreamManager:
@@ -1005,6 +1218,7 @@ class _MessageStreamManager:
         return getattr(self._manager, name)
 
     def __enter__(self):
+        self._call["entered"] = True
         start = time.monotonic()
         try:
             stream = self._manager.__enter__()
@@ -1017,6 +1231,7 @@ class _MessageStreamManager:
         return self._manager.__exit__(*exc)
 
     async def __aenter__(self):
+        self._call["entered"] = True
         start = time.monotonic()
         try:
             stream = await self._manager.__aenter__()
@@ -1027,6 +1242,57 @@ class _MessageStreamManager:
 
     async def __aexit__(self, *exc):
         return await self._manager.__aexit__(*exc)
+
+
+class _StreamContext:
+    """Stands in for a raw streaming context manager (cohere's raw
+    `chat_stream`): the request is sent on enter, and the event stream of
+    the response it yields (`.data`) is observed."""
+
+    def __init__(self, manager: Any, call: dict):
+        self._manager = manager
+        self._call = call
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._manager, name)
+
+    def __enter__(self):
+        start = time.monotonic()
+        try:
+            response = self._manager.__enter__()
+        except BaseException:
+            _release_framework_call(self._call)
+            raise
+        return self._observe(response, start, is_async=False)
+
+    def __exit__(self, *exc):
+        return self._manager.__exit__(*exc)
+
+    async def __aenter__(self):
+        start = time.monotonic()
+        try:
+            response = await self._manager.__aenter__()
+        except BaseException:
+            _release_framework_call(self._call)
+            raise
+        return self._observe(response, start, is_async=True)
+
+    async def __aexit__(self, *exc):
+        return await self._manager.__aexit__(*exc)
+
+    def _observe(self, response: Any, start: float, is_async: bool) -> Any:
+        wrapped = None
+        try:
+            wrapped = _wrap_stream(self._call, response._data, start, is_async)
+            response._data = wrapped
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.debug(f"Instrumentation stream context error: {e}")
+            if wrapped is not None:
+                wrapped.discard()
+            _release_framework_call(self._call)
+        return response
 
 
 # --- events ------------------------------------------------------------------
@@ -1066,6 +1332,8 @@ def _event(call: dict, response: Any, latency_ms: int,
            adapter_fields: dict | None = None) -> dict:
     adapter = call.get("adapter") or get_adapter(call["vendor"])
     if adapter_fields is None:
+        if call.get("http_response"):
+            response = getattr(response, "data", None)
         adapter_fields = (
             _extract_responses(response) if call["api"] == "responses"
             else adapter.extract(response)
@@ -1101,6 +1369,14 @@ def _send_sync(call: dict, event: dict) -> None:
     if state.atlas is not None:
         state.atlas.enqueue(build_atlas_event(event, call["messages"]))
         state.atlas.flush_sync()
+
+
+def _send_later(call: dict, event: dict) -> None:
+    """Enqueue without sending (no I/O): it goes out with the next flush."""
+    state = call["state"]
+    state.telemetry.enqueue(event)
+    if state.atlas is not None:
+        state.atlas.enqueue(build_atlas_event(event, call["messages"]))
 
 
 async def _send_async(call: dict, event: dict, flush: bool = True) -> None:

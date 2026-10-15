@@ -3,7 +3,9 @@
 The wrappers hand every chunk to the caller unchanged, as soon as it arrives,
 and only *observe* it on the way through. One telemetry event is emitted when
 the stream ends: exhausted (`stream_completed=True`), raises, or is closed
-early (`stream_completed=False`, with `stream_error` set on errors).
+early (`stream_completed=False`, with `stream_error` set on errors). With
+`on_abandon` (auto-instrumentation), a stream garbage-collected unfinished
+is reported too (`stream_abandoned=True`).
 
 Usage comes from the provider when it sends it:
   - OpenAI: the final usage chunk, present when
@@ -27,8 +29,10 @@ Fail-open: any error inside observation or emission is logged and swallowed;
 the caller's stream is never affected.
 """
 
+import contextlib
 import json
 import logging
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -380,6 +384,14 @@ class _StreamBase:
     on the first read (lazy generators): an error before any chunk is then a
     failed request, not a truncated stream, so no event is emitted (as for a
     failed non-streamed call) and `on_failed_start()` is called instead.
+
+    `on_abandon`, when given, is called with the same arguments as
+    `on_finish` (`stream_fields` also carrying `stream_abandoned=True`) if
+    the wrapper is garbage-collected before it ended: the caller broke out
+    of the loop without `close()`. It runs inside the garbage collector, so
+    it must not block or do I/O (enqueue the event, do not send it). It is
+    skipped at interpreter shutdown, and a lazy stream (`on_failed_start`)
+    that was never read sent no request, so it gets `on_failed_start()`.
     """
 
     def __init__(
@@ -399,6 +411,31 @@ class _StreamBase:
         self._on_failed_start = on_failed_start
         self._chunks = 0
         self._finished = False
+        # Set by the subclasses once fully constructed.
+        self._on_abandon: Callable[..., Any] | None = None
+
+    def __del__(self):
+        # Fail-open, and never raise from a finalizer.
+        try:
+            if (self._finished or self._on_abandon is None
+                    or sys.is_finalizing()):
+                return
+            if self._chunks == 0 and self._on_failed_start is not None:
+                self._finished = True
+                self._on_failed_start()
+                return
+            args = self._finish_args(completed=False, error=None)
+            if args is not None:
+                args[1]["stream_abandoned"] = True
+                self._on_abandon(*args)
+        except Exception as e:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                logger.debug(f"Stream telemetry abandon error: {e}")
+
+    def discard(self) -> None:
+        """Drop this wrapper unused: it will emit nothing, not even when
+        garbage-collected."""
+        self._finished = True
 
     def __getattr__(self, name: str) -> Any:
         # Delegate anything else (e.g. `.response`) to the upstream stream.
@@ -439,9 +476,11 @@ class _StreamBase:
 class ShieldsStream(_StreamBase):
     """Sync wrapper for an upstream stream (iterator + context manager)."""
 
-    def __init__(self, stream: Any, *args, **kwargs):
+    def __init__(self, stream: Any, *args,
+                 on_abandon: Callable[..., Any] | None = None, **kwargs):
         super().__init__(stream, *args, **kwargs)
         self._iterator = iter(stream)
+        self._on_abandon = on_abandon
 
     def __iter__(self):
         return self
@@ -487,9 +526,11 @@ class ShieldsStream(_StreamBase):
 class AsyncShieldsStream(_StreamBase):
     """Async wrapper for an upstream stream (async iterator + context manager)."""
 
-    def __init__(self, stream: Any, *args, **kwargs):
+    def __init__(self, stream: Any, *args,
+                 on_abandon: Callable[..., Any] | None = None, **kwargs):
         super().__init__(stream, *args, **kwargs)
         self._iterator = stream.__aiter__()
+        self._on_abandon = on_abandon
 
     def __aiter__(self):
         return self
