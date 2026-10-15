@@ -131,6 +131,7 @@ def _asset_dict(a: AIAsset) -> dict:
         "business_unit": a.business_unit,
         "owner_email": a.owner_email,
         "environment": a.environment,
+        "region": a.region,
         "status": a.status,
         "data_classification": a.data_classification,
         "discovery_source": a.discovery_source,
