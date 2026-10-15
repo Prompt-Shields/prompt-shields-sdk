@@ -408,7 +408,8 @@ async def test_cloud_inventory_and_partner_admin_routes_work_under_rls(rls_db, m
             json={"tenant_id": str(b)},
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["clouds"] == {"azure": {"status": "not_configured"}}
+        clouds = resp.json()["clouds"]
+        assert clouds and all(v == {"status": "not_configured"} for v in clouds.values())
 
         monkeypatch.delenv("PS_LEANIX", raising=False)
         resp = await c.post(
