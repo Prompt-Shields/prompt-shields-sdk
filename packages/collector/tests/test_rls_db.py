@@ -410,6 +410,21 @@ async def test_cloud_inventory_and_partner_admin_routes_work_under_rls(rls_db, m
         assert resp.status_code == 200, resp.text
         assert resp.json()["clouds"] == {"azure": {"status": "not_configured"}}
 
+        monkeypatch.delenv("PS_LEANIX", raising=False)
+        resp = await c.post(
+            "/api/v1/admin/connectors/leanix/sync",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"tenant_id": str(b)},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "not_configured"
+        resp = await c.get(
+            "/api/v1/admin/connectors/leanix/status",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            params={"tenant_id": str(b)},
+        )
+        assert resp.status_code == 200, resp.text
+
         key_b = {"Authorization": f"Bearer {KEY_B}"}
         creds = (await c.get("/api/v1/admin/partner-credentials", headers=key_b)).json()
         assert [x["client_id"] for x in creds["data"]] == ["client-b"]
