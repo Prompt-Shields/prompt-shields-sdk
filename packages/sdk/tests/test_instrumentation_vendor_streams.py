@@ -11,6 +11,7 @@ import base64
 import binascii
 import json
 import struct
+import types
 
 import httpx
 import prompt_shields
@@ -357,6 +358,72 @@ def test_bedrock_invoke_model_with_response_stream():
 
 
 @pytest.mark.usefixtures("aws")
+def test_bedrock_event_stream_is_observed_in_place():
+    # Callers keep botocore's own EventStream: isinstance, private attributes
+    # and close() behave as without instrumentation.
+    from botocore.eventstream import EventStream
+
+    prompt_shields.instrument(ps_api_key="ps_key")
+    resp = _event_stream_client(CONVERSE_STREAM).converse_stream(
+        modelId="m", messages=[])
+    stream = resp["stream"]
+    assert isinstance(stream, EventStream)
+    assert type(stream).__name__ == "EventStream"
+    assert stream._raw_stream is not None
+    for _ in stream:
+        break
+    assert _events() == []
+    assert len(list(stream)) == len(CONVERSE_STREAM) - 1  # carries on
+    _assert_one_stream_event()
+    stream.close()
+    assert len(_events()) == 1
+
+
+def _exception_message(exception_type: str, payload: dict) -> bytes:
+    headers = b""
+    for name, value in ((":message-type", "exception"),
+                        (":exception-type", exception_type),
+                        (":content-type", "application/json")):
+        n, v = name.encode(), value.encode()
+        headers += struct.pack("B", len(n)) + n + b"\x07" + struct.pack(">H", len(v)) + v
+    body = json.dumps(payload).encode()
+    prelude = struct.pack(">II", 12 + len(headers) + len(body) + 4, len(headers))
+    prelude += struct.pack(">I", binascii.crc32(prelude))
+    message = prelude + headers + body
+    return message + struct.pack(">I", binascii.crc32(message))
+
+
+@pytest.mark.usefixtures("aws")
+def test_bedrock_stream_error_mid_stream_emits_one_event():
+    from botocore.exceptions import EventStreamError
+
+    prompt_shields.instrument(ps_api_key="ps_key")
+    body = _event_message(*CONVERSE_STREAM[1]) + _exception_message(
+        "modelStreamErrorException", {"message": "boom"})
+    resp = _boto_client("bedrock-runtime", 200, body, headers={
+        "content-type": "application/vnd.amazon.eventstream"}).converse_stream(
+        modelId="m", messages=[])
+    seen = []
+    with pytest.raises(EventStreamError):
+        seen.extend(resp["stream"])  # items before the error are kept
+    assert seen == [dict([CONVERSE_STREAM[1]])]
+    event = _assert_one_stream_event(completed=False)
+    assert event["stream_error"] == "EventStreamError"
+    resp["stream"].close()
+    assert len(_events()) == 1
+
+
+@pytest.mark.usefixtures("aws")
+def test_bedrock_stream_wrapped_when_not_observable_in_place(monkeypatch):
+    prompt_shields.instrument(ps_api_key="ps_key")
+    monkeypatch.setattr(inst, "_observe_in_place", lambda *args: False)
+    resp = _event_stream_client(CONVERSE_STREAM).converse_stream(
+        modelId="m", messages=[])
+    assert len(list(resp["stream"])) == len(CONVERSE_STREAM)
+    _assert_one_stream_event()
+
+
+@pytest.mark.usefixtures("aws")
 def test_bedrock_stream_telemetry_failure_is_swallowed(monkeypatch):
     prompt_shields.instrument(ps_api_key="ps_key")
     monkeypatch.setattr(inst, "_stream_event", lambda *a, **k: 1 / 0)
@@ -454,6 +521,66 @@ def test_anthropic_stream_helper_error_emits_nothing():
             model="claude-test", max_tokens=10, messages=MESSAGES):
         pass
     assert _events() == []
+
+
+def test_anthropic_stream_managers_keep_their_class():
+    anthropic, http = _anthropic()
+    from anthropic.lib.streaming import (
+        AsyncMessageStreamManager,
+        MessageStream,
+        MessageStreamManager,
+    )
+
+    prompt_shields.instrument(ps_api_key="ps_key")
+    client = anthropic.Anthropic(api_key="sk-ant", http_client=http.Client(
+        transport=_anthropic_transport(http)))
+    manager = client.messages.stream(model="claude-test", max_tokens=10,
+                                     messages=MESSAGES)
+    assert isinstance(manager, MessageStreamManager)
+    assert type(manager).__name__ == "MessageStreamManager"
+    with pytest.raises(ValueError), manager as stream:
+        assert isinstance(stream, MessageStream)
+        assert next(iter(stream.text_stream)) == "hello"
+        assert stream.current_message_snapshot.usage.input_tokens == 9
+        raise ValueError
+    event = _assert_one_stream_event(completed=False)
+    assert event["tokens_in"] == 9
+
+    async def run():
+        aclient = anthropic.AsyncAnthropic(api_key="sk-ant", http_client=http.AsyncClient(
+            transport=_anthropic_transport(http)))
+        manager = aclient.messages.stream(model="claude-test", max_tokens=10,
+                                          messages=MESSAGES)
+        assert isinstance(manager, AsyncMessageStreamManager)
+        async with manager as stream:
+            await stream.until_done()
+            return (await stream.get_final_message()).usage.output_tokens
+
+    assert asyncio.run(run()) == 5
+    assert len(_events()) == 2 and _events()[1]["stream_completed"] is True
+
+
+def test_anthropic_stream_helper_without_raw_stream_is_unobserved():
+    # A different SDK layout: the stream is returned as is, and a framework
+    # call is released so the framework integration can report it.
+    fc = inst.FrameworkCall("langchain")
+    fc.captured = True
+    stream = types.SimpleNamespace(text_stream=iter(()))
+    assert inst._observe_helper_stream({"framework": fc}, stream, 0.0,
+                                       is_async=False) is stream
+    assert fc.captured is False
+
+
+def test_anthropic_stream_manager_wrapped_when_not_observable_in_place(monkeypatch):
+    anthropic, http = _anthropic()
+    prompt_shields.instrument(ps_api_key="ps_key")
+    monkeypatch.setattr(inst, "_observe_in_place", lambda *args: False)
+    client = anthropic.Anthropic(api_key="sk-ant", http_client=http.Client(
+        transport=_anthropic_transport(http)))
+    with client.messages.stream(model="claude-test", max_tokens=10,
+                                messages=MESSAGES) as stream:
+        assert stream.get_final_text() == "hello"
+    _assert_one_stream_event()
 
 
 def test_stream_methods_pass_through_when_suppressed():

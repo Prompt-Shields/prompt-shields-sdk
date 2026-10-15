@@ -733,11 +733,11 @@ _STREAMING_APIS = ("chat", "responses", "messages")
 def _finish_sync(call: dict, response: Any, start: float) -> Any:
     try:
         if call["stream_helper"]:
-            return _MessageStreamManager(response, call)
+            return _observe_stream_manager(call, response)
         if call["stream_key"] is not None:
             # Bedrock: the EventStream sits in the response dict.
             key = call["stream_key"]
-            response[key] = _wrap_stream(call, response[key], start)
+            response[key] = _observe_event_stream(call, response[key], start)
             return response
         if call["streaming"]:
             return _wrap_stream(call, response, start)
@@ -782,15 +782,135 @@ def _wrap_stream(call: dict, stream: Any, start: float,
     return ShieldsStream(stream, _accumulator(call), on_finish, start, **options)
 
 
-class _MessageStreamManager:
-    """Stands in for Anthropic's (Async)MessageStreamManager.
+# Observing in place: the caller keeps the SDK's own object, switched to a
+# subclass of its class (same name) with the observing methods of one of the
+# `_Observed*` classes below, so `isinstance`, `type(...).__name__` and every
+# attribute, private ones included, stay as they were. An object that cannot
+# be switched is wrapped instead.
+_OBSERVING_CLASSES: dict[tuple[type, type], type] = {}
+_observing_lock = threading.Lock()
 
-    The request is made on enter; the raw event stream is then wrapped where
-    the SDK's `MessageStream` reads it (`_raw_stream`, before its first read),
-    so `text_stream`, `get_final_message()` and plain iteration are all
-    observed, and closing it emits the event. If that attribute is missing
-    (a different SDK version) the stream is returned unobserved.
-    """
+
+def _observe_in_place(obj: Any, mixin: type, state: Any) -> bool:
+    """Switch `obj` to a subclass of its class with `mixin`'s methods (copied,
+    not inherited, so the object layout is unchanged), `state` kept on it."""
+    cls = type(obj)
+    try:
+        with _observing_lock:
+            sub = _OBSERVING_CLASSES.get((cls, mixin))
+            if sub is None:
+                methods = {k: v for k, v in vars(mixin).items()
+                           if inspect.isfunction(v)}
+                sub = type(cls.__name__, (cls,), {
+                    **methods,
+                    "__module__": cls.__module__,
+                    "__qualname__": cls.__qualname__,
+                    "__doc__": cls.__doc__,
+                })
+                _OBSERVING_CLASSES[(cls, mixin)] = sub
+        obj.__dict__["_ps_observed"] = state
+        obj.__class__ = sub
+        return True
+    except Exception as e:  # noqa: BLE001 - fail-open: wrap instead
+        logger.debug(f"Instrumentation in-place observe error: {e}")
+        with contextlib.suppress(Exception):
+            obj.__dict__.pop("_ps_observed", None)
+        return False
+
+
+class _Upstream:
+    """Iteration and `close()` of an object observed in place, through its
+    original class (its own methods now go through the observer)."""
+
+    def __init__(self, obj: Any, cls: type):
+        self._obj = obj
+        self._cls = cls
+
+    def __iter__(self):
+        return self._cls.__iter__(self._obj)
+
+    def close(self) -> None:
+        close = getattr(self._cls, "close", None)
+        if close is not None:
+            close(self._obj)
+
+
+class _ObservedEventStream:
+    """In front of botocore's `EventStream`: iteration and `close()` go
+    through the `ShieldsStream`."""
+
+    def __iter__(self):
+        return self.__dict__["_ps_observed"]
+
+    def close(self) -> None:
+        self.__dict__["_ps_observed"].close()
+
+
+def _observe_event_stream(call: dict, stream: Any, start: float) -> Any:
+    """Bedrock's EventStream, observed in place (or wrapped)."""
+    observed = _wrap_stream(call, _Upstream(stream, type(stream)), start)
+    if _observe_in_place(stream, _ObservedEventStream, observed):
+        return stream
+    return _wrap_stream(call, stream, start)
+
+
+def _observe_helper_stream(call: dict, stream: Any, start: float,
+                           is_async: bool) -> Any:
+    """Wrap the raw event stream where Anthropic's `MessageStream` reads it
+    (`_raw_stream`, before its first read), so `text_stream`,
+    `get_final_message()` and plain iteration are all observed, and closing
+    it emits the event. If that attribute is missing (a different SDK
+    version) the stream is returned unobserved."""
+    try:
+        raw = stream.__dict__["_raw_stream"]
+        stream._raw_stream = _wrap_stream(call, raw, start, is_async)
+    except Exception as e:  # noqa: BLE001 - fail-open
+        logger.debug(f"Instrumentation stream helper error: {e}")
+        _release_framework_call(call)  # no event: a framework may report it
+    return stream
+
+
+class _ObservedStreamManager:
+    """In front of Anthropic's `MessageStreamManager`: the request is made on
+    enter, and the `MessageStream` it returns is observed."""
+
+    def __enter__(self):
+        call = self.__dict__["_ps_observed"]
+        start = time.monotonic()
+        try:
+            stream = super(type(self), self).__enter__()
+        except BaseException:
+            _release_framework_call(call)
+            raise
+        return _observe_helper_stream(call, stream, start, is_async=False)
+
+
+class _ObservedAsyncStreamManager:
+    """In front of Anthropic's `AsyncMessageStreamManager`."""
+
+    async def __aenter__(self):
+        call = self.__dict__["_ps_observed"]
+        start = time.monotonic()
+        try:
+            stream = await super(type(self), self).__aenter__()
+        except BaseException:
+            _release_framework_call(call)
+            raise
+        return _observe_helper_stream(call, stream, start, is_async=True)
+
+
+def _observe_stream_manager(call: dict, manager: Any) -> Any:
+    """Anthropic's stream manager, observed in place (or wrapped)."""
+    is_async = not hasattr(manager, "__enter__")
+    mixin = _ObservedAsyncStreamManager if is_async else _ObservedStreamManager
+    if _observe_in_place(manager, mixin, call):
+        return manager
+    return _MessageStreamManager(manager, call)
+
+
+class _MessageStreamManager:
+    """Stands in for an Anthropic (Async)MessageStreamManager that cannot be
+    observed in place."""
 
     def __init__(self, manager: Any, call: dict):
         self._manager = manager
@@ -801,14 +921,6 @@ class _MessageStreamManager:
             raise AttributeError(name)
         return getattr(self._manager, name)
 
-    def _observe(self, stream: Any, start: float, is_async: bool) -> Any:
-        try:
-            raw = stream.__dict__["_raw_stream"]
-            stream._raw_stream = _wrap_stream(self._call, raw, start, is_async)
-        except Exception as e:  # noqa: BLE001 - fail-open
-            logger.debug(f"Instrumentation stream helper error: {e}")
-        return stream
-
     def __enter__(self):
         start = time.monotonic()
         try:
@@ -816,7 +928,7 @@ class _MessageStreamManager:
         except BaseException:
             _release_framework_call(self._call)
             raise
-        return self._observe(stream, start, is_async=False)
+        return _observe_helper_stream(self._call, stream, start, is_async=False)
 
     def __exit__(self, *exc):
         return self._manager.__exit__(*exc)
@@ -828,7 +940,7 @@ class _MessageStreamManager:
         except BaseException:
             _release_framework_call(self._call)
             raise
-        return self._observe(stream, start, is_async=True)
+        return _observe_helper_stream(self._call, stream, start, is_async=True)
 
     async def __aexit__(self, *exc):
         return await self._manager.__aexit__(*exc)
