@@ -4,8 +4,8 @@ Adds webhook_subscriptions (a partner's endpoint, event types and encrypted
 signing secret) and webhook_deliveries (the outbox: one row per event per
 subscription, with retry state and the dead-letter status) (#103).
 
-Revision ID: 010
-Revises: 009
+Revision ID: 012
+Revises: 011
 Create Date: 2026-10-15
 """
 
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "010"
-down_revision: str | None = "009"
+revision: str = "012"
+down_revision: str | None = "011"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

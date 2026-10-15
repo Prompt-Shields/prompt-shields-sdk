@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # link-local destinations.
     webhook_allow_http: bool = False
     webhook_allow_private_destinations: bool = False
+    # Deadline for one whole delivery attempt. Keep it well under the
+    # 5-minute claim lease (webhooks.CLAIM_LEASE).
     webhook_timeout_seconds: float = 10.0
     webhook_max_attempts: int = 8
     # In-process delivery loop interval; 0 disables it (then run

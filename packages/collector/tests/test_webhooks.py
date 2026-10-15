@@ -3,6 +3,7 @@ destination (SSRF) checks. No database needed."""
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import time
 import uuid
@@ -130,13 +131,22 @@ def test_http_allowed_only_when_configured(monkeypatch):
         "::ffff:127.0.0.1",
         "::ffff:169.254.169.254",
         "2002:a00:1::",  # 6to4 wrapping 10.0.0.1
+        "64:ff9b::a9fe:a9fe",  # NAT64 of 169.254.169.254
+        "64:ff9b::a00:1",  # NAT64 of 10.0.0.1
+        "::a9fe:a9fe",  # IPv4-compatible (deprecated)
+        "::8.8.8.8",  # IPv4-compatible, even if public
+        "fec0::1",  # site-local (deprecated)
+        "fd00:ec2::254",  # AWS IPv6 metadata
+        "198.18.0.1",  # benchmarking
     ],
 )
 def test_non_public_addresses_blocked(addr):
     assert not webhooks.ip_allowed(ipaddress.ip_address(addr))
 
 
-@pytest.mark.parametrize("addr", ["93.184.216.34", "2606:4700::1111"])
+@pytest.mark.parametrize(
+    "addr", ["93.184.216.34", "2606:4700::1111", "64:ff9b::808:808", "::ffff:8.8.8.8"]
+)
 def test_public_addresses_allowed(addr):
     assert webhooks.ip_allowed(ipaddress.ip_address(addr))
 
@@ -214,3 +224,18 @@ def test_payload_excludes_owner_email():
     payload = webhooks.asset_payload(asset)
     assert "owner_email" not in payload
     assert payload["vendor"] == "openai"
+
+
+async def test_post_signed_has_an_overall_deadline(monkeypatch):
+    """httpx timeouts are per operation; a trickling server must not hold
+    an attempt past PS_WEBHOOK_TIMEOUT_SECONDS (and so past the lease)."""
+    monkeypatch.setattr(webhooks, "_resolve_host", _resolver("93.184.216.34"))
+    monkeypatch.setattr(settings, "webhook_timeout_seconds", 0.2)
+
+    class Slow(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            await asyncio.sleep(5)
+            return httpx.Response(200)
+
+    with pytest.raises(httpx.TimeoutException):
+        await webhooks.post_signed("https://hooks.example.com/", b"{}", {}, transport=Slow())

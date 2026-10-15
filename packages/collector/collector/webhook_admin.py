@@ -117,7 +117,9 @@ async def create_subscription(body: CreateSubscriptionBody, request: Request) ->
     ).scalar_one_or_none()
     if partner is None:
         raise _problem(404, "Not Found", "Partner credential not found")
-    reason = webhooks.partner_ineligible_reason(partner, datetime.now(UTC))
+    reason = webhooks.partner_ineligible_reason(
+        partner, datetime.now(UTC), body.event_types
+    )
     if reason is not None:
         raise _problem(400, "Bad Request", f"Partner cannot receive webhooks: {reason}")
 

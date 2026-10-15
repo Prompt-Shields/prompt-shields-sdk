@@ -70,14 +70,20 @@ async def env(seeded_db):
 
         pa = partner(tenant_a, "pa")
         pa_noscope = partner(tenant_a, "pa2", scopes=("usage:read",))
+        # Granular scopes (#150): changes:read alone qualifies, assets:read
+        # alone does not.
+        pa_changes = partner(tenant_a, "pa3", scopes=("changes:read",))
+        pa_assets = partner(tenant_a, "pa4", scopes=("assets:read",))
         pb = partner(tenant_b, "pb")
-        s.add_all([pa, pa_noscope, pb])
+        s.add_all([pa, pa_noscope, pa_changes, pa_assets, pb])
         await s.commit()
         return {
             "factory": factory,
             "tenant_a": tenant_a.id,
             "pa": pa.id,
             "pa_noscope": pa_noscope.id,
+            "pa_changes": pa_changes.id,
+            "pa_assets": pa_assets.id,
             "pb": pb.id,
         }
 
@@ -167,8 +173,12 @@ async def test_create_checks_partner_tenant_scope_and_config(env, monkeypatch):
     async with _client() as c:
         # Another tenant's partner looks like a missing one.
         assert (await _subscribe(c, env["pb"])).status_code == 404
-        # Partner lacking registry:read cannot receive asset data.
+        # Partner lacking changes:read (directly or via registry:read)
+        # cannot receive asset events.
         assert (await _subscribe(c, env["pa_noscope"])).status_code == 400
+        resp = await _subscribe(c, env["pa_assets"])
+        assert resp.status_code == 400 and "changes:read" in resp.json()["detail"]["detail"]
+        assert (await _subscribe(c, env["pa_changes"])).status_code == 201
         assert (
             await c.post(
                 "/api/v1/admin/webhooks/subscriptions",
@@ -348,6 +358,33 @@ async def test_revoked_partner_deliveries_go_dead_without_sending(env):
     assert run.dead == 1 and rx.requests == []
     (row,) = await _deliveries(env["factory"])
     assert "lacks scope" in row.last_error
+
+
+async def test_granular_changes_scope_receives_and_narrowing_stops(env):
+    async with _client() as c:
+        await _subscribe(c, env["pa_changes"])
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+    (row,) = await _deliveries(env["factory"])
+    assert row.event_type == "asset.created"
+
+    # Narrowed to assets:read before delivery: dead, not sent.
+    async with env["factory"]() as s:
+        await s.execute(
+            update(PartnerCredential)
+            .where(PartnerCredential.id == env["pa_changes"])
+            .values(scopes=["assets:read"])
+        )
+        await s.commit()
+    rx = Receiver(200)
+    run = await webhooks.deliver_due(env["factory"], transport=rx.transport())
+    assert run.dead == 1 and rx.requests == []
+    (row,) = await _deliveries(env["factory"])
+    assert row.last_error == "partner credential lacks scope changes:read"
+
+    # And no new events are queued for it.
+    async with _client() as c:
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "anthropic"}]})
+    assert len(await _deliveries(env["factory"])) == 1
 
 
 async def test_destination_turning_private_is_not_contacted(env, monkeypatch):

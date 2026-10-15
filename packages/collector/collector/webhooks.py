@@ -34,8 +34,10 @@ Security
     across retries for idempotency.
   - Secrets: per subscription, returned once, stored AES-GCM encrypted with
     a key derived from PS_WEBHOOK_SECRET_KEY and bound to the row id.
-  - Scope: only partners that are active, unexpired and hold
-    REQUIRED_SCOPE get events, checked at enqueue and again at delivery.
+  - Scope: only partners that are active, unexpired and hold the scope
+    for the event (EVENT_SCOPES; `registry:read` still covers it through
+    the partner_scopes alias) get events, checked at enqueue and again at
+    delivery.
     Payloads carry an allowlisted asset summary: no owner email, no prompt
     content, no usage events.
 """
@@ -66,11 +68,12 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from db.models import AIAsset, PartnerCredential, WebhookDelivery, WebhookSubscription
-from sqlalchemy import any_, delete, inspect, literal, or_, select, update
+from sqlalchemy import delete, inspect, or_, select, update
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.config import settings
+from collector.partner_scopes import expand_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +83,23 @@ ASSET_RETIRED = "asset.retired"
 EVENT_TYPES: tuple[str, ...] = (ASSET_CREATED, ASSET_CHANGED, ASSET_RETIRED)
 EventType = Literal["asset.created", "asset.changed", "asset.retired"]
 
-# The partner must hold this scope to receive events: the payload is the
-# same asset data `/partner/v1/changes` returns under it.
-REQUIRED_SCOPE = "registry:read"
+# Scope a partner must hold to receive each event type. Asset events carry
+# the same asset data `/partner/v1/changes` returns under `changes:read`.
+# Checked with partner_scopes.expand_scopes, so Phase 1 `registry:read`
+# credentials qualify through the alias.
+EVENT_SCOPES: dict[str, str] = {
+    ASSET_CREATED: "changes:read",
+    ASSET_CHANGED: "changes:read",
+    ASSET_RETIRED: "changes:read",
+}
+
+
+def required_scope(event_type: str) -> str:
+    return EVENT_SCOPES[event_type]
+
+
+def partner_has_event_scope(partner: PartnerCredential, event_type: str) -> bool:
+    return required_scope(event_type) in expand_scopes(partner.scopes)
 
 SIGNATURE_HEADER = "Prompt-Shields-Signature"
 EVENT_ID_HEADER = "Prompt-Shields-Event-Id"
@@ -247,10 +264,24 @@ def check_url(url: str) -> SplitResult:
     return parts
 
 
+# IPv6 ranges that embed or stand for an IPv4 address, or are deprecated,
+# and that `is_global` does not catch on every Python version:
+# NAT64 well-known prefix (64:ff9b::/96 reaches the embedded IPv4 address
+# through a NAT64 gateway, e.g. 64:ff9b::a9fe:a9fe -> 169.254.169.254),
+# IPv4-compatible ::/96 and site-local fec0::/10.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+_SITE_LOCAL = ipaddress.ip_network("fec0::/10")
+
+
 def ip_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True for publicly routable unicast addresses only."""
     if ip.version == 6:
+        if ip in _IPV4_COMPATIBLE or ip in _SITE_LOCAL:
+            return False
         embedded = ip.ipv4_mapped or ip.sixtofour or (ip.teredo[1] if ip.teredo else None)
+        if embedded is None and ip in _NAT64:
+            embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
         if embedded is not None and not ip_allowed(embedded):
             return False
     if ip.is_unspecified or ip.is_multicast:
@@ -301,8 +332,26 @@ async def post_signed(
     """POST `body` to `url` via the checked address. Returns the status code.
 
     Raises DestinationNotAllowed, or httpx errors for network failures.
-    The response body is never read.
+    The response body is never read. The whole attempt (resolve, connect,
+    send, response headers) is bounded by PS_WEBHOOK_TIMEOUT_SECONDS:
+    httpx timeouts apply per operation, so a server trickling its response
+    headers could otherwise hold the attempt past the claim lease and get
+    the delivery claimed and sent again by another worker.
     """
+    try:
+        async with asyncio.timeout(settings.webhook_timeout_seconds):
+            return await _post_signed(url, body, headers, transport=transport)
+    except TimeoutError as exc:
+        raise httpx.TimeoutException("webhook attempt exceeded its deadline") from exc
+
+
+async def _post_signed(
+    url: str,
+    body: bytes,
+    headers: dict[str, str],
+    *,
+    transport: httpx.AsyncBaseTransport | None,
+) -> int:
     parts, address = await resolve_destination(url)
     port = parts.port or (443 if parts.scheme == "https" else 80)
     host = f"[{address}]" if ":" in address else address
@@ -381,9 +430,10 @@ class AssetChanges:
 
 
 def _eligible_partner_clause(now: datetime):
+    """Active and unexpired. The per-event scope is checked in Python with
+    partner_scopes.expand_scopes so aliases resolve in one place."""
     return (
         PartnerCredential.is_active == "true",
-        literal(REQUIRED_SCOPE) == any_(PartnerCredential.scopes),
         or_(PartnerCredential.expires_at.is_(None), PartnerCredential.expires_at > now),
     )
 
@@ -407,7 +457,11 @@ async def enqueue_asset_events(
     now = now or _utcnow()
     subs = (
         await db.execute(
-            select(WebhookSubscription.id, WebhookSubscription.event_types)
+            select(
+                WebhookSubscription.id,
+                WebhookSubscription.event_types,
+                PartnerCredential.scopes,
+            )
             .join(PartnerCredential, PartnerCredential.id == WebhookSubscription.partner_id)
             .where(
                 WebhookSubscription.tenant_id == tenant_id,
@@ -422,7 +476,12 @@ async def enqueue_asset_events(
 
     queued = 0
     for event_type, asset, fields in events:
-        targets = [s.id for s in subs if event_type in s.event_types]
+        scope = required_scope(event_type)
+        targets = [
+            s.id
+            for s in subs
+            if event_type in s.event_types and scope in expand_scopes(s.scopes)
+        ]
         if not targets:
             continue
         event_id = uuid4()
@@ -512,37 +571,53 @@ def retry_delay(attempts: int) -> timedelta:
 
 
 def partner_ineligible_reason(
-    partner: PartnerCredential | None, now: datetime
+    partner: PartnerCredential | None,
+    now: datetime,
+    event_types: Iterable[str] = EVENT_TYPES,
 ) -> str | None:
-    """Why this partner may not receive events, or None if it may."""
+    """Why this partner may not receive `event_types`, or None if it may."""
     if partner is None or partner.is_active != "true":
         return "partner credential revoked"
     if partner.expires_at is not None and partner.expires_at <= now:
         return "partner credential expired"
-    if REQUIRED_SCOPE not in (partner.scopes or []):
-        return f"partner credential lacks scope {REQUIRED_SCOPE}"
+    for event_type in event_types:
+        if not partner_has_event_scope(partner, event_type):
+            return f"partner credential lacks scope {required_scope(event_type)}"
     return None
 
 
 def _ineligible(
-    sub: WebhookSubscription | None, partner: PartnerCredential | None, now: datetime
+    sub: WebhookSubscription | None,
+    partner: PartnerCredential | None,
+    now: datetime,
+    event_type: str,
 ) -> str | None:
     if sub is None or not sub.is_active:
         return "subscription disabled"
-    return partner_ineligible_reason(partner, now)
+    return partner_ineligible_reason(partner, now, (event_type,))
 
 
 async def _attempt(
-    session_factory, delivery_id: UUID, transport, sem: asyncio.Semaphore
+    session_factory,
+    delivery_id: UUID,
+    transport,
+    sem: asyncio.Semaphore,
+    lease_until: datetime,
 ) -> str:
     async with sem, session_factory() as db:
+        # Not enough lease left to finish within the attempt deadline (e.g.
+        # queued behind slow attempts): leave it, the lease expires and the
+        # row is claimed again. Sending now could overlap another worker.
+        deadline = timedelta(seconds=settings.webhook_timeout_seconds)
+        if _utcnow() + deadline >= lease_until:
+            return "skipped"
         d = await db.get(WebhookDelivery, delivery_id)
         if d is None or d.status != "pending":
             return "skipped"
         now = _utcnow()
         sub = await db.get(WebhookSubscription, d.subscription_id)
         partner = await db.get(PartnerCredential, sub.partner_id) if sub else None
-        reason = _ineligible(sub, partner, now)
+        reason = _ineligible(sub, partner, now, d.event_type)
         if reason is None:
             try:
                 secret = decrypt_secret(sub.secret_ciphertext, sub.id)
@@ -628,7 +703,7 @@ async def deliver_due(
     run = DeliveryRun(claimed=len(ids))
     sem = asyncio.Semaphore(concurrency)
     outcomes = await asyncio.gather(
-        *(_attempt(session_factory, i, transport, sem) for i in ids),
+        *(_attempt(session_factory, i, transport, sem, now + CLAIM_LEASE) for i in ids),
         return_exceptions=True,
     )
     for outcome in outcomes:
