@@ -145,6 +145,7 @@ async def test_operator_route_requires_token_and_known_tenant(seeded_db, monkeyp
             "clouds": {
                 "azure": {"status": "not_configured"},
                 "aws": {"status": "not_configured"},
+                "gcp": {"status": "not_configured"},
             },
         }
 
@@ -217,5 +218,105 @@ async def test_aws_inventory_stores_bedrock_assets(seeded_db):
                 "eu-central-1",
                 "ai-lead@acme.com",
                 f"aws:{BEDROCK_PT}",
+            )
+        ]
+
+
+VERTEX_EP = "projects/123456789012/locations/europe-west4/endpoints/900"
+
+
+def _vertex_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.host == "oauth2.googleapis.com":
+        return httpx.Response(200, json={"access_token": "tok"})
+    assert request.url.host == "europe-west4-aiplatform.googleapis.com"
+    if request.url.path.endswith("/endpoints"):
+        return httpx.Response(
+            200,
+            json={
+                "endpoints": [
+                    {
+                        "name": VERTEX_EP,
+                        "labels": {"env": "prod", "department": "claims"},
+                        "deployedModels": [
+                            {
+                                "id": "1",
+                                "model": "projects/123456789012/locations/"
+                                "europe-west4/models/7",
+                                "displayName": "gemma2-claims",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+    return httpx.Response(200, json={})
+
+
+async def test_gcp_inventory_stores_vertex_assets(seeded_db):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    factory = async_sessionmaker(seeded_db, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as db:
+        tenant_id = (await db.execute(select(Tenant.id))).scalar_one()
+
+    settings = ci.CloudInventorySettings(
+        cloud_inventory={
+            str(tenant_id): ci.TenantCloudCredentials(
+                gcp=ci.GcpInventoryCredentials(
+                    service_account={
+                        "type": "service_account",
+                        "project_id": "acme-ml-prod",
+                        "client_email": "inv@acme-ml-prod.iam.gserviceaccount.com",
+                        "private_key": pem,
+                    },
+                    regions=["europe-west4"],
+                )
+            )
+        }
+    )
+    for _ in range(2):
+        async with factory() as db:
+            result = await ci.pull_cloud_inventory(
+                db,
+                tenant_id,
+                settings=settings,
+                transport=httpx.MockTransport(_vertex_handler),
+                sleep=_no_sleep,
+                now=datetime(2026, 10, 15, tzinfo=UTC),
+            )
+        assert result["clouds"]["gcp"]["status"] == "ok"
+
+    async with factory() as db:
+        assets = (await db.execute(select(AIAsset))).scalars().all()
+        assert [
+            (
+                a.tenant_id,
+                a.vendor,
+                a.model,
+                a.region,
+                a.environment,
+                a.business_unit,
+                a.calling_service,
+            )
+            for a in assets
+        ] == [
+            (
+                tenant_id,
+                "google",
+                "gemma2-claims",
+                "europe-west4",
+                "production",
+                "claims",
+                f"gcp:{VERTEX_EP}/deployedModels/1",
             )
         ]

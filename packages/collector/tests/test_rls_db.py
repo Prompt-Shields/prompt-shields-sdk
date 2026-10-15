@@ -465,6 +465,83 @@ async def test_cloud_inventory_and_partner_admin_routes_work_under_rls(rls_db, m
     assert denied == [b] and a not in denied
 
 
+async def test_vertex_inventory_pull_runs_as_the_target_tenant_under_rls(rls_db):
+    """A Vertex AI pull scoped to tenant B (as the route and CLI do) writes
+    and later updates B's asset; tenant A cannot see it."""
+    from collector import cloud_inventory as ci
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    a, b = rls_db["a"], rls_db["b"]
+    endpoint = "projects/42/locations/europe-west4/endpoints/7"
+
+    def vertex(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": "tok"})
+        assert request.url.host == "europe-west4-aiplatform.googleapis.com"
+        if request.url.path.endswith("/endpoints"):
+            dm = {"id": "1", "displayName": "gemini-tuned-claims"}
+            return httpx.Response(
+                200, json={"endpoints": [{"name": endpoint, "deployedModels": [dm]}]}
+            )
+        return httpx.Response(200, json={})
+
+    pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    gcp = ci.GcpInventoryCredentials(
+        service_account={
+            "client_email": "inv@acme-ml.iam.gserviceaccount.com",
+            "private_key": pem,
+        },
+        project_ids=["acme-ml-prod"],
+        regions=["europe-west4"],
+    )
+    settings = ci.CloudInventorySettings(
+        cloud_inventory={str(b): ci.TenantCloudCredentials(gcp=gcp)}
+    )
+
+    async def _no_sleep(_s: float) -> None:
+        return None
+
+    for _ in range(2):
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, b)
+            result = await ci.pull_cloud_inventory(
+                s,
+                b,
+                clouds=["gcp"],
+                settings=settings,
+                transport=httpx.MockTransport(vertex),
+                sleep=_no_sleep,
+            )
+        assert result["clouds"]["gcp"]["status"] == "ok", result
+
+    calling = f"gcp:{endpoint}/deployedModels/1"
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        rows = (
+            await s.execute(
+                select(AIAsset.vendor, AIAsset.region).where(
+                    AIAsset.calling_service == calling
+                )
+            )
+        ).all()
+        assert rows == [("google", "europe-west4")]
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        hidden = await s.execute(
+            select(AIAsset.id).where(AIAsset.calling_service == calling)
+        )
+        assert hidden.first() is None
+
+
 async def test_webhook_worker_claims_across_tenants_and_delivers_as_each(
     rls_db, monkeypatch, caplog
 ):
