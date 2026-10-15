@@ -13,7 +13,7 @@
       "id": "eu_ai_act.article_50.1.ai_interaction_disclosure",
       "category": "transparency",
       "level": "medium",
-      "reference": "Article 50(1): AI systems \"intended to interact directly with natural persons\" must inform them \"that they are interacting with an AI system\", unless this is obvious",
+      "reference": "Article 50(1): AI systems \"intended to interact directly with natural persons\" must inform them \"that they are interacting with an AI system\", unless this is obvious (not applicable to AI systems authorised by law to detect, prevent, investigate or prosecute criminal offences)",
       "title": "AI system interacting directly with people (chatbot or assistant) must disclose it is an AI",
       "when": {
         "any": [
@@ -25,7 +25,7 @@
       "id": "eu_ai_act.article_50.2.synthetic_content_marking",
       "category": "transparency",
       "level": "medium",
-      "reference": "Article 50(2): providers of AI systems \"generating synthetic audio, image, video or text content\" must ensure outputs are \"marked in a machine-readable format and detectable as artificially generated or manipulated\"",
+      "reference": "Article 50(2): providers of AI systems \"generating synthetic audio, image, video or text content\" must ensure outputs are \"marked in a machine-readable format and detectable as artificially generated or manipulated\" (not where the system performs an assistive function for standard editing or does not substantially alter the input data or its semantics)",
       "title": "Synthetic audio, image or video generation must be machine-readably marked",
       "when": {
         "any": [
@@ -51,7 +51,7 @@
       "id": "eu_ai_act.article_50.4.deep_fake_disclosure",
       "category": "transparency",
       "level": "medium",
-      "reference": "Article 50(4): deployers of an AI system generating or manipulating content \"constituting a deep fake\", or text \"published with the purpose of informing the public on matters of public interest\", must disclose that it was \"artificially generated or manipulated\"",
+      "reference": "Article 50(4): deployers of an AI system generating or manipulating content \"constituting a deep fake\", or text \"published with the purpose of informing the public on matters of public interest\", must disclose that it was \"artificially generated or manipulated\" (for text, not where it has undergone human review or editorial control and someone holds editorial responsibility; for evidently artistic, creative, satirical or fictional work, limited to disclosing the content exists in a way that does not hamper the display or enjoyment of the work)",
       "title": "Deep fakes, and AI-generated text published to inform the public, must be disclosed",
       "when": {
         "any": [

@@ -421,6 +421,16 @@ GOLDEN_ARTICLE_5 = [
         ),
         [P + "1h.realtime_remote_biometric_identification"],
     ),
+    (
+        # Matching faces against a watchlist is identification, even when the
+        # use case also mentions identity verification.
+        "1h watchlist search described as verification",
+        AssetSignals(
+            use_case="live facial recognition CCTV identity verification",
+            calling_service="police-watchlist",
+        ),
+        [P + "1h.realtime_remote_biometric_identification"],
+    ),
 ]
 
 GOLDEN_NOT_ARTICLE_5 = [
@@ -727,7 +737,9 @@ def test_unless_excludes_biometric_verification_from_remote_identification():
     # Annex III point 1(a) excludes verification whose sole purpose is to
     # confirm a person is who they claim to be.
     assert rid not in _annex(
-        AssetSignals(use_case="face matching", calling_service="kyc-identity-verification")
+        AssetSignals(
+            use_case="face matching", calling_service="kyc-identity-verification"
+        )
     )
     assert rid not in _annex(AssetSignals(use_case="face recognition liveness check"))
 
