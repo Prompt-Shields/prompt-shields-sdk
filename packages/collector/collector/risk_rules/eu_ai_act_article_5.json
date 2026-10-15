@@ -13,7 +13,7 @@
     "hr_units": ["hr", "human resources", "people", "people ops", "people operations", "talent", "talent acquisition", "recruiting", "recruitment", "workforce"],
     "education_units": ["education", "school*", "universit*", "academic*", "admissions", "registrar", "student*"],
     "one_to_many_search": ["watchlist*", "wanted person*", "suspect*", "face search", "crowd*"],
-    "medical_or_safety_reasons": ["medical", "clinical", "therap*", "mental health", "patient*", "driver monitoring", "driver fatigue", "driver drowsiness", "driver alertness", "driver distraction", "pilot monitoring", "pilot fatigue", "pilot alertness", "operator fatigue", "operator alertness", "crew fatigue", "crew alertness", "fatigue detection", "fatigue monitoring", "drowsiness", "drowsy", "microsleep*", "alertness monitoring", "alertness detection", "road safety", "vehicle safety", "aviation safety", "flight safety"],
+    "medical_or_safety_reasons": ["medical", "clinical", "therap*", "mental health", "driver monitoring", "driver fatigue", "driver drowsiness", "driver alertness", "driver distraction", "pilot monitoring", "pilot fatigue", "pilot alertness", "operator fatigue", "operator alertness", "crew fatigue", "crew alertness", "fatigue detection", "fatigue monitoring", "drowsiness", "drowsy", "microsleep*", "alertness monitoring", "alertness detection", "road safety", "vehicle safety", "aviation safety", "flight safety"],
     "detection_purpose": ["detect*", "audit*", "moderation", "moderat*", "classif*", "red team*", "safeguard*", "protect*", "prevention", "compliance check*"]
   },
   "rules": [

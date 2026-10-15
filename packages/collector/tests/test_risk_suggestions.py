@@ -531,6 +531,15 @@ GOLDEN_ARTICLE_5 = [
         [P + "1f.emotion_recognition_workplace_education"],
     ),
     (
+        # A patient-facing metric is not a medical reason for reading the
+        # employees' emotions.
+        "1f staff emotion for patient satisfaction",
+        AssetSignals(
+            use_case="employee emotion recognition to improve patient satisfaction"
+        ),
+        [P + "1f.emotion_recognition_workplace_education"],
+    ),
+    (
         "1g sensitive traits",
         AssetSignals(use_case="infer sexual orientation from face images"),
         [P + "1g.biometric_categorisation_sensitive_traits"],
