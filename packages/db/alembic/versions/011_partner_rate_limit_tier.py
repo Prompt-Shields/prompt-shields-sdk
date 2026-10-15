@@ -5,8 +5,8 @@ the credential's own rate_limit, so existing partners are unaffected.
 Scopes need no schema change: the existing scopes array now holds
 granular scopes, and `registry:read` stays valid as an alias (#106).
 
-Revision ID: 010
-Revises: 009
+Revision ID: 011
+Revises: 010
 Create Date: 2026-10-15
 """
 
@@ -15,8 +15,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "010"
-down_revision: str | None = "009"
+revision: str = "011"
+down_revision: str | None = "010"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
