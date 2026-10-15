@@ -1,0 +1,250 @@
+{
+  "$schema": "./cost-vectors.schema.json",
+  "description": "Hand-computed from vendor list prices (USD per 1M tokens) as of 2026-Q1. Shared by the SDK (packages/sdk/tests/test_cost_vectors.py) and, once it prices calls, the gateway.",
+  "vectors": [
+    {
+      "id": "openai-gpt-4o-base",
+      "dimension": "base",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "usage": { "tokens_in": 1000, "tokens_out": 2000 },
+      "expected_cost": 0.0225,
+      "expected_cost_source": "pricing_table",
+      "derivation": "1000 x $2.50 + 2000 x $10.00 = $0.0025 + $0.0200"
+    },
+    {
+      "id": "openai-gpt-4o-cache-read",
+      "dimension": "cache_read",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "usage": { "tokens_in": 10000, "tokens_out": 500, "tokens_cached": 4000 },
+      "expected_cost": 0.025,
+      "derivation": "6000 uncached x $2.50 + 4000 cached x $1.25 + 500 x $10.00 = $0.015 + $0.005 + $0.005"
+    },
+    {
+      "id": "openai-o4-mini-cache-read",
+      "dimension": "cache_read",
+      "vendor": "openai",
+      "model": "o4-mini",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cached": 4000
+      },
+      "expected_cost": 0.0121,
+      "derivation": "o3 / o4-mini cache reads are 25% of input: 6000 uncached x $1.10 + 4000 cached x $0.275 + 1000 x $4.40 = $0.0066 + $0.0011 + $0.0044"
+    },
+    {
+      "id": "anthropic-sonnet-4-cache-write-5m",
+      "dimension": "cache_write",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cache_write": 8000
+      },
+      "expected_cost": 0.051,
+      "derivation": "2000 x $3.00 + 8000 5-minute writes x $3.75 + 1000 x $15.00 = $0.006 + $0.030 + $0.015"
+    },
+    {
+      "id": "anthropic-sonnet-4-cache-write-1h",
+      "dimension": "cache_write_1h",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cache_write": 8000,
+        "tokens_cache_write_1h": 8000
+      },
+      "expected_cost": 0.069,
+      "derivation": "2000 x $3.00 + 8000 1-hour writes x $6.00 + 1000 x $15.00 = $0.006 + $0.048 + $0.015"
+    },
+    {
+      "id": "anthropic-sonnet-4-cache-mixed-ttl",
+      "dimension": "cache_write_1h",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": {
+        "tokens_in": 20000,
+        "tokens_out": 1000,
+        "tokens_cached": 10000,
+        "tokens_cache_write": 6000,
+        "tokens_cache_write_1h": 2000
+      },
+      "expected_cost": 0.057,
+      "derivation": "4000 x $3.00 + 10000 reads x $0.30 + 4000 5-minute writes x $3.75 + 2000 1-hour writes x $6.00 + 1000 x $15.00 = $0.012 + $0.003 + $0.015 + $0.012 + $0.015"
+    },
+    {
+      "id": "anthropic-sonnet-4-batch",
+      "dimension": "service_tier",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": { "tokens_in": 10000, "tokens_out": 1000, "service_tier": "batch" },
+      "expected_cost": 0.0225,
+      "derivation": "Batch list price $1.50 in / $7.50 out: 10000 x $1.50 + 1000 x $7.50 = $0.015 + $0.0075"
+    },
+    {
+      "id": "anthropic-sonnet-4-batch-with-cache-read",
+      "dimension": "service_tier",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cached": 8000,
+        "service_tier": "batch"
+      },
+      "expected_cost": 0.0117,
+      "derivation": "Batch and cache discounts stack: (2000 x $3.00 + 8000 x $0.30 + 1000 x $15.00) x 0.5 = ($0.006 + $0.0024 + $0.015) x 0.5"
+    },
+    {
+      "id": "anthropic-sonnet-4-standard-tier",
+      "dimension": "service_tier",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 1000,
+        "service_tier": "standard"
+      },
+      "expected_cost": 0.018,
+      "derivation": "1000 x $3.00 + 1000 x $15.00"
+    },
+    {
+      "id": "openai-o3-flex",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "o3",
+      "usage": { "tokens_in": 10000, "tokens_out": 2000, "service_tier": "flex" },
+      "expected_cost": 0.018,
+      "derivation": "Flex list price $1.00 in / $4.00 out: 10000 x $1.00 + 2000 x $4.00 = $0.010 + $0.008"
+    },
+    {
+      "id": "openai-gpt-4o-batch",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "usage": { "tokens_in": 1000, "tokens_out": 2000, "service_tier": "batch" },
+      "expected_cost": 0.01125,
+      "derivation": "Batch list price $1.25 in / $5.00 out: 1000 x $1.25 + 2000 x $5.00 = $0.00125 + $0.010"
+    },
+    {
+      "id": "openai-gpt-4o-default-tier",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "service_tier": "default"
+      },
+      "expected_cost": 0.0225,
+      "derivation": "Standard requests report service_tier 'default': 1000 x $2.50 + 2000 x $10.00"
+    },
+    {
+      "id": "openai-gpt-4o-priority-unpriced",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "service_tier": "priority"
+      },
+      "expected_cost": null,
+      "derivation": "Priority is priced per model, not as a multiple of standard; with no rate in the catalog the call is unmetered rather than under-reported"
+    },
+    {
+      "id": "google-gemini-2.5-flash-batch",
+      "dimension": "service_tier",
+      "vendor": "google",
+      "model": "gemini-2.5-flash",
+      "usage": { "tokens_in": 10000, "tokens_out": 1000, "service_tier": "batch" },
+      "expected_cost": 0.00275,
+      "derivation": "Batch list price $0.15 in / $1.25 out: 10000 x $0.15 + 1000 x $1.25 = $0.0015 + $0.00125"
+    },
+    {
+      "id": "google-gemini-2.5-pro-at-200k",
+      "dimension": "long_context",
+      "vendor": "google",
+      "model": "gemini-2.5-pro",
+      "usage": { "tokens_in": 200000, "tokens_out": 1000 },
+      "expected_cost": 0.26,
+      "derivation": "Prompt <= 200k: 200000 x $1.25 + 1000 x $10.00 = $0.25 + $0.01"
+    },
+    {
+      "id": "google-gemini-2.5-pro-over-200k",
+      "dimension": "long_context",
+      "vendor": "google",
+      "model": "gemini-2.5-pro",
+      "usage": { "tokens_in": 250000, "tokens_out": 1000 },
+      "expected_cost": 0.64,
+      "derivation": "Prompt > 200k: 250000 x $2.50 + 1000 x $15.00 = $0.625 + $0.015"
+    },
+    {
+      "id": "anthropic-sonnet-4-over-200k-with-cache-read",
+      "dimension": "long_context",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": {
+        "tokens_in": 300000,
+        "tokens_out": 2000,
+        "tokens_cached": 100000
+      },
+      "expected_cost": 1.305,
+      "derivation": "Prompt > 200k (cache reads count toward it): 200000 x $6.00 + 100000 reads x $0.60 + 2000 x $22.50 = $1.20 + $0.06 + $0.045"
+    },
+    {
+      "id": "openai-gpt-4o-audio-preview",
+      "dimension": "audio_tokens",
+      "vendor": "openai",
+      "model": "gpt-4o-audio-preview",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 600,
+        "tokens_audio_in": 800,
+        "tokens_audio_out": 500
+      },
+      "expected_cost": 0.0735,
+      "derivation": "200 text in x $2.50 + 800 audio in x $40.00 + 100 text out x $10.00 + 500 audio out x $80.00 = $0.0005 + $0.032 + $0.001 + $0.040"
+    },
+    {
+      "id": "openai-gpt-4o-audio-unpriced",
+      "dimension": "audio_tokens",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "usage": { "tokens_in": 1000, "tokens_out": 100, "tokens_audio_in": 100 },
+      "expected_cost": null,
+      "derivation": "Audio tokens on a model with no audio rate: unmetered rather than priced as text"
+    },
+    {
+      "id": "anthropic-sonnet-4-web-search",
+      "dimension": "tool_fee",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "usage": {
+        "tokens_in": 5000,
+        "tokens_out": 500,
+        "web_search_requests": 3
+      },
+      "expected_cost": 0.0525,
+      "derivation": "5000 x $3.00 + 500 x $15.00 + 3 searches x $10 / 1000 = $0.015 + $0.0075 + $0.030"
+    },
+    {
+      "id": "openrouter-provider-reported",
+      "dimension": "provider_reported",
+      "vendor": "openai",
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 1000,
+        "provider_cost": 0.00123
+      },
+      "expected_cost": 0.00123,
+      "expected_cost_source": "provider_reported",
+      "derivation": "OpenRouter usage.cost is used as reported, even for a model the catalog does not price"
+    }
+  ]
+}
