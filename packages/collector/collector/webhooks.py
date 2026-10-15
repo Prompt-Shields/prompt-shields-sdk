@@ -853,6 +853,8 @@ async def _attempt(
             d.last_status_code = None
             d.last_error = _missing_key_error(missing_key)
             outcome = _fail(d)
+            if outcome == "dead":
+                d.last_error = _missing_key_error(missing_key, final=True)
             await db.commit()
             return outcome
 
@@ -911,8 +913,13 @@ def _fail(d: WebhookDelivery) -> str:
 _missing_keys_logged: set[str | None] = set()
 
 
-def _missing_key_error(exc: SecretKeyMissing) -> str:
+def _missing_key_error(exc: SecretKeyMissing, *, final: bool = False) -> str:
     key = "the legacy key" if exc.key_id is None else f"key id {exc.key_id}"
+    if final:
+        return (
+            f"signing secret uses {key}, not configured on this worker; "
+            "gave up after the last attempt (add the key or rotate the secret)"
+        )
     return f"signing secret uses {key}, not configured on this worker; will retry"
 
 

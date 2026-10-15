@@ -639,6 +639,7 @@ async def test_unknown_key_id_goes_dead_only_after_the_normal_attempts(env, monk
     (row,) = await _deliveries(env["factory"])
     assert row.status == "dead" and row.attempts == 3
     assert "key id gone" in row.last_error
+    assert "gave up" in row.last_error and "will retry" not in row.last_error
 
 
 async def test_documented_rollout_order_never_strands_a_delivery(env, monkeypatch):
