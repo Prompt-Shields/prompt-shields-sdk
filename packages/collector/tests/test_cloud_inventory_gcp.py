@@ -315,6 +315,181 @@ async def test_every_region_failing_is_an_error():
         )
 
 
+US = "us-central1"
+P_US = f"projects/123456789012/locations/{US}"
+GARDEN_US = {
+    "name": f"{P_US}/models/777",
+    "displayName": "gemma3-one-click",
+    "labels": {"owner": "us-team"},
+    "baseModelSource": {
+        "modelGardenSource": {"publicModelName": "publishers/google/models/gemma3"}
+    },
+}
+
+
+def _cross_region_handler(calls: list[httpx.Request], *, model_status: int = 200):
+    """An endpoint in europe-west4 serving a model registered in
+    us-central1."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        url = request.url
+        if url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        assert request.method == "GET"
+        assert request.headers["authorization"] == f"Bearer {TOKEN}"
+        if url.host == VERTEX:
+            if url.path.endswith("/endpoints"):
+                dm = {"id": "1", "model": f"{P_US}/models/777@2", "displayName": "dm"}
+                return httpx.Response(
+                    200,
+                    json={
+                        "endpoints": [
+                            {"name": f"{P}/endpoints/950", "deployedModels": [dm]}
+                        ]
+                    },
+                )
+            return httpx.Response(200, json={})
+        assert url.host == f"{US}-aiplatform.googleapis.com"
+        if url.path == f"/v1/projects/{PROJECT}/locations/{US}/models":
+            return httpx.Response(200, json={"models": [GARDEN_US]})
+        if url.path == f"/v1/{P_US}/models/777":
+            return httpx.Response(model_status, json=GARDEN_US)
+        return httpx.Response(200, json={})
+
+    return handler
+
+
+async def test_deployed_model_in_another_configured_region_is_named():
+    calls: list[httpx.Request] = []
+    summary, deps = await ci.fetch_gcp_deployments(
+        _creds(regions=[REGION, US]),
+        transport=httpx.MockTransport(_cross_region_handler(calls)),
+        sleep=_no_sleep,
+        clock=_clock,
+    )
+    assert summary == {"projects": 1, "regions": 2}
+    assert [(d.resource_id, d.region, d.model, d.model_format) for d in deps] == [
+        (f"{P}/endpoints/950/deployedModels/1", REGION, "gemma3", "model_garden")
+    ]
+    assert deps[0].tags == {"owner": "us-team"}
+    # Named from the us-central1 registry listing: no extra lookup.
+    assert f"/v1/{P_US}/models/777" not in [c.url.path for c in calls]
+
+
+async def test_deployed_model_in_an_unlisted_region_is_looked_up():
+    calls: list[httpx.Request] = []
+    summary, deps = await ci.fetch_gcp_deployments(
+        _creds(),
+        transport=httpx.MockTransport(_cross_region_handler(calls)),
+        sleep=_no_sleep,
+        clock=_clock,
+    )
+    assert summary == {"projects": 1, "regions": 1}
+    assert [(d.region, d.model, d.model_format) for d in deps] == [
+        (REGION, "gemma3", "model_garden")
+    ]
+    assert [c.url.path for c in calls].count(f"/v1/{P_US}/models/777") == 1
+
+
+async def test_failed_model_lookup_keeps_the_deployment():
+    summary, deps = await ci.fetch_gcp_deployments(
+        _creds(),
+        transport=httpx.MockTransport(_cross_region_handler([], model_status=403)),
+        sleep=_no_sleep,
+        clock=_clock,
+    )
+    assert summary == {"projects": 1, "regions": 1}
+    assert [(d.region, d.model, d.model_format) for d in deps] == [
+        (REGION, "dm", "custom")
+    ]
+
+
+async def test_continuous_tuning_takes_the_base_model_from_the_pre_tuned_model():
+    jobs = [
+        {
+            # Continued from tuned model 111; listed before the job that made it.
+            "state": "JOB_STATE_SUCCEEDED",
+            "baseModel": "",
+            "preTunedModel": {"tunedModelName": f"{P}/models/111", "checkpointId": "2"},
+            "tunedModel": {"model": f"{P}/models/113@1"},
+        },
+        {
+            "state": "JOB_STATE_SUCCEEDED",
+            "baseModel": "gemini-2.0-flash-001",
+            "tunedModel": {"model": f"{P}/models/111@1"},
+        },
+        {
+            # The pre-tuned model's own base model is reported.
+            "state": "JOB_STATE_SUCCEEDED",
+            "preTunedModel": {
+                "tunedModelName": f"{P_US}/models/9",
+                "baseModel": "gemini-2.5-flash",
+            },
+            "tunedModel": {"model": f"{P}/models/114"},
+        },
+        {
+            # A cycle resolves to nothing rather than looping.
+            "state": "JOB_STATE_SUCCEEDED",
+            "preTunedModel": {"tunedModelName": f"{P}/models/115"},
+            "tunedModel": {"model": f"{P}/models/115"},
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = request.url
+        if url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        if url.path.endswith("/tuningJobs"):
+            return httpx.Response(200, json={"tuningJobs": jobs})
+        if url.path.endswith("/endpoints"):
+            dm = {"id": "1", "model": f"{P}/models/113@1"}
+            ep = {"name": f"{P}/endpoints/960", "deployedModels": [dm]}
+            return httpx.Response(200, json={"endpoints": [ep]})
+        return httpx.Response(200, json={})
+
+    _, deps = await ci.fetch_gcp_deployments(
+        _creds(), transport=httpx.MockTransport(handler), sleep=_no_sleep, clock=_clock
+    )
+    assert [(d.resource_id, d.model, d.model_format) for d in deps] == [
+        (f"{P}/models/113", "gemini-2.0-flash-001", "tuned_model"),
+        (f"{P}/models/111", "gemini-2.0-flash-001", "tuned_model"),
+        (f"{P}/models/114", "gemini-2.5-flash", "tuned_model"),
+        (f"{P}/models/115", None, "tuned_model"),
+        (f"{P}/endpoints/960/deployedModels/1", "gemini-2.0-flash-001", "tuned"),
+    ]
+
+
+async def test_access_token_is_renewed_before_it_expires():
+    now = [float(CLOCK)]
+
+    def clock() -> float:
+        now[0] += 120.0
+        return now[0]
+
+    state = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "oauth2.googleapis.com":
+            state["n"] += 1
+            state["token"] = f"ya29.token-{state['n']}"
+            return httpx.Response(
+                200, json={"access_token": state["token"], "expires_in": 600}
+            )
+        # Always the latest token.
+        assert request.headers["authorization"] == f"Bearer {state['token']}"
+        return httpx.Response(200, json={})
+
+    summary, _ = await ci.fetch_gcp_deployments(
+        _creds(regions=[REGION, US, "europe-west1", "asia-east1"]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+        clock=clock,
+    )
+    assert summary == {"projects": 1, "regions": 4}
+    assert state["n"] >= 3
+
+
 async def test_pull_stores_assets_and_is_idempotent():
     db = FakeSession()
     kw = {
