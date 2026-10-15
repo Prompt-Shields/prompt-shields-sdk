@@ -126,6 +126,8 @@ export const SCALEWAY: string = 'scaleway';
 export const REGOLO: string = 'regolo';
 export const IONOS: string = 'ionos';
 export const STACKIT: string = 'stackit';
+export const META: string = 'meta';
+export const SCX_AI: string = 'scx-ai';
 
 export const VALID_PROVIDERS = [
   ANTHROPIC,
@@ -215,6 +217,8 @@ export const VALID_PROVIDERS = [
   REGOLO,
   IONOS,
   STACKIT,
+  META,
+  SCX_AI,
 ];
 
 export const CONTENT_TYPES = {

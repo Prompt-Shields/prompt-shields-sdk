@@ -87,6 +87,8 @@ import ScalewayConfig from './scaleway';
 import RegoloConfig from './regolo';
 import IONOSConfig from './ionos';
 import STACKITConfig from './stackit';
+import MetaConfig from './meta';
+import SCXAIConfig from './scx-ai';
 
 const Providers: { [key: string]: ProviderConfigs } = {
   openai: OpenAIConfig,
@@ -174,6 +176,8 @@ const Providers: { [key: string]: ProviderConfigs } = {
   regolo: RegoloConfig,
   ionos: IONOSConfig,
   stackit: STACKITConfig,
+  meta: MetaConfig,
+  'scx-ai': SCXAIConfig,
 };
 
 export default Providers;
