@@ -20,6 +20,7 @@ KEY = "k" * 40
 @pytest.fixture(autouse=True)
 def _defaults(monkeypatch):
     monkeypatch.setattr(settings, "webhook_secret_key", KEY)
+    monkeypatch.setattr(settings, "webhook_secret_keys", "")
     monkeypatch.setattr(settings, "webhook_allow_http", False)
     monkeypatch.setattr(settings, "webhook_allow_private_destinations", False)
 
@@ -240,3 +241,114 @@ async def test_post_signed_has_an_overall_deadline(monkeypatch):
 
     with pytest.raises(httpx.TimeoutException):
         await webhooks.post_signed("https://hooks.example.com/", b"{}", {}, transport=Slow())
+
+
+# ── encryption keyring ────────────────────────────────────────────────
+
+K1 = "1" * 40
+K2 = "2" * 40
+
+
+def test_legacy_key_alone_keeps_the_v1_format():
+    sid = uuid.uuid4()
+    token = webhooks.encrypt_secret("whsec_x", sid)
+    assert token.startswith("v1.") and webhooks.token_key_id(token) is None
+    assert not webhooks.needs_rekey(token)
+
+
+def test_keyring_encrypts_with_the_first_key_and_records_its_id(monkeypatch):
+    sid = uuid.uuid4()
+    legacy = webhooks.encrypt_secret("whsec_old", sid)
+    monkeypatch.setattr(settings, "webhook_secret_keys", f"k2:{K2}, k1:{K1}")
+    token = webhooks.encrypt_secret("whsec_x", sid)
+    assert token.startswith("v2.k2.")
+    assert webhooks.decrypt_secret(token, sid) == "whsec_x"
+    # Old ciphertexts without a key id still decrypt with the legacy key.
+    assert webhooks.decrypt_secret(legacy, sid) == "whsec_old"
+    assert webhooks.needs_rekey(legacy) and not webhooks.needs_rekey(token)
+
+    # k1 becomes active: k2 tokens still decrypt, and need a rekey.
+    monkeypatch.setattr(settings, "webhook_secret_keys", f"k1:{K1},k2:{K2}")
+    assert webhooks.decrypt_secret(token, sid) == "whsec_x"
+    assert webhooks.needs_rekey(token)
+    assert webhooks.encrypt_secret("whsec_x", sid).startswith("v2.k1.")
+
+    # Without the legacy key, legacy tokens are unreadable (not a crash).
+    monkeypatch.setattr(settings, "webhook_secret_key", "")
+    with pytest.raises(ValueError):
+        webhooks.decrypt_secret(legacy, sid)
+    # A removed key makes its tokens unreadable.
+    monkeypatch.setattr(settings, "webhook_secret_keys", f"k1:{K1}")
+    with pytest.raises(ValueError, match="k2"):
+        webhooks.decrypt_secret(token, sid)
+
+
+def test_keyring_token_is_bound_to_key_id_and_subscription(monkeypatch):
+    monkeypatch.setattr(settings, "webhook_secret_keys", f"k1:{K1},k2:{K1}")
+    sid = uuid.uuid4()
+    token = webhooks.encrypt_secret("whsec_x", sid)
+    # Relabelled to another key id with the same key material: rejected.
+    with pytest.raises(ValueError):
+        webhooks.decrypt_secret(token.replace("v2.k1.", "v2.k2.", 1), sid)
+    with pytest.raises(ValueError):
+        webhooks.decrypt_secret(token, uuid.uuid4())
+
+
+@pytest.mark.parametrize(
+    "keys",
+    [
+        "nocolon" + "x" * 40,
+        f"bad id:{K1}",
+        f"k1:{K1},k1:{K2}",
+        "k1:short",
+        f"k1:{K1},",
+    ],
+)
+def test_malformed_keyring_is_not_configured_and_never_echoes_keys(monkeypatch, keys):
+    monkeypatch.setattr(settings, "webhook_secret_keys", keys)
+    with pytest.raises(webhooks.WebhooksNotConfigured) as exc:
+        webhooks.encrypt_secret("whsec_x", uuid.uuid4())
+    assert K1 not in str(exc.value) and K2 not in str(exc.value)
+
+
+def test_no_key_at_all_is_not_configured(monkeypatch):
+    monkeypatch.setattr(settings, "webhook_secret_key", "")
+    with pytest.raises(webhooks.WebhooksNotConfigured):
+        webhooks.active_key_id()
+
+
+# ── secret rotation: several signatures ───────────────────────────────
+
+
+def test_header_carries_one_v1_per_secret_and_either_verifies():
+    body = b'{"id":"e1"}'
+    ts = int(time.time())
+    header = webhooks.sign_payload(["whsec_new", "whsec_old"], body, ts)
+    assert header.count("v1=") == 2 and header.startswith(f"t={ts},v1=")
+    assert webhooks.verify_signature("whsec_new", body, header)
+    assert webhooks.verify_signature("whsec_old", body, header)
+    assert not webhooks.verify_signature("whsec_other", body, header)
+    # A single secret gives the original one-signature header.
+    assert webhooks.sign_payload("whsec_new", body, ts).count("v1=") == 1
+
+
+# ── attempt deadline bound ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("value", [0, -1, 61, 300, 600])
+def test_timeout_setting_must_fit_inside_the_claim_lease(value):
+    from collector.config import Settings
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="PS_WEBHOOK_TIMEOUT_SECONDS"):
+        Settings(webhook_timeout_seconds=value)
+
+
+def test_timeout_setting_accepts_values_up_to_the_cap(monkeypatch):
+    from collector.config import WEBHOOK_MAX_TIMEOUT_SECONDS, Settings
+
+    assert Settings(webhook_timeout_seconds=60).webhook_timeout_seconds == 60
+    # A value set at runtime (bypassing validation) is still capped.
+    monkeypatch.setattr(settings, "webhook_timeout_seconds", 900.0)
+    assert webhooks.attempt_timeout_seconds() == WEBHOOK_MAX_TIMEOUT_SECONDS
+    assert WEBHOOK_MAX_TIMEOUT_SECONDS < webhooks.CLAIM_LEASE.total_seconds()

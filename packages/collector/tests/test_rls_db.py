@@ -594,6 +594,67 @@ async def test_webhook_worker_claims_across_tenants_and_delivers_as_each(
     assert any("reason=webhook-worker" in r.getMessage() for r in caplog.records)
 
 
+async def test_webhook_attestation_events_and_rekey_under_rls(rls_db, monkeypatch, caplog):
+    """asset.attested is queued under the attesting tenant's context, and
+    the rekey job lists tenants through a logged bypass, then re-encrypts
+    each tenant's secrets as that tenant."""
+    from collector import webhooks
+
+    monkeypatch.setattr(settings, "webhook_secret_key", "s" * 40)
+    monkeypatch.setattr(settings, "webhook_secret_keys", "")
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 0)
+
+    async def public(host, port):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(webhooks, "_resolve_host", public)
+    async with rls_db["admin"]() as s:
+        partners = dict(
+            (await s.execute(select(PartnerCredential.tenant_id, PartnerCredential.id))).all()
+        )
+        assets = dict((await s.execute(select(AIAsset.tenant_id, AIAsset.id))).all())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key, tenant in ((KEY_A, rls_db["a"]), (KEY_B, rls_db["b"])):
+            h = {"Authorization": f"Bearer {key}"}
+            resp = await c.post(
+                "/api/v1/admin/webhooks/subscriptions",
+                headers=h,
+                json={
+                    "partner_id": str(partners[tenant]),
+                    "url": "https://hooks.example/x",
+                    "event_types": ["asset.attested"],
+                },
+            )
+            assert resp.status_code == 201, resp.text
+            resp = await c.post(
+                f"/api/v1/registry/assets/{assets[tenant]}/attestations",
+                headers=h,
+                json={"field": "asset", "state": "attested", "attested_by": "r@x.example"},
+            )
+            assert resp.status_code == 201, resp.text
+
+    async with rls_db["admin"]() as s:
+        queued = (
+            await s.execute(
+                select(WebhookDelivery.tenant_id, WebhookDelivery.payload).where(
+                    WebhookDelivery.event_type == "asset.attested"
+                )
+            )
+        ).all()
+    assert sorted(str(t) for t, _ in queued) == sorted([str(rls_db["a"]), str(rls_db["b"])])
+    assert all(p["tenant_id"] == str(t) for t, p in queued)
+
+    monkeypatch.setattr(settings, "webhook_secret_keys", "k2:" + "n" * 40)
+    # Without the bypass the listing sees no tenant's subscriptions.
+    run = await webhooks.rekey_all(rls_db["plain"], list_factory=rls_db["plain"])
+    assert run.checked == 0
+    caplog.set_level(logging.INFO, logger="collector.rls")
+    run = await webhooks.rekey_all(rls_db["plain"])
+    # Two real subscriptions rekeyed; the seeded placeholders are unreadable.
+    assert (run.checked, run.rekeyed, run.unreadable) == (4, 2, 2)
+    assert any("reason=webhook-rekey" in r.getMessage() for r in caplog.records)
+
+
 async def test_risk_suggestions_run_and_all_tenants_cli_under_rls(rls_db):
     """The tenant route and the --all-tenants job each write suggestions
     for the right tenant only."""

@@ -335,9 +335,13 @@ class WebhookSubscription(Base):
     """A partner's HTTPS endpoint for asset change events.
 
     Created by a tenant admin for one of the tenant's partner credentials.
-    `secret_ciphertext` is the signing secret encrypted with
-    PS_WEBHOOK_SECRET_KEY (AES-GCM, bound to the row id); the plaintext is
-    returned once, on creation or rotation. See collector/webhooks.py.
+    `secret_ciphertext` is the signing secret encrypted with a key from
+    PS_WEBHOOK_SECRET_KEYS or the legacy PS_WEBHOOK_SECRET_KEY (AES-GCM,
+    bound to the row id; the token names its key id); the plaintext is
+    returned once, on creation or rotation. After a rotation with a grace
+    period, `previous_secret_ciphertext` holds the replaced secret, which
+    also signs deliveries until `previous_secret_expires_at`. See
+    collector/webhooks.py.
     """
 
     __tablename__ = "webhook_subscriptions"
@@ -353,6 +357,8 @@ class WebhookSubscription(Base):
     event_types = Column(ARRAY(Text), nullable=False)
     description = Column(Text)
     secret_ciphertext = Column(Text, nullable=False)
+    previous_secret_ciphertext = Column(Text)
+    previous_secret_expires_at = Column(TIMESTAMP(timezone=True))
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)

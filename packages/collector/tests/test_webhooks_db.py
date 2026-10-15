@@ -36,6 +36,7 @@ URL = "https://hooks.partner.example/ps"
 @pytest.fixture(autouse=True)
 def _config(monkeypatch):
     monkeypatch.setattr(settings, "webhook_secret_key", "s" * 40)
+    monkeypatch.setattr(settings, "webhook_secret_keys", "")
     monkeypatch.setattr(settings, "webhook_max_attempts", 3)
     monkeypatch.setattr(settings, "rate_limit_per_minute", 0)
 
@@ -432,3 +433,241 @@ async def test_purge_removes_old_finished_deliveries(env):
         assert await webhooks.purge_old_deliveries(s) == 0
         later = datetime.now(UTC) + timedelta(days=settings.webhook_delivery_retention_days + 1)
         assert await webhooks.purge_old_deliveries(s, now=later) == 1
+
+
+# ── secret rotation grace period ──────────────────────────────────────
+
+
+async def _rotate(c, sid, **body):
+    return await c.post(
+        f"/api/v1/admin/webhooks/subscriptions/{sid}/rotate-secret",
+        headers=H_A,
+        json=body or None,
+    )
+
+
+async def test_rotate_with_grace_period_signs_with_both_secrets(env):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        assert sub["rotation_grace_ends_at"] is None
+        resp = await _rotate(c, sub["id"], grace_period_seconds=3600)
+        assert resp.status_code == 200, resp.text
+        rotated = resp.json()
+        ends = datetime.fromisoformat(rotated["rotation_grace_ends_at"])
+        assert timedelta(minutes=59) < ends - datetime.now(UTC) <= timedelta(hours=1)
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+
+    rx = Receiver(200)
+    await webhooks.deliver_due(env["factory"], transport=rx.transport())
+    req = rx.requests[0]
+    header = req.headers[webhooks.SIGNATURE_HEADER]
+    assert header.count("v1=") == 2
+    assert webhooks.verify_signature(rotated["secret"], req.content, header)
+    assert webhooks.verify_signature(sub["secret"], req.content, header)
+
+    # Grace over: the old secret stops signing and is dropped from the row.
+    async with env["factory"]() as s:
+        await s.execute(
+            update(WebhookSubscription).values(
+                previous_secret_expires_at=datetime.now(UTC) - timedelta(seconds=1)
+            )
+        )
+        await s.commit()
+    async with _client() as c:
+        listed = (await c.get("/api/v1/admin/webhooks/subscriptions", headers=H_A)).json()
+        assert listed["data"][0]["rotation_grace_ends_at"] is None
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "anthropic"}]})
+    await webhooks.deliver_due(env["factory"], transport=rx.transport())
+    req = rx.requests[1]
+    header = req.headers[webhooks.SIGNATURE_HEADER]
+    assert header.count("v1=") == 1
+    assert webhooks.verify_signature(rotated["secret"], req.content, header)
+    assert not webhooks.verify_signature(sub["secret"], req.content, header)
+    async with env["factory"]() as s:
+        row = (await s.execute(select(WebhookSubscription))).scalar_one()
+        assert row.previous_secret_ciphertext is None and row.previous_secret_expires_at is None
+
+
+async def test_rotate_without_grace_drops_any_previous_secret(env):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        first = (await _rotate(c, sub["id"], grace_period_seconds=600)).json()
+        second = (await _rotate(c, sub["id"])).json()  # no body: immediate
+        assert second["rotation_grace_ends_at"] is None
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+    rx = Receiver(200)
+    await webhooks.deliver_due(env["factory"], transport=rx.transport())
+    req = rx.requests[0]
+    header = req.headers[webhooks.SIGNATURE_HEADER]
+    assert header.count("v1=") == 1
+    assert webhooks.verify_signature(second["secret"], req.content, header)
+    for old in (sub["secret"], first["secret"]):
+        assert not webhooks.verify_signature(old, req.content, header)
+
+
+@pytest.mark.parametrize("grace", [-1, 7 * 86400 + 1])
+async def test_rotate_grace_period_is_bounded(env, grace):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        assert (await _rotate(c, sub["id"], grace_period_seconds=grace)).status_code == 422
+
+
+# ── encryption key rotation ───────────────────────────────────────────
+
+
+async def _subscriptions(factory) -> dict[str, WebhookSubscription]:
+    async with factory() as s:
+        return {str(r.id): r for r in (await s.execute(select(WebhookSubscription))).scalars()}
+
+
+async def test_keyring_rotation_rekeys_on_use_and_with_the_rekey_command(env, monkeypatch):
+    async with _client() as c:
+        one = (await _subscribe(c, env["pa"])).json()
+        two = (await _subscribe(c, env["pa"], event_types=["asset.retired"])).json()
+    subs = await _subscriptions(env["factory"])
+    assert all(r.secret_ciphertext.startswith("v1.") for r in subs.values())
+
+    # New active key; the legacy key stays configured for old ciphertexts.
+    monkeypatch.setattr(settings, "webhook_secret_keys", "2026b:" + "n" * 40)
+    async with _client() as c:
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+    rx = Receiver(200)
+    assert (await webhooks.deliver_due(env["factory"], transport=rx.transport())).succeeded == 1
+    req = rx.requests[0]
+    assert webhooks.verify_signature(
+        one["secret"], req.content, req.headers[webhooks.SIGNATURE_HEADER]
+    )
+
+    subs = await _subscriptions(env["factory"])
+    # Re-encrypted on use, without touching updated_at.
+    assert subs[one["id"]].secret_ciphertext.startswith("v2.2026b.")
+    assert subs[one["id"]].updated_at.isoformat() == one["updated_at"]
+    assert subs[two["id"]].secret_ciphertext.startswith("v1.")
+
+    result = await webhooks.rekey_all(env["factory"])
+    assert (result.checked, result.rekeyed, result.unchanged, result.unreadable) == (2, 1, 1, 0)
+    assert (await webhooks.rekey_all(env["factory"])).unchanged == 2
+
+    # The legacy key can go now; both secrets are still readable.
+    monkeypatch.setattr(settings, "webhook_secret_key", "")
+    for sid, row in (await _subscriptions(env["factory"])).items():
+        assert row.secret_ciphertext.startswith("v2.2026b.")
+        expected = one["secret"] if sid == one["id"] else two["secret"]
+        assert webhooks.decrypt_secret(row.secret_ciphertext, row.id) == expected
+
+
+async def test_rekey_reports_unreadable_secrets_and_keeps_a_grace_secret(env, monkeypatch):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        await _rotate(c, sub["id"], grace_period_seconds=3600)
+        broken = (await _subscribe(c, env["pa"])).json()
+    async with env["factory"]() as s:
+        await s.execute(
+            update(WebhookSubscription)
+            .where(WebhookSubscription.id == broken["id"])
+            .values(secret_ciphertext="v1.AAAA")
+        )
+        await s.commit()
+
+    monkeypatch.setattr(settings, "webhook_secret_keys", "k2:" + "n" * 40)
+    result = await webhooks.rekey_all(env["factory"])
+    assert (result.rekeyed, result.unreadable) == (1, 1)
+    row = (await _subscriptions(env["factory"]))[sub["id"]]
+    assert row.secret_ciphertext.startswith("v2.k2.")
+    assert row.previous_secret_ciphertext.startswith("v2.k2.")
+    assert webhooks.decrypt_secret(row.previous_secret_ciphertext, row.id) == sub["secret"]
+
+
+async def test_unknown_key_id_dead_letters_with_a_clear_reason(env, monkeypatch):
+    monkeypatch.setattr(settings, "webhook_secret_keys", "gone:" + "g" * 40)
+    async with _client() as c:
+        await _subscribe(c, env["pa"])
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+    monkeypatch.setattr(settings, "webhook_secret_keys", "new:" + "n" * 40)
+    rx = Receiver(200)
+    assert (await webhooks.deliver_due(env["factory"], transport=rx.transport())).dead == 1
+    assert rx.requests == []
+    (row,) = await _deliveries(env["factory"])
+    assert row.last_error == "signing secret unreadable; rotate the secret"
+
+
+async def test_malformed_keyring_fails_fast_without_burning_attempts(env, monkeypatch):
+    async with _client() as c:
+        await _subscribe(c, env["pa"])
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+    monkeypatch.setattr(settings, "webhook_secret_keys", "oops")
+    with pytest.raises(webhooks.WebhooksNotConfigured):
+        await webhooks.deliver_due(env["factory"], transport=Receiver(200).transport())
+    (row,) = await _deliveries(env["factory"])
+    assert row.status == "pending" and row.attempts == 0
+
+
+# ── attestation events ────────────────────────────────────────────────
+
+
+async def test_attestation_queues_asset_attested_without_personal_data(env):
+    async with _client() as c:
+        await _subscribe(c, env["pa"])  # default: every event type
+        await _subscribe(c, env["pa"], event_types=["asset.created"])
+        await c.post(
+            "/ingest/events",
+            headers=H_A,
+            json={"events": [{"vendor": "openai", "owner_email": "owner@corp.example"}]},
+        )
+        async with env["factory"]() as s:
+            asset_id = (await s.execute(select(AIAsset.id))).scalar_one()
+        resp = await c.post(
+            f"/api/v1/registry/assets/{asset_id}/attestations",
+            headers=H_A,
+            json={
+                "field": "owner",
+                "state": "disputed",
+                "attested_by": "reviewer@corp.example",
+                "comment": "Jane Doe left; ask jane.doe@corp.example",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+
+    rows = [r for r in await _deliveries(env["factory"]) if r.event_type == "asset.attested"]
+    assert len(rows) == 1  # not to the asset.created-only subscription
+    payload = rows[0].payload
+    assert payload["type"] == "asset.attested"
+    assert rows[0].asset_id == asset_id
+    assert payload["data"]["attestation"] == {
+        "id": resp.json()["data"]["id"],
+        "field": "owner",
+        "state": "disputed",
+        "actor_type": "tenant",
+        "attested_at": resp.json()["data"]["attested_at"],
+    }
+    assert payload["data"]["asset"]["id"] == str(asset_id)
+    dumped = json.dumps(payload)
+    for personal in ("reviewer@corp.example", "owner@corp.example", "Jane Doe"):
+        assert personal not in dumped
+
+    rx = Receiver(200)
+    await webhooks.deliver_due(env["factory"], transport=rx.transport())
+    assert "asset.attested" in [r.headers[webhooks.EVENT_TYPE_HEADER] for r in rx.requests]
+
+
+async def test_attestation_event_needs_changes_scope(env):
+    async with _client() as c:
+        await _subscribe(c, env["pa_changes"], event_types=["asset.attested"])
+        resp = await _subscribe(c, env["pa_assets"], event_types=["asset.attested"])
+        assert resp.status_code == 400 and "changes:read" in resp.text
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+        async with env["factory"]() as s:
+            asset_id = (await s.execute(select(AIAsset.id))).scalar_one()
+            await s.execute(
+                update(PartnerCredential)
+                .where(PartnerCredential.id == env["pa_changes"])
+                .values(scopes=["assets:read"])
+            )
+            await s.commit()
+        resp = await c.post(
+            f"/api/v1/registry/assets/{asset_id}/attestations",
+            headers=H_A,
+            json={"field": "asset", "state": "attested", "attested_by": "r@corp.example"},
+        )
+        assert resp.status_code == 201
+    assert await _deliveries(env["factory"]) == []
