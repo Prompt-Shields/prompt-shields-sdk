@@ -45,9 +45,28 @@ integration that writes CIs.
 
 | PS Data | CMDB | Identifier |
 |---------|------|------------|
-| AI Asset | `asset_class` CI (default `cmdb_ci_ai_application`) | `promptshields:asset:<asset id>` |
+| AI Asset, SaaS / externally hosted vendor | `asset_class` CI (default `cmdb_ci_function_ai`) | `promptshields:asset:<asset id>` |
+| AI Asset, self-hosted vendor | `self_hosted_asset_class` CI (default `cmdb_ci_appl_ai_application`) | `promptshields:asset:<asset id>` |
 | AI Vendor | `provider_class` CI (default `cmdb_ci_service`) | `promptshields:provider:<vendor>` |
 | Asset → Vendor | `cmdb_rel_ci`, type `Depends on::Used by` | |
+
+### AI CI classes
+
+The AI classes ship with the **CMDB CI Class Models** store application,
+version **1.68.0 or later**; CSDM 5 describes the same two classes:
+
+| Class | Label | Use |
+|-------|-------|-----|
+| `cmdb_ci_function_ai` | AI Function | AI hosted or developed outside your organisation: the SaaS model APIs (OpenAI, Anthropic, Bedrock, Vertex AI, ...) that most Prompt Shields assets are |
+| `cmdb_ci_appl_ai_application` | AI Application (extends `cmdb_ci_appl`) | AI your organisation hosts itself |
+
+An asset goes to `self_hosted_asset_class` when its vendor (compared
+case-insensitively) is in `self_hosted_vendors` (default `ollama`, `vllm`,
+`llamacpp`, `localai`, `tgi`, `triton`, `self_hosted`), and to
+`asset_class` otherwise. Set `self_hosted_asset_class` to `null` to send
+every asset to `asset_class`. On an instance without the store application,
+point both at classes you have (for example a custom `u_` class, or
+`cmdb_ci_appl` with the identification rule below).
 
 Each CI carries its identifier as `correlation_id` and as the
 `source_native_key` of its `sys_object_source_info` (source name = the
@@ -70,14 +89,22 @@ not pushed yet.
 ## Setup
 
 1. In ServiceNow:
-   - Create the AI asset class, or pick an existing one. The issue's target
-     is `cmdb_ci_ai_application`; if your release ships AI asset classes, set
-     `asset_class` to the one you use. `cmdb_ci_appl` works too, but its
-     out-of-the-box identification rule depends on a hosting CI, so add an
-     independent rule as below.
-   - Give the asset class and the vendor class an **independent
-     identification rule on `correlation_id`** (CI Class Manager →
-     Identification Rule).
+   - Install or update **CMDB CI Class Models** (ServiceNow Store) to
+     1.68.0 or later, so `cmdb_ci_function_ai` and
+     `cmdb_ci_appl_ai_application` exist; or set `asset_class` /
+     `self_hosted_asset_class` to classes you already have.
+   - Give each class the connector writes (`cmdb_ci_function_ai`,
+     `cmdb_ci_appl_ai_application` and the vendor class, `cmdb_ci_service`
+     by default) an **independent identification rule with one identifier
+     entry on `correlation_id`** (CI Class Manager → class → Identification
+     Rule → Add identifier entry, criterion attribute `correlation_id`,
+     independent). This is required: the connector sends no hosting CI, and
+     `cmdb_ci_appl_ai_application` inherits the `cmdb_ci_appl` rule, which
+     is dependent (it needs a "Runs on" host), so IRE would otherwise answer
+     `MISSING_DEPENDENCY` or `MISSING_MATCHING_ATTRIBUTES` and the run
+     fails. Check the rules in a sub-production instance first; the class
+     definitions above come from the store application release, and
+     out-of-the-box identifier entries can differ between versions.
    - Add a choice `PromptShields` (or your `data_source`) to the
      `cmdb_ci.discovery_source` choice list and, if other sources write the
      same classes, a reconciliation rule for it.
@@ -107,7 +134,10 @@ PS_SERVICENOW='{
 Use `"username"` and `"password"` instead of the OAuth fields for basic
 auth; exactly one of the two is required. Optional per-tenant fields:
 `data_source` (default `PromptShields`), `asset_class` (default
-`cmdb_ci_ai_application`), `provider_class` (default `cmdb_ci_service`;
+`cmdb_ci_function_ai`), `self_hosted_asset_class` (default
+`cmdb_ci_appl_ai_application`; `null` to use `asset_class` for every
+asset), `self_hosted_vendors` (JSON list, see above), `provider_class`
+(default `cmdb_ci_service`;
 `null` pushes assets only, without vendor CIs or relationships) and
 `batch_size` (assets per IRE request, default 50, at most 100). For a
 collector reached over an internal network, set
@@ -130,6 +160,11 @@ collector reached over an internal network, set
   address, and redirects are never followed.
 - Every Partner API read made by the connector is checked against the
   credential's scopes and recorded in the partner audit log.
+- With OAuth, the access token is fetched once per run and fetched again
+  shortly before its `expires_in` runs out (60 seconds before, or a tenth
+  of its lifetime if shorter). If a call still answers `401`, the token is
+  fetched again and the call repeated once; a second `401` fails the run.
+  Tokens are never logged.
 - Requests time out after 30 seconds; `429`, `5xx` and network errors are
   retried up to four times, honouring `Retry-After`.
 

@@ -358,6 +358,40 @@ def test_processor_configuration_covers_every_ldif_type():
     assert cfg["connectorId"] == "prompt-shields"
 
 
+def test_business_unit_fact_sheet_type_is_configurable():
+    ldif = lx.build_ldif(
+        [_asset()], connector_id="prompt-shields", business_unit_type="UserGroup"
+    )
+    types = {i["type"] for i in ldif["content"]}
+    assert "UserGroup" in types and "Organization" not in types
+    cfg = lx.processor_configuration("prompt-shields", "UserGroup")
+    bu = [p for p in cfg["processors"] if p["type"] == "UserGroup"]
+    assert len(bu) == 1 and bu[0]["filter"] == {"exactType": "UserGroup"}
+    with pytest.raises(ValueError):
+        _settings(business_unit_type="Team")
+
+
+def test_lx_workspace_is_optional_and_sent_when_set():
+    ws = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    assert "lxWorkspace" not in lx.build_ldif([_asset()], connector_id="c")
+    ldif = lx.build_ldif([_asset()], connector_id="c", lx_workspace=ws)
+    assert ldif["lxWorkspace"] == str(ws)
+    with pytest.raises(ValueError):
+        _settings(lx_workspace="not-a-uuid")
+
+
+@pytest.mark.parametrize("value", [12345, 1.5, ["2026"], {"a": 1}, True, "nope"])
+def test_malformed_dates_are_dropped_not_raised(value):
+    data = lx.asset_items(_asset(first_seen=value))[0]["data"]
+    assert "lifecycleStart" not in data
+    retired = lx.asset_items(
+        _asset(lifecycle_state="retired", lifecycle_changed_at=value, last_seen=value)
+    )[0]["data"]
+    assert "lifecycleStart" not in retired
+    assert cx.next_cursor("2026-10-15T00:00:00+00:00", [{"changed_at": value}], None)
+    assert cx.next_cursor(None, [], value) is None
+
+
 def test_next_cursor():
     assert (
         lx.next_cursor(None, [], "2026-10-15T12:00:00Z") == "2026-10-15T11:55:00+00:00"
@@ -599,3 +633,134 @@ async def test_invalid_run_id_is_refused():
     kw["leanix_transport"] = httpx.MockTransport(handler)
     out = await lx.sync_leanix(db, TENANT, **kw)
     assert out["status"] == "error" and "no valid id" in out["error"]
+
+
+async def test_sync_sends_configured_workspace_and_business_unit_type():
+    ws = "22222222-2222-2222-2222-222222222222"
+    db = FakeSession()
+    fakes = Fakes()
+    settings = _settings(lx_workspace=ws, business_unit_type="UserGroup")
+    out = await lx.sync_leanix(db, TENANT, **fakes.kwargs(settings))
+    assert out["status"] == "ok", out
+    assert fakes.ldifs[0]["lxWorkspace"] == ws
+    assert "UserGroup" in {i["type"] for i in fakes.ldifs[0]["content"]}
+    cfg = json.loads(fakes.leanix_requests[1].content)
+    assert "UserGroup" in {p["type"] for p in cfg["processors"]}
+
+
+async def test_malformed_partner_dates_do_not_fail_the_sync():
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(first_seen=12345, last_seen={"x": 1})])
+    out = await lx.sync_leanix(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "ok", out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Token refresh
+# ──────────────────────────────────────────────────────────────────────
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+async def test_long_sync_refreshes_token_before_expiry_and_after_401(caplog):
+    """A run polled past the token lifetime refreshes it proactively; a 401
+    anyway refreshes it once more and repeats the call once."""
+    caplog.set_level(logging.DEBUG)
+    clock = Clock()
+    issued: list[str] = []
+    seen: list[tuple[str, str]] = []
+    reject: set[str] = set()
+
+    async def tick(_s: float) -> None:
+        clock.t += 1000  # each poll interval "lasts" 1000s
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        if r.url.path == lx.TOKEN_PATH:
+            issued.append(f"{BEARER}-{len(issued) + 1}")
+            return httpx.Response(
+                200, json={"access_token": issued[-1], "expires_in": "3600"}
+            )
+        auth = r.headers["authorization"].removeprefix("Bearer ")
+        seen.append((r.url.path.rsplit("/", 1)[-1], auth))
+        if auth in reject:
+            return httpx.Response(401, text=auth)
+        if r.url.path.endswith("/status"):
+            done = sum(p == "status" for p, _ in seen) >= 5
+            return httpx.Response(
+                200, json={"status": "FINISHED" if done else "RUNNING"}
+            )
+        return httpx.Response(200, json={"id": "run-1"})
+
+    conn = lx.connection_for_tenant(TENANT, _settings())
+    async with lx.LeanIXClient(
+        conn,
+        transport=httpx.MockTransport(handler),
+        resolver=_public,
+        sleep=tick,
+        clock=clock,
+    ) as client:
+        run_id = await client.start_run({"content": []})
+        assert await client.wait_for_run(run_id) == "FINISHED"
+        # Server revokes the current token early: one refresh, one repeat.
+        reject.add(issued[-1])
+        assert await client.start_run({"content": []}) == "run-1"
+
+    # Polls at +0..+3000s use token 1 (refresh due at +3540s); +4000s token 2.
+    assert [a for p, a in seen if p == "status"] == [
+        f"{BEARER}-1",
+        f"{BEARER}-1",
+        f"{BEARER}-1",
+        f"{BEARER}-1",
+        f"{BEARER}-2",
+    ]
+    assert seen[-2:] == [
+        ("synchronizationRuns", f"{BEARER}-2"),
+        ("synchronizationRuns", f"{BEARER}-3"),
+    ]
+    assert len(issued) == 3
+    for token in issued + [LX_TOKEN]:
+        assert token not in caplog.text
+
+
+async def test_repeated_401_fails_once_refreshed():
+    calls: list[str] = []
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        calls.append(r.url.path)
+        if r.url.path == lx.TOKEN_PATH:
+            return httpx.Response(
+                200, json={"access_token": BEARER, "expires_in": 3600}
+            )
+        return httpx.Response(401)
+
+    conn = lx.connection_for_tenant(TENANT, _settings())
+    async with lx.LeanIXClient(
+        conn, transport=httpx.MockTransport(handler), resolver=_public, sleep=_no_sleep
+    ) as client:
+        with pytest.raises(cx.ConnectorError, match="returned HTTP 401"):
+            await client.put_processor_configuration()
+    assert calls.count(lx.TOKEN_PATH) == 2 and len(calls) == 4
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (3600, 3600.0),
+        ("90", 90.0),
+        (None, None),
+        (0, None),
+        (-5, None),
+        ("soon", None),
+        (True, None),
+        (float("inf"), None),
+        (float("nan"), None),
+    ],
+)
+def test_expires_in_parsing(value, expected):
+    assert cx._expires_in(value) == expected
