@@ -46,7 +46,9 @@ Security
     written with the legacy PS_WEBHOOK_SECRET_KEY and still decrypt with
     it. Secrets under an older key are re-encrypted with the active key
     when used for a delivery, or all at once by
-    `python -m collector.webhooks rekey`.
+    `python -m collector.webhooks rekey`. A token whose key id this process
+    does not have (a rolling restart that adds a key) is retried with the
+    normal backoff rather than dead-lettered; see SecretKeyMissing.
   - Scope: only partners that are active, unexpired and hold the scope
     for the event (EVENT_SCOPES; `registry:read` still covers it through
     the partner_scopes alias) get events, checked at enqueue and again at
@@ -188,6 +190,22 @@ class DestinationNotAllowed(ValueError):
     """The webhook URL is malformed or points somewhere it must not."""
 
 
+class SecretKeyMissing(ValueError):
+    """A stored secret names a key this process does not have: a key id
+    missing from PS_WEBHOOK_SECRET_KEYS, or a legacy "v1." token without
+    PS_WEBHOOK_SECRET_KEY.
+
+    Usually a rolling restart that adds a key: processes already running
+    the new keyring re-encrypt secrets with it, and the others cannot read
+    them until they restart. Deliveries treat it as a retryable failure.
+    """
+
+    def __init__(self, key_id: str | None) -> None:
+        self.key_id = key_id
+        name = "legacy key PS_WEBHOOK_SECRET_KEY" if key_id is None else f"key id {key_id!r}"
+        super().__init__(f"secret needs {name}, which this process does not have")
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -258,7 +276,7 @@ def active_key_id() -> str | None:
 
 def _legacy_aead() -> AESGCM:
     if len(settings.webhook_secret_key) < MIN_KEY_LENGTH:
-        raise ValueError("secret needs the legacy key; PS_WEBHOOK_SECRET_KEY is not set")
+        raise SecretKeyMissing(None)
     return _derive(settings.webhook_secret_key, _INFO_LEGACY)
 
 
@@ -311,8 +329,9 @@ def needs_rekey(token: str) -> bool:
 def decrypt_secret(token: str, subscription_id: UUID) -> str:
     """Decrypt with the key the token names (the legacy key for "v1.").
 
-    Raises ValueError if the token is malformed, its key is not configured
-    any more, or it was not encrypted for this subscription with that key.
+    Raises SecretKeyMissing (a ValueError) if the token's key is not
+    configured in this process, and ValueError if the token is malformed or
+    was not encrypted for this subscription with that key.
     Raises WebhooksNotConfigured if the keyring itself is malformed (so a
     configuration mistake never dead-letters deliveries).
     """
@@ -323,12 +342,12 @@ def decrypt_secret(token: str, subscription_id: UUID) -> str:
     else:
         key = dict(keyring()).get(kid)
         if key is None:
-            raise ValueError(f"secret key id {kid!r} is not in PS_WEBHOOK_SECRET_KEYS")
+            raise SecretKeyMissing(kid)
         aead, aad = _derive(key, _INFO_KEYRING), _keyring_aad(subscription_id, kid)
-    raw = base64.urlsafe_b64decode(blob.encode())
     try:
+        raw = base64.urlsafe_b64decode(blob.encode())
         pt = aead.decrypt(raw[:12], raw[12:], aad)
-    except InvalidTag as exc:
+    except (InvalidTag, ValueError) as exc:  # binascii.Error is a ValueError
         raise ValueError("secret could not be decrypted") from exc
     return pt.decode()
 
@@ -360,22 +379,38 @@ def verify_signature(
     tolerance: int = SIGNATURE_TOLERANCE_SECONDS,
     now: float | None = None,
 ) -> bool:
-    """Reference receiver check (the docs carry the same code). Accepts the
-    request if any v1 in the header matches."""
-    try:
-        items = [p.split("=", 1) for p in header.split(",")]
-        timestamps = [v for k, v in items if k == "t"]
-        timestamp = int(timestamps[0])
-    except (IndexError, ValueError):
+    """Reference receiver check (the docs carry the same logic; a test runs
+    the documented samples against this). Accepts the request if any v1 in
+    the header matches. A malformed header (missing or non-numeric `t`,
+    items without "=", non-ASCII) returns False and never raises."""
+    if not isinstance(header, str):
         return False
-    if abs((time.time() if now is None else now) - timestamp) > tolerance:
+    timestamp: str | None = None
+    signatures: list[str] = []
+    for item in header.split(","):
+        key, sep, value = item.partition("=")
+        if not sep:
+            continue
+        if key == "t" and timestamp is None:
+            timestamp = value
+        elif key == "v1":
+            signatures.append(value)
+    # ASCII digits only, and short enough to stay an ordinary number.
+    if (
+        timestamp is None
+        or not signatures
+        or not (timestamp.isascii() and timestamp.isdigit())
+        or len(timestamp) > 12
+    ):
         return False
-    expected = _mac(secret, body, timestamp)
+    ts = int(timestamp)
+    if abs((time.time() if now is None else now) - ts) > tolerance:
+        return False
+    expected = _mac(secret, body, ts)
     # Compare against every candidate so timing does not reveal which matched.
     matched = False
-    for key, value in items:
-        if key == "v1":
-            matched |= hmac.compare_digest(expected, value)
+    for value in signatures:
+        matched |= value.isascii() and hmac.compare_digest(expected, value)
     return matched
 
 
@@ -794,9 +829,12 @@ async def _attempt(
         sub = await db.get(WebhookSubscription, d.subscription_id)
         partner = await db.get(PartnerCredential, sub.partner_id) if sub else None
         reason = _ineligible(sub, partner, now, d.event_type)
+        missing_key: SecretKeyMissing | None = None
         if reason is None:
             try:
                 secrets_to_sign = signing_secrets(sub, now)
+            except SecretKeyMissing as exc:
+                missing_key = exc
             except ValueError:
                 reason = "signing secret unreadable; rotate the secret"
         if reason is not None:
@@ -804,6 +842,19 @@ async def _attempt(
             d.last_error = reason
             await db.commit()
             return "dead"
+        if missing_key is not None:
+            # Most likely a rolling restart: another process already uses a
+            # key this one lacks. Count the attempt and back off as for any
+            # failure, without sending; a process that has the key (or this
+            # one, once restarted) delivers it.
+            _log_missing_key(missing_key)
+            d.attempts += 1
+            d.last_attempt_at = now
+            d.last_status_code = None
+            d.last_error = _missing_key_error(missing_key)
+            outcome = _fail(d)
+            await db.commit()
+            return outcome
 
         body = json.dumps(d.payload, separators=(",", ":"), sort_keys=True).encode()
         d.attempts += 1
@@ -834,12 +885,8 @@ async def _attempt(
             d.status = "succeeded"
             d.delivered_at = _utcnow()
             outcome = "succeeded"
-        elif d.attempts >= settings.webhook_max_attempts:
-            d.status = "dead"
-            outcome = "dead"
         else:
-            d.next_attempt_at = _utcnow() + retry_delay(d.attempts)
-            outcome = "retrying"
+            outcome = _fail(d)
         # Re-encrypt secrets stored under an older key, and drop an expired
         # previous secret. After the POST so the row lock is held briefly.
         try:
@@ -848,6 +895,37 @@ async def _attempt(
             pass  # current secret readable (we just signed); previous skipped
         await db.commit()
         return outcome
+
+
+def _fail(d: WebhookDelivery) -> str:
+    """Schedule a failed attempt's retry, or dead-letter it after the last."""
+    if d.attempts >= settings.webhook_max_attempts:
+        d.status = "dead"
+        return "dead"
+    d.next_attempt_at = _utcnow() + retry_delay(d.attempts)
+    return "retrying"
+
+
+# Keys this process already warned about (None: the legacy key), so a
+# rollout logs once per key rather than once per delivery.
+_missing_keys_logged: set[str | None] = set()
+
+
+def _missing_key_error(exc: SecretKeyMissing) -> str:
+    key = "the legacy key" if exc.key_id is None else f"key id {exc.key_id}"
+    return f"signing secret uses {key}, not configured on this worker; will retry"
+
+
+def _log_missing_key(exc: SecretKeyMissing) -> None:
+    if exc.key_id in _missing_keys_logged:
+        return
+    _missing_keys_logged.add(exc.key_id)
+    logger.warning(
+        "webhook signing secrets use %s, which this process does not have; "
+        "their deliveries are retried with backoff. Add a new key to every "
+        "process (after the active key) before making it active.",
+        "the legacy PS_WEBHOOK_SECRET_KEY" if exc.key_id is None else f"key id {exc.key_id!r}",
+    )
 
 
 def previous_secret_valid(sub: WebhookSubscription, now: datetime) -> bool:
@@ -867,6 +945,8 @@ def signing_secrets(sub: WebhookSubscription, now: datetime) -> list[str]:
     if previous_secret_valid(sub, now):
         try:
             out.append(decrypt_secret(sub.previous_secret_ciphertext, sub.id))
+        except SecretKeyMissing as exc:
+            _log_missing_key(exc)
         except ValueError:
             logger.warning("webhook subscription %s: previous secret unreadable", sub.id)
     return out
@@ -992,16 +1072,67 @@ async def purge_old_deliveries(db: AsyncSession, *, now: datetime | None = None)
     return result.rowcount or 0
 
 
+async def clear_expired_previous_secrets(
+    session_factory, *, now: datetime | None = None, list_factory=None
+) -> int:
+    """Drop rotated-out secrets whose grace period is over.
+
+    Deliveries already do this for the subscriptions they use; this covers
+    idle ones, so an old secret is not kept at rest much past its grace
+    period. Listing the tenants is a logged RLS bypass (``list_factory``);
+    each tenant's rows are cleared under that tenant's context.
+    `updated_at` is left alone. Returns the number of rows cleared.
+    """
+    now = now or _utcnow()
+    list_factory = list_factory or worker_session_factory(
+        session_factory, "webhook-secret-sweep"
+    )
+    expired = (
+        WebhookSubscription.previous_secret_ciphertext.is_not(None),
+        or_(
+            WebhookSubscription.previous_secret_expires_at.is_(None),
+            WebhookSubscription.previous_secret_expires_at <= now,
+        ),
+    )
+    async with list_factory() as db:
+        tenant_ids = (
+            await db.execute(select(WebhookSubscription.tenant_id).where(*expired).distinct())
+        ).scalars().all()
+
+    cleared = 0
+    for tenant_id in tenant_ids:
+        async with session_factory() as db:
+            await rls.set_tenant(db, tenant_id)
+            result = await db.execute(
+                update(WebhookSubscription)
+                .where(WebhookSubscription.tenant_id == tenant_id, *expired)
+                .values(
+                    previous_secret_ciphertext=None,
+                    previous_secret_expires_at=None,
+                    updated_at=WebhookSubscription.updated_at,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+            cleared += result.rowcount or 0
+    return cleared
+
+
 async def run_worker(session_factory, interval: float) -> None:
-    """Deliver forever, every `interval` seconds; purge once an hour."""
+    """Deliver forever, every `interval` seconds. Once an hour, purge old
+    deliveries and clear expired rotated-out secrets."""
     last_purge = 0.0
     claim_factory = worker_session_factory(session_factory)
+    sweep_factory = worker_session_factory(session_factory, "webhook-secret-sweep")
     while True:
         try:
             await deliver_due(session_factory, claim_factory=claim_factory)
             if time.monotonic() - last_purge > 3600:
                 async with claim_factory() as db:
                     await purge_old_deliveries(db)
+                await clear_expired_previous_secrets(
+                    session_factory, list_factory=sweep_factory
+                )
                 last_purge = time.monotonic()
         except asyncio.CancelledError:
             raise
@@ -1079,6 +1210,8 @@ async def _run_cli(command: str, loop: bool, interval: float) -> None:
         if command == "purge":
             async with worker_session_factory(factory)() as db:
                 print(f"webhook deliveries purged: {await purge_old_deliveries(db)}")
+            cleared = await clear_expired_previous_secrets(factory)
+            print(f"expired rotated-out secrets cleared: {cleared}")
         elif command == "rekey":
             print(f"webhook secret rekey: {asdict(await rekey_all(factory))}")
         elif loop:
@@ -1093,8 +1226,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m collector.webhooks",
         description=(
-            "Deliver queued partner webhooks, purge old delivery rows, or "
-            "re-encrypt signing secrets with the active PS_WEBHOOK_SECRET_KEYS key."
+            "Deliver queued partner webhooks, purge old delivery rows and "
+            "expired rotated-out secrets, or re-encrypt signing secrets with "
+            "the active PS_WEBHOOK_SECRET_KEYS key."
         ),
     )
     parser.add_argument("command", choices=("deliver", "purge", "rekey"))

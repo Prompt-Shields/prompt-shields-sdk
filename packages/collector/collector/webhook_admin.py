@@ -7,6 +7,9 @@ The signing secret is returned once, on creation and on rotation.
   POST   /subscriptions                        create (returns the secret)
   GET    /subscriptions                        list
   GET    /subscriptions/{id}                   read
+  PATCH  /subscriptions/{id}                   change url, event_types or
+                                               is_active (pause / resume);
+                                               audited
   DELETE /subscriptions/{id}                   delete with its deliveries
   POST   /subscriptions/{id}/rotate-secret     new secret (returned once);
                                                {"grace_period_seconds": n}
@@ -25,10 +28,11 @@ from uuid import UUID, uuid4
 
 from db.models import PartnerCredential, WebhookDelivery, WebhookSubscription
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import delete, func, select
 
 from collector import webhooks
+from collector.audit import build_audit_row, record_read
 from collector.auth import resolve_tenant
 
 router = APIRouter(prefix="/api/v1/admin/webhooks", tags=["Admin"])
@@ -212,6 +216,108 @@ async def delete_subscription(subscription_id: UUID, request: Request) -> None:
     )
     await db.delete(sub)
     await db.commit()
+
+
+class UpdateSubscriptionBody(BaseModel):
+    """Fields to change; omitted fields keep their value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=webhooks.MAX_URL_LENGTH,
+        description="New destination. Checked like a new subscription's URL.",
+    )
+    event_types: list[webhooks.EventType] | None = Field(
+        default=None,
+        min_length=1,
+        description="Replaces the event list. The partner needs each event's scope.",
+    )
+    is_active: bool | None = Field(
+        default=None,
+        description=(
+            "false pauses the subscription: no new events are queued for it "
+            "and queued deliveries are not sent. true resumes it."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _not_empty_or_null(self):
+        if not self.model_fields_set:
+            raise ValueError("give at least one of url, event_types, is_active")
+        nulls = sorted(f for f in self.model_fields_set if getattr(self, f) is None)
+        if nulls:
+            raise ValueError(f"{', '.join(nulls)} cannot be null")
+        return self
+
+
+@router.patch(
+    "/subscriptions/{subscription_id}",
+    summary="Change a webhook subscription's URL or event types, or pause and resume it",
+)
+async def update_subscription(
+    subscription_id: UUID, body: UpdateSubscriptionBody, request: Request
+) -> dict:
+    tenant_id = await resolve_tenant(request)
+    db = request.state.db
+
+    async def refuse(exc: HTTPException) -> HTTPException:
+        await record_read(request, tenant_id=tenant_id, status_code=exc.status_code)
+        return exc
+
+    try:
+        sub = await _get_subscription(db, tenant_id, subscription_id)
+    except HTTPException as exc:
+        raise await refuse(exc) from None
+
+    event_types = (
+        sorted(set(body.event_types)) if body.event_types is not None else sorted(sub.event_types)
+    )
+    is_active = sub.is_active if body.is_active is None else body.is_active
+    # Changing the events or resuming needs a partner that may receive them
+    # (as on create). Pausing never does, so a revoked partner can be paused.
+    if body.event_types is not None or (body.is_active and not sub.is_active):
+        partner = (
+            await db.execute(
+                select(PartnerCredential).where(
+                    PartnerCredential.id == sub.partner_id,
+                    PartnerCredential.tenant_id == tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        reason = webhooks.partner_ineligible_reason(partner, datetime.now(UTC), event_types)
+        if reason is not None:
+            raise await refuse(
+                _problem(400, "Bad Request", f"Partner cannot receive webhooks: {reason}")
+            )
+    if body.url is not None and body.url != sub.url:
+        try:
+            await webhooks.resolve_destination(body.url)
+        except webhooks.DestinationNotAllowed as exc:
+            raise await refuse(
+                _problem(400, "Bad Request", f"Invalid webhook URL: {exc}")
+            ) from exc
+
+    changed: list[str] = []
+    if body.url is not None and body.url != sub.url:
+        sub.url = body.url
+        changed.append("url")
+    if event_types != sorted(sub.event_types):
+        sub.event_types = event_types
+        changed.append("event_types")
+    if is_active != sub.is_active:
+        sub.is_active = is_active
+        changed.append("is_active")
+
+    # The audit row commits with the change. It names the fields that
+    # changed, not their values (a URL can carry a token in its query).
+    audit = build_audit_row(request, tenant_id=tenant_id, status_code=200)
+    audit.query_params = {**(audit.query_params or {}), "changed_fields": changed}
+    db.add(audit)
+    await db.commit()
+    await db.refresh(sub)
+    return _subscription_dict(sub)
 
 
 class RotateSecretBody(BaseModel):
