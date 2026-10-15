@@ -154,6 +154,13 @@ def _arm_handler(calls: list[httpx.Request], *, throttle_first_list: bool = Fals
                                 "provisioningState": "Failed",
                             },
                         },
+                        {
+                            "name": "paused",
+                            "properties": {
+                                "model": {"format": "OpenAI", "name": "gpt-4o"},
+                                "provisioningState": "Disabled",
+                            },
+                        },
                     ]
                 },
             )
@@ -164,12 +171,13 @@ def _arm_handler(calls: list[httpx.Request], *, throttle_first_list: bool = Fals
 
 async def test_azure_lists_deployments_with_region_and_tags():
     calls: list[httpx.Request] = []
-    accounts, deps = await ci.fetch_azure_deployments(
+    summary, deps = await ci.fetch_azure_deployments(
         _creds(),
         transport=httpx.MockTransport(_arm_handler(calls, throttle_first_list=True)),
         sleep=_no_sleep,
     )
-    assert accounts == 1  # speech skipped, malformed id rejected
+    assert summary == {"accounts": 1}  # speech skipped, malformed id rejected
+    # Failed and Disabled deployments are not serving and are skipped.
     assert [(d.resource_id, d.region, d.model) for d in deps] == [
         (f"{ACCOUNT}/deployments/chat-prod", "swedencentral", "gpt-4o"),
         (f"{ACCOUNT}/deployments/embed", "swedencentral", "text-embedding-3-small"),
@@ -206,6 +214,124 @@ async def test_next_link_to_another_host_is_refused():
     with pytest.raises(ci.CloudInventoryError, match="nextLink"):
         await ci.fetch_azure_deployments(
             _creds(), transport=httpx.MockTransport(handler), sleep=_no_sleep
+        )
+
+
+SUB_DENIED = "aaaaaaaa-0000-0000-0000-000000000002"
+
+
+async def test_a_failing_subscription_does_not_stop_the_others():
+    calls: list[httpx.Request] = []
+    ok = _arm_handler(calls)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if SUB_DENIED in request.url.path:
+            return httpx.Response(403, json={"error": {"code": "AuthorizationFailed"}})
+        return ok(request)
+
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB_DENIED, SUB]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+    )
+    assert summary == {
+        "accounts": 1,
+        "subscription_errors": {SUB_DENIED: "azure: account list returned HTTP 403"},
+    }
+    assert len(deps) == 2
+
+    result = await ci.pull_cloud_inventory(
+        FakeSession(),
+        TENANT,
+        clouds=["azure"],
+        settings=_settings(subscription_ids=[SUB_DENIED, SUB]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+        now=NOW,
+    )
+    assert result["clouds"]["azure"]["status"] == "ok"
+    assert result["clouds"]["azure"]["subscription_errors"] == summary[
+        "subscription_errors"
+    ]
+    assert result["clouds"]["azure"]["deployments"] == 2
+
+
+async def test_every_subscription_failing_is_an_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        return httpx.Response(403)
+
+    with pytest.raises(ci.CloudInventoryError, match="HTTP 403"):
+        await ci.fetch_azure_deployments(
+            _creds(subscription_ids=[SUB, SUB_DENIED]),
+            transport=httpx.MockTransport(handler),
+            sleep=_no_sleep,
+        )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, content=b"<html>not json</html>"),
+        httpx.Response(200, json=["not", "an", "object"]),
+        httpx.Response(200, json={"value": "not-a-list"}),
+        httpx.Response(200, json={"value": [1, "x"]}),
+        httpx.Response(200, json={"value": [], "nextLink": 7}),
+    ],
+)
+async def test_malformed_arm_response_is_a_cloud_error_not_a_crash(response):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        return response
+
+    with pytest.raises(ci.CloudInventoryError):
+        await ci.fetch_azure_deployments(
+            _creds(), transport=httpx.MockTransport(handler), sleep=_no_sleep
+        )
+    # Through the pull: reported per cloud, not raised (no HTTP 500).
+    result = await ci.pull_cloud_inventory(
+        FakeSession(),
+        TENANT,
+        clouds=["azure"],
+        settings=_settings(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+    )
+    assert result["clouds"]["azure"]["status"] == "error"
+
+
+async def test_malformed_deployment_fields_are_tolerated():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        if request.url.path.endswith("/accounts"):
+            return httpx.Response(
+                200, json={"value": [{"id": ACCOUNT, "kind": "OpenAI", "location": 5}]}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {"name": "a", "properties": "x"},
+                    {"name": "b", "properties": {"model": ["gpt-4o"]}},
+                ]
+            },
+        )
+
+    _, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+    )
+    assert [(d.region, d.model) for d in deps] == [(None, None), (None, None)]
+
+
+async def test_unknown_clouds_are_rejected():
+    with pytest.raises(ValueError, match="unknown clouds: gpc"):
+        await ci.pull_cloud_inventory(
+            FakeSession(), TENANT, clouds=["azure", "gpc"], settings=_settings()
         )
 
 
@@ -361,6 +487,37 @@ def test_credentials_come_from_env(monkeypatch):
     creds = ci.credentials_for_tenant(TENANT)
     assert creds.azure.client_secret.get_secret_value() == SECRET
     assert ci.credentials_for_tenant(uuid.uuid4()).azure is None
+
+
+def test_env_tenant_keys_match_case_insensitively(monkeypatch):
+    tenant = uuid.UUID("abcdef01-2345-6789-abcd-ef0123456789")
+    azure = {
+        "directory_id": "contoso.onmicrosoft.com",
+        "client_id": "app",
+        "client_secret": SECRET,
+    }
+    monkeypatch.setenv(
+        "PS_CLOUD_INVENTORY", json.dumps({str(tenant).upper(): {"azure": azure}})
+    )
+    assert ci.credentials_for_tenant(tenant).azure.client_id == "app"
+
+
+@pytest.mark.parametrize(
+    "keys",
+    [
+        ["not-a-tenant"],
+        # The same tenant twice, differing only in case.
+        ["ABCDEF01-2345-6789-ABCD-EF0123456789", "abcdef01-2345-6789-abcd-ef0123456789"],
+    ],
+)
+def test_env_tenant_keys_must_be_distinct_uuids(monkeypatch, keys):
+    azure = {"directory_id": "contoso.com", "client_id": "a", "client_secret": SECRET}
+    monkeypatch.setenv(
+        "PS_CLOUD_INVENTORY", json.dumps({k: {"azure": azure} for k in keys})
+    )
+    with pytest.raises(Exception) as exc_info:
+        ci.credentials_for_tenant(TENANT)
+    assert SECRET not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
