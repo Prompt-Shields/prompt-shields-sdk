@@ -23,6 +23,7 @@ import {
   apiSurfaceOf,
   extractPSHeaders,
   providerFromHeaders,
+  requestBodyForTelemetry,
 } from './ps-telemetry';
 import {
   inputTokensOf,
@@ -628,12 +629,8 @@ export function psOtel(
           responseBody = undefined;
         }
       }
-      let requestBody: any;
-      try {
-        requestBody = await c.req.json();
-      } catch {
-        requestBody = undefined;
-      }
+      // Multipart uploads yield only their `model`; the form is not re-read.
+      const requestBody = await requestBodyForTelemetry(c);
       let waitUntil: ((p: Promise<unknown>) => void) | undefined;
       try {
         const ctx = c.executionCtx;

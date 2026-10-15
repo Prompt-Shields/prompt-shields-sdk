@@ -185,4 +185,60 @@ describe('psTelemetry (Hono adapter)', () => {
       tokens_out: 2,
     });
   });
+
+  describe('multipart audio uploads', () => {
+    const form = () => {
+      const f = new FormData();
+      f.append('model', 'nova-3');
+      f.append('prompt', 'secret context');
+      f.append('file', new Blob([new Uint8Array(64)], { type: 'audio/wav' }));
+      return f;
+    };
+
+    test('a transcription reports its model and seconds, not the form', async () => {
+      const app = new Hono();
+      app.use('*', psTelemetry());
+      app.post('/v1/audio/transcriptions', async (c) => {
+        // As createTranscriptionHandler does: Hono's cached form.
+        await c.req.formData();
+        return c.json({
+          text: 'hello',
+          usage: { type: 'duration', seconds: 3.5 },
+        });
+      });
+      await app.request('/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'x-portkey-provider': 'deepgram' },
+        body: form(),
+      });
+      await flush();
+      expect(sent.events[0]).toMatchObject({
+        vendor: 'deepgram',
+        model: 'nova-3',
+        api_surface: 'audio',
+        modality: 'audio',
+        usage_units: 3.5,
+        usage_unit_type: 'seconds',
+      });
+      expect(JSON.stringify(sent)).not.toContain('secret context');
+    });
+
+    test('a form the handler never parsed is not read by telemetry', async () => {
+      const app = new Hono();
+      app.use('*', psTelemetry());
+      app.post('/v1/audio/translations', (c) =>
+        c.json({ status: 'failure' }, 413)
+      );
+      const res = await app.request('/v1/audio/translations', {
+        method: 'POST',
+        body: form(),
+      });
+      await flush();
+      expect(res.status).toBe(413);
+      expect(sent.events[0]).toMatchObject({
+        model: 'unknown',
+        modality: 'audio',
+      });
+    });
+  });
 });
