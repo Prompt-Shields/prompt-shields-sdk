@@ -6,6 +6,7 @@ describe('CacheService.getCachedResponse cache-mode resolution', () => {
   const buildHonoContext = (spy: jest.Mock) =>
     ({
       get: (k: string) => (k === 'getFromCache' ? spy : undefined),
+      set: jest.fn(),
     }) as any;
 
   const buildRequestContext = (cacheConfig: any, honoContext: any) =>

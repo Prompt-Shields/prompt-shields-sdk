@@ -58,10 +58,22 @@ app.include_router(oauth_router)
 app.include_router(partner_admin_router)
 app.include_router(partner_registry_router)
 
+# Human attestation: tenant registry and Partner API routes (#98)
+from collector.attestation_api import partner_router as attestation_partner_router  # noqa: E402
+from collector.attestation_api import tenant_router as attestation_tenant_router  # noqa: E402
+
+app.include_router(attestation_tenant_router)
+app.include_router(attestation_partner_router)
+
 # Platform signal: provider org usage pull (admin trigger)
 from collector.provider_usage_admin import router as provider_usage_router  # noqa: E402
 
 app.include_router(provider_usage_router)
+
+# Platform signal: cloud AI inventory (admin trigger)
+from collector.cloud_inventory import router as cloud_inventory_router  # noqa: E402
+
+app.include_router(cloud_inventory_router)
 
 # Operator surface: retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router  # noqa: E402

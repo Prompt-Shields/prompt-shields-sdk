@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Text, ARRAY, TIMESTAMP, Integer, BigInteger, Numeric, ForeignKey, Index
+    Column, Text, ARRAY, TIMESTAMP, Integer, BigInteger, Numeric, ForeignKey, Index, DDL, event
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -52,6 +52,9 @@ class AIAsset(Base):
     business_unit = Column(Text)
     owner_email = Column(Text)
     environment = Column(Text)
+    # Cloud region of the deployment (e.g. "swedencentral"), for sovereignty
+    # reporting. Set by the cloud inventory platform signal.
+    region = Column(Text)
     status = Column(Text, default="active")
     # Telemetry-driven lifecycle: active -> stale -> retired, back to active
     # when telemetry resumes. Independent of the governance `status` above.
@@ -182,6 +185,9 @@ class PartnerCredential(Base):
     api_key_hash = Column(Text)
     scopes = Column(ARRAY(Text), nullable=False, default=lambda: ["registry:read"])
     rate_limit = Column(Integer, default=1000)
+    # Named tier from collector.partner_scopes.RATE_LIMIT_TIERS; NULL means
+    # the custom `rate_limit` above applies (all Phase 1 credentials).
+    rate_limit_tier = Column(Text)
     is_active = Column(Text, default="true")  # 'true' | 'false' — text for portability
     partner_metadata = Column(JSONB, default=dict)
     expires_at = Column(TIMESTAMP(timezone=True))
@@ -291,3 +297,89 @@ class TelemetryClientStats(Base):
     ignored_fields = Column(JSONB, nullable=False, default=dict)
     first_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     last_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Human attestation (#98)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class AssetAttestation(Base):
+    """Append-only history of human sign-offs on an asset field.
+
+    One row per decision: who (`attested_by`, plus the authenticated caller),
+    when, which field, the state chosen and a snapshot of the field's value
+    at that moment. The current state of a field is its newest row. Rows are
+    never updated or deleted (triggers reject UPDATE, and DELETE outside
+    tenant erasure, on Postgres). Attestation never changes `AIAsset.confidence`.
+    See collector/attestation.py.
+    """
+
+    __tablename__ = "asset_attestations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("ai_assets.id"), nullable=False)
+    field = Column(Text, nullable=False)  # e.g. 'asset', 'owner', 'data_classification'
+    state = Column(Text, nullable=False)  # unreviewed | attested | disputed | retired
+    value = Column(JSONB)  # the field's value when the decision was made
+    comment = Column(Text)
+    attested_by = Column(Text, nullable=False)  # the human, e.g. an email
+    actor_type = Column(Text, nullable=False)  # 'tenant' | 'partner'
+    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True)
+    # SHA-256 lookup prefix of the tenant API key used, never the key itself.
+    api_key_prefix = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index(
+            "ix_asset_attestations_tenant_asset_field_ts",
+            "tenant_id", "asset_id", "field", "created_at",
+        ),
+    )
+
+
+ATTESTATION_IMMUTABLE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION asset_attestations_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'asset_attestations rows are immutable; insert a new row instead';
+END;
+$$ LANGUAGE plpgsql
+"""
+ATTESTATION_IMMUTABLE_TRIGGER_SQL = """
+CREATE TRIGGER asset_attestations_no_update
+BEFORE UPDATE ON asset_attestations
+FOR EACH ROW EXECUTE FUNCTION asset_attestations_immutable()
+"""
+# DELETE is allowed only for tenant erasure, which sets this transaction-local
+# setting to the tenant being erased (collector/retention.py). Any other
+# DELETE would let history be rewritten (delete, then insert a new row).
+ATTESTATION_ERASE_SETTING = "prompt_shields.erasing_tenant"
+ATTESTATION_NO_DELETE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION asset_attestations_no_delete() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('prompt_shields.erasing_tenant', true) = OLD.tenant_id::text THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'asset_attestations rows are append-only; only tenant erasure may delete them';
+END;
+$$ LANGUAGE plpgsql
+"""
+ATTESTATION_NO_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER asset_attestations_no_delete
+BEFORE DELETE ON asset_attestations
+FOR EACH ROW EXECUTE FUNCTION asset_attestations_no_delete()
+"""
+
+# Install the triggers when the schema is built with create_all too (tests).
+for _ddl in (
+    ATTESTATION_IMMUTABLE_FUNCTION_SQL,
+    ATTESTATION_IMMUTABLE_TRIGGER_SQL,
+    ATTESTATION_NO_DELETE_FUNCTION_SQL,
+    ATTESTATION_NO_DELETE_TRIGGER_SQL,
+):
+    event.listen(
+        AssetAttestation.__table__,
+        "after_create",
+        DDL(_ddl).execute_if(dialect="postgresql"),
+    )
