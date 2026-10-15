@@ -618,3 +618,94 @@ def test_lazy_stream_request_error_emits_nothing():
     with pytest.raises(ApiError):
         list(co.chat_stream(model="command-r-08-2024", messages=MESSAGES))
     assert _events() == []
+
+
+# --- deferred framework calls (LlamaIndex streams) ----------------------------
+
+
+def _stream_reader(vendor):
+    """A generator function that opens and reads one `vendor` stream, as a
+    framework stream (LlamaIndex) does once it is iterated."""
+    if vendor == "google":
+        client = _gemini_client()
+
+        def gemini():
+            yield from client.models.generate_content_stream(
+                model="gemini-2.5-flash", contents="hi")
+        return gemini
+    if vendor == "mistral":
+        client = _mistral_client()
+
+        def mistral():
+            with client.chat.stream(model="mistral-small-latest",
+                                    messages=MESSAGES) as s:
+                yield from s
+        return mistral
+    if vendor == "cohere":
+        cohere = pytest.importorskip("cohere")
+        transport, _ = _sse(httpx, COHERE_V2_EVENTS)
+        client = cohere.ClientV2(api_key="co-key",
+                                 httpx_client=httpx.Client(transport=transport))
+
+        def cohere_stream():
+            yield from client.chat_stream(model="command-r-08-2024",
+                                          messages=MESSAGES)
+        return cohere_stream
+    if vendor == "bedrock":
+        client = _event_stream_client(CONVERSE_STREAM)
+
+        def bedrock():
+            yield from client.converse_stream(
+                modelId="us.amazon.nova-lite-v1:0",
+                messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            )["stream"]
+        return bedrock
+    anthropic, http = _anthropic()
+    client = anthropic.Anthropic(api_key="sk-ant", http_client=http.Client(
+        transport=_anthropic_transport(http)))
+
+    def anthropic_helper():
+        with client.messages.stream(model="claude-test", max_tokens=10,
+                                    messages=MESSAGES) as s:
+            yield from s
+    return anthropic_helper
+
+
+@pytest.mark.parametrize("vendor", ["google", "mistral", "cohere", "bedrock",
+                                    "anthropic"])
+@pytest.mark.parametrize("close_early", [False, True])
+def test_vendor_stream_claims_a_deferred_framework_call(vendor, close_early,
+                                                        request):
+    # A framework (LlamaIndex) announced the call, bound it to its stream's
+    # generator and returned; the stream is read later in another thread,
+    # whose context does not hold the call. The vendor stream emits the one
+    # event, tagged with the framework, and the framework call is claimed.
+    import threading
+
+    if vendor == "bedrock":
+        request.getfixturevalue("aws")
+    prompt_shields.instrument(ps_api_key="ps_key")
+    reader = _stream_reader(vendor)
+    fc = inst.FrameworkCall("llamaindex", "support-bot")
+    stream = reader()
+    assert inst.defer_framework_call(fc, stream)
+
+    def consume():
+        if close_early:
+            next(stream)
+            stream.close()
+        else:
+            list(stream)
+
+    thread = threading.Thread(target=consume)
+    thread.start()
+    thread.join()
+    fc.finished = True
+    inst.forget_framework_call(fc)
+    assert fc.captured
+
+    event = _assert_one_stream_event(completed=not close_early)
+    assert event["framework"] == "llamaindex"
+    assert event["use_case_name"] == "support-bot"
+    assert event["vendor"] == vendor
+    assert not inst._deferred_calls

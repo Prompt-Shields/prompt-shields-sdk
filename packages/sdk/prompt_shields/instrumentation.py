@@ -48,9 +48,11 @@ import contextvars
 import functools
 import importlib
 import inspect
+import itertools
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -191,10 +193,15 @@ class FrameworkCall:
     several prompts) announces every run before making the calls, so a call
     that finds the newest one already claimed claims the next older one.
     A call that raises gives its claim back (it emits no event).
+
+    A framework stream that calls the provider only once it is iterated
+    (LlamaIndex) binds its call to the stream's generator with
+    `defer_framework_call`: from then on only a patched call made while that
+    generator runs can claim it, whichever context iterates it.
     """
 
-    __slots__ = ("captured", "finished", "framework", "model", "previous",
-                 "use_case_hint")
+    __slots__ = ("captured", "finished", "frame", "framework", "model",
+                 "previous", "seq", "use_case_hint")
 
     def __init__(self, framework: str, use_case_hint: str | None = None,
                  model: str | None = None,
@@ -205,6 +212,11 @@ class FrameworkCall:
         self.previous = previous
         self.captured = False
         self.finished = False
+        self.frame = None  # the generator frame of a deferred call
+        self.seq = next(_framework_call_seq)
+
+
+_framework_call_seq = itertools.count()
 
 
 _FRAMEWORK_CALL: contextvars.ContextVar[FrameworkCall | None] = (
@@ -227,12 +239,83 @@ def current_framework_call() -> FrameworkCall | None:
     return fc
 
 
+# Deferred calls (see `FrameworkCall`) not yet forgotten, by id of their
+# generator frame (kept alive by `fc.frame`, so the id stays unique). Kept
+# as an index so a claim costs one walk up the stack, however many streams
+# are pending.
+_deferred_calls: dict[int, FrameworkCall] = {}
+_MAX_STACK_DEPTH = 300
+
+
+def defer_framework_call(fc: FrameworkCall, generator: Any) -> bool:
+    """Bind `fc` to a (sync or async) generator that makes the call lazily."""
+    frame = getattr(generator, "gi_frame", None) or getattr(
+        generator, "ag_frame", None)
+    if frame is None:
+        return False
+    with _claim_lock:
+        if fc.captured or fc.finished or fc.frame is not None:
+            return False
+        fc.frame = frame
+        _deferred_calls[id(frame)] = fc
+    return True
+
+
+def forget_framework_call(fc: FrameworkCall) -> None:
+    """Drop a finished deferred call (and its frame reference)."""
+    with _claim_lock:
+        _forget(fc)
+
+
+def _forget(fc: FrameworkCall) -> None:
+    # Caller holds `_claim_lock`.
+    if fc.frame is not None and _deferred_calls.get(id(fc.frame)) is fc:
+        del _deferred_calls[id(fc.frame)]
+    fc.frame = None
+
+
+def _deferred_on_stack() -> FrameworkCall | None:
+    """The innermost unclaimed deferred call whose generator is running.
+
+    Caller holds `_claim_lock`.
+    """
+    frame = sys._getframe(1)
+    for _ in range(_MAX_STACK_DEPTH):
+        if frame is None:
+            break
+        fc = _deferred_calls.get(id(frame))
+        if fc is not None:
+            if fc.finished:
+                _forget(fc)
+            elif not fc.captured:  # a claim given back is claimable again
+                return fc
+        frame = frame.f_back
+    return None
+
+
+def _claimable_framework_call() -> FrameworkCall | None:
+    """The call a provider (or nested framework) call made here belongs to.
+
+    Caller holds `_claim_lock`.
+    """
+    fc = _FRAMEWORK_CALL.get()
+    while fc is not None and (fc.captured or fc.frame is not None) \
+            and not fc.finished:
+        fc = fc.previous
+    if fc is None or fc.captured or fc.finished or fc.frame is not None:
+        fc = None
+    if _deferred_calls:
+        deferred = _deferred_on_stack()
+        # The newer of the two is the innermost framework call.
+        if deferred is not None and (fc is None or deferred.seq > fc.seq):
+            fc = deferred
+    return fc
+
+
 def _claim_framework_call(model: Any) -> FrameworkCall | None:
     with _claim_lock:
-        fc = _FRAMEWORK_CALL.get()
-        while fc is not None and fc.captured and not fc.finished:
-            fc = fc.previous
-        if fc is None or fc.captured or fc.finished:
+        fc = _claimable_framework_call()
+        if fc is None:
             return None
         if fc.model and isinstance(model, str) and not _same_model(fc.model, model):
             return None

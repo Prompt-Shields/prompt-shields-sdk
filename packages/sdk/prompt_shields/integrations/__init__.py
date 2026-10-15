@@ -6,6 +6,11 @@
     # LangChain
     from prompt_shields.integrations.langchain import PromptShieldsCallbackHandler
     chain.invoke(inputs, config={"callbacks": [PromptShieldsCallbackHandler()]})
+    # ... or on every run: prompt_shields.integrations.langchain.register()
+
+    # LlamaIndex
+    from prompt_shields.integrations.llamaindex import register
+    register()
 
     # LiteLLM
     from prompt_shields.integrations.litellm import register
@@ -21,10 +26,13 @@ without patching any provider SDK.
 No double events: when the framework reaches a provider SDK that
 `instrument()` patched, that call emits the event (tagged with the framework
 and its use-case hint) and the integration emits nothing. Otherwise the
-integration builds the event from the framework's own usage data.
+integration builds the event from the framework's own usage data. When one
+framework calls another (LiteLLM or LlamaIndex under LangChain, a LangChain
+model under LlamaIndex), the inner one reports the call.
 
 Every event carries `framework`. The use-case hint (the outermost LangChain
-chain or agent name, or `ps_use_case` in the call's metadata) fills
+chain or agent name, the outermost LlamaIndex agent or workflow name, or
+`ps_use_case` in the call's metadata or LlamaIndex instrument tags) fills
 `use_case_name` only when no use case was configured. Tool calls the model
 made are reported in `tool_calls_used`. Integration errors are logged and
 swallowed.

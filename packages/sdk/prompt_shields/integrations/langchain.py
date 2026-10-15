@@ -13,21 +13,32 @@ handler's `use_case`, `ps_use_case` in the run's metadata (e.g.
 outermost named chain or agent the run belongs to (LangChain's default names,
 such as `RunnableSequence` or `AgentExecutor`, are skipped). See
 `prompt_shields.integrations` for delivery and double-counting rules.
+
+To attach a handler to every run without passing `callbacks`, call
+`register()` (once, after `instrument()`); `unregister()` detaches it. Runs
+that already have a `PromptShieldsCallbackHandler` keep only their own.
 """
 
 import logging
+import threading
 import time
 from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.tracers.context import register_configure_hook
 
 from prompt_shields.instrumentation import (
     _FRAMEWORK_CALL,
     FrameworkCall,
     current_framework_call,
 )
-from prompt_shields.integrations._common import emit, normalize_vendor, text_of
+from prompt_shields.integrations._common import (
+    claim_outer_call,
+    emit,
+    normalize_vendor,
+    text_of,
+)
 from prompt_shields.providers import _int, openai_usage_fields
 
 logger = logging.getLogger("prompt_shields.integrations.langchain")
@@ -127,6 +138,11 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
                 or metadata.get("ps_use_case")
                 or self._roots.get(parent_run_id)
             )
+            # A LangChain model called from another framework's LLM call
+            # (LlamaIndex's LangChainLLM) reports it in place of that one.
+            outer = claim_outer_call("langchain")
+            if outer is not None and not hint:
+                hint = outer.use_case_hint
             fc = FrameworkCall("langchain", hint,
                                previous=current_framework_call())
             _FRAMEWORK_CALL.set(fc)
@@ -243,3 +259,46 @@ def _extract(result: Any) -> dict:
         "tool_calls_used": tool_calls or None,
         "served_model": served_model if isinstance(served_model, str) else None,
     }
+
+
+# --- attach globally ----------------------------------------------------------------
+
+_registered: PromptShieldsCallbackHandler | None = None
+_register_lock = threading.Lock()
+_hook_installed = False
+
+
+class _GlobalHandler:
+    """What LangChain's configure hook reads: the registered handler or None.
+
+    LangChain only calls `.get()` on it. Unlike a ContextVar, it has the same
+    value in every thread and task, and `unregister()` can clear it (hooks
+    cannot be removed).
+    """
+
+    def get(self) -> PromptShieldsCallbackHandler | None:
+        return _registered
+
+
+def register(use_case: str | None = None) -> PromptShieldsCallbackHandler:
+    """Add a `PromptShieldsCallbackHandler` to every LangChain run; return it.
+
+    Idempotent: a second call returns the same handler.
+    """
+    global _registered, _hook_installed
+    with _register_lock:
+        if not _hook_installed:
+            # Inheritable, so child runs (the model inside a chain) get it.
+            register_configure_hook(_GlobalHandler(), True,
+                                    PromptShieldsCallbackHandler)
+            _hook_installed = True
+        if _registered is None:
+            _registered = PromptShieldsCallbackHandler(use_case=use_case)
+        return _registered
+
+
+def unregister() -> None:
+    """Stop adding the handler from `register()` to new runs."""
+    global _registered
+    with _register_lock:
+        _registered = None
