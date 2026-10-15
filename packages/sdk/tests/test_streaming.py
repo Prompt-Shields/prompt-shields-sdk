@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from prompt_shields import AsyncShieldsClient, ShieldsClient
-from prompt_shields.streaming import request_openai_stream_usage
+from prompt_shields.streaming import StreamAccumulator, request_openai_stream_usage
 
 MESSAGES = [{"role": "user", "content": "hello there, how are you"}]
 
@@ -479,3 +479,22 @@ def test_include_usage_not_injected_for_openai_compatible_hosts():
     assert "stream_options" not in kwargs
     assert received == chunks  # nothing hidden when the SDK did not inject
     assert len(events) == 1
+
+
+def test_anthropic_stream_records_mcp_tool_use():
+    acc = StreamAccumulator("anthropic", MESSAGES)
+    for event in _anthropic_events()[:5] + [
+        NS(
+            type="content_block_start",
+            index=2,
+            content_block=NS(type="mcp_tool_use", name="search_issues",
+                             server_name="github", input={}),
+        ),
+        NS(type="content_block_start", index=3,
+           content_block=NS(type="mcp_tool_result")),
+    ]:
+        acc.observe(event)
+    assert acc.adapter_fields()["tool_calls_used"] == [
+        {"name": "get_weather", "type": "tool_use"},
+        {"name": "search_issues", "type": "mcp", "server": "github"},
+    ]

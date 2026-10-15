@@ -4,6 +4,7 @@ from prompt_shields.providers import (
     AnthropicAdapter,
     OpenAIAdapter,
     get_adapter,
+    mcp_tool_call,
 )
 
 
@@ -84,3 +85,41 @@ def test_anthropic_adapter_extracts_tool_use_blocks():
     response.content = [text_block, tool_block]
     fields = AnthropicAdapter().extract(response)
     assert fields["tool_calls_used"] == [{"name": "search_db", "type": "tool_use"}]
+
+
+def test_anthropic_adapter_extracts_mcp_tool_use_blocks():
+    response = MagicMock()
+    response.usage.input_tokens = 50
+    response.usage.output_tokens = 100
+    mcp_block = MagicMock()
+    mcp_block.type = "mcp_tool_use"
+    mcp_block.name = "search_issues"
+    mcp_block.server_name = "github"
+    result_block = MagicMock()
+    result_block.type = "mcp_tool_result"
+    response.content = [mcp_block, result_block]
+
+    fields = AnthropicAdapter().extract(response)
+    assert fields["tool_calls_used"] == [
+        {"name": "search_issues", "type": "mcp", "server": "github"}
+    ]
+
+
+def test_bedrock_anthropic_body_mcp_tool_use():
+    body = {
+        "usage": {"input_tokens": 1, "output_tokens": 2},
+        "content": [{"type": "mcp_tool_use", "name": "t", "server_name": "s"}],
+    }
+    fields = get_adapter("bedrock").extract(body)
+    assert fields["tool_calls_used"] == [{"name": "t", "type": "mcp", "server": "s"}]
+
+
+def test_mcp_tool_call_shapes():
+    assert mcp_tool_call({"type": "tool_use", "name": "x"}) is None
+    assert mcp_tool_call(None) is None
+    assert mcp_tool_call({"type": ["mcp_call"]}) is None  # malformed raw JSON
+    assert mcp_tool_call({"type": "mcp_call", "name": 5}) == {
+        "name": None, "type": "mcp", "server": None}
+    long = mcp_tool_call({"type": "mcp_call", "name": "n" * 500,
+                          "server_label": "s" * 500})
+    assert len(long["name"]) == 200 and len(long["server"]) == 200

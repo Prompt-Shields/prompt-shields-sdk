@@ -63,6 +63,20 @@ def _anthropic_response():
     )
 
 
+def _anthropic_mcp_response():
+    # MCP connector (beta): the provider called the MCP server itself.
+    return NS(
+        model="claude-test",
+        usage=NS(input_tokens=5, output_tokens=7),
+        content=[
+            NS(type="mcp_tool_use", name="search_issues", server_name="github",
+               input={"q": "secret"}),
+            NS(type="mcp_tool_result", content=[NS(type="text", text="x")]),
+            NS(type="text"),
+        ],
+    )
+
+
 def _responses_response():
     return NS(
         model="gpt-4.1-2025-04-14",
@@ -145,7 +159,11 @@ def fakes(monkeypatch):
     messages.Messages = _make_resource("Messages", _anthropic_response, False)
     messages.AsyncMessages = _make_resource(
         "AsyncMessages", _anthropic_response, True)
-    for mod in (chat, responses, messages):
+    beta = ModuleType("anthropic.resources.beta.messages.messages")
+    beta.Messages = _make_resource("Messages", _anthropic_mcp_response, False)
+    beta.AsyncMessages = _make_resource(
+        "AsyncMessages", _anthropic_mcp_response, True)
+    for mod in (chat, responses, messages, beta):
         monkeypatch.setitem(sys.modules, mod.__name__, mod)
 
     RecordingSender.instances = []
@@ -154,7 +172,7 @@ def fakes(monkeypatch):
     for var in ("PS_API_KEY", "PS_COLLECTOR_URL", "PS_ATLAS_URL",
                 "PS_ATLAS_API_KEY", *inst._METADATA_ENV.values()):
         monkeypatch.delenv(var, raising=False)
-    yield NS(chat=chat, responses=responses, messages=messages)
+    yield NS(chat=chat, responses=responses, messages=messages, beta=beta)
     prompt_shields.uninstrument()
 
 
@@ -269,6 +287,44 @@ def test_responses_api_event(fakes):
     assert (event["tokens_in"], event["tokens_out"]) == (3, 4)
     assert event["tool_calls_used"] == [{"name": "search", "type": "function"}]
     assert event["prompt_text"] == "be brief call 555-123-4567"
+
+
+MCP_CALL = {"name": "search_issues", "type": "mcp", "server": "github"}
+
+
+def test_anthropic_beta_mcp_connector_event(fakes):
+    prompt_shields.instrument(ps_api_key="ps_key")
+    fakes.beta.Messages().create(
+        model="claude-test", messages=MESSAGES, max_tokens=10,
+        betas=["mcp-client-2025-11-20"])
+
+    event = _events()[0]
+    assert event["vendor"] == "anthropic"
+    assert event["tool_calls_used"] == [MCP_CALL]
+    assert "secret" not in json.dumps(event)  # tool arguments never recorded
+
+
+def test_responses_mcp_call_recorded_without_arguments_or_output():
+    response = NS(model="gpt-4.1", usage=None, output=[
+        NS(type="mcp_list_tools", server_label="github", tools=[]),
+        NS(type="mcp_call", name="search_issues", server_label="github",
+           arguments='{"q": "secret"}', output="secret result"),
+        NS(type="function_call", name="lookup"),
+    ])
+    fields = inst._extract_responses(response)
+    assert fields["tool_calls_used"] == [
+        MCP_CALL, {"name": "lookup", "type": "function"}]
+
+
+def test_responses_stream_records_mcp_call_once():
+    item = NS(type="mcp_call", name="search_issues", server_label="github")
+    acc = inst._ResponsesAccumulator("openai", [])
+    acc.observe(NS(type="response.output_item.added", item=item))
+    acc.observe(NS(type="response.mcp_call.completed"))
+    acc.observe(NS(type="response.output_item.done", item=item))
+    acc.observe(NS(type="response.output_item.done",
+                   item=NS(type="message")))
+    assert acc.adapter_fields()["tool_calls_used"] == [MCP_CALL]
 
 
 def _responses_usage():
@@ -529,3 +585,37 @@ def test_real_anthropic_async(recording):
     event = _events()[0]
     assert (event["vendor"], event["tokens_in"], event["tokens_out"]) == (
         "anthropic", 4, 3)
+
+
+def test_real_anthropic_beta_mcp_connector(recording):
+    anthropic = pytest.importorskip("anthropic")
+    body = {
+        "id": "m1", "type": "message", "role": "assistant",
+        "model": "claude-test", "stop_reason": "end_turn",
+        "content": [
+            {"type": "mcp_tool_use", "id": "mcptoolu_1", "name": "search_issues",
+             "server_name": "github", "input": {"q": "secret"}},
+            {"type": "mcp_tool_result", "tool_use_id": "mcptoolu_1",
+             "is_error": False, "content": [{"type": "text", "text": "found"}]},
+            {"type": "text", "text": "hi"},
+        ],
+        "usage": {"input_tokens": 4, "output_tokens": 3},
+    }
+    prompt_shields.instrument(ps_api_key="ps_key", vendors=("anthropic",))
+
+    http = _http(anthropic)
+    client = anthropic.Anthropic(
+        api_key="sk-ant-test",
+        http_client=http.Client(transport=_json_transport(http, body)))
+    message = client.beta.messages.create(
+        model="claude-test", max_tokens=10, messages=MESSAGES,
+        betas=["mcp-client-2025-11-20"],
+        mcp_servers=[{"type": "url", "url": "https://mcp.example/mcp",
+                      "name": "github"}],
+        tools=[{"type": "mcp_toolset", "mcp_server_name": "github"}])
+
+    assert message.content[2].text == "hi"
+    event = _events()[0]
+    assert event["tool_calls_used"] == [MCP_CALL]
+    assert "secret" not in json.dumps(event)
+    assert "mcp.example" not in json.dumps(event)
