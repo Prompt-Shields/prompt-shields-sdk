@@ -217,9 +217,7 @@ def test_instrument_requires_api_key(fakes):
 
 
 def test_missing_provider_packages_are_skipped(fakes, monkeypatch):
-    for name in ("openai.resources.chat.completions", "openai.resources.responses",
-                 "anthropic.resources.messages",
-                 "anthropic.resources.beta.messages.messages"):
+    for name in {target[1] for target in inst._TARGETS}:
         monkeypatch.setitem(sys.modules, name, None)  # import raises ImportError
     assert prompt_shields.instrument(ps_api_key="ps_key") is True
     assert inst._state.patches == []
