@@ -99,10 +99,19 @@ def gemini_usage_fields(usage_metadata: Any) -> dict:
 
 
 def _count(value: Any) -> int | None:
-    """An integer count, also from a digit string (HTTP header values)."""
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
+    """An integer count, also from a digit string (HTTP header values) or an
+    integral float (the Cohere SDK types its token counts as floats)."""
+    if isinstance(value, str):
+        value = value.strip()
+        return int(value) if value.isascii() and value.isdigit() else None
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
     return _int(value)
+
+
+def _items(value: Any) -> list | tuple:
+    """`value` if it is a list or tuple, else empty (unexpected shapes)."""
+    return value if isinstance(value, (list, tuple)) else ()
 
 
 def _openai_like_extract(response: Any) -> dict:
@@ -112,9 +121,9 @@ def _openai_like_extract(response: Any) -> dict:
     objects and raw JSON dicts alike.
     """
     tool_calls: list[dict] = []
-    for choice in _field(response, "choices") or []:
+    for choice in _items(_field(response, "choices")):
         message = _field(choice, "message")
-        for tc in _field(message, "tool_calls") or []:
+        for tc in _items(_field(message, "tool_calls")):
             fn = _field(tc, "function")
             if fn is not None:
                 tool_calls.append({"name": _field(fn, "name"), "type": "function"})
@@ -214,9 +223,9 @@ class GeminiAdapter(ProviderAdapter):
         if usage is None:
             usage = _field(response, "usageMetadata")
         tool_calls: list[dict] = []
-        for candidate in _field(response, "candidates") or []:
+        for candidate in _items(_field(response, "candidates")):
             content = _field(candidate, "content")
-            for part in _field(content, "parts") or []:
+            for part in _items(_field(content, "parts")):
                 call = _field(part, "function_call") or _field(part, "functionCall")
                 if call is not None:
                     tool_calls.append({
@@ -303,7 +312,7 @@ class CohereAdapter(ProviderAdapter):
         if calls is None:
             calls = _field(response, "tool_calls")  # v1
         tool_calls: list[dict] = []
-        for tc in calls or []:
+        for tc in _items(calls):
             fn = _field(tc, "function")
             name = _field(fn, "name") if fn is not None else _field(tc, "name")
             tool_calls.append({"name": name, "type": "function"})
@@ -377,11 +386,11 @@ class BedrockAdapter(ProviderAdapter):
 
         tool_calls: list[dict] = []
         message = _field(_field(response, "output"), "message")
-        for block in _field(message, "content") or []:
+        for block in _items(_field(message, "content")):
             tool_use = _field(block, "toolUse")
             if tool_use is not None:
                 tool_calls.append({"name": _field(tool_use, "name"), "type": "tool_use"})
-        for block in _field(response, "content") or []:  # Anthropic body
+        for block in _items(_field(response, "content")):  # Anthropic body
             if _field(block, "type") == "tool_use":
                 tool_calls.append({"name": _field(block, "name"), "type": "tool_use"})
 

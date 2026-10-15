@@ -63,8 +63,9 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
     ("google", "gemini-1.5-pro"): (0.00125, 0.005),
     ("google", "gemini-1.5-flash"): (0.000075, 0.0003),
     ("google", "gemini-2.0-flash"): (0.0001, 0.0004),
-    ("google", "gemini-2.5-flash"): (0.0003, 0.0025),
-    ("google", "gemini-2.5-pro"): (0.00125, 0.010),  # prompts <= 200k
+    # Gemini 2.5 cached input is 10% of input (2.0 and 1.5: 25%).
+    ("google", "gemini-2.5-flash"): (0.0003, 0.0025, 0.00003, 0.0003),
+    ("google", "gemini-2.5-pro"): (0.00125, 0.010, 0.000125, 0.00125),  # <= 200k
 
     # Amazon Bedrock (on-demand, us-east-1). Cache rates are per model:
     # Claude reads 10% / writes 125%, Nova reads 25% / no write charge.

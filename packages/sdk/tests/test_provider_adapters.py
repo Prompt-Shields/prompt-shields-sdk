@@ -203,6 +203,44 @@ def test_cohere_falls_back_to_raw_tokens_without_billed_units():
     assert fields["tool_calls_used"] is None
 
 
+def test_cohere_sdk_float_counts_are_read():
+    # The cohere SDK types billed_units / tokens counts as Optional[float].
+    fields = CohereAdapter().extract(NS(
+        message=NS(tool_calls=None),
+        usage=NS(billed_units=NS(input_tokens=500.0, output_tokens=250.0), tokens=None),
+    ))
+    assert fields["tokens_in"] == 500
+    assert fields["tokens_out"] == 250
+    assert estimate_cost("cohere", "command-r-plus-08-2024", 500, 250) == 0.00375
+
+
+# --- Gemini ----------------------------------------------------------------
+
+
+def test_gemini_25_cached_tokens_priced_at_10_percent():
+    fields = GeminiAdapter().extract({"usageMetadata": {
+        "promptTokenCount": 10000, "cachedContentTokenCount": 8000,
+        "candidatesTokenCount": 100,
+    }})
+    cost = estimate_cost(
+        "google", "gemini-2.5-flash", fields["tokens_in"], fields["tokens_out"],
+        tokens_cached=fields["tokens_cached"],
+    )
+    # 2000 x $0.30/M + 8000 x $0.03/M + 100 x $2.50/M
+    assert cost == pytest.approx(0.00109)
+
+
+@pytest.mark.parametrize("vendor", ["google", "azure_openai", "bedrock", "mistral", "cohere"])
+@pytest.mark.parametrize("response", [
+    {"choices": 5}, {"choices": [{"message": {"tool_calls": 5}}]},
+    {"candidates": 5}, {"message": {"tool_calls": 5}}, {"tool_calls": 5},
+    {"output": {"message": {"content": 5}}}, {"usage": {"input_tokens": 3}, "content": 5},
+    {"usage": {"inputTokens": "²"}},
+])
+def test_unexpected_shapes_do_not_raise(vendor, response):
+    get_adapter(vendor).extract(response)
+
+
 # --- Mistral ---------------------------------------------------------------
 
 
