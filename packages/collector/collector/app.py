@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from collector import rls
 from collector.config import settings
 from collector.embeddings import get_embedder
 
@@ -13,6 +14,9 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_embedder()  # fail fast on a bad PS_EMBEDDINGS_* configuration
+    if settings.rls_required:
+        async with engine.connect() as conn:
+            await rls.check_required(conn)
     yield
     await engine.dispose()
 

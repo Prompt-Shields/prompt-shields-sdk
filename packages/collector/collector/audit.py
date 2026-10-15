@@ -195,11 +195,13 @@ async def purge_expired(db, retention_days: int, now: datetime | None = None) ->
 
 
 async def _purge_main() -> int:
+    from collector import rls
     from collector.app import SessionLocal, engine
     from collector.config import settings
 
     try:
         async with SessionLocal() as db:
+            await rls.bypass(db, "audit-purge-cli", actor="cli")
             return await purge_expired(db, settings.audit_retention_days)
     finally:
         await engine.dispose()

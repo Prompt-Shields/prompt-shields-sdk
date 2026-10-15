@@ -412,9 +412,13 @@ async def set_tenant_retention(
 async def _run_cli(args: argparse.Namespace) -> list[dict]:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from collector import rls
+
     engine = create_async_engine(settings.database_url)
     try:
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        session_factory = async_sessionmaker(
+            engine, expire_on_commit=False, info=rls.bypass_info("retention-cli")
+        )
         async with session_factory() as db:
             if args.tenant:
                 result = await purge_tenant_events(

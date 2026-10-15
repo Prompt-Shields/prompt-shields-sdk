@@ -210,9 +210,13 @@ async def _run_cli(
 ) -> SweepResult:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from collector import rls
+
     engine = create_async_engine(settings.database_url)
     try:
-        session_factory = async_sessionmaker(engine, class_=AsyncSession)
+        session_factory = async_sessionmaker(
+            engine, class_=AsyncSession, info=rls.bypass_info("lifecycle-cli")
+        )
         async with session_factory() as db:
             result = await sweep_asset_lifecycle(
                 db,

@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     retention_batch_size: int = 5000
     # Operator token for /api/v1/operator/*. Empty disables those endpoints.
     admin_token: str = ""
+    # Row-level security (#83). The collector always sets the tenant context;
+    # with this on it also refuses to start unless RLS is enforced on every
+    # tenant table for its database role. See collector/rls.py.
+    rls_required: bool = False
 
     # Semantic search embeddings; see collector/embeddings.py and the README.
     # auto | openai | local | none. auto = openai if OPENAI_API_KEY is set, else none.
