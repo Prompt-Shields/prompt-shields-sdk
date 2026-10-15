@@ -1,3 +1,10 @@
+/**
+ * Default test run: offline and deterministic. Suites that need live vendor
+ * APIs or a `.creds.json` file are listed in tests/jest/integrationSuites.js
+ * and run with `npm run test:integration` instead.
+ */
+import { integrationTests } from './tests/jest/integrationSuites.js';
+
 /** @type {import('ts-jest').JestConfigWithTsJest} **/
 export default {
   testEnvironment: 'node',
@@ -7,5 +14,6 @@ export default {
     '/src/utils/env\\.ts$': '<rootDir>/tests/jest/envTransformer.cjs',
     '^.+.tsx?$': ['ts-jest', {}],
   },
+  testPathIgnorePatterns: ['/node_modules/', ...integrationTests],
   testTimeout: 30000, // Set default timeout to 30 seconds
 };

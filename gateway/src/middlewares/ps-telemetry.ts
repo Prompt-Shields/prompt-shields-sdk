@@ -87,8 +87,9 @@ export function modalityOf(path: string): string | undefined {
 
 /**
  * Non-token usage: transcription `usage: {type: 'duration', seconds}`,
- * Mistral OCR `usage_info.pages_processed`, or text-to-speech characters
- * from the request `input`.
+ * Mistral OCR `usage_info.pages_processed`, rerank `usage.search_units`
+ * (Cohere search units, Voyage/Jina tokens, Pinecone rerank units, as the
+ * provider bills them), or text-to-speech characters from the request `input`.
  */
 export function usageUnits(
   path: string,
@@ -98,6 +99,9 @@ export function usageUnits(
   const u = responseBody?.usage;
   if (u?.type === 'duration' && typeof u.seconds === 'number') {
     return { usage_units: u.seconds, usage_unit_type: 'seconds' };
+  }
+  if (path.startsWith('/v1/rerank') && typeof u?.search_units === 'number') {
+    return { usage_units: u.search_units, usage_unit_type: 'search_units' };
   }
   const pages = responseBody?.usage_info?.pages_processed;
   if (typeof pages === 'number') {

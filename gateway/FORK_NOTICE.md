@@ -40,6 +40,8 @@ Skipped from `main`: [`b341133`](https://github.com/Portkey-AI/gateway/commit/b3
 | Bedrock full port (#108) | `src/providers/bedrock/*`, `src/providers/anthropic-base/{messages,utils/streamGenerator}.ts`, `src/utils/awsAuth.ts`, `src/providers/sagemaker/api.ts` | `Environment()` accepts the runtime env record (2.0) or a Hono context (ours); `services/cache/cacheService.ts` is an in-process TTL shim of upstream's Redis/KV `requestCache`; `assumedRole`/`serviceRole` resolve through one helper (`providerAssumedRoleCredentials`); host credentials (env, shared files, IRSA, pod identity, ECS, IMDS) only with `AWS_AMBIENT_CREDENTIALS_ENABLED=true`, and are no longer read at module load; signing only for `https` hosts under `AWS_ENDPOINT_DOMAIN`, region format checked, STS query encoded; `uploadFile` keeps this fork's web-stream implementation |
 | Batch output streaming, Vertex batch upload (#108) | `src/providers/{openai,azure-openai,google-vertex-ai}/getBatchOutput.ts`, `src/providers/google-vertex-ai/{uploadFile,createBatch}.ts`, `createLineSplitter` in `src/handlers/streamHandlerUtils.ts` | Upstream switches to `node-fetch` plus Node streams (`nodeLineReader`) so its proxy agents apply; this fork keeps one web-stream path for Node and Workers on plain `fetch`, so `nodeLineReader` and `externalServiceFetchWithNodeFetch` are not ported. Ported: octet-stream pass-through, `createLineSplitter` emitting bytes and decoding with `stream: true`, Vertex output-file probe, row-id fix and error responses, resource-name models in `createBatch`. Upstream resolves custom-model base models via the Vertex API (`getModelProviderFromModelID`); not ported, upload and output use the name's last segment. PS hardening: provider-returned output locations are followed only to GCS (`gs://`) and Azure Blob Storage hosts |
 
+End-to-end regression tests for these ports (whole app, offline, with ps-telemetry checks) are in `src/tests/regression/` (#69); transform-level tests sit next to each provider.
+
 Not ported:
 - `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
 - Prometheus via `prom-client` and `addMetricsMiddleware` (#61): Node-only and tied to control-plane context keys. `/metrics` is our own dependency-free implementation (`src/middlewares/psMetrics/`).
@@ -53,6 +55,8 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `README.md`
 - `conf.example.json`
 - `deployment.yaml`
+- `jest.config.js`
+- `package.json`
 - `plugins/azure/utils.ts`
 - `src/globals.ts`
 - `src/handlers/createTranscriptionHandler.ts`

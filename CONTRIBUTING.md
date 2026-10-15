@@ -45,7 +45,13 @@ npm run test:gateway    # jest src/
 npm run test:plugins    # jest plugins/
 ```
 
-There is no aggregate `npm test` in `gateway/` — run both suites.
+There is no aggregate `npm test` in `gateway/` — run both suites. They run
+offline. Suites that call live vendor APIs (they need network access and a
+gitignored `.creds.json` or vendor env vars) are listed in
+`gateway/tests/jest/integrationSuites.js`, left out of the default run, and run
+with `npm run test:integration`. `gateway/src/tests/regression/` drives the
+whole gateway app with a fake `fetch`; add a case there when you port a
+provider or endpoint.
 
 ## Two licenses live in this repository
 
