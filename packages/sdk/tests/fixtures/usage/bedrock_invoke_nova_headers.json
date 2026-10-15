@@ -1,0 +1,28 @@
+{
+  "vendor": "bedrock",
+  "model": "amazon.nova-pro-v1:0",
+  "note": "boto3 bedrock-runtime invoke_model response; usage is read from the HTTP headers so the streaming body is never consumed. Nova Pro: input $0.80/M, cache read $0.20/M, output $3.20/M.",
+  "response": {
+    "ResponseMetadata": {
+      "HTTPStatusCode": 200,
+      "HTTPHeaders": {
+        "content-type": "application/json",
+        "x-amzn-bedrock-invocation-latency": "812",
+        "x-amzn-bedrock-input-token-count": "1500",
+        "x-amzn-bedrock-output-token-count": "300",
+        "x-amzn-bedrock-cache-read-input-token-count": "1000",
+        "x-amzn-bedrock-cache-write-input-token-count": "0"
+      }
+    },
+    "contentType": "application/json",
+    "body": "<botocore.response.StreamingBody>"
+  },
+  "expected_fields": {
+    "tokens_in": 2500,
+    "tokens_out": 300,
+    "tokens_cached": 1000,
+    "tokens_cache_write": 0,
+    "tool_calls_used": null
+  },
+  "expected_cost_usd": 0.00236
+}

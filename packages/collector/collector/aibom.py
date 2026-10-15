@@ -178,6 +178,7 @@ def build_bom(
             ("owner", a.owner_email),
             ("business_unit", a.business_unit),
             ("environment", a.environment),
+            ("region", a.region),
             ("status", a.status),
             ("data_classification", a.data_classification),
             ("calling_service", a.calling_service),

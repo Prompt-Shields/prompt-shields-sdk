@@ -1,0 +1,39 @@
+{
+  "vendor": "azure_openai",
+  "model": "prod-chat",
+  "note": "Azure OpenAI chat completion for deployment 'prod-chat'; Azure reports the versioned model. Global standard gpt-4o at OpenAI list prices: input $2.50/M, cached input $1.25/M, output $10/M.",
+  "response": {
+    "id": "chatcmpl-azure-1",
+    "object": "chat.completion",
+    "model": "gpt-4o-2024-08-06",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search_docs", "arguments": "{}"}}]
+        },
+        "content_filter_results": {}
+      }
+    ],
+    "prompt_filter_results": [],
+    "usage": {
+      "prompt_tokens": 2000,
+      "completion_tokens": 300,
+      "total_tokens": 2300,
+      "prompt_tokens_details": {"cached_tokens": 1024},
+      "completion_tokens_details": {"reasoning_tokens": 0}
+    }
+  },
+  "expected_fields": {
+    "tokens_in": 2000,
+    "tokens_out": 300,
+    "tokens_cached": 1024,
+    "tokens_reasoning": 0,
+    "tool_calls_used": [{"name": "search_docs", "type": "function"}],
+    "served_model": "gpt-4o-2024-08-06"
+  },
+  "expected_cost_usd": 0.00672
+}

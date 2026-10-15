@@ -65,6 +65,11 @@ from collector.provider_usage_admin import router as provider_usage_router  # no
 
 app.include_router(provider_usage_router)
 
+# Platform signal: cloud AI inventory (admin trigger)
+from collector.cloud_inventory import router as cloud_inventory_router  # noqa: E402
+
+app.include_router(cloud_inventory_router)
+
 # Operator surface: retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router  # noqa: E402
 

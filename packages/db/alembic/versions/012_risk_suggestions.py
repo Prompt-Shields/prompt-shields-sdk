@@ -6,8 +6,8 @@ rule_id, ruleset_version, framework_ref, confidence, evidence (JSONB),
 created_at, updated_at and reviewed_at. A partial unique index on
 (tenant_id, asset_id, rule_id) is the suggestion engine's upsert key.
 
-Revision ID: 010
-Revises: 009
+Revision ID: 012
+Revises: 011
 Create Date: 2026-10-15
 """
 
@@ -17,8 +17,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "010"
-down_revision: str | None = "009"
+revision: str = "012"
+down_revision: str | None = "011"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
