@@ -6,7 +6,7 @@ import { VALID_PROVIDERS } from '../globals';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { transformUsingProviderConfig } from '../services/transformToProviderRequest';
 
-// OpenAI-compatible chat providers added for #74 (first slice).
+// OpenAI-compatible chat providers added for #74.
 const cases: [string, string, boolean][] = [
   ['minimax', 'https://api.minimax.io/v1', false],
   ['byteplus', 'https://ark.ap-southeast.bytepluses.com/api/v3', true],
@@ -20,6 +20,8 @@ const cases: [string, string, boolean][] = [
     'https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1',
     true,
   ],
+  ['meta', 'https://api.llama.com/compat/v1', false],
+  ['scx-ai', 'https://api.scx.ai/v1', false],
 ];
 
 const c: any = { get: () => undefined, env: {} };
