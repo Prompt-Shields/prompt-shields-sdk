@@ -22,6 +22,19 @@
       "derivation": "6000 uncached x $2.50 + 4000 cached x $1.25 + 500 x $10.00 = $0.015 + $0.005 + $0.005"
     },
     {
+      "id": "openai-o4-mini-cache-read",
+      "dimension": "cache_read",
+      "vendor": "openai",
+      "model": "o4-mini",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cached": 4000
+      },
+      "expected_cost": 0.0121,
+      "derivation": "o3 / o4-mini cache reads are 25% of input: 6000 uncached x $1.10 + 4000 cached x $0.275 + 1000 x $4.40 = $0.0066 + $0.0011 + $0.0044"
+    },
+    {
       "id": "anthropic-sonnet-4-cache-write-5m",
       "dimension": "cache_write",
       "vendor": "anthropic",

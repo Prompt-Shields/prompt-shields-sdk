@@ -107,8 +107,9 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
     ("openai", "gpt-3.5-turbo"): (0.0005, 0.0015),
     ("openai", "o1"): (0.015, 0.060),
     ("openai", "o1-mini"): (0.003, 0.012),
-    ("openai", "o3"): (0.002, 0.008),
-    ("openai", "o4-mini"): (0.0011, 0.0044),
+    # o3 / o4-mini cached input is 25% of input, not the OpenAI default 50%.
+    ("openai", "o3"): (0.002, 0.008, 0.0005),
+    ("openai", "o4-mini"): (0.0011, 0.0044, 0.000275),
     # Text rates; audio tokens are priced from AUDIO_PRICING.
     ("openai", "gpt-4o-audio-preview"): (0.0025, 0.010),
     ("openai", "gpt-4o-mini-audio-preview"): (0.00015, 0.0006),
