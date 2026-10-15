@@ -54,6 +54,7 @@ components:
             export:read: Access bulk export endpoint
             changes:read: Access delta feed endpoint
             webhooks:manage: Manage webhook subscriptions (never granted by default)
+            attestations:write: Record human attestations (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
@@ -163,6 +164,15 @@ components:
           description: When `lifecycle_state` last changed
           nullable: true
           example: null
+        attestation:
+          type: object
+          description: >
+            Human sign-off per attestable field (`asset`, `owner`,
+            `data_classification`). Separate from `confidence`, which only
+            counts agreeing discovery sources and is never changed by an
+            attestation.
+          additionalProperties:
+            $ref: '#/components/schemas/AttestationStatus'
       required:
         - id
         - vendor
@@ -323,6 +333,12 @@ components:
           enum: [stale, retired, reactivated]
           nullable: true
           description: Lifecycle transition since `since`, or null if none
+        attestation_changes:
+          type: array
+          items:
+            type: string
+          description: Fields whose attestation changed since `since`
+          example: ["owner"]
         changed_at:
           type: string
           format: date-time
@@ -333,6 +349,88 @@ components:
           description: Which fields changed (null for created)
           nullable: true
           example: ["confidence", "discovery_source", "last_seen"]
+
+    AttestationStatus:
+      type: object
+      description: Current attestation of one field (its newest attestation)
+      properties:
+        state:
+          type: string
+          enum: [unreviewed, attested, disputed, retired]
+        attested_by:
+          type: string
+          nullable: true
+          example: "ciso@acme.com"
+        attested_at:
+          type: string
+          format: date-time
+          nullable: true
+        comment:
+          type: string
+          nullable: true
+        value_changed:
+          type: boolean
+          description: The registry value differs from the value that was attested
+
+    Attestation:
+      type: object
+      description: One immutable attestation record
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        field:
+          type: string
+          example: "owner"
+        state:
+          type: string
+          enum: [unreviewed, attested, disputed, retired]
+        value:
+          description: The field's value when the attestation was made
+          nullable: true
+          example: "jane.doe@acme.com"
+        comment:
+          type: string
+          nullable: true
+        attested_by:
+          type: string
+          example: "ciso@acme.com"
+        attested_at:
+          type: string
+          format: date-time
+        actor_type:
+          type: string
+          enum: [tenant, partner]
+        partner_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    AttestationRequest:
+      type: object
+      required: [field, state, attested_by]
+      properties:
+        field:
+          type: string
+          description: One of `asset`, `owner`, `data_classification`
+          example: "owner"
+        state:
+          type: string
+          enum: [unreviewed, attested, disputed, retired]
+        attested_by:
+          type: string
+          description: >-
+            The person signing off, e.g. an email. Asserted by the caller (API
+            keys and partner tokens are machine credentials); the authenticated
+            credential (tenant key prefix or partner id) is recorded alongside it.
+          example: "ciso@acme.com"
+        comment:
+          type: string
+          description: Required when `state` is `disputed`
+          nullable: true
 
     PaginationMeta:
       type: object
@@ -758,6 +856,92 @@ paths:
                     confidence: null
                     evidence: null
                     reviewed_at: null
+        '404':
+          description: Asset not found
+
+  /partner/v1/assets/{asset_id}/attestations:
+    parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAssetAttestations
+      tags: [Assets]
+      summary: Get attestation history
+      description: |
+        Immutable history of human attestations for an asset, newest first,
+        with the current state of every attestable field in `meta.current`.
+        Requires `assets:read`.
+      parameters:
+        - name: field
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+      responses:
+        '200':
+          description: Attestation history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Attestation'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      confidence:
+                        type: string
+                      current:
+                        type: object
+                        additionalProperties:
+                          $ref: '#/components/schemas/AttestationStatus'
+        '404':
+          description: Asset not found
+    post:
+      operationId: createAssetAttestation
+      tags: [Assets]
+      summary: Record a human attestation
+      description: |
+        Appends an attestation for one field of an asset. Requires the
+        `attestations:write` scope. Never changes `confidence`. The asset
+        then appears in `/changes` with the field in `attestation_changes`.
+      security:
+        - OAuth2: [attestations:write]
+        - PartnerApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttestationRequest'
+      responses:
+        '201':
+          description: Attestation recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Attestation'
+        '400':
+          description: Unknown field, or a dispute without a comment
+        '403':
+          description: Token lacks `attestations:write`
         '404':
           description: Asset not found
 
