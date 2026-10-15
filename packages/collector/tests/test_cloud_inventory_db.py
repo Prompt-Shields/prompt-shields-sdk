@@ -212,7 +212,7 @@ async def test_aws_inventory_stores_bedrock_assets(seeded_db):
         ] == [
             (
                 tenant_id,
-                "aws",
+                "amazon",
                 "anthropic.claude-3-haiku-20240307-v1:0",
                 "eu-central-1",
                 "ai-lead@acme.com",

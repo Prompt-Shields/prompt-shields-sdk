@@ -82,7 +82,7 @@ Leave `subscription_ids` empty to inventory every subscription the principal can
 
 ### AWS: Amazon Bedrock
 
-Bedrock is regional, so list every region to inventory. In each region the collector records the resources that show AI in use, each as its own asset:
+Bedrock is regional, so list every region to inventory. In each region the collector records the resources that show AI in use, each as its own asset with vendor `amazon` (Azure deployments use `microsoft`):
 
 | Resource | Why it is an asset | `model` |
 | --- | --- | --- |

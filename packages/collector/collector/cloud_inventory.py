@@ -285,10 +285,14 @@ async def _request(
     sleep: Sleep,
     cloud: str = "azure",
     as_text: bool = False,
+    sign: Callable[[], dict[str, str]] | None = None,
     **kwargs,
 ):
-    """Request with retry on 429/5xx, honouring Retry-After."""
+    """Request with retry on 429/5xx, honouring Retry-After. ``sign``, when
+    given, builds fresh headers for every attempt."""
     for attempt in range(MAX_RETRIES + 1):
+        if sign is not None:
+            kwargs["headers"] = sign()
         try:
             resp = await client.request(method, url, **kwargs)
         except httpx.TransportError as exc:
@@ -520,7 +524,7 @@ def sigv4_headers(
             method,
             path,
             query,
-            "".join(f"{h}:{headers[h].strip()}\n" for h in signed),
+            "".join(f"{h}:{' '.join(headers[h].split())}\n" for h in signed),
             ";".join(signed),
             _sha256(body),
         ]
@@ -564,21 +568,24 @@ async def _aws_call(
     content_type: str | None = None,
     as_text: bool = False,
 ):
-    # Retries reuse the signature; their total backoff stays inside the
-    # five-minute SigV4 clock-skew window.
     query = canonical_query(params or {})
-    headers = sigv4_headers(
-        method,
-        host,
-        path,
-        query,
-        body,
-        region=region,
-        service=service,
-        keys=keys,
-        now=clock(),
-        content_type=content_type,
-    )
+
+    def sign() -> dict[str, str]:
+        # Each attempt is signed afresh, so retries after a long backoff stay
+        # inside the five-minute SigV4 clock-skew window.
+        return sigv4_headers(
+            method,
+            host,
+            path,
+            query,
+            body,
+            region=region,
+            service=service,
+            keys=keys,
+            now=clock(),
+            content_type=content_type,
+        )
+
     url = f"https://{host}{path}" + (f"?{query}" if query else "")
     return await _request(
         client,
@@ -588,7 +595,7 @@ async def _aws_call(
         sleep=sleep,
         cloud="aws",
         as_text=as_text,
-        headers=headers,
+        sign=sign,
         content=body,
     )
 
@@ -813,7 +820,7 @@ async def _bedrock_region(
         "inference profile list",
         sleep,
         clock,
-        params={"typeEquals": "APPLICATION"},
+        params={"type": "APPLICATION"},
     ):
         arn = _bedrock_arn(
             p.get("inferenceProfileArn"), region, "application-inference-profile"
@@ -931,7 +938,7 @@ def environment_from_tags(tags: dict[str, str]) -> str | None:
 
 def vendor_for(d: CloudDeployment) -> str:
     # The cloud provider is the supplier (and processor) of a hosted model.
-    return {"azure": "microsoft", "aws": "aws"}[d.cloud]
+    return {"azure": "microsoft", "aws": "amazon"}[d.cloud]
 
 
 def asset_id_for(tenant_id: UUID, d: CloudDeployment) -> UUID:

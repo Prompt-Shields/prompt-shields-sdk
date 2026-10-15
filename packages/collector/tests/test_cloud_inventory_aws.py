@@ -200,7 +200,8 @@ def _aws_handler(
                 },
             )
         if path == "/inference-profiles":
-            assert params.get("typeEquals") == "APPLICATION"
+            assert params.get("type") == "APPLICATION"
+            assert "typeEquals" not in params
             return httpx.Response(
                 200,
                 json={
@@ -376,7 +377,7 @@ async def test_pull_stores_aws_assets_and_is_idempotent():
         profile.first_seen,
         profile.last_seen,
     ) == (
-        "aws",
+        "amazon",
         "anthropic.claude-3-haiku-20240307-v1:0",
         "eu-central-1",
         "hr-bot@acme.com",
@@ -448,6 +449,81 @@ async def test_assume_role_without_credentials_in_response_fails():
 
     with pytest.raises(ci.CloudInventoryError, match="no credentials"):
         await _fetch(_creds(role_arn=ROLE_ARN), handler)
+
+
+_UNRESERVED = "-._~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+@pytest.mark.parametrize(
+    "method,params,body,content_type,signature",
+    [
+        # Expected values from the AWS SigV4 test suite (also match botocore).
+        ("POST", {}, b"", None, "5da7c1a2acd57cee7505fc6676e4e544621c30862966e37dddb68e92efbe5d6b"),
+        (
+            "GET",
+            {"Param2": "value2", "Param1": "value1"},
+            b"",
+            None,
+            "b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500",
+        ),
+        (
+            "GET",
+            {_UNRESERVED: _UNRESERVED},
+            b"",
+            None,
+            "9c3e54bfcdf0b19771a7f523ee5669cdf59bc7cc0884027167c21bb143a40197",
+        ),
+        ("GET", {"ሴ": "bar"}, b"", None, "2cdec8eed098649ff3a119c94853b13c643bcf08f8b0a1d91e12c9027818dd04"),
+        (
+            "POST",
+            {},
+            b"Param1=value1",
+            "application/x-www-form-urlencoded",
+            "ff11897932ad3f4e8b18135d722051e5ac45fc38421b1da7b9d196a0fe09473a",
+        ),
+        (
+            "POST",
+            {},
+            b"Param1=value1",
+            "application/x-www-form-urlencoded; charset=utf8",
+            "1a72ec8f64bd914b0e42e42607c7fbce7fb2c7465f63e3092b3b0d39fa77a6fe",
+        ),
+    ],
+)
+def test_sigv4_more_test_suite_vectors(method, params, body, content_type, signature):
+    headers = ci.sigv4_headers(
+        method,
+        "example.amazonaws.com",
+        "/",
+        ci.canonical_query(params),
+        body,
+        region="us-east-1",
+        service="service",
+        keys=ci.AwsKeys("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"),
+        now=datetime(2015, 8, 30, 12, 36, tzinfo=UTC),
+        content_type=content_type,
+    )
+    assert headers["authorization"].endswith(f"Signature={signature}")
+
+
+async def test_retries_are_signed_again():
+    dates = []
+    times = iter(CLOCK + timedelta(minutes=i) for i in range(100))
+
+    def handler(request):
+        dates.append(request.headers["x-amz-date"])
+        _check_signature(request, ci.AwsKeys(KEY_ID, SECRET))
+        return httpx.Response(503)
+
+    with pytest.raises(ci.CloudInventoryError, match="retries"):
+        await ci.fetch_aws_deployments(
+            _creds(),
+            transport=httpx.MockTransport(handler),
+            sleep=_no_sleep,
+            clock=lambda: next(times),
+        )
+    assert len(dates) == ci.MAX_RETRIES + 1
+    assert len(set(dates)) == len(dates)
 
 
 async def test_gives_up_after_max_retries():
