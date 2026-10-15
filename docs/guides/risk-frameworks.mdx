@@ -84,12 +84,16 @@ is a versioned ruleset:
 
 A rule fires when its `when` conditions match and no `unless` condition does
 (for example, Annex III point 5(b) credit scoring excludes fraud detection).
-Conditions match keywords against signals (whole words, or word prefixes with
-a trailing `*`), PII categories (`any_of`, `present`) or a minimum data
+Conditions match keywords against signals (whole words or phrases; a word
+ending in `*` is a prefix, also inside a phrase such as `loan* applicant*`),
+PII categories (`any_of`, `present`) or a minimum data
 classification (`at_least`). A condition can carry `context` (at least one of
 these conditions must also match somewhere on the asset) and `exclude` (none
 may match), which scope an ambiguous keyword such as `applicant*` or
-`admission*` without dropping the rest of the rule. `supporting` conditions add evidence and raise
+`admission*` without dropping the rest of the rule. An `exclude` that should
+only apply next to the ambiguous word is written as phrases (`loan* applicant*`,
+`applicant* for a visa*`), so "job applicants for university staff roles"
+still counts as recruitment while "loan applicant scoring" does not. `supporting` conditions add evidence and raise
 confidence: `low` when only weak triggers matched (a business unit name, for
 instance), `high` when supporting evidence matched too, otherwise `medium`.
 
@@ -144,7 +148,10 @@ except rejected ones, each with `status` and `source`.
 default, so existing integrations keep receiving human-set classifications
 only. Both accept `?status=suggested|confirmed|rejected` to filter. The CycloneDX export lists unconfirmed suggestions as
 `promptshields:risk-suggestion:<framework>:<category>` properties, separate
-from `promptshields:risk:*`, and leaves rejected ones out.
+from `promptshields:risk:*`, and leaves rejected ones out. Each name appears
+once per asset, valued with the highest level among its mappings; when rules
+contributed, `…:<category>:rules` lists their rule ids (comma-separated), so
+several Article 5 points on one asset give one `prohibited_practice` property.
 
 ## How Risks Map to Ardoq
 
