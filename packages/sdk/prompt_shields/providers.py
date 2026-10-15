@@ -241,6 +241,11 @@ class GeminiAdapter(ProviderAdapter):
             "served_model": served_model,
         }
 
+    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
+        # google-genai accepts "models/gemini-2.5-flash" and Vertex resource
+        # names ".../publishers/google/models/gemini-2.5-flash".
+        return model.rsplit("models/", 1)[-1] if model else model
+
 
 # Azure echoes the underlying model with a version date, e.g.
 # "gpt-4o-2024-08-06"; the pricing table keys the base name.
