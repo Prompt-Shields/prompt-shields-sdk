@@ -21,7 +21,12 @@ from typing import Any
 import litellm
 from litellm.integrations.custom_logger import CustomLogger
 
-from prompt_shields.instrumentation import _FRAMEWORK_CALL, FrameworkCall
+from prompt_shields.instrumentation import (
+    _FRAMEWORK_CALL,
+    FrameworkCall,
+    _claim_framework_call,
+    current_framework_call,
+)
 from prompt_shields.integrations._common import emit, normalize_vendor, text_of
 from prompt_shields.providers import _field, _int, get_adapter
 
@@ -58,16 +63,43 @@ class PromptShieldsLogger(CustomLogger):
             call_id = kwargs.get("litellm_call_id")
             if not call_id:
                 return
-            fc = FrameworkCall("litellm", self._hint(kwargs),
-                               model=model if isinstance(model, str) else None)
             with self._lock:
                 previous = self._pending.pop(call_id, None)
-                if previous is not None:  # a retry: keep an earlier claim
+                hint = self._hint(kwargs)
+                outer = current_framework_call()
+                if previous is not None:  # a retry: keep the hint and claim
+                    hint = previous.use_case_hint
+                elif outer is not None and outer.framework != "litellm":
+                    # Called from a framework run (LangChain's ChatLiteLLM):
+                    # this call reports it, the outer integration must not.
+                    outer = _claim_framework_call(None)
+                    if outer is not None and not hint:
+                        hint = outer.use_case_hint
+                fc = FrameworkCall("litellm", hint,
+                                   model=model if isinstance(model, str) else None,
+                                   previous=current_framework_call())
+                if previous is not None:
                     fc.captured = previous.captured
                 self._pending[call_id] = fc
                 while len(self._pending) > _MAX_TRACKED:
                     self._pending.popitem(last=False)
             _FRAMEWORK_CALL.set(fc)
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.debug(f"LiteLLM logger error: {e}")
+
+    # Runs in the request's context once the provider answered (success
+    # logging may run later, on another thread): close the announcement so a
+    # later SDK call in this context cannot claim it.
+    def log_post_api_call(self, kwargs, response_obj, start_time, end_time):
+        try:
+            call_id = kwargs.get("litellm_call_id")
+            with self._lock:
+                fc = self._pending.get(call_id) if call_id else None
+            if fc is None:
+                return
+            fc.finished = True
+            if _FRAMEWORK_CALL.get() is fc:
+                _FRAMEWORK_CALL.set(current_framework_call())
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LiteLLM logger error: {e}")
 
@@ -154,6 +186,7 @@ def register(use_case: str | None = None) -> PromptShieldsLogger:
     global _registered
     with _register_lock:
         if _registered is None or _registered not in litellm.callbacks:
+            _remove(_registered)
             _registered = PromptShieldsLogger(use_case=use_case)
             litellm.callbacks.append(_registered)
         return _registered
@@ -163,6 +196,17 @@ def unregister() -> None:
     """Remove the logger added by `register()`."""
     global _registered
     with _register_lock:
-        if _registered is not None and _registered in litellm.callbacks:
-            litellm.callbacks.remove(_registered)
+        _remove(_registered)
         _registered = None
+
+
+def _remove(callback: Any) -> None:
+    # LiteLLM copies `callbacks` entries into its per-event lists.
+    if callback is None:
+        return
+    for name in ("callbacks", "input_callback", "success_callback",
+                 "failure_callback", "_async_success_callback",
+                 "_async_failure_callback"):
+        callbacks = getattr(litellm, name, None)
+        while isinstance(callbacks, list) and callback in callbacks:
+            callbacks.remove(callback)

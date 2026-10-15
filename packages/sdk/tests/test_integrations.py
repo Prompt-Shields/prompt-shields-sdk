@@ -400,3 +400,142 @@ def test_litellm_logger_never_raises(fakes, ll):  # noqa: F811
     logger.log_success_event({}, object(), None, None)
     logger.log_success_event(None, None, None, None)
     asyncio.run(logger.async_log_failure_event(None, None, None, None))
+
+
+# --- batches, nesting, claims and vendors ------------------------------------------
+
+
+def test_failed_patched_call_releases_its_claim(fakes):  # noqa: F811
+    prompt_shields.instrument(ps_api_key="ps_key")
+    fc = FrameworkCall("langchain")
+    token = _FRAMEWORK_CALL.set(fc)
+    try:
+        with pytest.raises(RuntimeError):
+            fakes.chat.Completions().create(model="gpt-4o", messages=MESSAGES,
+                                            boom=True)
+    finally:
+        _FRAMEWORK_CALL.reset(token)
+    assert not fc.captured  # no event was emitted: the integration reports it
+    assert _events() == []
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_langchain_multi_prompt_generate_one_event_each(fakes, lc, is_async):  # noqa: F811
+    # generate() announces every run before it makes any call.
+    from langchain_core.messages import HumanMessage
+    prompt_shields.instrument(ps_api_key="ps_key")
+    handler = lc.Handler()
+    prompts = [[HumanMessage("a")], [HumanMessage("b")], [HumanMessage("c")]]
+    if is_async:
+        model = lc.Model(resource=fakes.chat.AsyncCompletions())
+        asyncio.run(model.agenerate(prompts, callbacks=[handler]))
+    else:
+        model = lc.Model(resource=fakes.chat.Completions())
+        model.generate(prompts, callbacks=[handler])
+    events = _events()
+    assert len(events) == 3
+    assert all(e["framework"] == "langchain" and e["tokens_in"] == 11
+               for e in events)
+    assert handler._runs == {}
+    current = _FRAMEWORK_CALL.get()
+    assert current is None or current.finished
+
+
+def test_langchain_default_names_are_not_use_cases(fakes, lc):  # noqa: F811
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.runnables import RunnableLambda
+    prompt_shields.instrument(ps_api_key="ps_key", vendors=())
+    handler = lc.Handler()
+    prompt = ChatPromptTemplate.from_messages([("user", "{q}")])
+    (prompt | lc.Model()).invoke({"q": "x"}, config={"callbacks": [handler]})
+    # An unnamed outer chain defers to the named chain inside it.
+    RunnableLambda(lambda x: _chain(lc, lc.Model()).invoke(x)).invoke(
+        {"q": "x"}, config={"callbacks": [handler]})
+    assert [e.get("use_case_name") for e in _events()] == [None, "support_bot"]
+
+
+def test_litellm_inside_langchain_reports_once(fakes, lc, ll):  # noqa: F811
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    prompt_shields.instrument(ps_api_key="ps_key", vendors=())
+    ll.mod.register()
+
+    class ChatLiteLLM(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "litellm"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            r = ll.litellm.completion(model="gpt-4o-mini", mock_response="hi",
+                                      messages=[{"role": "user", "content": "x"}])
+            return ChatResult(generations=[ChatGeneration(
+                message=AIMessage(content=r.choices[0].message.content))])
+
+    _chain(lc, ChatLiteLLM()).invoke({"q": "x"},
+                                     config={"callbacks": [lc.Handler()]})
+    _wait_for(2, timeout=1.0)
+    (event,) = _events()
+    assert event["framework"] == "litellm"
+    assert event["use_case_name"] == "support_bot"
+
+
+def test_litellm_earlier_unlogged_call_is_not_claimed(fakes, ll):  # noqa: F811
+    # LiteLLM may log a call's success after the next call has started.
+    prompt_shields.instrument(ps_api_key="ps_key", vendors=())
+    logger = ll.mod.PromptShieldsLogger()
+    logger.log_pre_api_call("gpt-4o", [], _kwargs("c1"))
+    logger.log_pre_api_call("gpt-4o", [], _kwargs("c2"))
+    logger.log_success_event(_kwargs("c1"), _response(), _T0, _T1)
+    logger.log_success_event(_kwargs("c2"), _response(), _T0, _T1)
+    assert len(_events()) == 2
+
+
+def test_litellm_post_api_call_closes_the_announcement(fakes, ll):  # noqa: F811
+    prompt_shields.instrument(ps_api_key="ps_key")
+    logger = ll.mod.PromptShieldsLogger()
+    logger.log_pre_api_call("gpt-4o", [], _kwargs())
+    logger.log_post_api_call(_kwargs(), None, _T0, _T1)
+    # A direct SDK call before LiteLLM logs the success does not claim it.
+    fakes.chat.Completions().create(model="gpt-4o", messages=MESSAGES)
+    logger.log_success_event(_kwargs(), _response(), _T0, _T1)
+    direct, framework = _events()
+    assert "framework" not in direct
+    assert framework["framework"] == "litellm"
+
+
+def test_litellm_unregister_removes_promoted_callbacks(fakes, ll):  # noqa: F811
+    prompt_shields.instrument(ps_api_key="ps_key", vendors=())
+    first = ll.mod.register()
+    ll.litellm.completion(model="gpt-4o-mini", mock_response="hi",
+                          messages=[{"role": "user", "content": "x"}])
+    _wait_for(1)
+    ll.mod.unregister()
+    for name in ("callbacks", "input_callback", "success_callback",
+                 "failure_callback", "_async_success_callback",
+                 "_async_failure_callback"):
+        assert first not in getattr(ll.litellm, name)
+    ll.mod.register()
+    ll.litellm.completion(model="gpt-4o-mini", mock_response="hi",
+                          messages=[{"role": "user", "content": "x"}])
+    _wait_for(3, timeout=1.0)
+    assert len(_events()) == 2  # one per call, not one per logger ever added
+
+
+@pytest.mark.parametrize(("provider", "model", "vendor", "priced"), [
+    # Azure deployment names are priced by the model Azure served.
+    ("azure", "my-deployment", "azure_openai", True),
+    ("bedrock", "us.anthropic.claude-3-5-haiku-20241022-v1:0", "bedrock", True),
+    ("bedrock_converse", "amazon.nova-lite-v1:0", "bedrock", True),
+    ("azure_ai", "mistral-large", "azure_ai", False),
+])
+def test_litellm_vendor_and_pricing_use_provider_adapters(
+        fakes, ll, provider, model, vendor, priced):  # noqa: F811
+    prompt_shields.instrument(ps_api_key="ps_key", vendors=())
+    logger = ll.mod.PromptShieldsLogger()
+    kwargs = _kwargs(model=model, response_cost=0.5)
+    kwargs["litellm_params"]["custom_llm_provider"] = provider
+    logger.log_success_event(kwargs, _response(), _T0, _T1)
+    (event,) = _events()
+    assert event["vendor"] == vendor
+    assert event["cost_source"] == ("pricing_table" if priced else "litellm")

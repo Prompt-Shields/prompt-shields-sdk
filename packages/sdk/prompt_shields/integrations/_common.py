@@ -10,14 +10,18 @@ from prompt_shields.telemetry import build_atlas_event
 
 logger = logging.getLogger("prompt_shields.integrations")
 
-# Framework provider names -> collector vendor names.
+# Framework provider names -> SDK vendor names (the keys of
+# `providers.ADAPTERS` and the pricing table, as `ShieldsClient` reports them).
 _VENDORS = {
     "openai": "openai",
     "text-completion-openai": "openai",
     "anthropic": "anthropic",
-    "azure": "microsoft",
-    "azure_ai": "microsoft",
-    "azure_openai": "microsoft",
+    "azure": "azure_openai",
+    "azure_text": "azure_openai",
+    "azure_openai": "azure_openai",
+    "bedrock": "bedrock",
+    "bedrock_converse": "bedrock",
+    "amazon_bedrock": "bedrock",
     "google": "google",
     "google_genai": "google",
     "google_vertexai": "google",

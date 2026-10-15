@@ -10,8 +10,9 @@
 One event per chat model / LLM run. The use-case hint is, in order: the
 handler's `use_case`, `ps_use_case` in the run's metadata (e.g.
 `config={"metadata": {"ps_use_case": "support-bot"}}`), then the name of the
-outermost chain or agent the run belongs to. See `prompt_shields.integrations`
-for delivery and double-counting rules.
+outermost named chain or agent the run belongs to (LangChain's default names,
+such as `RunnableSequence` or `AgentExecutor`, are skipped). See
+`prompt_shields.integrations` for delivery and double-counting rules.
 """
 
 import logging
@@ -21,7 +22,11 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from prompt_shields.instrumentation import _FRAMEWORK_CALL, FrameworkCall
+from prompt_shields.instrumentation import (
+    _FRAMEWORK_CALL,
+    FrameworkCall,
+    current_framework_call,
+)
 from prompt_shields.integrations._common import emit, normalize_vendor, text_of
 from prompt_shields.providers import _int, openai_usage_fields
 
@@ -29,11 +34,10 @@ logger = logging.getLogger("prompt_shields.integrations.langchain")
 
 
 class _Run:
-    __slots__ = ("fc", "messages", "model", "previous", "start", "vendor")
+    __slots__ = ("fc", "messages", "model", "start", "vendor")
 
-    def __init__(self, fc, previous, vendor, model, messages):
+    def __init__(self, fc, vendor, model, messages):
         self.fc = fc
-        self.previous = previous
         self.vendor = vendor
         self.model = model
         self.messages = messages
@@ -58,15 +62,18 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
     def _enter(self, serialized: Any, run_id: UUID, parent_run_id: UUID | None,
                kwargs: dict) -> None:
         try:
-            if parent_run_id is not None and parent_run_id in self._roots:
-                self._roots[run_id] = self._roots[parent_run_id]
-            else:
-                self._roots[run_id] = kwargs.get("name") or _name(serialized)
+            inherited = (self._roots.get(parent_run_id)
+                         if parent_run_id is not None else None)
+            self._roots[run_id] = inherited or _meaningful(
+                kwargs.get("name") or _name(serialized))
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LangChain handler error: {e}")
 
     def _exit(self, run_id: UUID) -> None:
-        self._roots.pop(run_id, None)
+        try:
+            self._roots.pop(run_id, None)
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.debug(f"LangChain handler error: {e}")
 
     def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None,
                        **kwargs):
@@ -104,8 +111,11 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
 
     def on_llm_start(self, serialized, prompts, *, run_id, parent_run_id=None,
                      metadata=None, **kwargs):
-        flat = [{"role": "user", "content": p} for p in prompts or []
-                if isinstance(p, str)]
+        try:
+            flat = [{"role": "user", "content": p} for p in prompts or []
+                    if isinstance(p, str)]
+        except Exception:  # noqa: BLE001 - fail-open
+            flat = []
         self._start(run_id, parent_run_id, metadata, kwargs, flat)
 
     def _start(self, run_id, parent_run_id, metadata, kwargs, messages):
@@ -117,12 +127,11 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
                 or metadata.get("ps_use_case")
                 or self._roots.get(parent_run_id)
             )
-            fc = FrameworkCall("langchain", hint)
-            previous = _FRAMEWORK_CALL.get()
+            fc = FrameworkCall("langchain", hint,
+                               previous=current_framework_call())
             _FRAMEWORK_CALL.set(fc)
             self._runs[run_id] = _Run(
                 fc,
-                previous,
                 normalize_vendor(metadata.get("ls_provider")
                                  or invocation.get("_type")),
                 metadata.get("ls_model_name")
@@ -139,8 +148,12 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
             return None
         run.fc.finished = True
         try:
-            if _FRAMEWORK_CALL.get() is run.fc:
-                _FRAMEWORK_CALL.set(run.previous)
+            # Unwind finished calls (batch runs end in any order).
+            current = top = _FRAMEWORK_CALL.get()
+            while current is not None and current.finished:
+                current = current.previous
+            if current is not top:
+                _FRAMEWORK_CALL.set(current)
         except Exception:  # noqa: BLE001, S110 - fail-open
             pass
         return run
@@ -162,6 +175,18 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
             self._finish(run_id)
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LangChain handler error: {e}")
+
+
+# Names LangChain gives unnamed runnables and agents: not a use case.
+_GENERIC_NAMES = frozenset({"AgentExecutor", "LangGraph"})
+
+
+def _meaningful(name: Any) -> str | None:
+    """`name` unless it is a LangChain default (`RunnableSequence`, ...)."""
+    if not isinstance(name, str) or not name or name in _GENERIC_NAMES \
+            or name.startswith("Runnable"):
+        return None
+    return name
 
 
 def _name(serialized: Any) -> str | None:
