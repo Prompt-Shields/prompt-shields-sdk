@@ -142,5 +142,80 @@ async def test_operator_route_requires_token_and_known_tenant(seeded_db, monkeyp
         assert resp.status_code == 200
         assert resp.json() == {
             "tenant_id": str(tenant_id),
-            "clouds": {"azure": {"status": "not_configured"}},
+            "clouds": {
+                "azure": {"status": "not_configured"},
+                "aws": {"status": "not_configured"},
+            },
         }
+
+
+BEDROCK_PT = "arn:aws:bedrock:eu-central-1:123456789012:provisioned-model/pt-1"
+
+
+def _bedrock_handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.host == "bedrock.eu-central-1.amazonaws.com"
+    assert request.headers["authorization"].startswith("AWS4-HMAC-SHA256 ")
+    if request.url.path == "/provisioned-model-throughputs":
+        return httpx.Response(
+            200,
+            json={
+                "provisionedModelSummaries": [
+                    {
+                        "provisionedModelArn": BEDROCK_PT,
+                        "foundationModelArn": "arn:aws:bedrock:eu-central-1::"
+                        "foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+                        "status": "InService",
+                    }
+                ]
+            },
+        )
+    if request.url.path == "/listTagsForResource":
+        return httpx.Response(
+            200, json={"tags": [{"key": "owner", "value": "ai-lead@acme.com"}]}
+        )
+    return httpx.Response(200, json={})
+
+
+async def test_aws_inventory_stores_bedrock_assets(seeded_db):
+    factory = async_sessionmaker(seeded_db, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as db:
+        tenant_id = (await db.execute(select(Tenant.id))).scalar_one()
+
+    settings = ci.CloudInventorySettings(
+        cloud_inventory={
+            str(tenant_id): ci.TenantCloudCredentials(
+                aws=ci.AwsInventoryCredentials(
+                    access_key_id="AKIAEXAMPLEKEY12345",
+                    secret_access_key="s",
+                    regions=["eu-central-1"],
+                )
+            )
+        }
+    )
+    for _ in range(2):
+        async with factory() as db:
+            result = await ci.pull_cloud_inventory(
+                db,
+                tenant_id,
+                settings=settings,
+                transport=httpx.MockTransport(_bedrock_handler),
+                sleep=_no_sleep,
+                now=datetime(2026, 10, 15, tzinfo=UTC),
+            )
+        assert result["clouds"]["aws"]["status"] == "ok"
+
+    async with factory() as db:
+        assets = (await db.execute(select(AIAsset))).scalars().all()
+        assert [
+            (a.tenant_id, a.vendor, a.model, a.region, a.owner_email, a.calling_service)
+            for a in assets
+        ] == [
+            (
+                tenant_id,
+                "aws",
+                "anthropic.claude-3-haiku-20240307-v1:0",
+                "eu-central-1",
+                "ai-lead@acme.com",
+                f"aws:{BEDROCK_PT}",
+            )
+        ]
