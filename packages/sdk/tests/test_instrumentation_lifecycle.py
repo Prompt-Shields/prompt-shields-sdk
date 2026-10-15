@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 
 import httpx
 import prompt_shields
@@ -157,6 +158,45 @@ def test_lazy_target_already_imported_is_patched_at_once():
 
     prompt_shields.instrument(ps_api_key="ps_key")
     assert hasattr(models.Models.generate_content, "__ps_original__")
+
+
+@pytest.mark.usefixtures("fake_sdk")
+def test_module_being_imported_by_another_thread_is_patched(tmp_path,
+                                                            monkeypatch):
+    # The other thread found the module before the hook went in, and is
+    # still running it: instrument() waits for that import, then patches.
+    (tmp_path / "ps_fake_sdk" / "gate.py").write_text(
+        "import threading\nentered = threading.Event()\n"
+        "release = threading.Event()\n")
+    (tmp_path / "ps_fake_sdk" / "slow.py").write_text(textwrap.dedent("""
+        from ps_fake_sdk import gate
+        gate.entered.set()
+        gate.release.wait(10)
+
+        class Models:
+            def generate_content(self, **kwargs):
+                return None
+    """))
+    monkeypatch.setattr(inst, "_TARGETS", (
+        ("google", "ps_fake_sdk.slow", "Models", "generate_content", "gemini"),))
+    from ps_fake_sdk import gate
+
+    importer = threading.Thread(target=importlib.import_module,
+                                args=("ps_fake_sdk.slow",))
+    importer.start()
+    try:
+        assert gate.entered.wait(10)
+        threading.Timer(0.2, gate.release.set).start()
+        prompt_shields.instrument(ps_api_key="ps_key")
+    finally:
+        gate.release.set()
+        importer.join(10)
+    slow = sys.modules["ps_fake_sdk.slow"]
+    try:
+        assert hasattr(slow.Models.generate_content, "__ps_original__")
+    finally:
+        for name in ("ps_fake_sdk.slow", "ps_fake_sdk.gate"):
+            sys.modules.pop(name, None)
 
 
 @pytest.mark.usefixtures("fake_sdk")

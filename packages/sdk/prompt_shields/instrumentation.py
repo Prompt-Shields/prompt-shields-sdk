@@ -521,6 +521,7 @@ def instrument(
             _patch(state, module, target)
 
         _state = state
+        in_progress = []
         if lazy:
             # Installed before looking at `sys.modules`, so a module imported
             # meanwhile (by another thread) is patched by one or the other.
@@ -530,8 +531,22 @@ def instrument(
                 module = sys.modules.get(module_name)
                 if module is not None:
                     state.finder.patch(module_name, module)
+                    if module_name in lazy and getattr(
+                            getattr(module, "__spec__", None),
+                            "_initializing", False):
+                        in_progress.append(module_name)
         logger.debug(f"Instrumented {len(state.patches)} provider methods")
-        return True
+
+    # A module another thread was still running when the hook went in (found
+    # before it, so not hooked): wait for that import to finish, then patch
+    # it. Outside `_lock`, which that import may need for its own targets.
+    for module_name in in_progress:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:  # noqa: BLE001, S112 - its import failed
+            continue
+        state.finder.patch(module_name, module)
+    return True
 
 
 def _patch(state: _State, module: Any, target: tuple) -> bool:
