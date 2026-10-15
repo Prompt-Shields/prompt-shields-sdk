@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Text, ARRAY, TIMESTAMP, Integer, BigInteger, Numeric, ForeignKey, Index, DDL, event
+    Column, Text, ARRAY, TIMESTAMP, Boolean, Integer, BigInteger, Numeric, ForeignKey, Index,
+    DDL, event,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -297,6 +298,82 @@ class TelemetryClientStats(Base):
     ignored_fields = Column(JSONB, nullable=False, default=dict)
     first_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     last_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Partner change webhooks (#103)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class WebhookSubscription(Base):
+    """A partner's HTTPS endpoint for asset change events.
+
+    Created by a tenant admin for one of the tenant's partner credentials.
+    `secret_ciphertext` is the signing secret encrypted with
+    PS_WEBHOOK_SECRET_KEY (AES-GCM, bound to the row id); the plaintext is
+    returned once, on creation or rotation. See collector/webhooks.py.
+    """
+
+    __tablename__ = "webhook_subscriptions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    partner_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("partner_credentials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    url = Column(Text, nullable=False)
+    event_types = Column(ARRAY(Text), nullable=False)
+    description = Column(Text)
+    secret_ciphertext = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        Index("ix_webhook_subscriptions_tenant", "tenant_id"),
+        Index("ix_webhook_subscriptions_partner", "partner_id"),
+    )
+
+
+class WebhookDelivery(Base):
+    """One event for one subscription: the outbox row and its delivery state.
+
+    status: pending (waiting for an attempt), succeeded, or dead (gave up;
+    shown in the dead-letter view and can be redelivered). The payload is
+    built when the event is enqueued and holds no owner email or content.
+    """
+
+    __tablename__ = "webhook_deliveries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    subscription_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("webhook_subscriptions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_id = Column(UUID(as_uuid=True), nullable=False)
+    event_type = Column(Text, nullable=False)
+    asset_id = Column(UUID(as_uuid=True))
+    payload = Column(JSONB, nullable=False)
+    status = Column(Text, nullable=False, default="pending", server_default="pending")
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    last_attempt_at = Column(TIMESTAMP(timezone=True))
+    last_status_code = Column(Integer)
+    last_error = Column(Text)
+    delivered_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_webhook_deliveries_due", "status", "next_attempt_at"),
+        Index("ix_webhook_deliveries_tenant_status", "tenant_id", "status", "created_at"),
+        Index(
+            "ux_webhook_deliveries_sub_event", "subscription_id", "event_id", unique=True
+        ),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

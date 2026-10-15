@@ -260,7 +260,9 @@ async def test_write_spans_stores_metadata_only():
         patch.object(otel_ingest, "find_or_create_asset", find),
         patch.object(otel_ingest, "get_embedding", AsyncMock(return_value=None)),
         patch.object(otel_ingest, "record_event_flows", flows),
+        patch.object(otel_ingest, "AssetChanges") as changes,
     ):
+        changes.return_value.enqueue = AsyncMock()
         created = await otel_ingest.write_spans(db, TENANT, [mapped])
 
     assert created == 1
@@ -276,6 +278,8 @@ async def test_write_spans_stores_metadata_only():
         db, TENANT, asset, event, calling_service="hr-screener"
     )
     db.commit.assert_awaited_once()
+    changes.return_value.record.assert_called_once_with(asset, True)
+    changes.return_value.enqueue.assert_awaited_once_with(db, TENANT)
 
 
 def test_route_reuses_shared_tenant_auth():

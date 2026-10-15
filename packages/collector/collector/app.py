@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -17,7 +19,18 @@ async def lifespan(app: FastAPI):
     if settings.rls_required:
         async with engine.connect() as conn:
             await rls.check_required(conn)
+    worker = None
+    if settings.webhook_worker_interval_seconds > 0:
+        from collector.webhooks import run_worker
+
+        worker = asyncio.create_task(
+            run_worker(SessionLocal, settings.webhook_worker_interval_seconds)
+        )
     yield
+    if worker is not None:
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
     await engine.dispose()
 
 
@@ -61,6 +74,11 @@ from collector.partner_registry import router as partner_registry_router  # noqa
 app.include_router(oauth_router)
 app.include_router(partner_admin_router)
 app.include_router(partner_registry_router)
+
+# Partner change webhooks: tenant admin management (#103)
+from collector.webhook_admin import router as webhook_admin_router  # noqa: E402
+
+app.include_router(webhook_admin_router)
 
 # Human attestation: tenant registry and Partner API routes (#98)
 from collector.attestation_api import partner_router as attestation_partner_router  # noqa: E402

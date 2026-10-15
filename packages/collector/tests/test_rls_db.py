@@ -10,9 +10,12 @@ SECURITY binds the owner.
 
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from collector import rls
 from collector.app import app
@@ -31,6 +34,8 @@ from db.models import (
     RetentionAuditLog,
     RiskMapping,
     TelemetryClientStats,
+    WebhookDelivery,
+    WebhookSubscription,
     Tenant,
 )
 from httpx import ASGITransport, AsyncClient
@@ -102,6 +107,27 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     actor_type="tenant",
                 ),
             ]
+        )
+        sub = WebhookSubscription(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            partner_id=p.id,
+            url="https://hooks.example/seed",
+            event_types=["asset.created"],
+            secret_ciphertext="unused",
+            is_active=False,
+        )
+        s.add(sub)
+        await s.flush()
+        s.add(
+            WebhookDelivery(
+                tenant_id=tenant_id,
+                subscription_id=sub.id,
+                event_id=uuid.uuid4(),
+                event_type="asset.created",
+                payload={},
+                status="succeeded",
+            )
         )
         await s.commit()
 
@@ -322,6 +348,8 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         assert resp.status_code == 200, resp.text
         assert resp.json()["rows_deleted"]["tenants"] == 1
         assert resp.json()["rows_deleted"]["asset_attestations"] == 1
+        assert resp.json()["rows_deleted"]["webhook_deliveries"] == 1
+        assert resp.json()["rows_deleted"]["webhook_subscriptions"] == 1
 
     assert any(
         "rls bypass granted reason=operator:POST /api/v1/operator/retention/purge"
@@ -419,3 +447,55 @@ async def test_cloud_inventory_and_partner_admin_routes_work_under_rls(rls_db, m
             )
         ).scalars().all()
     assert denied == [b] and a not in denied
+
+
+async def test_webhook_worker_claims_across_tenants_and_delivers_as_each(
+    rls_db, monkeypatch, caplog
+):
+    """Webhook events are queued under the tenant's context; the worker's
+    claim is a logged bypass and each attempt runs as the row's tenant."""
+    from collector import webhooks
+
+    monkeypatch.setattr(settings, "webhook_secret_key", "s" * 40)
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 0)
+
+    async def public(host, port):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(webhooks, "_resolve_host", public)
+    async with rls_db["admin"]() as s:
+        partners = dict(
+            (await s.execute(select(PartnerCredential.tenant_id, PartnerCredential.id))).all()
+        )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key, tenant in ((KEY_A, rls_db["a"]), (KEY_B, rls_db["b"])):
+            h = {"Authorization": f"Bearer {key}"}
+            resp = await c.post(
+                "/api/v1/admin/webhooks/subscriptions",
+                headers=h,
+                json={"partner_id": str(partners[tenant]), "url": "https://hooks.example/x"},
+            )
+            assert resp.status_code == 201, resp.text
+            resp = await c.post(
+                "/ingest/events", headers=h, json={"events": [{"vendor": f"v-{key}"}]}
+            )
+            assert resp.status_code == 200, resp.text
+
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["tenant_id"])
+        return httpx.Response(200)
+
+    transport = httpx.MockTransport(handler)
+    # Without the bypass the claim sees no tenant's rows.
+    run = await webhooks.deliver_due(
+        rls_db["plain"], transport=transport, claim_factory=rls_db["plain"]
+    )
+    assert run.claimed == 0
+
+    caplog.set_level(logging.INFO, logger="collector.rls")
+    run = await webhooks.deliver_due(rls_db["plain"], transport=transport)
+    assert (run.claimed, run.succeeded) == (2, 2)
+    assert sorted(sent) == sorted([str(rls_db["a"]), str(rls_db["b"])])
+    assert any("reason=webhook-worker" in r.getMessage() for r in caplog.records)
