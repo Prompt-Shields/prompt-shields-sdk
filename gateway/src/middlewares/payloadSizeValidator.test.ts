@@ -54,6 +54,15 @@ describe('payloadSizeValidatorMiddleware', () => {
       }
     );
 
+    test('also limits urlencoded forms, which formData() parses too', async () => {
+      process.env.MAX_FILE_PAYLOAD_SIZE_IN_MB = '1';
+      const res = await post({
+        'content-type': 'application/x-www-form-urlencoded',
+        'content-length': String(2 * 1048576),
+      });
+      expect(res.status).toBe(413);
+    });
+
     test('does not apply to JSON bodies', async () => {
       process.env.MAX_FILE_PAYLOAD_SIZE_IN_MB = '1';
       const res = await post({

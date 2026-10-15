@@ -223,6 +223,26 @@ describe('psTelemetry (Hono adapter)', () => {
       expect(JSON.stringify(sent)).not.toContain('secret context');
     });
 
+    test('an urlencoded form yields only its model', async () => {
+      const app = new Hono();
+      app.use('*', psTelemetry());
+      app.post('/v1/audio/transcriptions', async (c) => {
+        await c.req.formData();
+        return c.json({ text: 'hello' });
+      });
+      await app.request('/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          'x-portkey-provider': 'openai',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: 'model=whisper-1&prompt=secret+context&file=AAAA',
+      });
+      await flush();
+      expect(sent.events[0]).toMatchObject({ model: 'whisper-1' });
+      expect(JSON.stringify(sent)).not.toContain('secret');
+    });
+
     test('a form the handler never parsed is not read by telemetry', async () => {
       const app = new Hono();
       app.use('*', psTelemetry());

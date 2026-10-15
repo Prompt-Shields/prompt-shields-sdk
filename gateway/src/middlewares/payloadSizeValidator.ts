@@ -16,6 +16,13 @@ import { env } from 'hono/adapter';
  * handlers read the whole form into memory before calling the provider, so
  * while this limit is set a multipart body must declare its
  * `content-length`; one without it gets 411 instead of being read unchecked.
+ * `application/x-www-form-urlencoded` is limited the same way, since
+ * `formData()` parses it too and it would otherwise bypass the limit.
+ *
+ * The check is on the declared length only; it relies on the HTTP server
+ * framing the body by `content-length` (Node's HTTP/1.1 parser reads exactly
+ * that many bytes and rejects `content-length` together with
+ * `transfer-encoding`; workerd likewise), so the bytes read cannot exceed it.
  */
 const BYTES_PER_MB = 1048576;
 
@@ -43,7 +50,11 @@ export const payloadSizeValidatorMiddleware = () => {
     }
 
     const fileLimitMb = Number(vars.MAX_FILE_PAYLOAD_SIZE_IN_MB);
-    if (fileLimitMb > 0 && contentType === 'multipart/form-data') {
+    if (
+      fileLimitMb > 0 &&
+      (contentType === 'multipart/form-data' ||
+        contentType === 'application/x-www-form-urlencoded')
+    ) {
       const bytes = declared?.trim() ? Number(declared) : NaN;
       if (!Number.isFinite(bytes) || bytes < 0) {
         return c.json(

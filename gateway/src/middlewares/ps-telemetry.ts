@@ -124,8 +124,10 @@ export function usageUnits(
  */
 export async function requestBodyForTelemetry(c: any): Promise<any> {
   const contentType = (c.req.header('content-type') || '').toLowerCase();
-  if (contentType.startsWith('multipart/form-data')) {
-    const cached = c.req.bodyCache?.formData;
+  // Any parsed form (multipart or urlencoded): never serialise it back via
+  // json(), which would copy the whole upload into a string.
+  const cached = c.req.bodyCache?.formData;
+  if (cached || contentType.startsWith('multipart/form-data')) {
     if (!cached) return undefined;
     try {
       const form = await cached;
