@@ -7,8 +7,8 @@ created_at, updated_at, reviewed_at, reviewed_by and
 reviewed_key_prefix. A partial unique index on
 (tenant_id, asset_id, rule_id) is the suggestion engine's upsert key.
 
-Revision ID: 013
-Revises: 012
+Revision ID: 014
+Revises: 013
 Create Date: 2026-10-15
 """
 
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "013"
-down_revision: str | None = "012"
+revision: str = "014"
+down_revision: str | None = "013"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

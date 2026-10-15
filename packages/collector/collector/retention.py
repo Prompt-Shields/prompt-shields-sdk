@@ -52,6 +52,8 @@ from db.models import (
     RiskMapping,
     TelemetryClientStats,
     Tenant,
+    WebhookDelivery,
+    WebhookSubscription,
 )
 from sqlalchemy import Table, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,6 +76,8 @@ ERASE_ORDER: tuple[type, ...] = (
     RiskMapping,
     AssetAttestation,
     PartnerAuditLog,
+    WebhookDelivery,
+    WebhookSubscription,
     PartnerCredential,
     AIAsset,
     TelemetryClientStats,
