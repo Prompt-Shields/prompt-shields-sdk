@@ -133,11 +133,11 @@ A delivery fails when the response is not `2xx`, including redirects (redirects 
 
 Events can arrive out of order, and an event can arrive more than once. Use `Prompt-Shields-Event-Id` to drop duplicates, and compare `created_at` or re-read the asset when order matters.
 
-If the partner credential is revoked or expired, or no longer has the `registry:read` scope, its subscriptions stop receiving events. Queued deliveries are moved to `dead` and are not sent.
+If the partner credential is revoked or expired, or no longer has the scope for the event (`changes:read` for asset events), its subscriptions stop receiving events. Queued deliveries are moved to `dead` and are not sent.
 
 ## Managing subscriptions (tenant admin)
 
-The tenant manages subscriptions with its own API key, not with partner credentials, because the tenant decides where its registry data is sent. The partner credential must be active and have the `registry:read` scope.
+The tenant manages subscriptions with its own API key, not with partner credentials, because the tenant decides where its registry data is sent. The partner credential must be active and have the `changes:read` scope, which asset events need because they carry the same data as the [changes feed](/api-reference/sync/get-changes). Phase 1 credentials with `registry:read` already include it. A credential with only `assets:read` cannot be subscribed.
 
 ```bash
 curl -X POST https://collector.example.com/api/v1/admin/webhooks/subscriptions \
@@ -162,7 +162,7 @@ The response includes `secret` (`whsec_…`). This is the only time it is shown,
 ### Endpoint rules
 
 - The URL must use `https`, must not contain credentials or a fragment, and can be at most 2048 characters.
-- Every address the host name resolves to must be public. Loopback, private, link-local (including cloud metadata `169.254.169.254`), carrier-grade NAT, multicast and IPv4-mapped forms of these are refused. This is checked when the subscription is created and again on every delivery. The request goes to the address that was checked, and TLS is verified against the host name.
+- Every address the host name resolves to must be public. Loopback, private, link-local (including cloud metadata `169.254.169.254`), carrier-grade NAT, multicast, deprecated IPv6 ranges (IPv4-compatible `::/96`, site-local `fec0::/10`) and IPv4-mapped, 6to4, Teredo and NAT64 (`64:ff9b::/96`) forms of these are refused. This is checked when the subscription is created and again on every delivery. The request goes to the address that was checked, and TLS is verified against the host name.
 - A partner credential can have at most 10 subscriptions.
 
 ## Operating the collector
@@ -172,7 +172,7 @@ The response includes `secret` (`whsec_…`). This is the only time it is shown,
 | `PS_WEBHOOK_SECRET_KEY` | (empty) | Encrypts signing secrets at rest (AES-GCM). At least 32 characters, for example `openssl rand -base64 32`. While it is empty, webhooks are off. If you change it, every subscription needs a new secret. |
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` | `0` | When above 0, each collector process runs the delivery loop in the background. Otherwise, run `python -m collector.webhooks deliver --loop` as its own worker. Workers claim rows with `SKIP LOCKED`, so several can run at the same time. |
 | `PS_WEBHOOK_MAX_ATTEMPTS` | `8` | Attempts before a delivery is marked `dead` |
-| `PS_WEBHOOK_TIMEOUT_SECONDS` | `10` | Timeout for each attempt |
+| `PS_WEBHOOK_TIMEOUT_SECONDS` | `10` | Overall deadline for each attempt (resolve, connect, send, response headers). Keep it well under 5 minutes, the worker's claim lease |
 | `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `30` | `succeeded` and `dead` rows older than this are deleted (by the worker once an hour, or by `python -m collector.webhooks purge`) |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | For local development only |
 

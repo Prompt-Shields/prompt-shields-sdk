@@ -10,6 +10,7 @@ import uuid
 
 import httpx
 import pytest
+
 from collector import webhooks
 from collector.config import settings
 
