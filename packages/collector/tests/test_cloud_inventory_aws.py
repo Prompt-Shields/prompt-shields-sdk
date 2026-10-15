@@ -155,6 +155,12 @@ def _aws_handler(
                             "modelArn": CUSTOM.replace("abc123", "bad1"),
                             "modelStatus": "Failed",
                         },
+                        # Still training: not an asset yet.
+                        {
+                            "modelArn": CUSTOM.replace("abc123", "training1"),
+                            "baseModelArn": FM,
+                            "modelStatus": "Creating",
+                        },
                         # Another region's ARN is never stored for this one.
                         {"modelArn": CUSTOM.replace("eu-central-1", "us-east-1")},
                     ]
@@ -318,6 +324,87 @@ async def test_assume_role_with_external_id_uses_session_credentials():
     assert summary == {"regions": 2}
     # The us-east-1 copy of the custom model ARN is stored once, for us-east-1.
     assert [d.region for d in deps if "us-east-1" in d.resource_id] == ["us-east-1"]
+
+
+def _sts_response(keys: ci.AwsKeys, expiration: datetime) -> httpx.Response:
+    return httpx.Response(
+        200,
+        text=(
+            '<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">'
+            "<AssumeRoleResult><Credentials>"
+            f"<AccessKeyId>{keys.access_key_id}</AccessKeyId>"
+            f"<SecretAccessKey>{keys.secret_access_key}</SecretAccessKey>"
+            f"<SessionToken>{keys.session_token}</SessionToken>"
+            f"<Expiration>{expiration.strftime('%Y-%m-%dT%H:%M:%SZ')}</Expiration>"
+            "</Credentials></AssumeRoleResult></AssumeRoleResponse>"
+        ),
+    )
+
+
+def _amz_date(request: httpx.Request) -> datetime:
+    return datetime.strptime(request.headers["x-amz-date"], "%Y%m%dT%H%M%S%z")
+
+
+async def test_govcloud_assumes_the_role_in_its_own_partition():
+    gov_role = f"arn:aws-us-gov:iam::{ACCT}:role/Inventory"
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.host.startswith("sts."):
+            form = dict(httpx.QueryParams(request.content.decode()))
+            assert form["RoleArn"] == gov_role
+            assert form["DurationSeconds"] == "3600"
+            return _sts_response(
+                ci.AwsKeys(ROLE_KEY_ID, ROLE_SECRET, ROLE_TOKEN),
+                _amz_date(request) + timedelta(hours=1),
+            )
+        _check_signature(request, ci.AwsKeys(ROLE_KEY_ID, ROLE_SECRET, ROLE_TOKEN))
+        return httpx.Response(200, json={})
+
+    summary, _ = await _fetch(
+        _creds(role_arn=gov_role, regions=["us-gov-west-1", "us-gov-east-1"]), handler
+    )
+    assert summary == {"regions": 2}
+    assert hosts[0] == "sts.us-gov-west-1.amazonaws.com"
+    assert hosts.count(hosts[0]) == 1
+    assert {h for h in hosts if h.startswith("bedrock.")} == {
+        "bedrock.us-gov-west-1.amazonaws.com",
+        "bedrock.us-gov-east-1.amazonaws.com",
+    }
+
+
+async def test_assumed_role_keys_are_renewed_before_they_expire():
+    # Every clock read moves time on by a minute, so 15-minute sessions run
+    # out several times during one inventory of five regions.
+    times = iter(CLOCK + timedelta(minutes=i) for i in range(10_000))
+    state: dict = {"sts": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        date = _amz_date(request)
+        if request.url.host.startswith("sts."):
+            _check_signature(request, ci.AwsKeys(KEY_ID, SECRET))
+            form = dict(httpx.QueryParams(request.content.decode()))
+            assert form["DurationSeconds"] == "900"
+            state["sts"] += 1
+            n = state["sts"]
+            state["keys"] = ci.AwsKeys(f"ASIAROLE{n:012d}", f"secret-{n}", f"token-{n}")
+            state["expires"] = date + timedelta(minutes=15)
+            return _sts_response(state["keys"], state["expires"])
+        # Signed with the latest session's keys, before they expire.
+        _check_signature(request, state["keys"])
+        assert date < state["expires"]
+        return httpx.Response(200, json={})
+
+    regions = ["eu-central-1", "eu-west-1", "eu-west-2", "eu-north-1", "us-east-1"]
+    summary, _ = await ci.fetch_aws_deployments(
+        _creds(role_arn=ROLE_ARN, session_duration_seconds=900, regions=regions),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+        clock=lambda: next(times),
+    )
+    assert summary == {"regions": 5}
+    assert state["sts"] >= 3
 
 
 async def test_failing_region_is_reported_and_others_continue():
@@ -545,7 +632,7 @@ def test_aws_credentials_come_from_env(monkeypatch):
                         "secret_access_key": SECRET,
                         "role_arn": ROLE_ARN,
                         "external_id": EXTERNAL_ID,
-                        "regions": ["eu-central-1", "eu-central-1", "us-gov-west-1"],
+                        "regions": ["eu-central-1", "eu-central-1", "us-east-1"],
                     }
                 }
             }
@@ -553,7 +640,8 @@ def test_aws_credentials_come_from_env(monkeypatch):
     )
     creds = ci.credentials_for_tenant(TENANT).aws
     assert creds.secret_access_key.get_secret_value() == SECRET
-    assert creds.regions == ["eu-central-1", "us-gov-west-1"]
+    assert creds.regions == ["eu-central-1", "us-east-1"]
+    assert creds.session_duration_seconds == 3600
     assert ci.credentials_for_tenant(uuid.uuid4()).aws is None
 
 
@@ -571,6 +659,15 @@ def test_aws_credentials_come_from_env(monkeypatch):
         {"external_id": "x"},  # external_id without role_arn
         {"role_arn": ROLE_ARN, "external_id": "has space"},
         {"role_session_name": "a b"},
+        # Keys, roles and STS are per partition: never mixed.
+        {"regions": ["eu-central-1", "us-gov-west-1"]},
+        {"regions": ["us-gov-west-1"], "role_arn": ROLE_ARN},
+        {
+            "regions": ["eu-central-1"],
+            "role_arn": f"arn:aws-us-gov:iam::{ACCT}:role/Inventory",
+        },
+        {"role_arn": ROLE_ARN, "session_duration_seconds": 899},
+        {"role_arn": ROLE_ARN, "session_duration_seconds": 43201},
     ],
 )
 def test_malformed_aws_env_is_rejected_without_echoing_the_secret(monkeypatch, aws):

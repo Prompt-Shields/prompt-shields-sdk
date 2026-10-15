@@ -138,6 +138,13 @@ async def test_operator_route_requires_token_and_known_tenant(seeded_db, monkeyp
         resp = await c.post(url, json={"tenant_id": str(uuid.uuid4())}, headers=op)
         assert resp.status_code == 404
 
+        # An unknown cloud is a client error, not silently dropped.
+        resp = await c.post(
+            url, json={"tenant_id": str(tenant_id), "clouds": ["azure", "gpc"]}, headers=op
+        )
+        assert resp.status_code == 400
+        assert "gpc" in resp.json()["detail"]["detail"]
+
         resp = await c.post(url, json={"tenant_id": str(tenant_id)}, headers=op)
         assert resp.status_code == 200
         assert resp.json() == {
