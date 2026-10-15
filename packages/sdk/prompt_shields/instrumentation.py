@@ -18,6 +18,9 @@ Guarantees:
     response (or exception) is what the caller gets.
   - No double events: calls made through `ShieldsClient` / `AsyncShieldsClient`
     run inside `suppress_instrumentation()` and are left to those clients.
+    Framework integrations (`prompt_shields.integrations`) announce each call
+    as a `FrameworkCall`; a patched call made inside it claims it, adds the
+    framework fields to its event, and the integration then emits nothing.
 
 Events are built by the same code as `ShieldsClient` (`_build_event`) and
 streams are wrapped by the same `ShieldsStream` / `AsyncShieldsStream`.
@@ -82,6 +85,52 @@ _SUPPRESSED: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 _lock = threading.Lock()
 _state: "_State | None" = None
+
+
+class FrameworkCall:
+    """One LLM call announced by a framework integration.
+
+    Set in `_FRAMEWORK_CALL` before the framework reaches the provider SDK.
+    The first patched call made inside it claims it (`captured`), so the
+    integration knows the event was already emitted. `model`, when set, must
+    match the requested model for the claim (a guard against a stale value).
+    """
+
+    __slots__ = ("captured", "finished", "framework", "model", "use_case_hint")
+
+    def __init__(self, framework: str, use_case_hint: str | None = None,
+                 model: str | None = None):
+        self.framework = framework
+        self.use_case_hint = use_case_hint
+        self.model = model
+        self.captured = False
+        self.finished = False
+
+
+_FRAMEWORK_CALL: contextvars.ContextVar[FrameworkCall | None] = (
+    contextvars.ContextVar("prompt_shields_framework_call", default=None)
+)
+
+
+def _same_model(a: str, b: str) -> bool:
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+
+def _claim_framework_call(model: Any) -> FrameworkCall | None:
+    fc = _FRAMEWORK_CALL.get()
+    if fc is None or fc.captured or fc.finished:
+        return None
+    if fc.model and isinstance(model, str) and not _same_model(fc.model, model):
+        return None
+    fc.captured = True
+    return fc
+
+
+def apply_framework_fields(event: dict, fc: FrameworkCall) -> None:
+    """Tag an event with its framework; the hint fills an unset use case."""
+    event["framework"] = fc.framework
+    if fc.use_case_hint and not event.get("use_case_name"):
+        event["use_case_name"] = fc.use_case_hint
 
 
 @contextlib.contextmanager
@@ -268,6 +317,7 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
         ):
             hide_usage_chunk = request_openai_stream_usage(call_kwargs)
         api_key = getattr(upstream, "api_key", None)
+        framework = _claim_framework_call(call_kwargs.get("model"))
         return {
             "state": state,
             "vendor": vendor,
@@ -278,6 +328,7 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             "streaming": streaming,
             "hide_usage_chunk": hide_usage_chunk,
             "api_key": api_key if isinstance(api_key, str) else None,
+            "framework": framework,
         }
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"Instrumentation prepare error: {e}")
@@ -338,37 +389,52 @@ async def _finish_async(call: dict, response: Any, start: float) -> Any:
 # --- events ------------------------------------------------------------------
 
 
-def _event(call: dict, response: Any, latency_ms: int,
-           adapter_fields: dict | None = None) -> dict:
+def build_event(state: _State, *, vendor: str, model: Any, messages: list,
+                latency_ms: int, adapter_fields: dict,
+                api_key: str | None = None) -> dict:
+    """A `ShieldsClient`-shaped event from already extracted usage fields."""
     # Imported here: client.py imports this module for suppress_instrumentation.
     from prompt_shields.client import ShieldsClient, _fingerprint
 
+    # Duck-typed stand-in for a ShieldsClient: the attributes _build_event reads.
+    shim = SimpleNamespace(
+        _vendor=vendor,
+        _adapter=None,
+        _metadata=state.metadata,
+        _scan_pii=state.scan_pii,
+        _send_prompt_text=state.send_prompt_text,
+        _pricing_table=state.pricing_table,
+        _api_key_fingerprint=_fingerprint(api_key) if api_key else None,
+    )
+    return ShieldsClient._build_event(
+        shim,
+        model=model,
+        messages=messages,
+        response=None,
+        latency_ms=latency_ms,
+        adapter_fields=adapter_fields,
+    )
+
+
+def _event(call: dict, response: Any, latency_ms: int,
+           adapter_fields: dict | None = None) -> dict:
     if adapter_fields is None:
         adapter_fields = (
             _extract_responses(response) if call["api"] == "responses"
             else get_adapter(call["vendor"]).extract(response)
         )
-    state = call["state"]
-    # Duck-typed stand-in for a ShieldsClient: the attributes _build_event reads.
-    shim = SimpleNamespace(
-        _vendor=call["vendor"],
-        _adapter=get_adapter(call["vendor"]),
-        _metadata=state.metadata,
-        _scan_pii=state.scan_pii,
-        _send_prompt_text=state.send_prompt_text,
-        _pricing_table=state.pricing_table,
-        _api_key_fingerprint=(
-            _fingerprint(call["api_key"]) if call["api_key"] else None
-        ),
-    )
-    return ShieldsClient._build_event(
-        shim,
+    event = build_event(
+        call["state"],
+        vendor=call["vendor"],
         model=call["model"],
         messages=call["messages"],
-        response=response,
         latency_ms=latency_ms,
         adapter_fields=adapter_fields,
+        api_key=call["api_key"],
     )
+    if call.get("framework") is not None:
+        apply_framework_fields(event, call["framework"])
+    return event
 
 
 def _stream_event(call: dict, adapter_fields: dict, stream_fields: dict,

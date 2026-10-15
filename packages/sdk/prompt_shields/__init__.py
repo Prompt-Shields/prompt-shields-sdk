@@ -18,6 +18,10 @@ Public surface:
     Auto-instrumentation:
         instrument / uninstrument — patch installed openai / anthropic SDKs
 
+    Framework integrations (optional imports, see prompt_shields.integrations):
+        prompt_shields.integrations.langchain — LangChain callback handler
+        prompt_shields.integrations.litellm   — LiteLLM custom logger
+
     Utilities:
         detect_pii_categories — pattern-based PII detection
         estimate_cost         — token-to-USD cost estimator
