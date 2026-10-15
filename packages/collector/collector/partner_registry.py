@@ -37,6 +37,7 @@ from collector.partner_auth import (
 from collector.partner_rate_limit import get_rate_limiter
 from collector.partner_scopes import DEFAULT_RATE_LIMIT
 from collector.retention import get_retention_cutoff
+from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 from db.models import (
     AIAsset,
     AIUsageEvent,
@@ -161,15 +162,6 @@ def _flow_dict(f: DataFlow) -> dict:
         "data_classification": f.data_classification,
         "direction": f.direction,
         "detected_pii_types": f.detected_pii_types,
-    }
-
-
-def _risk_dict(r: RiskMapping) -> dict:
-    return {
-        "id": str(r.id),
-        "risk_category": r.risk_category,
-        "risk_level": r.risk_level,
-        "framework": r.framework,
     }
 
 
@@ -330,21 +322,28 @@ async def get_risks(
     request: Request,
     response: Response,
     principal: PartnerPrincipal = Depends(require_scope("risks:read")),
+    status: RiskStatus | None = Query(
+        default=None,
+        description="Only mappings with this status. Default: confirmed.",
+    ),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
     rows = (
         await db.execute(
-            select(RiskMapping).where(
+            select(RiskMapping)
+            .where(
                 RiskMapping.asset_id == asset_id,
                 RiskMapping.tenant_id == principal.tenant_id,
+                risk_status_filter(status, default="confirmed"),
             )
+            .order_by(RiskMapping.framework, RiskMapping.risk_category, RiskMapping.id)
         )
     ).scalars().all()
     await _audit(
         request, principal, f"/partner/v1/assets/{asset_id}/risks", "GET", 200, len(rows)
     )
-    return {"data": [_risk_dict(r) for r in rows]}
+    return {"data": [risk_dict(r) for r in rows]}
 
 
 # Supported `period` values for /usage-summary, in days.
