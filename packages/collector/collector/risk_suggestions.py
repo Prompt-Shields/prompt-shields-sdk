@@ -57,6 +57,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import rls
 from collector.audit import bearer_key_prefix, record_read
 from collector.auth import resolve_tenant
 from collector.dedup import CLASSIFICATION_ORDER
@@ -660,9 +661,11 @@ async def _run_cli(tenant_ids: list[UUID] | None, database_url: str) -> int:
     try:
         if tenant_ids is None:
             async with session_factory() as db:
+                await rls.bypass(db, "risk-suggestions-cli:list-tenants", actor="cli")
                 tenant_ids = list((await db.execute(select(Tenant.id))).scalars())
         for tenant_id in tenant_ids:
             async with session_factory() as db:
+                await rls.set_tenant(db, tenant_id)
                 r = await suggest_risks(db, tenant_id)
                 await db.commit()
             print(

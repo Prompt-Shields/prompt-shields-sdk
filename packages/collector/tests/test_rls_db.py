@@ -34,9 +34,9 @@ from db.models import (
     RetentionAuditLog,
     RiskMapping,
     TelemetryClientStats,
+    Tenant,
     WebhookDelivery,
     WebhookSubscription,
-    Tenant,
 )
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
@@ -499,3 +499,51 @@ async def test_webhook_worker_claims_across_tenants_and_delivers_as_each(
     assert (run.claimed, run.succeeded) == (2, 2)
     assert sorted(sent) == sorted([str(rls_db["a"]), str(rls_db["b"])])
     assert any("reason=webhook-worker" in r.getMessage() for r in caplog.records)
+
+
+async def test_risk_suggestions_run_and_all_tenants_cli_under_rls(rls_db):
+    """The tenant route and the --all-tenants job each write suggestions
+    for the right tenant only."""
+    from collector.risk_suggestions import _run_cli
+
+    event = {
+        "vendor": "openai",
+        "model": "gpt-4o",
+        "use_case_name": "resume-screening",
+        "business_unit": "HR",
+        "detected_pii_types": ["email"],
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key in (KEY_A, KEY_B):
+            h = {"Authorization": f"Bearer {key}"}
+            resp = await c.post("/ingest/events", headers=h, json={"events": [event]})
+            assert resp.status_code == 200, resp.text
+        resp = await c.post(
+            "/api/v1/admin/risk-suggestions/run",
+            headers={"Authorization": f"Bearer {KEY_A}"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["created"] > 0
+
+    async def suggested() -> dict:
+        async with rls_db["admin"]() as s:
+            rows = (
+                await s.execute(
+                    select(RiskMapping.tenant_id, RiskMapping.asset_id).where(
+                        RiskMapping.rule_id.is_not(None)
+                    )
+                )
+            ).all()
+        return {t: {a for tt, a in rows if tt == t} for t, _ in rows}
+
+    assert set(await suggested()) == {rls_db["a"]}
+    await _run_cli(None, rls_db["engine"].url.render_as_string(hide_password=False))
+    by_tenant = await suggested()
+    assert set(by_tenant) == {rls_db["a"], rls_db["b"]}
+    async with rls_db["admin"]() as s:
+        for tenant, assets in by_tenant.items():
+            owners = set(
+                (await s.execute(select(AIAsset.tenant_id).where(AIAsset.id.in_(assets))))
+                .scalars()
+            )
+            assert owners == {tenant}

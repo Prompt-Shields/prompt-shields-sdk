@@ -13,8 +13,8 @@ Downgrade turns enforcement off and drops the policies (#83).
 The SQL is inlined (a snapshot of db/rls.py at this revision) so later edits
 to db/rls.py don't rewrite history.
 
-Revision ID: 014
-Revises: 013
+Revision ID: 015
+Revises: 014
 Create Date: 2026-10-15
 """
 
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "014"
-down_revision: str | None = "013"
+revision: str = "015"
+down_revision: str | None = "014"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
