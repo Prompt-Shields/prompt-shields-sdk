@@ -1,6 +1,6 @@
 {
   "ruleset": "eu_ai_act_annex_iii",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "framework": "EU_AI_ACT",
   "title": "EU AI Act Annex III high-risk use cases",
   "description": "Suggests the Annex III area an AI asset may fall under, from its use case, business unit, calling service, data sources, output destinations and detected PII. Annex III systems are high-risk under Article 6(2) unless the Article 6(3) derogation applies; the engine does not assess that derogation, so every match is a suggestion for a human to confirm or reject.",
@@ -10,7 +10,16 @@
     "education_units": ["education", "school*", "universit*", "academic*", "admissions", "registrar", "student*"],
     "finance_units": ["lending", "loans", "credit", "underwriting", "retail banking", "consumer finance"],
     "insurance_units": ["insurance", "underwriting", "actuarial"],
-    "public_sector_units": ["social services", "welfare", "public health"],
+    "public_sector_units": ["social services", "social welfare", "welfare services", "welfare office*", "public health"],
+    "employment_context": ["hire", "hires", "hiring", "recruit*", "employer*", "vacanc*", "career*", "talent*", "interview*", "resume*", "cv", "cvs", "staffing", "headhunt*", "shortlist*", "job application*", "job opening*", "job offer*", "job seeker*", "jobseeker*", "job description*", "job requisition*", "job posting*", "job candidate*", "job applicant*", "open role*", "workforce"],
+    "non_employment_applicant": ["loan*", "mortgage*", "credit*", "lending", "insurance*", "visa*", "asylum", "tenant*", "rental*", "lease*", "benefit*", "grant*", "scholarship*", "admission*", "student*", "school*", "universit*", "candidate generation", "candidate retrieval", "candidate item*", "candidate product*", "candidate document*", "candidate passage*", "candidate answer*", "candidate response*", "candidate completion*", "candidate model*", "candidate set*", "candidate pool of item*", "release candidate*", "election*", "electoral", "ballot*", "political candidate*"],
+    "education_context": ["school*", "universit*", "college*", "academ*", "student*", "pupil*", "campus", "tuition", "curricul*", "degree*", "undergrad*", "postgrad*", "graduate program*", "vocational", "apprentice*", "education*", "enrol*", "kindergarten", "registrar"],
+    "healthcare_context": ["hospital*", "patient*", "clinic*", "inpatient*", "outpatient*", "ward", "wards", "bed management", "bed occupancy", "icu", "emergency department", "medical", "nursing", "care home*", "health*"],
+    "benefit_context": ["benefit*", "eligib*", "claim", "claims", "claimant*", "entitlement*", "allowance*", "assistance", "means test*", "social", "public", "recipient*", "caseworker*", "case work*", "payment*", "applicant*", "application*"],
+    "non_public_welfare": ["animal*", "livestock", "pet", "pets", "employee*", "staff", "worker*", "workplace", "corporate"],
+    "technical_election": ["leader election*", "leader elect*", "master election*", "raft", "paxos", "consensus", "zookeeper", "etcd", "cluster*", "failover", "distributed lock*"],
+    "campaign_logistics": ["logistic*", "volunteer schedul*", "volunteer management", "volunteer shift*", "canvass* rout*", "route planning", "route optimi*", "event planning", "event schedul*", "schedul*", "donation processing", "donor management", "expense*", "finance report*", "compliance report*", "office admin*", "administrative", "inventory", "yard sign*"],
+    "voter_influence": ["persua*", "microtarget*", "micro target*", "targeting", "targeted messag*", "political advertising", "political ad", "political ads", "voter outreach", "voter contact", "get out the vote", "gotv", "disinformation", "messaging", "message generation"],
     "health_pii": ["health", "medical", "medical_record", "diagnosis", "health_insurance_id"],
     "financial_pii": ["credit_card", "bank_account", "iban", "income", "salary", "credit_score", "tax_id"],
     "identity_pii": ["national_id", "ssn", "passport", "date_of_birth", "drivers_license"],
@@ -89,7 +98,18 @@
       "title": "Access or admission to education and vocational training",
       "when": {
         "any": [
-          {"signal": "text", "keywords": ["admission*", "student application*", "student enrol*", "university application*", "school placement"]}
+          {"signal": "text", "keywords": ["student application*", "student enrol*", "university application*", "university admission*", "college admission*", "school admission*", "school placement"]},
+          {
+            "signal": "text", "keywords": ["admission*", "admissions office"],
+            "context": [
+              {"signal": "text", "keywords": "@education_context"},
+              {"signal": "business_unit", "keywords": "@education_context"}
+            ],
+            "exclude": [
+              {"signal": "text", "keywords": "@healthcare_context"},
+              {"signal": "business_unit", "keywords": "@healthcare_context"}
+            ]
+          }
         ]
       },
       "supporting": [
@@ -149,7 +169,18 @@
       "title": "Recruitment or selection: targeted job ads, filtering applications, evaluating candidates",
       "when": {
         "any": [
-          {"signal": "text", "keywords": ["recruit*", "hiring", "resume*", "cv screening", "cv parsing", "candidate*", "applicant*", "job application*", "talent acquisition", "job ad*", "job posting*", "interview screening", "interview scoring", "interview analysis"]},
+          {"signal": "text", "keywords": ["recruit*", "hiring", "resume*", "cv screening", "cv parsing", "job application*", "job applicant*", "job candidate*", "talent acquisition", "job ad*", "job posting*", "interview screening", "interview scoring", "interview analysis"]},
+          {
+            "signal": "text", "keywords": ["candidate*", "applicant*"],
+            "context": [
+              {"signal": "text", "keywords": "@employment_context"},
+              {"signal": "business_unit", "keywords": "@hr_units"},
+              {"signal": "data_sources", "keywords": ["ats", "applicant tracking*"]}
+            ],
+            "exclude": [
+              {"signal": "text", "keywords": "@non_employment_applicant"}
+            ]
+          },
           {"signal": "data_sources", "keywords": ["ats", "applicant tracking*"]},
           {"signal": "business_unit", "keywords": ["talent acquisition", "recruiting", "recruitment"], "strength": "weak"}
         ]
@@ -183,7 +214,16 @@
       "title": "Eligibility for public assistance benefits and services, including healthcare",
       "when": {
         "any": [
-          {"signal": "text", "keywords": ["benefit eligibility", "benefits eligibility", "eligibility assessment*", "eligibility determination*", "welfare", "social benefit*", "public assistance", "social security", "unemployment benefit*", "housing benefit*", "medicaid", "healthcare eligibility"]},
+          {"signal": "text", "keywords": ["benefit eligibility", "benefits eligibility", "eligibility assessment*", "eligibility determination*", "social welfare", "social benefit*", "public assistance", "unemployment benefit*", "housing benefit*", "medicaid", "healthcare eligibility"]},
+          {
+            "signal": "text", "keywords": ["welfare"],
+            "context": [{"signal": "text", "keywords": "@benefit_context"}],
+            "exclude": [{"signal": "text", "keywords": "@non_public_welfare"}]
+          },
+          {
+            "signal": "text", "keywords": ["social security"],
+            "exclude": [{"signal": "text", "keywords": ["social security number*", "social security no", "ssn*"]}]
+          },
           {"signal": "business_unit", "keywords": "@public_sector_units", "strength": "weak"}
         ]
       },
@@ -200,7 +240,7 @@
       "title": "Creditworthiness evaluation or credit scoring (fraud detection excluded)",
       "when": {
         "any": [
-          {"signal": "text", "keywords": ["credit scor*", "creditworth*", "credit risk", "credit decision*", "loan approval*", "loan underwriting", "loan application*", "lending decision*", "credit limit*"]},
+          {"signal": "text", "keywords": ["credit scor*", "creditworth*", "credit risk", "credit decision*", "loan approval*", "loan underwriting", "loan application*", "loan applicant*", "mortgage applicant*", "credit applicant*", "lending decision*", "credit limit*"]},
           {"signal": "business_unit", "keywords": "@finance_units", "strength": "weak"}
         ]
       },
@@ -268,7 +308,7 @@
       "title": "Migration, asylum and border control management",
       "when": {
         "any": [
-          {"signal": "text", "keywords": ["asylum", "visa application*", "visa processing", "residence permit*", "immigration", "border control", "border security", "irregular migration", "migration risk"]}
+          {"signal": "text", "keywords": ["asylum", "visa application*", "visa applicant*", "visa processing", "residence permit*", "immigration", "border control", "border security", "irregular migration", "migration risk"]}
         ]
       },
       "supporting": [
@@ -293,13 +333,30 @@
       "category": "justice_democratic_processes",
       "level": "high",
       "reference": "Annex III, point 8(b)",
-      "title": "Influencing the outcome of an election or referendum, or voting behaviour",
+      "title": "Influencing the outcome of an election or referendum, or voting behaviour (tools that only organise, optimise or structure political campaigns from an administrative or logistical point of view are excluded)",
       "when": {
         "any": [
-          {"signal": "text", "keywords": ["election*", "electoral", "voter*", "referendum*", "political campaign*", "political advertising"]},
-          {"signal": "text", "keywords": ["voting"], "strength": "weak"}
+          {"signal": "text", "keywords": ["electoral", "voter*", "referendum*", "political campaign*", "political advertising"]},
+          {
+            "signal": "text", "keywords": ["election*"],
+            "exclude": [{"signal": "text", "keywords": "@technical_election"}]
+          },
+          {
+            "signal": "text", "keywords": ["voting"], "strength": "weak",
+            "exclude": [{"signal": "text", "keywords": ["ensemble*", "majority voting", "model voting", "classifier*", "self consistency"]}]
+          }
         ]
-      }
+      },
+      "unless": [
+        {
+          "signal": "use_case", "keywords": "@campaign_logistics",
+          "exclude": [{"signal": "text", "keywords": "@voter_influence"}]
+        },
+        {
+          "signal": "calling_service", "keywords": "@campaign_logistics",
+          "exclude": [{"signal": "text", "keywords": "@voter_influence"}]
+        }
+      ]
     }
   ]
 }
