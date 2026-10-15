@@ -66,6 +66,7 @@ TRUSTED_CUSTOM_HOSTS=localhost,127.0.0.1              # optional; hosts exempt f
 PS_METRICS_ENABLED=true                               # optional; Prometheus metrics at GET /metrics
 PS_METRICS_TOKEN=<random>                             # optional; require Bearer token on /metrics
 MAX_JSON_PAYLOAD_SIZE_IN_MB=10                        # optional; 413 for larger JSON bodies
+MAX_FILE_PAYLOAD_SIZE_IN_MB=25                        # optional; 413 for larger multipart uploads (audio, files), 411 without Content-Length
 AWS_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Bedrock/SageMaker callers use this host's AWS identity (serviceRole)
 AZURE_AMBIENT_CREDENTIALS_ENABLED=true                # optional; let Azure callers use this host's managed or workload identity
 GCP_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Vertex callers use this host's Google identity (vertex auth type workload)

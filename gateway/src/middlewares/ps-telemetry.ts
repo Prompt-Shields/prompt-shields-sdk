@@ -115,6 +115,35 @@ export function usageUnits(
   return {};
 }
 
+/**
+ * The request body as telemetry needs it, read after the handler ran. JSON
+ * bodies come from Hono's body cache. For a multipart upload (audio
+ * transcription or translation) only the `model` field is taken from the
+ * form the handler already parsed; the form is never re-read or serialised,
+ * and no other field (file, prompt) is returned.
+ */
+export async function requestBodyForTelemetry(c: any): Promise<any> {
+  const contentType = (c.req.header('content-type') || '').toLowerCase();
+  // Any parsed form (multipart or urlencoded): never serialise it back via
+  // json(), which would copy the whole upload into a string.
+  const cached = c.req.bodyCache?.formData;
+  if (cached || contentType.startsWith('multipart/form-data')) {
+    if (!cached) return undefined;
+    try {
+      const form = await cached;
+      const model = form?.get?.('model');
+      return typeof model === 'string' && model ? { model } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    return await c.req.json();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Token usage from Chat Completions or Messages/Responses-style usage. */
 export function usageTokens(body: any): {
   tokens_in?: number;
@@ -352,12 +381,7 @@ export function psTelemetry() {
       }
 
       // The requested model comes from the (possibly rewritten) request body.
-      let requestBody: any = undefined;
-      try {
-        requestBody = await c.req.json();
-      } catch {
-        requestBody = undefined;
-      }
+      const requestBody = await requestBodyForTelemetry(c);
 
       const model =
         route?.requestedModel ||
