@@ -21,6 +21,7 @@ describe('CacheService', () => {
   beforeEach(() => {
     mockContext = {
       get: jest.fn().mockReturnValue(undefined),
+      set: jest.fn(),
     } as unknown as Context;
 
     mockHooksService = {
@@ -304,7 +305,8 @@ describe('CacheService', () => {
         mockRequestContext.endpoint,
         'cache-identifier',
         'simple',
-        3600
+        3600,
+        expect.stringMatching(/^[0-9a-f]{64}$/) // caller scope digest
       );
     });
 

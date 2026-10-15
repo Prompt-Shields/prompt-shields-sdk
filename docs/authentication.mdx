@@ -54,27 +54,58 @@ Authorization: Bearer ps-pk-your-key-here
 API keys don't expire but can be revoked from the Atlas AI Dashboard.
 
 <Warning>
-  API keys provide the same access as OAuth tokens but cannot be scoped or
-  time-limited. Use OAuth when possible.
+  API keys have the same scopes as the credential they belong to, but they are
+  long-lived bearer secrets. Use OAuth when possible.
 </Warning>
 
 ## Scopes
 
-OAuth tokens are issued with scopes that control access:
+Each credential is granted a set of scopes, and every endpoint requires one.
+A request without the endpoint's scope gets `403`, whether it uses an OAuth
+token or an API key. Scopes not granted are denied.
 
-| Scope | Access |
-|-------|--------|
-| `registry:read` | AI assets, vendors, models, business units |
-| `data-flows:read` | Data flow lineage per asset |
-| `risks:read` | Risk mappings per asset |
-| `usage:read` | Aggregated usage statistics |
-| `export:read` | Bulk export endpoint |
-| `changes:read` | Delta feed endpoint |
+| Scope | Endpoints |
+|-------|-----------|
+| `assets:read` | `/assets`, `/assets/{id}`, `/vendors`, `/models`, `/business-units` |
+| `data-flows:read` | `/assets/{id}/data-flows` |
+| `risks:read` | `/assets/{id}/risks` |
+| `usage:read` | `/assets/{id}/usage-summary` |
+| `changes:read` | `/changes` |
+| `export:read` | `/export` |
+| `webhooks:manage` | Webhook subscriptions. Never granted unless asked for |
+
+New credentials get the six read scopes unless the tenant admin picks fewer.
+Changing a credential's scopes takes effect on its next request, including
+requests made with OAuth tokens issued before the change: a token never grants
+more than its credential currently holds.
 
 <Info>
-  **Phase 1:** All partners receive all scopes. Granular scope assignment
-  per partner will be available in a future release.
+  **Existing credentials:** `registry:read`, the single Phase 1 scope, still
+  works. It stands for the six read scopes above, so credentials and tokens
+  issued with it keep the access they had. It does not include scopes added
+  later, such as `webhooks:manage`.
 </Info>
+
+### Managing scopes and tiers (tenant admins)
+
+Tenant admins manage credentials with the tenant API key:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/admin/partner-scopes` | Scopes, the `registry:read` alias and rate-limit tiers |
+| `POST` | `/api/v1/admin/partner-credentials` | Issue a credential: `scopes`, and either `rate_limit_tier` or a custom `rate_limit` |
+| `GET` | `/api/v1/admin/partner-credentials` | List credentials with scopes, tier and effective limit |
+| `PATCH` | `/api/v1/admin/partner-credentials/{id}` | Change `scopes`, `rate_limit_tier` or `rate_limit` |
+| `DELETE` | `/api/v1/admin/partner-credentials/{id}` | Revoke |
+
+```bash
+curl -X PATCH https://api.promptshields.io/api/v1/admin/partner-credentials/$ID \
+  -H "Authorization: Bearer $PS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"scopes": ["assets:read", "changes:read"], "rate_limit_tier": "premium"}'
+```
+
+Unknown scopes or tiers, or a request that sets both `rate_limit_tier` and
+`rate_limit`, return `400`.
 
 ## Security Best Practices
 

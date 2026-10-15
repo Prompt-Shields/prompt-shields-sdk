@@ -7,16 +7,22 @@ description: API rate limiting and throttling
 
 All Partner API endpoints are rate-limited to protect service stability.
 
-## Current Limits
+## Tiers
 
-| Tier | Limit | Scope |
-|------|-------|-------|
-| **All partners** | 1,000 requests/minute | Per partner credential |
+Each partner credential has a rate-limit tier, set by the tenant admin
+(see [Authentication](/authentication#managing-scopes-and-tiers-tenant-admins)).
+Limits are per credential.
 
-<Info>
-  Phase 1 applies flat rate limits to all partners. Tiered rate limiting
-  based on partnership level will be available in a future release.
-</Info>
+| Tier | Limit |
+|------|-------|
+| `basic` | 120 requests/minute |
+| `standard` (default) | 1,000 requests/minute |
+| `premium` | 5,000 requests/minute |
+| `enterprise` | 20,000 requests/minute |
+
+An admin can set a custom per-minute limit instead of a tier. Credentials
+issued before tiers existed keep their own limit (1,000 unless changed).
+`X-RateLimit-Limit` always shows the limit in effect.
 
 ## Ingest Limits
 

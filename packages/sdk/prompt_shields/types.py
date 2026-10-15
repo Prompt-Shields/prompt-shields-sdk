@@ -82,6 +82,8 @@ Vendor = Literal[
     "anthropic",
     "google",
     "microsoft",
+    "azure_openai",
+    "bedrock",
     "meta",
     "cohere",
     "mistral",
