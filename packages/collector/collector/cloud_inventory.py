@@ -14,11 +14,14 @@ Supported so far:
   - AWS: Amazon Bedrock provisioned throughput, custom (fine-tuned) models,
     imported models and application inference profiles, per configured
     region, via the Bedrock control plane (SigV4-signed, read-only).
+  - GCP: Vertex AI models deployed to endpoints (including Model Garden
+    deployments) and tuned models, per configured project and region, via
+    the regional Vertex AI API with a service-account JWT-bearer token.
 
-Each asset's ``calling_service`` is ``azure:<ARM deployment resource id>``
-or ``aws:<Bedrock resource ARN>``, which marks where it came from. Asset ids
-are UUIDv5 values derived from the tenant, the cloud and that resource id,
-so re-runs update the same rows.
+Each asset's ``calling_service`` is ``azure:<ARM deployment resource id>``,
+``aws:<Bedrock resource ARN>`` or ``gcp:<Vertex AI resource name>``, which
+marks where it came from. Asset ids are UUIDv5 values derived from the
+tenant, the cloud and that resource id, so re-runs update the same rows.
 
 Run it with ``POST /api/v1/admin/cloud-inventory/pull`` (operator only:
 ``Authorization: Bearer $PS_ADMIN_TOKEN``, ``{"tenant_id": ...}``; 404 when
@@ -29,19 +32,23 @@ Credentials come from the operator's environment only, per tenant, in
 request body. Secrets are held as ``SecretStr`` and are never logged or
 returned. HTTP calls go only to the fixed Microsoft hosts below, and to
 ``bedrock.<region>.amazonaws.com`` / ``sts.<region>.amazonaws.com`` for
-strictly validated region names; ARM ``nextLink`` URLs, resource ids and
-ARNs are checked before they are followed or stored.
+strictly validated region names, and to ``oauth2.googleapis.com`` /
+``<region>-aiplatform.googleapis.com`` (likewise validated); ARM
+``nextLink`` URLs, resource ids, ARNs and Vertex AI resource names are
+checked before they are followed or stored.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
 import logging
 import re
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
@@ -51,6 +58,8 @@ from urllib.parse import quote
 from uuid import UUID
 
 import httpx
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from db.models import AIAsset, Tenant
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, SecretStr, field_validator, model_validator
@@ -65,7 +74,7 @@ from collector.provider_usage_admin import require_operator
 logger = logging.getLogger("prompt_shields.cloud_inventory")
 
 SOURCE = "platform_signal"
-SUPPORTED_CLOUDS = ("azure", "aws")
+SUPPORTED_CLOUDS = ("azure", "aws", "gcp")
 
 # Fixed hosts. Never derived from tenant input.
 AZURE_LOGIN_HOST = "login.microsoftonline.com"
@@ -106,6 +115,30 @@ _FOUNDATION_MODEL_ARN = re.compile(
 )
 # Bedrock states that are not (or no longer) usable.
 AWS_INACTIVE_STATES = {"failed", "deleting", "deleted"}
+
+# GCP: the token endpoint is fixed (a key file's ``token_uri`` is ignored);
+# Vertex AI hosts are built only from a validated region name.
+GCP_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GCP_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+GCP_JWT_LIFETIME_S = 600
+VERTEX_HOST = "{region}-aiplatform.googleapis.com"
+VERTEX_PAGE_SIZE = 100
+# Vertex AI regions, e.g. "us-central1", "europe-west4", "me-central2",
+# "northamerica-northeast1". No "global" and no multi-regions.
+_GCP_REGION = re.compile(
+    r"^(?:us|europe|asia|australia|northamerica|southamerica|me|africa)-"
+    r"(?:north|south|east|west|central|northeast|northwest|southeast|southwest)"
+    r"[1-9][0-9]?$"
+)
+_GCP_PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+_GCP_SA_EMAIL = re.compile(
+    r"^[a-z0-9-]{1,100}@[a-z0-9.-]{1,100}\.gserviceaccount\.com$"
+)
+_GCP_PEM = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----")
+# A project id or number in a Vertex AI resource name.
+_GCP_SEGMENT = r"[a-z0-9][a-z0-9-]{0,62}"
+_GCP_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_VERTEX_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/-]{0,199}$")
 
 MAX_PAGES = 200
 MAX_RETRIES = 4
@@ -222,16 +255,103 @@ class AwsInventoryCredentials(BaseModel):
         return self
 
 
+class GcpServiceAccountKey(BaseModel):
+    """The fields of a service-account JSON key file that are used. Others
+    (including ``token_uri``) are ignored: the token host is fixed."""
+
+    model_config = {"extra": "ignore", "hide_input_in_errors": True}
+
+    type: str = "service_account"
+    project_id: str | None = None
+    client_email: str
+    private_key_id: SecretStr | None = None
+    private_key: SecretStr
+
+    @field_validator("type")
+    @classmethod
+    def _type(cls, v: str) -> str:
+        if v != "service_account":
+            raise ValueError("only service account keys are supported")
+        return v
+
+    @field_validator("client_email")
+    @classmethod
+    def _email(cls, v: str) -> str:
+        if not _GCP_SA_EMAIL.match(v):
+            raise ValueError("client_email must be a service account email")
+        return v
+
+    @field_validator("private_key")
+    @classmethod
+    def _key(cls, v: SecretStr) -> SecretStr:
+        if not _GCP_PEM.search(v.get_secret_value()):
+            raise ValueError("private_key must be a PEM private key")
+        return v
+
+
+class GcpInventoryCredentials(BaseModel):
+    """A service account with ``roles/aiplatform.viewer`` (see the guide)."""
+
+    model_config = {"hide_input_in_errors": True}
+
+    # The JSON key file, as an object or as a JSON string.
+    service_account: GcpServiceAccountKey
+    # Empty: the service account's own project.
+    project_ids: list[str] = []
+    # Vertex AI is regional: every region to inventory must be listed.
+    regions: list[str]
+
+    @field_validator("service_account", mode="before")
+    @classmethod
+    def _parse_key(cls, v):
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except ValueError:
+                v = None
+        if not isinstance(v, dict):
+            # Not echoing the value: it may be (part of) the key.
+            raise ValueError(  # noqa: TRY004 (pydantic needs ValueError)
+                "service_account must be a service account JSON key"
+            )
+        return v
+
+    @field_validator("project_ids")
+    @classmethod
+    def _projects(cls, v: list[str]) -> list[str]:
+        if len(v) > 50 or not all(_GCP_PROJECT_ID.match(p) for p in v):
+            raise ValueError("project_ids must be up to 50 GCP project ids")
+        return list(dict.fromkeys(v))
+
+    @field_validator("regions")
+    @classmethod
+    def _regions(cls, v: list[str]) -> list[str]:
+        if not v or len(v) > 40 or not all(_GCP_REGION.match(r) for r in v):
+            raise ValueError("regions must be 1-40 Vertex AI region names")
+        return list(dict.fromkeys(v))
+
+    @model_validator(mode="after")
+    def _default_project(self):
+        if not self.project_ids:
+            project = self.service_account.project_id
+            if not project or not _GCP_PROJECT_ID.match(project):
+                raise ValueError("project_ids is required")
+            self.project_ids = [project]
+        return self
+
+
 class TenantCloudCredentials(BaseModel):
     azure: AzureInventoryCredentials | None = None
     aws: AwsInventoryCredentials | None = None
+    gcp: GcpInventoryCredentials | None = None
 
 
 class CloudInventorySettings(BaseSettings):
     """``PS_CLOUD_INVENTORY='{"<tenant uuid>": {"azure": {"directory_id": ...,
     "client_id": ..., "client_secret": ..., "subscription_ids": [...]},
     "aws": {"access_key_id": ..., "secret_access_key": ..., "role_arn": ...,
-    "external_id": ..., "regions": [...]}}}'``"""
+    "external_id": ..., "regions": [...]}, "gcp": {"service_account": {<key
+    file JSON>}, "project_ids": [...], "regions": [...]}}}'``"""
 
     cloud_inventory: dict[str, TenantCloudCredentials] = {}
 
@@ -919,6 +1039,278 @@ async def fetch_aws_deployments(
     return summary, deployments
 
 
+# --- Google Cloud Vertex AI -------------------------------------------------
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def gcp_jwt_assertion(key: GcpServiceAccountKey, now: int) -> str:
+    """An RS256 JWT for the OAuth 2.0 JWT-bearer grant (RFC 7523)."""
+    header = {"alg": "RS256", "typ": "JWT"}
+    if key.private_key_id is not None:
+        header["kid"] = key.private_key_id.get_secret_value()
+    claims = {
+        "iss": key.client_email,
+        "scope": GCP_SCOPE,
+        "aud": GCP_TOKEN_URL,
+        "iat": now,
+        "exp": now + GCP_JWT_LIFETIME_S,
+    }
+    signing_input = ".".join(
+        _b64url(json.dumps(part, separators=(",", ":")).encode())
+        for part in (header, claims)
+    )
+    try:
+        private_key = serialization.load_pem_private_key(
+            key.private_key.get_secret_value().encode(), password=None
+        )
+    except (ValueError, TypeError):
+        private_key = None
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        # No detail from the parser: it must not quote the key.
+        raise CloudInventoryError("gcp: service account private_key is unusable")
+    signature = private_key.sign(
+        signing_input.encode(), padding.PKCS1v15(), hashes.SHA256()
+    )
+    return f"{signing_input}.{_b64url(signature)}"
+
+
+async def _gcp_token(
+    client: httpx.AsyncClient,
+    key: GcpServiceAccountKey,
+    sleep: Sleep,
+    clock: Callable[[], float],
+) -> str:
+    body = await _request(
+        client,
+        "POST",
+        GCP_TOKEN_URL,
+        what="token request",
+        sleep=sleep,
+        cloud="gcp",
+        data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": gcp_jwt_assertion(key, int(clock())),
+        },
+    )
+    token = body.get("access_token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token:
+        raise CloudInventoryError("gcp: token response had no access_token")
+    return token
+
+
+async def _vertex_list(
+    client: httpx.AsyncClient,
+    region: str,
+    parent: str,
+    collection: str,
+    headers: dict[str, str],
+    what: str,
+    sleep: Sleep,
+):
+    # The host comes from the validated region only; the page token is a
+    # query parameter, so it cannot change where the request goes.
+    url = f"https://{VERTEX_HOST.format(region=region)}/v1/{parent}/{collection}"
+    params = {"pageSize": str(VERTEX_PAGE_SIZE)}
+    for _ in range(MAX_PAGES):
+        body = await _request(
+            client,
+            "GET",
+            url,
+            what=what,
+            sleep=sleep,
+            cloud="gcp",
+            params=params,
+            headers=headers,
+        )
+        items = body.get(collection) if isinstance(body, dict) else None
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict):
+                yield item
+        token = body.get("nextPageToken") if isinstance(body, dict) else None
+        if not token:
+            return
+        if not isinstance(token, str) or len(token) > 4096:
+            raise CloudInventoryError(f"gcp: {what}: unexpected nextPageToken")
+        params = {"pageSize": str(VERTEX_PAGE_SIZE), "pageToken": token}
+    raise CloudInventoryError(f"gcp: {what}: more than {MAX_PAGES} pages")
+
+
+def _vertex_name(value, region: str, collection: str) -> str | None:
+    """A Vertex AI resource name in ``region``, without any ``@version``,
+    or None. The project segment may be an id or a number."""
+    if not isinstance(value, str):
+        return None
+    name = value.split("@", 1)[0]
+    pattern = (
+        rf"^projects/{_GCP_SEGMENT}/locations/{re.escape(region)}/"
+        rf"{collection}/[A-Za-z0-9_-]{{1,128}}$"
+    )
+    return name if re.match(pattern, name) else None
+
+
+def _vertex_model_id(value) -> str | None:
+    """``gemini-2.0-flash-001`` from a bare id or from a publisher model name
+    such as ``publishers/google/models/gemma2``."""
+    if not isinstance(value, str):
+        return None
+    if "models/" in value:
+        value = value.rsplit("models/", 1)[1]
+    value = value.strip()
+    return value if _VERTEX_MODEL_ID.match(value) else None
+
+
+def _display_name(value) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()[:200]
+
+
+async def _vertex_region(
+    client: httpx.AsyncClient,
+    project: str,
+    region: str,
+    headers: dict[str, str],
+    sleep: Sleep,
+) -> list[CloudDeployment]:
+    """Vertex AI resources in one project and region that represent AI in
+    use: models deployed to endpoints, and tuned models."""
+    parent = f"projects/{project}/locations/{region}"
+
+    # Tuned models (supervised tuning of Gemini or open models): trained on
+    # the tenant's data, so an asset even before (or without) serving.
+    tuned: dict[str, tuple[str | None, dict[str, str]]] = {}
+    async for job in _vertex_list(
+        client, region, parent, "tuningJobs", headers, "tuning job list", sleep
+    ):
+        if job.get("state") != "JOB_STATE_SUCCEEDED":
+            continue
+        model_name = _vertex_name(
+            (job.get("tunedModel") or {}).get("model"), region, "models"
+        )
+        if model_name is None:
+            continue
+        tuned[model_name] = (
+            _vertex_model_id(job.get("baseModel")),
+            _tags(job.get("labels")),
+        )
+
+    # The Model Registry, to name what endpoints serve: the base model of a
+    # tuned model, the publisher model of a Model Garden deployment, or the
+    # registry display name of a custom model.
+    registry: dict[str, tuple[str | None, str, dict[str, str]]] = {}
+    async for m in _vertex_list(
+        client, region, parent, "models", headers, "model list", sleep
+    ):
+        name = _vertex_name(m.get("name"), region, "models")
+        if name is None:
+            continue
+        garden = _vertex_model_id(
+            ((m.get("baseModelSource") or {}).get("modelGardenSource") or {}).get(
+                "publicModelName"
+            )
+        )
+        if name in tuned:
+            model, kind = tuned[name][0], "tuned"
+        elif garden:
+            model, kind = garden, "model_garden"
+        else:
+            model, kind = _display_name(m.get("displayName")), "custom"
+        registry[name] = (model, kind, _tags(m.get("labels")))
+
+    found: list[CloudDeployment] = []
+    for name, (base, job_labels) in tuned.items():
+        found.append(
+            CloudDeployment(
+                cloud="gcp",
+                resource_id=name,
+                region=region,
+                model=base,
+                model_format="tuned_model",
+                # The registry model's labels override the tuning job's.
+                tags={**job_labels, **registry.get(name, (None, "", {}))[2]},
+            )
+        )
+
+    # Endpoints: each deployed model is serving capacity (dedicated or
+    # shared), the Vertex AI counterpart of an Azure deployment.
+    async for ep in _vertex_list(
+        client, region, parent, "endpoints", headers, "endpoint list", sleep
+    ):
+        endpoint = _vertex_name(ep.get("name"), region, "endpoints")
+        if endpoint is None:
+            logger.warning("gcp: skipping endpoint with unexpected name")
+            continue
+        endpoint_labels = _tags(ep.get("labels"))
+        for dm in ep.get("deployedModels") or []:
+            if not isinstance(dm, dict):
+                continue
+            dm_id = dm.get("id")
+            if not isinstance(dm_id, str) or not _GCP_ID.match(dm_id):
+                continue
+            model_name = _vertex_name(dm.get("model"), region, "models")
+            model, kind, model_labels = registry.get(model_name or "") or (
+                None,
+                "custom",
+                {},
+            )
+            if model_name in tuned:
+                model, kind = tuned[model_name][0], "tuned"
+            found.append(
+                CloudDeployment(
+                    cloud="gcp",
+                    resource_id=f"{endpoint}/deployedModels/{dm_id}",
+                    region=region,
+                    model=model or _display_name(dm.get("displayName")),
+                    model_format=kind,
+                    # The endpoint's labels override the model's.
+                    tags={**model_labels, **endpoint_labels},
+                )
+            )
+    return found
+
+
+async def fetch_gcp_deployments(
+    creds: GcpInventoryCredentials,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    sleep: Sleep = asyncio.sleep,
+    clock: Callable[[], float] = time.time,
+) -> tuple[dict, list[CloudDeployment]]:
+    """Return (summary, Vertex AI resources) for one service account.
+
+    A failing project/region is reported in ``summary["region_errors"]``
+    and does not stop the others. A failing token exchange, or every
+    project/region failing, raises ``CloudInventoryError``.
+    """
+    deployments: list[CloudDeployment] = []
+    errors: dict[str, str] = {}
+    async with httpx.AsyncClient(
+        transport=transport, timeout=30.0, follow_redirects=False
+    ) as client:
+        token = await _gcp_token(client, creds.service_account, sleep, clock)
+        headers = {"Authorization": f"Bearer {token}"}
+        for project in creds.project_ids:
+            for region in creds.regions:
+                try:
+                    deployments += await _vertex_region(
+                        client, project, region, headers, sleep
+                    )
+                except CloudInventoryError as exc:
+                    errors[f"{project}/{region}"] = str(exc)
+    if len(errors) == len(creds.project_ids) * len(creds.regions):
+        raise CloudInventoryError("; ".join(dict.fromkeys(errors.values())))
+    summary: dict = {
+        "projects": len(creds.project_ids),
+        "regions": len(creds.regions),
+    }
+    if errors:
+        summary["region_errors"] = errors
+    return summary, deployments
+
+
 def _tag(tags: dict[str, str], names: tuple[str, ...]) -> str | None:
     lowered = {k.lower(): v.strip() for k, v in tags.items()}
     for n in names:
@@ -939,7 +1331,7 @@ def environment_from_tags(tags: dict[str, str]) -> str | None:
 
 def vendor_for(d: CloudDeployment) -> str:
     # The cloud provider is the supplier (and processor) of a hosted model.
-    return {"azure": "microsoft", "aws": "amazon"}[d.cloud]
+    return {"azure": "microsoft", "aws": "amazon", "gcp": "google"}[d.cloud]
 
 
 def asset_id_for(tenant_id: UUID, d: CloudDeployment) -> UUID:
@@ -1031,8 +1423,12 @@ async def pull_cloud_inventory(
                     cloud_creds, transport=transport, sleep=sleep
                 )
                 summary: dict = {"accounts": accounts}
-            else:
+            elif cloud == "aws":
                 summary, deployments = await fetch_aws_deployments(
+                    cloud_creds, transport=transport, sleep=sleep
+                )
+            else:
+                summary, deployments = await fetch_gcp_deployments(
                     cloud_creds, transport=transport, sleep=sleep
                 )
         except CloudInventoryError as exc:
