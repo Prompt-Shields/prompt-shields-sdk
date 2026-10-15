@@ -48,7 +48,7 @@ import asyncio
 import json
 import logging
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Self
 from uuid import UUID
 
@@ -69,6 +69,8 @@ from collector.connectors import (
     Sleep,
     default_resolver,
     load_sync_state,
+    next_cursor,  # noqa: F401  (re-exported; moved to connectors)
+    read_registry,
     save_sync_state,
     validate_hostname,
 )
@@ -89,9 +91,6 @@ INTEGRATION_API = "/services/integration-api/v1"
 DEFAULT_BATCH_SIZE = 500
 POLL_INTERVAL_S = 5.0
 MAX_POLL_S = 900.0
-# Re-read this much before the newest change seen, so a change committed
-# while a sync was paging is not skipped. Upserts make the overlap harmless.
-CURSOR_OVERLAP = timedelta(minutes=5)
 MAX_TEXT = 2000
 
 RUN_DONE = {"FINISHED"}
@@ -512,38 +511,6 @@ class LeanIXClient:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _parse_ts(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
-
-
-def next_cursor(
-    since: str | None, changes: list[dict], server_token: str | None
-) -> str | None:
-    """Cursor for the next incremental run.
-
-    After a full export: the server's sync token less the overlap. After
-    ``/changes``: the newest ``changed_at`` less the overlap, never going
-    back before ``since``.
-    """
-    previous = _parse_ts(since)
-    if previous is None:
-        token = _parse_ts(server_token)
-        return (token - CURSOR_OVERLAP).isoformat() if token else None
-    newest = max(
-        (t for t in (_parse_ts(c.get("changed_at")) for c in changes) if t),
-        default=None,
-    )
-    if newest is None:
-        return previous.isoformat()
-    return max(previous, newest - CURSOR_OVERLAP).isoformat()
-
-
 async def sync_leanix(
     db: AsyncSession,
     tenant_id: UUID,
@@ -579,24 +546,15 @@ async def sync_leanix(
     try:
         async with PartnerApiClient(
             conn.partner_api,
+            tenant_id=tenant_id,
             transport=partner_transport,
             resolver=resolver,
             sleep=sleep,
         ) as partner:
-            if since:
-                changes = await partner.changes(since)
-                assets = [
-                    c["asset"] for c in changes if isinstance(c.get("asset"), dict)
-                ]
-                cursor = next_cursor(since, changes, None)
-            else:
-                assets, token = await partner.export_assets()
-                cursor = next_cursor(None, [], token)
-            flows: dict[str, list[dict]] = {}
-            if conn.include_data_flows:
-                for a in assets:
-                    if a.get("id"):
-                        flows[a["id"]] = await partner.data_flows(a["id"])
+            read = await read_registry(
+                partner, since, include_data_flows=conn.include_data_flows
+            )
+        assets, flows, cursor = read.assets, read.flows, read.cursor
 
         run_ids: list[str] = []
         items = 0
