@@ -43,6 +43,7 @@ from uuid import UUID
 from db.models import (
     AIAsset,
     AIUsageEvent,
+    AssetAttestation,
     DataFlow,
     PartnerAuditLog,
     PartnerCredential,
@@ -70,6 +71,7 @@ ERASE_ORDER: tuple[type, ...] = (
     AIUsageEvent,
     DataFlow,
     RiskMapping,
+    AssetAttestation,
     PartnerAuditLog,
     PartnerCredential,
     AIAsset,

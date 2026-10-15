@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, desc, func, select
 
 from collector import aibom
+from collector.attestation import add_attestation_summaries, attestation_changes_since
 from collector.audit import record_read
 from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.partner_auth import (
@@ -238,6 +239,7 @@ async def list_assets(
     ).scalars().all()
 
     data = [_asset_dict(a) for a in rows]
+    await add_attestation_summaries(db, principal.tenant_id, rows, data)
     has_more = len(data) == limit and total > limit
     next_cursor = data[-1]["id"] if has_more and data else None
 
@@ -285,8 +287,10 @@ async def get_asset(
                 "detail": "Asset not found",
             },
         )
+    body = _asset_dict(row)
+    await add_attestation_summaries(db, principal.tenant_id, [row], [body])
     await _audit(request, principal, f"/partner/v1/assets/{asset_id}", "GET", 200, 1)
-    return _asset_dict(row)
+    return body
 
 
 @router.get("/assets/{asset_id}/data-flows", summary="Get data flows for an asset")
@@ -575,6 +579,14 @@ async def get_changes(
             # `changed_fields` requires field-level audit; deferred to Phase 2.
             "changed_fields": None,
         })
+    await add_attestation_summaries(
+        db, principal.tenant_id, rows, [d["asset"] for d in data]
+    )
+    for d in data:
+        # Fields whose attestation changed since `since` (#98).
+        d["attestation_changes"] = attestation_changes_since(
+            d["asset"]["attestation"], since_dt
+        )
 
     has_more = len(data) == limit and total > limit
     next_cursor = data[-1]["asset"]["id"] if has_more and data else None
@@ -654,6 +666,8 @@ async def export_registry(
     ).scalars().all()
 
     now = datetime.utcnow()
+    data = [_asset_dict(a) for a in rows]
+    await add_attestation_summaries(db, principal.tenant_id, rows, data)
     await _audit(
         request,
         principal,
@@ -665,7 +679,7 @@ async def export_registry(
     )
 
     return {
-        "data": [_asset_dict(a) for a in rows],
+        "data": data,
         "meta": {
             "total": len(rows),
             "exported_at": now.isoformat() + "Z",

@@ -29,7 +29,7 @@ from db.models import PartnerCredential
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
 
-ALLOWED_SCOPES = {
+READ_SCOPES = {
     "registry:read",
     "data-flows:read",
     "risks:read",
@@ -37,11 +37,16 @@ ALLOWED_SCOPES = {
     "export:read",
     "changes:read",
 }
+# Write scopes are granted only when requested explicitly.
+WRITE_SCOPES = {
+    "attestations:write",  # record human attestations (#98)
+}
+ALLOWED_SCOPES = READ_SCOPES | WRITE_SCOPES
 
 
 class IssuePartnerCredentialBody(BaseModel):
     partner_name: str = Field(..., min_length=1, max_length=80)
-    scopes: list[str] = Field(default_factory=lambda: list(ALLOWED_SCOPES))
+    scopes: list[str] = Field(default_factory=lambda: list(READ_SCOPES))
     issue_api_key: bool = True
     rate_limit: int = 1000
     expires_at: datetime | None = None
