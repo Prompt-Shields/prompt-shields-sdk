@@ -1,6 +1,6 @@
 {
   "ruleset": "eu_ai_act_article_5",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "framework": "EU_AI_ACT",
   "title": "EU AI Act Article 5 prohibited AI practices",
   "description": "Flags assets whose use case, calling service, data flows or detected PII resemble a practice prohibited by Article 5(1)(a)-(h) of Regulation (EU) 2024/1689 (applicable since 2 February 2025). Every rule is level 'critical' so it sorts first, and every match is only a suggestion for a human (legal or compliance) to review: keyword signals cannot establish the legal conditions of a prohibition (for example 'significant harm', 'based solely on profiling', 'real-time', 'publicly accessible spaces') or its exceptions (medical or safety reasons in point (f), the law-enforcement objectives and authorisation in point (h) and Article 5(2)-(7)). Rule references quote the operative words of each point.",
@@ -13,6 +13,7 @@
     "hr_units": ["hr", "human resources", "people", "people ops", "people operations", "talent", "talent acquisition", "recruiting", "recruitment", "workforce"],
     "education_units": ["education", "school*", "universit*", "academic*", "admissions", "registrar", "student*"],
     "one_to_many_search": ["watchlist*", "wanted person*", "suspect*", "face search", "crowd*"],
+    "medical_or_safety_reasons": ["medical", "clinical", "therap*", "mental health", "patient*", "driver monitoring", "driver fatigue", "driver drowsiness", "driver alertness", "driver distraction", "pilot monitoring", "pilot fatigue", "pilot alertness", "operator fatigue", "operator alertness", "crew fatigue", "crew alertness", "fatigue detection", "fatigue monitoring", "drowsiness", "drowsy", "microsleep*", "alertness monitoring", "alertness detection", "road safety", "vehicle safety", "aviation safety", "flight safety"],
     "detection_purpose": ["detect*", "audit*", "moderation", "moderat*", "classif*", "red team*", "safeguard*", "protect*", "prevention", "compliance check*"]
   },
   "rules": [
@@ -122,8 +123,8 @@
         ]
       },
       "unless": [
-        {"signal": "use_case", "keywords": ["medical", "clinical", "therap*", "mental health", "safety", "driver monitoring", "drowsiness", "fatigue"]},
-        {"signal": "calling_service", "keywords": ["medical", "clinical", "therap*", "mental health", "safety", "driver monitoring", "drowsiness", "fatigue"]}
+        {"signal": "use_case", "keywords": "@medical_or_safety_reasons"},
+        {"signal": "calling_service", "keywords": "@medical_or_safety_reasons"}
       ],
       "supporting": [
         {"signal": "pii_types", "any_of": "@biometric_pii"}
