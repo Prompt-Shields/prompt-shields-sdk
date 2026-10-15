@@ -26,6 +26,7 @@ call. See `prompt_shields.integrations` for delivery and double-counting
 rules.
 """
 
+import contextlib
 import inspect
 import logging
 import threading
@@ -37,7 +38,11 @@ from typing import Any
 # LlamaIndex's own pydantic (pydantic.v1 before llama-index-core 0.11).
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.instrumentation import get_dispatcher
-from llama_index.core.instrumentation import root_manager as _root_manager
+
+try:  # Only used to unregister from every dispatcher.
+    from llama_index.core.instrumentation import root_manager as _root_manager
+except ImportError:
+    _root_manager = None
 from llama_index.core.instrumentation.event_handlers import BaseEventHandler
 from llama_index.core.instrumentation.span import SimpleSpan
 from llama_index.core.instrumentation.span_handlers import BaseSpanHandler
@@ -400,39 +405,56 @@ _registered: tuple[PromptShieldsEventHandler, PromptShieldsSpanHandler] | None =
 _register_lock = threading.Lock()
 
 
-def register(use_case: str | None = None) -> PromptShieldsEventHandler:
+def register(use_case: str | None = None) -> PromptShieldsEventHandler | None:
     """Attach the handlers to LlamaIndex's root dispatcher once; return the
-    event handler."""
+    event handler. Fail-open: if this LlamaIndex version's dispatcher does
+    not take them, logs a warning, attaches nothing and returns None."""
     global _registered
     with _register_lock:
-        dispatcher = get_dispatcher()
-        # Identity checks: pydantic handlers compare equal by field values.
-        if _registered is not None \
-                and any(h is _registered[0] for h in dispatcher.event_handlers) \
-                and any(h is _registered[1] for h in dispatcher.span_handlers):
-            return _registered[0]
-        _remove(_registered)
-        events = PromptShieldsEventHandler(use_case=use_case)
-        spans = PromptShieldsSpanHandler()
-        spans._events = events
-        dispatcher.add_span_handler(spans)
-        dispatcher.add_event_handler(events)
-        _registered = (events, spans)
-        return events
+        try:
+            dispatcher = get_dispatcher()
+            # Identity checks: pydantic handlers compare equal by field values.
+            if _registered is not None \
+                    and any(h is _registered[0] for h in dispatcher.event_handlers) \
+                    and any(h is _registered[1] for h in dispatcher.span_handlers):
+                return _registered[0]
+            _remove(_registered)
+            _registered = None
+            events = PromptShieldsEventHandler(use_case=use_case)
+            spans = PromptShieldsSpanHandler()
+            spans._events = events
+            _registered = (events, spans)
+            dispatcher.add_span_handler(spans)
+            dispatcher.add_event_handler(events)
+            return events
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.warning(
+                f"Prompt Shields: LlamaIndex handlers not registered ({e!r}); "
+                "LlamaIndex calls are not reported by this integration")
+            with contextlib.suppress(Exception):
+                _remove(_registered)  # a half-attached pair
+            _registered = None
+            return None
 
 
 def unregister() -> None:
-    """Remove the handlers added by `register()` from every dispatcher."""
+    """Remove the handlers added by `register()` from every dispatcher.
+    Fail-open: errors are logged."""
     global _registered
     with _register_lock:
-        _remove(_registered)
+        try:
+            _remove(_registered)
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.warning(f"Prompt Shields: LlamaIndex unregister failed ({e!r})")
         _registered = None
 
 
 def _remove(handlers: Any) -> None:
     if handlers is None:
         return
-    for dispatcher in list(_root_manager.dispatchers.values()):
+    dispatchers = getattr(_root_manager, "dispatchers", None)
+    for dispatcher in (list(dispatchers.values()) if dispatchers is not None
+                       else [get_dispatcher()]):
         dispatcher.event_handlers = [
             h for h in dispatcher.event_handlers if not any(h is x for x in handlers)]
         dispatcher.span_handlers = [

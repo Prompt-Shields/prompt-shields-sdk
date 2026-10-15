@@ -478,6 +478,28 @@ def test_hint_from_workflows_and_agents(fakes, handler):  # noqa: F811
 # --- registration -------------------------------------------------------------------
 
 
+def test_register_is_fail_open_when_internals_differ(monkeypatch, caplog):
+    root = get_dispatcher()
+    before = len(root.event_handlers), len(root.span_handlers)
+
+    def boom(self, handler):
+        raise AttributeError("no event_handlers here")
+
+    # The span handler is attached, then adding the event handler fails.
+    monkeypatch.setattr(type(root), "add_event_handler", boom)
+    with caplog.at_level("WARNING", logger="prompt_shields.integrations.llamaindex"):
+        assert li.register() is None
+    assert "not registered" in caplog.text
+    assert (len(root.event_handlers), len(root.span_handlers)) == before
+    assert li._registered is None
+
+    monkeypatch.setattr(li, "get_dispatcher", lambda: 1 / 0)
+    assert li.register() is None
+    monkeypatch.setattr(li, "_remove", lambda handlers: 1 / 0)
+    li.unregister()  # logged, not raised
+    assert li._registered is None
+
+
 def test_register_is_idempotent_and_unregister_removes_handlers(fakes):  # noqa: F811
     prompt_shields.instrument(ps_api_key="ps_key", vendors=())
     root = get_dispatcher()
