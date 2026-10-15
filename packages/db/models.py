@@ -52,6 +52,9 @@ class AIAsset(Base):
     business_unit = Column(Text)
     owner_email = Column(Text)
     environment = Column(Text)
+    # Cloud region of the deployment (e.g. "swedencentral"), for sovereignty
+    # reporting. Set by the cloud inventory platform signal.
+    region = Column(Text)
     status = Column(Text, default="active")
     # Telemetry-driven lifecycle: active -> stale -> retired, back to active
     # when telemetry resumes. Independent of the governance `status` above.

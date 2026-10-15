@@ -108,6 +108,11 @@ components:
           enum: [production, staging, dev]
           example: "production"
           nullable: true
+        region:
+          type: string
+          description: Cloud region the asset is deployed in, from the cloud inventory platform signal
+          example: "swedencentral"
+          nullable: true
         status:
           type: string
           description: Governance status
