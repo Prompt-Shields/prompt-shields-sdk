@@ -41,8 +41,10 @@ from typing import Any
 from uuid import UUID
 
 from db.models import (
+    ATTESTATION_ERASE_SETTING,
     AIAsset,
     AIUsageEvent,
+    AssetAttestation,
     DataFlow,
     PartnerAuditLog,
     PartnerCredential,
@@ -50,8 +52,10 @@ from db.models import (
     RiskMapping,
     TelemetryClientStats,
     Tenant,
+    WebhookDelivery,
+    WebhookSubscription,
 )
-from sqlalchemy import Table, delete, func, select
+from sqlalchemy import Table, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.config import settings
@@ -70,7 +74,10 @@ ERASE_ORDER: tuple[type, ...] = (
     AIUsageEvent,
     DataFlow,
     RiskMapping,
+    AssetAttestation,
     PartnerAuditLog,
+    WebhookDelivery,
+    WebhookSubscription,
     PartnerCredential,
     AIAsset,
     TelemetryClientStats,
@@ -183,7 +190,12 @@ def _batch_size(batch_size: int | None) -> int:
 
 
 async def _delete_in_batches(
-    db: AsyncSession, table: Table, conditions: list, batch_size: int
+    db: AsyncSession,
+    table: Table,
+    conditions: list,
+    batch_size: int,
+    *,
+    erasing_tenant: UUID | None = None,
 ) -> int:
     """Delete rows matching ``conditions`` in batches, committing each one.
 
@@ -191,14 +203,29 @@ async def _delete_in_batches(
     short, so ingest and reads are not blocked behind a long delete. Tables
     without an ``id`` column (small per-tenant counter tables) are deleted in
     one statement.
+
+    ``erasing_tenant`` marks each delete transaction as part of that
+    tenant's erasure, which the append-only trigger on
+    ``asset_attestations`` requires before it allows a DELETE.
     """
+
+    async def _mark_erasure() -> None:
+        # The trigger only exists on PostgreSQL (unit tests also use SQLite).
+        if erasing_tenant is not None and db.get_bind().dialect.name == "postgresql":
+            await db.execute(
+                text("SELECT set_config(:name, :tenant, true)"),
+                {"name": ATTESTATION_ERASE_SETTING, "tenant": str(erasing_tenant)},
+            )
+
     if "id" not in table.c:
+        await _mark_erasure()
         result = await db.execute(delete(table).where(*conditions))
         await db.commit()
         return result.rowcount or 0
     total = 0
     while True:
         ids = select(table.c.id).where(*conditions).limit(batch_size)
+        await _mark_erasure()
         result = await db.execute(delete(table).where(table.c.id.in_(ids)))
         await db.commit()
         deleted = result.rowcount or 0
@@ -350,7 +377,7 @@ async def erase_tenant(
     for model in ERASE_ORDER:
         table = model.__table__
         rows_deleted[model.__tablename__] = await _delete_in_batches(
-            db, table, [table.c.tenant_id == tenant_id], size
+            db, table, [table.c.tenant_id == tenant_id], size, erasing_tenant=tenant_id
         )
 
     result = await db.execute(delete(Tenant).where(Tenant.id == tenant_id))
@@ -412,9 +439,13 @@ async def set_tenant_retention(
 async def _run_cli(args: argparse.Namespace) -> list[dict]:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from collector import rls
+
     engine = create_async_engine(settings.database_url)
     try:
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        session_factory = async_sessionmaker(
+            engine, expire_on_commit=False, info=rls.bypass_info("retention-cli")
+        )
         async with session_factory() as db:
             if args.tenant:
                 result = await purge_tenant_events(

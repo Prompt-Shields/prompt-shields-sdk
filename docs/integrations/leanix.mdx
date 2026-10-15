@@ -8,38 +8,125 @@ description: Integration guide for LeanIX EAM
 Connect Prompt Shields to LeanIX to enrich your IT landscape with discovered AI assets.
 
 <Info>
-  LeanIX integration is planned for Phase 2. This guide describes the
-  recommended approach using the Partner API.
+  The built-in LeanIX connector is a first slice: it pushes AI assets,
+  vendors, business units and data flows. It has not yet been verified
+  against a live LeanIX sandbox; check the processor configuration in a
+  sandbox workspace before using it in production.
 </Info>
 
-## Recommended Approach
+## How it works
 
-LeanIX supports REST API integrations via its **Integration Hub**. Use the Partner API to pull AI assets and map them to LeanIX Fact Sheets.
+The connector runs in the collector deployment. It reads the tenant's
+registry through the **Partner API**, with a partner API key, and writes it to
+LeanIX through the **Integration API** as LDIF synchronisation runs:
+
+1. First run: `GET /partner/v1/export`, then `GET /partner/v1/assets/{id}/data-flows` per asset.
+2. Later runs: `GET /partner/v1/changes?since=<cursor>` and the flows of the changed assets.
+3. Upsert the inbound processor configuration (`PUT /services/integration-api/v1/configurations/`).
+4. Start one synchronisation run per batch of assets and wait for it to finish.
+5. Store the new cursor in the tenant settings. A failed run leaves the cursor where it was, so the next run retries the same changes.
 
 ### Mapping
 
-| PS Data | LeanIX Fact Sheet Type |
-|---------|----------------------|
-| AI Asset | IT Component |
-| AI Vendor | Provider |
-| Business Unit | Organization |
-| Data Flow | Data Flow (interface) |
-| Risk Mapping | Risk |
+| PS Data | LeanIX Fact Sheet | External id |
+|---------|-------------------|-------------|
+| AI Asset | IT Component | `promptshields:asset:<asset id>` |
+| AI Vendor | Provider | `promptshields:provider:<vendor>` |
+| Business Unit | Organization (or UserGroup, see `business_unit_type`) | `promptshields:business-unit:<name>` |
+| Data Flow | Interface | `promptshields:flow:<flow id>` |
 
-### Authentication
+Relations: IT Component → Provider (`relITComponentToProvider`) and
+Interface → IT Component (`relInterfaceToITComponent`). Retired assets get the
+`endOfLife` lifecycle phase; active ones `active` from their first-seen date.
+The external ids are the same as the AI-BOM (CycloneDX) `bom-ref` values.
 
-LeanIX Integration Hub supports OAuth 2.0 Client Credentials:
+Fact sheets are matched on their `externalId`, so re-running a sync updates the
+same fact sheets. Runs use `processingMode: partial` and never delete or
+archive fact sheets. IT Component and Interface names carry the first eight
+characters of the Prompt Shields id (`Support bot [0190a000]`) because LeanIX
+names are unique per fact sheet type.
 
+## Setup
+
+1. In LeanIX, create a technical user with permission to run Integration API
+   synchronisations and copy its API token.
+2. In Prompt Shields, issue a partner credential for the connector with the
+   scopes `export:read`, `changes:read` and `data-flows:read`
+   (`POST /api/v1/admin/partner-credentials`).
+3. Configure the connector in the collector's environment, per tenant:
+
+```bash
+PS_LEANIX='{
+  "<tenant uuid>": {
+    "workspace_host": "acme.leanix.net",
+    "api_token": "<LeanIX API token>",
+    "partner_api": {
+      "base_url": "https://collector.example.com",
+      "api_key": "<partner API key>"
+    }
+  }
+}'
 ```
-Token URL: https://api.promptshields.io/oauth/token
-Client ID: ps-partner-leanix-xxx
-Client Secret: sk-partner-secret-xxx
-Grant Type: client_credentials
+
+Optional per-tenant fields: `connector_id` (default `prompt-shields`; set it
+when several Prompt Shields instances feed one workspace),
+`include_data_flows` (default `true`), `batch_size` (assets per run,
+default 500), `business_unit_type` and `lx_workspace`:
+
+- `business_unit_type`: the fact sheet type business units are written to.
+  `Organization` (default) in the current meta model (v4); `UserGroup` in
+  workspaces still on the earlier meta model. Check which one your
+  workspace has under Administration → Meta Model Configuration.
+- `lx_workspace`: your workspace UUID. Optional; when set it is sent as
+  the LDIF `lxWorkspace`, so a token for another workspace makes the run
+  fail instead of writing there. The workspace is otherwise taken from the
+  API token. For a collector reached over an internal network, set
+`"allow_private_network": true` under `partner_api`; it must still be https.
+
+### Security
+
+- The LeanIX API token and the partner API key live only in the operator
+  environment. They are never stored in the database, logged or returned by
+  any endpoint; error messages carry status codes, never response bodies.
+- The partner API key must belong to the tenant it is configured under.
+  Every Partner API response names the key's tenant (`meta.tenant_id`); if
+  it is not the configured tenant, or missing, the run fails before
+  anything is sent to LeanIX and the cursor does not move.
+- The access token is refreshed shortly before its `expires_in` runs out
+  (long runs poll for up to 15 minutes each) and once more after a `401`;
+  a second `401` fails the run. Tokens are never logged.
+- `workspace_host` must be a DNS name ending in one of
+  `PS_LEANIX_ALLOWED_HOST_SUFFIXES` (JSON list, default `[".leanix.net"]`).
+  Calls go only to `https://<workspace_host>`, the host must resolve to public
+  addresses, and redirects are never followed.
+- Every Partner API read made by the connector is checked against the
+  credential's scopes and recorded in the partner audit log.
+- Requests time out after 30 seconds; `429`, `5xx` and network errors are
+  retried up to four times, honouring `Retry-After`. A run that does not
+  finish within 15 minutes fails the sync.
+
+## Running a sync
+
+```bash
+# Operator API (Authorization: Bearer $PS_ADMIN_TOKEN)
+curl -X POST https://collector.example.com/api/v1/admin/connectors/leanix/sync \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN" \
+  -d '{"tenant_id": "<tenant uuid>"}'          # add "full": true to ignore the cursor
+
+curl "https://collector.example.com/api/v1/admin/connectors/leanix/status?tenant_id=<tenant uuid>" \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN"
+
+# CLI
+python -m collector.leanix --tenant <tenant uuid> [--full]
 ```
 
-### Sync Pattern
+Schedule the CLI (for example every 4 hours) with your job runner; the
+collector has no built-in scheduler yet.
 
-1. Use `GET /partner/v1/export` for initial load
-2. Schedule `GET /partner/v1/changes?since={last_sync}` every 4 hours
-3. Map each asset to an IT Component Fact Sheet
-4. Create Provider relations from vendor data
+## Do it yourself
+
+You can also pull from the Partner API with LeanIX Integration Hub or your
+own job and map the data yourself. Use `GET /partner/v1/export` for the
+initial load and `GET /partner/v1/changes?since={last_sync}` afterwards, and
+authenticate with OAuth 2.0 client credentials (`POST /oauth/token`) or a
+partner API key.

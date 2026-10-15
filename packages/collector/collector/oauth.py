@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Form, HTTPException, Request
 from sqlalchemy import select
 
+from collector import rls
 from collector.partner_auth import (
     JWT_TTL_SECONDS,
     issue_access_token,
@@ -47,8 +48,8 @@ async def token_endpoint(
 
     db = request.state.db
     stmt = select(PartnerCredential).where(PartnerCredential.client_id == client_id)
-    result = await db.execute(stmt)
-    partner = result.scalar_one_or_none()
+    async with rls.auth_lookup(db):
+        partner = (await db.execute(stmt)).scalar_one_or_none()
 
     if partner is None or partner.is_active != "true":
         raise HTTPException(
@@ -77,6 +78,7 @@ async def token_endpoint(
             },
         )
 
+    await rls.set_tenant(db, partner.tenant_id)
     scopes = list(partner.scopes or [])
     token, expires_in = issue_access_token(
         tenant_id=partner.tenant_id,

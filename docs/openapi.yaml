@@ -23,7 +23,7 @@ servers:
     description: Sandbox (synthetic data)
 
 security:
-  - OAuth2: [registry:read]
+  - OAuth2: [assets:read]
   - PartnerApiKey: []
 
 tags:
@@ -47,12 +47,15 @@ components:
         clientCredentials:
           tokenUrl: /oauth/token
           scopes:
-            registry:read: Read AI assets, vendors, models, business units
+            assets:read: Read AI assets, vendors, models, business units
             data-flows:read: Read data flow lineage per asset
             risks:read: Read risk mappings per asset
             usage:read: Read aggregated usage statistics
             export:read: Access bulk export endpoint
             changes:read: Access delta feed endpoint
+            webhooks:manage: Manage webhook subscriptions (never granted by default)
+            attestations:write: Record human attestations (never granted by default)
+            registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
       type: http
@@ -108,6 +111,11 @@ components:
           enum: [production, staging, dev]
           example: "production"
           nullable: true
+        region:
+          type: string
+          description: Cloud region the asset is deployed in, from the cloud inventory platform signal
+          example: "swedencentral"
+          nullable: true
         status:
           type: string
           description: Governance status
@@ -156,6 +164,15 @@ components:
           description: When `lifecycle_state` last changed
           nullable: true
           example: null
+        attestation:
+          type: object
+          description: >
+            Human sign-off per attestable field (`asset`, `owner`,
+            `data_classification`). Separate from `confidence`, which only
+            counts agreeing discovery sources and is never changed by an
+            attestation.
+          additionalProperties:
+            $ref: '#/components/schemas/AttestationStatus'
       required:
         - id
         - vendor
@@ -201,14 +218,21 @@ components:
 
     RiskMapping:
       type: object
-      description: Risk assessment linked to an AI asset
+      description: |
+        Risk assessment linked to an AI asset. Rows with `status: suggested`
+        come from the rules engine and are suggestions, not determinations:
+        a human confirms or rejects them.
       properties:
         id:
           type: string
           format: uuid
         risk_category:
           type: string
-          enum: [strategic, operational, compliance, cyber, reputational]
+          description: |
+            Hand-entered mappings typically use strategic, operational,
+            compliance, cyber or reputational. Suggestions use the framework's
+            own category, e.g. `employment` (EU AI Act Annex III point 4) or
+            `privacy` (NIST AI RMF).
           example: "compliance"
         risk_level:
           type: string
@@ -220,10 +244,56 @@ components:
           enum: [NIST_AI_RMF, ISO_42001, EU_AI_ACT, custom]
           example: "EU_AI_ACT"
           nullable: true
+        status:
+          type: string
+          enum: [suggested, confirmed, rejected]
+          description: Hand-entered mappings are `confirmed`.
+          example: "suggested"
+        source:
+          type: string
+          enum: [manual, rules]
+          example: "rules"
+        rule_id:
+          type: string
+          nullable: true
+          description: Rule that produced the suggestion
+          example: "eu_ai_act.annex_iii.4a.recruitment"
+        ruleset_version:
+          type: string
+          nullable: true
+          example: "1.0.0"
+        framework_ref:
+          type: string
+          nullable: true
+          description: Where in the framework the rule points
+          example: "Annex III, point 4(a)"
+        confidence:
+          type: string
+          nullable: true
+          enum: [low, medium, high, null]
+          example: "high"
+        evidence:
+          type: object
+          nullable: true
+          description: |
+            Why the rule fired: `summary` (one line), `rule_title`, `ruleset`
+            and `signals`, each `{signal, value, matched, role}` where role is
+            `trigger` or `supporting`.
+        reviewed_at:
+          type: string
+          format: date-time
+          nullable: true
+        reviewed_by:
+          type: string
+          nullable: true
+          description: The person who confirmed or rejected the mapping
+          example: "dpo@example.com"
       required:
         - id
         - risk_category
         - risk_level
+        - status
+        - source
 
     UsageSummary:
       type: object
@@ -268,6 +338,12 @@ components:
           enum: [stale, retired, reactivated]
           nullable: true
           description: Lifecycle transition since `since`, or null if none
+        attestation_changes:
+          type: array
+          items:
+            type: string
+          description: Fields whose attestation changed since `since`
+          example: ["owner"]
         changed_at:
           type: string
           format: date-time
@@ -278,6 +354,88 @@ components:
           description: Which fields changed (null for created)
           nullable: true
           example: ["confidence", "discovery_source", "last_seen"]
+
+    AttestationStatus:
+      type: object
+      description: Current attestation of one field (its newest attestation)
+      properties:
+        state:
+          type: string
+          enum: [unreviewed, attested, disputed, retired]
+        attested_by:
+          type: string
+          nullable: true
+          example: "ciso@acme.com"
+        attested_at:
+          type: string
+          format: date-time
+          nullable: true
+        comment:
+          type: string
+          nullable: true
+        value_changed:
+          type: boolean
+          description: The registry value differs from the value that was attested
+
+    Attestation:
+      type: object
+      description: One immutable attestation record
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        field:
+          type: string
+          example: "owner"
+        state:
+          type: string
+          enum: [unreviewed, attested, disputed, retired]
+        value:
+          description: The field's value when the attestation was made
+          nullable: true
+          example: "jane.doe@acme.com"
+        comment:
+          type: string
+          nullable: true
+        attested_by:
+          type: string
+          example: "ciso@acme.com"
+        attested_at:
+          type: string
+          format: date-time
+        actor_type:
+          type: string
+          enum: [tenant, partner]
+        partner_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    AttestationRequest:
+      type: object
+      required: [field, state, attested_by]
+      properties:
+        field:
+          type: string
+          description: One of `asset`, `owner`, `data_classification`
+          example: "owner"
+        state:
+          type: string
+          enum: [unreviewed, attested, disputed, retired]
+        attested_by:
+          type: string
+          description: >-
+            The person signing off, e.g. an email. Asserted by the caller (API
+            keys and partner tokens are machine credentials); the authenticated
+            credential (tenant key prefix or partner id) is recorded alongside it.
+          example: "ciso@acme.com"
+        comment:
+          type: string
+          description: Required when `state` is `disputed`
+          nullable: true
 
     PaginationMeta:
       type: object
@@ -294,8 +452,19 @@ components:
           nullable: true
         sync_token:
           type: string
-          description: Token for delta sync (only on /changes endpoint)
+          description: >-
+            Token for delta sync; pass it as `since` to the next /changes
+            call. Returned by /changes (not by the /assets list); /export
+            returns it in its meta too.
           nullable: true
+        tenant_id:
+          type: string
+          format: uuid
+          description: >-
+            Tenant of the credential that made the request. Returned by
+            /changes (not by the /assets list); /export and
+            /assets/{asset_id}/data-flows return it in their meta too. Lets an
+            integration check that its key belongs to the tenant it syncs.
 
     Error:
       type: object
@@ -329,7 +498,20 @@ components:
           example: 3600
         scope:
           type: string
-          example: "registry:read data-flows:read risks:read usage:read export:read changes:read"
+          example: "assets:read data-flows:read risks:read usage:read export:read changes:read"
+
+  responses:
+    Forbidden:
+      description: The credential lacks the scope this endpoint requires
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: about:blank
+            title: Forbidden
+            status: 403
+            detail: "Token lacks required scope: export:read"
 
   parameters:
     LimitParam:
@@ -477,7 +659,12 @@ paths:
         - $ref: '#/components/parameters/VendorParam'
         - $ref: '#/components/parameters/ConfidenceParam'
         - $ref: '#/components/parameters/DataClassificationParam'
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Paginated list of AI assets
           content:
@@ -537,7 +724,12 @@ paths:
           schema:
             type: string
             format: uuid
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Asset details
           content:
@@ -567,7 +759,12 @@ paths:
           schema:
             type: string
             format: uuid
+      security:
+        - OAuth2: [data-flows:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Data flows for the asset
           content:
@@ -579,6 +776,13 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/DataFlow'
+                  meta:
+                    type: object
+                    properties:
+                      tenant_id:
+                        type: string
+                        format: uuid
+                        description: Tenant of the credential that made the request
               example:
                 data:
                   - id: "019e1a2b-0000-7000-8000-000000000010"
@@ -603,7 +807,11 @@ paths:
       summary: Get risk mappings
       description: |
         Returns risk assessments for an AI asset, mapped to governance
-        frameworks (NIST AI RMF, ISO 42001, EU AI Act).
+        frameworks (NIST AI RMF, ISO 42001, EU AI Act). By default only
+        `confirmed` mappings are returned (hand-entered ones and rule-based
+        suggestions a person has confirmed), as before suggestions existed.
+        Pass `status=suggested` for unreviewed rule-based suggestions, which
+        are not determinations, or `status=rejected`.
       parameters:
         - name: asset_id
           in: path
@@ -611,7 +819,19 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: status
+          in: query
+          required: false
+          description: Only mappings with this status. Default is `confirmed`.
+          schema:
+            type: string
+            enum: [suggested, confirmed, rejected]
+      security:
+        - OAuth2: [risks:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Risk mappings for the asset
           content:
@@ -626,13 +846,129 @@ paths:
               example:
                 data:
                   - id: "019e1a2b-0000-7000-8000-000000000020"
-                    risk_category: "compliance"
+                    risk_category: "employment"
                     risk_level: "high"
                     framework: "EU_AI_ACT"
+                    status: "confirmed"
+                    source: "rules"
+                    rule_id: "eu_ai_act.annex_iii.4a.recruitment"
+                    ruleset_version: "1.1.0"
+                    framework_ref: "Annex III, point 4(a)"
+                    confidence: "high"
+                    evidence:
+                      rule_title: "Recruitment or selection: targeted job ads, filtering applications, evaluating candidates"
+                      ruleset: "eu_ai_act_annex_iii"
+                      summary: "Annex III, point 4(a), Recruitment or selection: ...: use_case 'resume-screening' matched resume* (trigger); business_unit 'HR' matched hr (supporting)"
+                      signals:
+                        - signal: "use_case"
+                          value: "resume-screening"
+                          matched: ["resume*"]
+                          role: "trigger"
+                        - signal: "business_unit"
+                          value: "HR"
+                          matched: ["hr"]
+                          role: "supporting"
+                    reviewed_at: "2026-10-15T09:30:00Z"
+                    reviewed_by: "dpo@example.com"
                   - id: "019e1a2b-0000-7000-8000-000000000021"
                     risk_category: "operational"
                     risk_level: "medium"
                     framework: "NIST_AI_RMF"
+                    status: "confirmed"
+                    source: "manual"
+                    rule_id: null
+                    ruleset_version: null
+                    framework_ref: null
+                    confidence: null
+                    evidence: null
+                    reviewed_at: null
+                    reviewed_by: null
+        '404':
+          description: Asset not found
+
+  /partner/v1/assets/{asset_id}/attestations:
+    parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAssetAttestations
+      tags: [Assets]
+      summary: Get attestation history
+      description: |
+        Immutable history of human attestations for an asset, newest first,
+        with the current state of every attestable field in `meta.current`.
+        Requires `assets:read`.
+      parameters:
+        - name: field
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+      responses:
+        '200':
+          description: Attestation history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Attestation'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      confidence:
+                        type: string
+                      current:
+                        type: object
+                        additionalProperties:
+                          $ref: '#/components/schemas/AttestationStatus'
+        '404':
+          description: Asset not found
+    post:
+      operationId: createAssetAttestation
+      tags: [Assets]
+      summary: Record a human attestation
+      description: |
+        Appends an attestation for one field of an asset. Requires the
+        `attestations:write` scope. Never changes `confidence`. The asset
+        then appears in `/changes` with the field in `attestation_changes`.
+      security:
+        - OAuth2: [attestations:write]
+        - PartnerApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttestationRequest'
+      responses:
+        '201':
+          description: Attestation recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Attestation'
+        '400':
+          description: Unknown field, or a dispute without a comment
+        '403':
+          description: Token lacks `attestations:write`
         '404':
           description: Asset not found
 
@@ -658,7 +994,12 @@ paths:
             enum: [7d, 30d, 90d]
             default: 30d
           description: Time period for aggregation
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Usage summary
           content:
@@ -672,7 +1013,12 @@ paths:
       tags: [Taxonomy]
       summary: List AI vendors
       description: Returns all distinct AI vendors found in the tenant's asset registry.
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: List of vendor names
           content:
@@ -693,7 +1039,12 @@ paths:
       tags: [Taxonomy]
       summary: List AI models
       description: Returns all distinct AI models found in the tenant's asset registry.
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: List of model names
           content:
@@ -714,7 +1065,12 @@ paths:
       tags: [Taxonomy]
       summary: List business units
       description: Returns all distinct business units that have AI usage recorded.
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: List of business unit names
           content:
@@ -754,7 +1110,12 @@ paths:
           example: "2026-03-25T10:00:00Z"
         - $ref: '#/components/parameters/LimitParam'
         - $ref: '#/components/parameters/AfterParam'
+      security:
+        - OAuth2: [changes:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Change feed
           content:
@@ -822,7 +1183,12 @@ paths:
             enum: [json]
             default: json
           description: Export format
+      security:
+        - OAuth2: [export:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Full registry export
           content:
@@ -845,6 +1211,10 @@ paths:
                       sync_token:
                         type: string
                         description: Use as `since` parameter for delta sync
+                      tenant_id:
+                        type: string
+                        format: uuid
+                        description: Tenant of the credential that made the request
 
   /partner/v1/health:
     get:

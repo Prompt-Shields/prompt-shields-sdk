@@ -20,6 +20,8 @@ The collector has no scheduler, so the sweep is exposed three ways:
 The sweep is idempotent: running it twice in a row changes nothing the
 second time. Every transition sets `lifecycle_changed_at` and bumps
 `updated_at`, so it shows up in the Partner API delta feed (`/changes`).
+The endpoint and CLI also queue partner webhooks for the transitions
+(`collector.webhooks.enqueue_lifecycle_events`).
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.auth import resolve_tenant
 from collector.config import settings
+from collector.webhooks import enqueue_lifecycle_events
 
 ACTIVE = "active"
 STALE = "stale"
@@ -179,9 +182,11 @@ async def run_sweep(
 ) -> dict:
     tenant_id = await resolve_tenant(request)
     db = request.state.db
+    now = datetime.now(UTC)
     try:
         result = await sweep_asset_lifecycle(
             db,
+            now=now,
             tenant_id=tenant_id,
             stale_after_days=stale_after_days,
             retire_after_days=retire_after_days,
@@ -196,6 +201,7 @@ async def run_sweep(
                 "detail": str(exc),
             },
         ) from exc
+    await enqueue_lifecycle_events(db, changed_at=now, tenant_id=tenant_id)
     await db.commit()
     return asdict(result)
 
@@ -210,15 +216,22 @@ async def _run_cli(
 ) -> SweepResult:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from collector import rls
+
     engine = create_async_engine(settings.database_url)
     try:
-        session_factory = async_sessionmaker(engine, class_=AsyncSession)
+        session_factory = async_sessionmaker(
+            engine, class_=AsyncSession, info=rls.bypass_info("lifecycle-cli")
+        )
         async with session_factory() as db:
+            now = datetime.now(UTC)
             result = await sweep_asset_lifecycle(
                 db,
+                now=now,
                 stale_after_days=stale_after_days,
                 retire_after_days=retire_after_days,
             )
+            await enqueue_lifecycle_events(db, changed_at=now)
             await db.commit()
             return result
     finally:

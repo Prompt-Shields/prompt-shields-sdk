@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Text, ARRAY, TIMESTAMP, Integer, BigInteger, Numeric, ForeignKey, Index
+    Column, Text, ARRAY, TIMESTAMP, Boolean, Integer, BigInteger, Numeric, ForeignKey, Index,
+    DDL, event,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -52,6 +53,9 @@ class AIAsset(Base):
     business_unit = Column(Text)
     owner_email = Column(Text)
     environment = Column(Text)
+    # Cloud region of the deployment (e.g. "swedencentral"), for sovereignty
+    # reporting. Set by the cloud inventory platform signal.
+    region = Column(Text)
     status = Column(Text, default="active")
     # Telemetry-driven lifecycle: active -> stale -> retired, back to active
     # when telemetry resumes. Independent of the governance `status` above.
@@ -151,12 +155,38 @@ class RiskMapping(Base):
     risk_category = Column(Text, nullable=False)
     risk_level = Column(Text, nullable=False)
     framework = Column(Text)
+    # Rule-based suggestions (collector/risk_suggestions.py, #97). Hand-entered
+    # rows are source 'manual', status 'confirmed'. The engine writes source
+    # 'rules', status 'suggested' and only ever changes or withdraws rows that
+    # are still 'suggested'; a human review sets 'confirmed' or 'rejected'.
+    status = Column(Text, nullable=False, default="confirmed", server_default="confirmed")
+    source = Column(Text, nullable=False, default="manual", server_default="manual")
+    rule_id = Column(Text)
+    ruleset_version = Column(Text)
+    framework_ref = Column(Text)
+    confidence = Column(Text)
+    # Which signals triggered the rule: [{signal, field, value, matched, role}].
+    evidence = Column(JSONB)
+    created_at = Column(TIMESTAMP(timezone=True), default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True), default=utcnow)
+    reviewed_at = Column(TIMESTAMP(timezone=True))
+    # Who reviewed (a person, e.g. an email) and the tenant key prefix used.
+    reviewed_by = Column(Text)
+    reviewed_key_prefix = Column(Text)
 
     asset = relationship("AIAsset", back_populates="risk_mappings")
 
     __table_args__ = (
         Index("ix_risk_mappings_tenant_asset", "tenant_id", "asset_id"),
         Index("ix_risk_mappings_tenant_cat", "tenant_id", "risk_category"),
+        Index("ix_risk_mappings_tenant_status", "tenant_id", "status"),
+        # One row per rule per asset; the engine's upsert key.
+        Index(
+            "ux_risk_mappings_rule",
+            "tenant_id", "asset_id", "rule_id",
+            unique=True,
+            postgresql_where=rule_id.isnot(None),
+        ),
     )
 
 
@@ -182,6 +212,9 @@ class PartnerCredential(Base):
     api_key_hash = Column(Text)
     scopes = Column(ARRAY(Text), nullable=False, default=lambda: ["registry:read"])
     rate_limit = Column(Integer, default=1000)
+    # Named tier from collector.partner_scopes.RATE_LIMIT_TIERS; NULL means
+    # the custom `rate_limit` above applies (all Phase 1 credentials).
+    rate_limit_tier = Column(Text)
     is_active = Column(Text, default="true")  # 'true' | 'false' — text for portability
     partner_metadata = Column(JSONB, default=dict)
     expires_at = Column(TIMESTAMP(timezone=True))
@@ -291,3 +324,171 @@ class TelemetryClientStats(Base):
     ignored_fields = Column(JSONB, nullable=False, default=dict)
     first_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     last_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Partner change webhooks (#103)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class WebhookSubscription(Base):
+    """A partner's HTTPS endpoint for asset change events.
+
+    Created by a tenant admin for one of the tenant's partner credentials.
+    `secret_ciphertext` is the signing secret encrypted with a key from
+    PS_WEBHOOK_SECRET_KEYS or the legacy PS_WEBHOOK_SECRET_KEY (AES-GCM,
+    bound to the row id; the token names its key id); the plaintext is
+    returned once, on creation or rotation. After a rotation with a grace
+    period, `previous_secret_ciphertext` holds the replaced secret, which
+    also signs deliveries until `previous_secret_expires_at`. See
+    collector/webhooks.py.
+    """
+
+    __tablename__ = "webhook_subscriptions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    partner_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("partner_credentials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    url = Column(Text, nullable=False)
+    event_types = Column(ARRAY(Text), nullable=False)
+    description = Column(Text)
+    secret_ciphertext = Column(Text, nullable=False)
+    previous_secret_ciphertext = Column(Text)
+    previous_secret_expires_at = Column(TIMESTAMP(timezone=True))
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        Index("ix_webhook_subscriptions_tenant", "tenant_id"),
+        Index("ix_webhook_subscriptions_partner", "partner_id"),
+    )
+
+
+class WebhookDelivery(Base):
+    """One event for one subscription: the outbox row and its delivery state.
+
+    status: pending (waiting for an attempt), succeeded, or dead (gave up;
+    shown in the dead-letter view and can be redelivered). The payload is
+    built when the event is enqueued and holds no owner email or content.
+    """
+
+    __tablename__ = "webhook_deliveries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    subscription_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("webhook_subscriptions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_id = Column(UUID(as_uuid=True), nullable=False)
+    event_type = Column(Text, nullable=False)
+    asset_id = Column(UUID(as_uuid=True))
+    payload = Column(JSONB, nullable=False)
+    status = Column(Text, nullable=False, default="pending", server_default="pending")
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    last_attempt_at = Column(TIMESTAMP(timezone=True))
+    last_status_code = Column(Integer)
+    last_error = Column(Text)
+    delivered_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_webhook_deliveries_due", "status", "next_attempt_at"),
+        Index("ix_webhook_deliveries_tenant_status", "tenant_id", "status", "created_at"),
+        Index(
+            "ux_webhook_deliveries_sub_event", "subscription_id", "event_id", unique=True
+        ),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Human attestation (#98)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class AssetAttestation(Base):
+    """Append-only history of human sign-offs on an asset field.
+
+    One row per decision: who (`attested_by`, plus the authenticated caller),
+    when, which field, the state chosen and a snapshot of the field's value
+    at that moment. The current state of a field is its newest row. Rows are
+    never updated or deleted (triggers reject UPDATE, and DELETE outside
+    tenant erasure, on Postgres). Attestation never changes `AIAsset.confidence`.
+    See collector/attestation.py.
+    """
+
+    __tablename__ = "asset_attestations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("ai_assets.id"), nullable=False)
+    field = Column(Text, nullable=False)  # e.g. 'asset', 'owner', 'data_classification'
+    state = Column(Text, nullable=False)  # unreviewed | attested | disputed | retired
+    value = Column(JSONB)  # the field's value when the decision was made
+    comment = Column(Text)
+    attested_by = Column(Text, nullable=False)  # the human, e.g. an email
+    actor_type = Column(Text, nullable=False)  # 'tenant' | 'partner'
+    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True)
+    # SHA-256 lookup prefix of the tenant API key used, never the key itself.
+    api_key_prefix = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index(
+            "ix_asset_attestations_tenant_asset_field_ts",
+            "tenant_id", "asset_id", "field", "created_at",
+        ),
+    )
+
+
+ATTESTATION_IMMUTABLE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION asset_attestations_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'asset_attestations rows are immutable; insert a new row instead';
+END;
+$$ LANGUAGE plpgsql
+"""
+ATTESTATION_IMMUTABLE_TRIGGER_SQL = """
+CREATE TRIGGER asset_attestations_no_update
+BEFORE UPDATE ON asset_attestations
+FOR EACH ROW EXECUTE FUNCTION asset_attestations_immutable()
+"""
+# DELETE is allowed only for tenant erasure, which sets this transaction-local
+# setting to the tenant being erased (collector/retention.py). Any other
+# DELETE would let history be rewritten (delete, then insert a new row).
+ATTESTATION_ERASE_SETTING = "prompt_shields.erasing_tenant"
+ATTESTATION_NO_DELETE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION asset_attestations_no_delete() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('prompt_shields.erasing_tenant', true) = OLD.tenant_id::text THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'asset_attestations rows are append-only; only tenant erasure may delete them';
+END;
+$$ LANGUAGE plpgsql
+"""
+ATTESTATION_NO_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER asset_attestations_no_delete
+BEFORE DELETE ON asset_attestations
+FOR EACH ROW EXECUTE FUNCTION asset_attestations_no_delete()
+"""
+
+# Install the triggers when the schema is built with create_all too (tests).
+for _ddl in (
+    ATTESTATION_IMMUTABLE_FUNCTION_SQL,
+    ATTESTATION_IMMUTABLE_TRIGGER_SQL,
+    ATTESTATION_NO_DELETE_FUNCTION_SQL,
+    ATTESTATION_NO_DELETE_TRIGGER_SQL,
+):
+    event.listen(
+        AssetAttestation.__table__,
+        "after_create",
+        DDL(_ddl).execute_if(dialect="postgresql"),
+    )

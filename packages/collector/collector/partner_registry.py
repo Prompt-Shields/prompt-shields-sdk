@@ -4,7 +4,8 @@ Read-only registry surface for EA tool integrations (Ardoq, LeanIX,
 ServiceNow). Mirrors `/api/v1/registry/*` but with:
 
   - OAuth-or-API-key authentication via `partner_auth.resolve_partner`
-  - Per-partner rate limiting (default 1000 req/min)
+  - One scope per route (`partner_scopes.SCOPES`), 403 without it
+  - Per-partner rate limiting by tier (default 1000 req/min)
   - Audit logging on every request
   - Two new endpoints not in the internal API: /changes and /export
 
@@ -26,6 +27,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, desc, func, select
 
 from collector import aibom
+from collector.attestation import add_attestation_summaries, attestation_changes_since
 from collector.audit import record_read
 from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.partner_auth import (
@@ -33,7 +35,9 @@ from collector.partner_auth import (
     require_scope,
 )
 from collector.partner_rate_limit import get_rate_limiter
+from collector.partner_scopes import DEFAULT_RATE_LIMIT
 from collector.retention import get_retention_cutoff
+from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 from db.models import (
     AIAsset,
     AIUsageEvent,
@@ -84,13 +88,18 @@ async def _enforce_rate_limit(
     principal: PartnerPrincipal,
 ) -> None:
     """Enforce per-partner rate limit. Sets X-RateLimit-* headers on the
-    response. Raises 429 on exceed."""
-    # Load the partner's configured rate limit
-    db = request.state.db
-    stmt = select(PartnerCredential.rate_limit).where(
-        PartnerCredential.id == principal.partner_id
-    )
-    limit = (await db.execute(stmt)).scalar() or 1000
+    response. Raises 429 on exceed.
+
+    The limit comes from the credential's tier or custom limit, resolved
+    with the principal; the lookup is only a fallback for principals built
+    without a credential row."""
+    limit = principal.rate_limit
+    if limit is None:
+        db = request.state.db
+        stmt = select(PartnerCredential.rate_limit).where(
+            PartnerCredential.id == principal.partner_id
+        )
+        limit = (await db.execute(stmt)).scalar() or DEFAULT_RATE_LIMIT
 
     result = get_rate_limiter().check(principal.partner_id, limit)
     response.headers["X-RateLimit-Limit"] = str(result.limit)
@@ -131,6 +140,7 @@ def _asset_dict(a: AIAsset) -> dict:
         "business_unit": a.business_unit,
         "owner_email": a.owner_email,
         "environment": a.environment,
+        "region": a.region,
         "status": a.status,
         "data_classification": a.data_classification,
         "discovery_source": a.discovery_source,
@@ -155,15 +165,6 @@ def _flow_dict(f: DataFlow) -> dict:
     }
 
 
-def _risk_dict(r: RiskMapping) -> dict:
-    return {
-        "id": str(r.id),
-        "risk_category": r.risk_category,
-        "risk_level": r.risk_level,
-        "framework": r.framework,
-    }
-
-
 # ──────────────────────────────────────────────────────────────────────
 # Health (no auth)
 # ──────────────────────────────────────────────────────────────────────
@@ -183,7 +184,7 @@ async def health() -> dict:
 async def list_assets(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
     business_unit: str | None = None,
     status: str | None = None,
     lifecycle_state: LifecycleState | None = None,
@@ -238,6 +239,7 @@ async def list_assets(
     ).scalars().all()
 
     data = [_asset_dict(a) for a in rows]
+    await add_attestation_summaries(db, principal.tenant_id, rows, data)
     has_more = len(data) == limit and total > limit
     next_cursor = data[-1]["id"] if has_more and data else None
 
@@ -262,7 +264,7 @@ async def get_asset(
     asset_id: UUID,
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -285,8 +287,10 @@ async def get_asset(
                 "detail": "Asset not found",
             },
         )
+    body = _asset_dict(row)
+    await add_attestation_summaries(db, principal.tenant_id, [row], [body])
     await _audit(request, principal, f"/partner/v1/assets/{asset_id}", "GET", 200, 1)
-    return _asset_dict(row)
+    return body
 
 
 @router.get("/assets/{asset_id}/data-flows", summary="Get data flows for an asset")
@@ -294,7 +298,7 @@ async def get_data_flows(
     asset_id: UUID,
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("data-flows:read")),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -309,7 +313,10 @@ async def get_data_flows(
     await _audit(
         request, principal, f"/partner/v1/assets/{asset_id}/data-flows", "GET", 200, len(rows)
     )
-    return {"data": [_flow_dict(f) for f in rows]}
+    return {
+        "data": [_flow_dict(f) for f in rows],
+        "meta": {"tenant_id": str(principal.tenant_id)},
+    }
 
 
 @router.get("/assets/{asset_id}/risks", summary="Get risk mappings for an asset")
@@ -317,22 +324,29 @@ async def get_risks(
     asset_id: UUID,
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("risks:read")),
+    status: RiskStatus | None = Query(
+        default=None,
+        description="Only mappings with this status. Default: confirmed.",
+    ),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
     rows = (
         await db.execute(
-            select(RiskMapping).where(
+            select(RiskMapping)
+            .where(
                 RiskMapping.asset_id == asset_id,
                 RiskMapping.tenant_id == principal.tenant_id,
+                risk_status_filter(status, default="confirmed"),
             )
+            .order_by(RiskMapping.framework, RiskMapping.risk_category, RiskMapping.id)
         )
     ).scalars().all()
     await _audit(
         request, principal, f"/partner/v1/assets/{asset_id}/risks", "GET", 200, len(rows)
     )
-    return {"data": [_risk_dict(r) for r in rows]}
+    return {"data": [risk_dict(r) for r in rows]}
 
 
 # Supported `period` values for /usage-summary, in days.
@@ -349,7 +363,7 @@ async def get_usage_summary(
     period: Literal["7d", "30d", "90d"] = Query(
         default="30d", description="Time period for aggregation"
     ),
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),
 ):
     """Aggregated usage for one asset over the trailing `period`.
 
@@ -444,7 +458,7 @@ def _usage_summary_dict(row, period: str) -> dict:
 async def list_vendors(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -464,7 +478,7 @@ async def list_vendors(
 async def list_models(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -487,7 +501,7 @@ async def list_models(
 async def list_business_units(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -520,7 +534,7 @@ async def get_changes(
     since: str = Query(..., description="ISO 8601 timestamp"),
     after: str | None = None,
     limit: int = Query(default=50, le=200, ge=1),
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("changes:read")),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -575,6 +589,14 @@ async def get_changes(
             # `changed_fields` requires field-level audit; deferred to Phase 2.
             "changed_fields": None,
         })
+    await add_attestation_summaries(
+        db, principal.tenant_id, rows, [d["asset"] for d in data]
+    )
+    for d in data:
+        # Fields whose attestation changed since `since` (#98).
+        d["attestation_changes"] = attestation_changes_since(
+            d["asset"]["attestation"], since_dt
+        )
 
     has_more = len(data) == limit and total > limit
     next_cursor = data[-1]["asset"]["id"] if has_more and data else None
@@ -596,6 +618,9 @@ async def get_changes(
             "has_more": has_more,
             "next_cursor": next_cursor,
             "sync_token": latest_change.isoformat(),
+            # The credential's tenant, so a connector can check that the
+            # key it was configured with belongs to the tenant it syncs.
+            "tenant_id": str(principal.tenant_id),
         },
     }
 
@@ -608,7 +633,7 @@ async def export_registry(
         default="json",
         description="`json` (registry envelope) or `cyclonedx` (CycloneDX 1.6 AI-BOM)",
     ),
-    principal: PartnerPrincipal = Depends(require_scope("registry:read")),
+    principal: PartnerPrincipal = Depends(require_scope("export:read")),
 ):
     if format not in ("json", "cyclonedx"):
         raise HTTPException(
@@ -654,6 +679,8 @@ async def export_registry(
     ).scalars().all()
 
     now = datetime.utcnow()
+    data = [_asset_dict(a) for a in rows]
+    await add_attestation_summaries(db, principal.tenant_id, rows, data)
     await _audit(
         request,
         principal,
@@ -665,10 +692,11 @@ async def export_registry(
     )
 
     return {
-        "data": [_asset_dict(a) for a in rows],
+        "data": data,
         "meta": {
             "total": len(rows),
             "exported_at": now.isoformat() + "Z",
             "sync_token": now.isoformat() + "Z",
+            "tenant_id": str(principal.tenant_id),
         },
     }

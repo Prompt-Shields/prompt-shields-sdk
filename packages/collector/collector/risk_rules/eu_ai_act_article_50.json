@@ -1,0 +1,64 @@
+{
+  "ruleset": "eu_ai_act_article_50",
+  "version": "1.0.0",
+  "framework": "EU_AI_ACT",
+  "title": "EU AI Act Article 50 transparency obligations",
+  "description": "Suggests the Article 50 transparency obligations of Regulation (EU) 2024/1689 that may apply to an asset: telling people they are interacting with an AI system, marking synthetic audio, image and video output, informing people exposed to emotion recognition or biometric categorisation, and disclosing deep fakes and AI-generated text published to inform the public. Article 50 applies on top of any risk classification and has exceptions (for example where the AI interaction is obvious, or for authorised law-enforcement uses), so every match is a suggestion for a human to confirm or reject. Synthetic text generation alone is not flagged under Article 50(2), since almost every LLM asset generates text.",
+  "lists": {
+    "emotion_recognition": ["emotion recognition", "emotion detection", "emotion inference", "emotion analysis", "emotion analytics", "emotion tracking", "emotion classification", "affect recognition", "affective computing", "facial expression analysis", "mood detection", "mood recognition"],
+    "deep_fake": ["deepfake*", "deep fake*", "face swap*", "faceswap*", "voice clon*", "lip sync*", "digital double*", "synthetic likeness*"]
+  },
+  "rules": [
+    {
+      "id": "eu_ai_act.article_50.1.ai_interaction_disclosure",
+      "category": "transparency",
+      "level": "medium",
+      "reference": "Article 50(1): AI systems \"intended to interact directly with natural persons\" must inform them \"that they are interacting with an AI system\", unless this is obvious (not applicable to AI systems authorised by law to detect, prevent, investigate or prosecute criminal offences)",
+      "title": "AI system interacting directly with people (chatbot or assistant) must disclose it is an AI",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["chatbot*", "chat bot*", "chat assistant*", "virtual assistant*", "virtual agent*", "conversational agent*", "conversational ai", "conversational assistant*", "voice assistant*", "voicebot*", "voice bot*", "ai assistant*", "ai companion*", "support bot*", "customer support bot*", "live chat"]}
+        ]
+      }
+    },
+    {
+      "id": "eu_ai_act.article_50.2.synthetic_content_marking",
+      "category": "transparency",
+      "level": "medium",
+      "reference": "Article 50(2): providers of AI systems \"generating synthetic audio, image, video or text content\" must ensure outputs are \"marked in a machine-readable format and detectable as artificially generated or manipulated\" (not where the system performs an assistive function for standard editing or does not substantially alter the input data or its semantics)",
+      "title": "Synthetic audio, image or video generation must be machine-readably marked",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["image generation", "image generator*", "generate image*", "text to image", "video generation", "video generator*", "text to video", "audio generation", "music generation", "speech synthesis", "voice synthesis", "text to speech", "tts", "synthetic media", "synthetic image*", "synthetic video*", "synthetic audio", "synthetic voice*"]},
+          {"signal": "text", "keywords": "@deep_fake"}
+        ]
+      }
+    },
+    {
+      "id": "eu_ai_act.article_50.3.emotion_biometric_disclosure",
+      "category": "transparency",
+      "level": "medium",
+      "reference": "Article 50(3): deployers of \"an emotion recognition system or a biometric categorisation system shall inform the natural persons exposed thereto of the operation of the system\"",
+      "title": "People exposed to emotion recognition or biometric categorisation must be informed",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": "@emotion_recognition"},
+          {"signal": "text", "keywords": ["biometric categori*", "ethnicity detection", "ethnicity classification", "facial attribute*", "face attribute*"]}
+        ]
+      }
+    },
+    {
+      "id": "eu_ai_act.article_50.4.deep_fake_disclosure",
+      "category": "transparency",
+      "level": "medium",
+      "reference": "Article 50(4): deployers of an AI system generating or manipulating content \"constituting a deep fake\", or text \"published with the purpose of informing the public on matters of public interest\", must disclose that it was \"artificially generated or manipulated\" (for text, not where it has undergone human review or editorial control and someone holds editorial responsibility; for evidently artistic, creative, satirical or fictional work, limited to disclosing the content exists in a way that does not hamper the display or enjoyment of the work)",
+      "title": "Deep fakes, and AI-generated text published to inform the public, must be disclosed",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": "@deep_fake"},
+          {"signal": "text", "keywords": ["news generation", "news writing", "news article generation", "automated journalism", "ai generated news"], "strength": "weak"}
+        ]
+      }
+    }
+  ]
+}

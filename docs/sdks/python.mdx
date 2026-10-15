@@ -101,7 +101,7 @@ Requires Python 3.11+.
     Measured at the SDK boundary
   </Card>
   <Card title="Tool calls" icon="screwdriver-wrench">
-    OpenAI `tool_calls` and Anthropic `tool_use` blocks
+    OpenAI `tool_calls` and Anthropic `tool_use` blocks, plus provider-hosted MCP calls (tool and server name only)
   </Card>
   <Card title="PII categories" icon="user-shield">
     Local pattern scan — categories only, never content
@@ -140,9 +140,24 @@ response = client.chat.completions.create(
 ## Auto-Instrumentation
 
 To get telemetry without changing call sites, call `instrument()` once at
-startup. It patches the installed `openai` and `anthropic` SDKs, sync and
-async: `chat.completions.create`, `responses.create` and `messages.create`,
-including `stream=True`.
+startup. It patches whichever of these SDKs are installed, sync and async:
+
+| Vendor | Calls | Streaming |
+| --- | --- | --- |
+| `openai` | `chat.completions.create`, `responses.create` | yes |
+| `azure_openai` | the same, on `AzureOpenAI` / `AsyncAzureOpenAI` clients | yes |
+| `anthropic` | `messages.create`, `beta.messages.create` | yes |
+| `google` | google-genai `models.generate_content` | not yet |
+| `mistral` | mistralai `chat.complete`, `chat.complete_async` | not yet |
+| `cohere` | `Client.chat` (v1), `ClientV2.chat` (v2), and async clients | not yet |
+| `bedrock` | boto3 `bedrock-runtime` `converse`, `invoke_model` | not yet |
+
+Azure calls are tagged `azure_openai` and recorded under the deployment name.
+To price them, pass `azure_deployments={"prod-chat": "gpt-4o"}`; an unmapped
+deployment is priced by the model Azure reports. Bedrock `invoke_model` usage
+is read from the response headers, so the response body stream is never read.
+Streaming methods of the newer vendors (`generate_content_stream`,
+`chat.stream`, `chat_stream`, `converse_stream`, ...) are not instrumented yet.
 
 ```python
 import openai
@@ -157,12 +172,15 @@ client.chat.completions.create(model="gpt-4o", messages=[...])  # emits an event
 Unset arguments fall back to `PS_API_KEY`, `PS_COLLECTOR_URL`,
 `PS_BUSINESS_UNIT`, `PS_USE_CASE`, `PS_OWNER`, `PS_DATA_CLASSIFICATION`,
 `PS_ENVIRONMENT`, `PS_CALLING_SERVICE`, `PS_ATLAS_URL` and `PS_ATLAS_API_KEY`.
-Pass `vendors=("openai",)` to patch only some providers.
+Pass `vendors=("openai",)` to instrument only some providers. `"openai"` also
+covers Azure clients (tagged `azure_openai`); pass `("azure_openai",)` alone to
+instrument Azure without plain OpenAI.
 
 - Calling `instrument()` again does nothing; `uninstrument()` restores the original methods.
 - Missing packages are skipped. Telemetry errors never affect the call.
 - Calls made through `ShieldsClient` are not counted twice. To skip other calls, wrap them in `with prompt_shields.suppress_instrumentation():`.
 - `.with_raw_response` calls, and positional-argument calls, are not instrumented.
+- MCP tools the provider calls for you (OpenAI Responses `mcp` tool, Anthropic MCP connector) appear in `tool_calls_used` as `{"name": ..., "type": "mcp", "server": ...}`. Tool arguments, results and server URLs are never recorded. Tools your own code calls through an MCP client library are not captured.
 
 ## Cost-Aware Routing
 

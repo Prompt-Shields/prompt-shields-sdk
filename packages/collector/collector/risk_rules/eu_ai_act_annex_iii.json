@@ -1,0 +1,362 @@
+{
+  "ruleset": "eu_ai_act_annex_iii",
+  "version": "1.2.0",
+  "framework": "EU_AI_ACT",
+  "title": "EU AI Act Annex III high-risk use cases",
+  "description": "Suggests the Annex III area an AI asset may fall under, from its use case, business unit, calling service, data sources, output destinations and detected PII. Annex III systems are high-risk under Article 6(2) unless the Article 6(3) derogation applies; the engine does not assess that derogation, so every match is a suggestion for a human to confirm or reject.",
+  "lists": {
+    "biometric_pii": ["biometric", "biometric_data", "face", "face_image", "facial_image", "fingerprint", "iris", "voiceprint", "voice_print"],
+    "hr_units": ["hr", "human resources", "people", "people ops", "people operations", "talent", "talent acquisition", "recruiting", "recruitment", "workforce"],
+    "education_units": ["education", "school*", "universit*", "academic*", "admissions", "registrar", "student*"],
+    "finance_units": ["lending", "loans", "credit", "underwriting", "retail banking", "consumer finance"],
+    "insurance_units": ["insurance", "underwriting", "actuarial"],
+    "public_sector_units": ["social services", "social welfare", "welfare services", "welfare office*", "public health"],
+    "employment_context": ["hire", "hires", "hiring", "recruit*", "employer*", "vacanc*", "career*", "talent*", "interview*", "resume*", "cv", "cvs", "staffing", "headhunt*", "shortlist*", "job application*", "job opening*", "job offer*", "job seeker*", "jobseeker*", "job description*", "job requisition*", "job posting*", "job candidate*", "job applicant*", "open role*", "workforce"],
+    "non_employment_applicant": ["loan*", "mortgage*", "credit*", "lending", "insurance*", "visa*", "asylum", "tenant*", "rental*", "lease*", "benefit*", "grant*", "scholarship*", "admission*", "student*", "school*", "universit*", "candidate generation", "candidate retrieval", "candidate item*", "candidate product*", "candidate document*", "candidate passage*", "candidate answer*", "candidate response*", "candidate completion*", "candidate model*", "candidate set*", "candidate pool of item*", "release candidate*", "election*", "electoral", "ballot*", "political candidate*"],
+    "education_context": ["school*", "universit*", "college*", "academ*", "student*", "pupil*", "campus", "tuition", "curricul*", "degree*", "undergrad*", "postgrad*", "graduate program*", "vocational", "apprentice*", "education*", "enrol*", "kindergarten", "registrar"],
+    "healthcare_context": ["hospital*", "patient*", "clinic*", "inpatient*", "outpatient*", "ward", "wards", "bed management", "bed occupancy", "icu", "emergency department", "medical", "nursing", "care home*", "health*"],
+    "benefit_context": ["benefit*", "eligib*", "claim", "claims", "claimant*", "entitlement*", "allowance*", "assistance", "means test*", "social", "public", "recipient*", "caseworker*", "case work*", "payment*", "applicant*", "application*"],
+    "non_public_welfare": ["animal*", "livestock", "pet", "pets", "employee*", "staff", "worker*", "workplace", "corporate"],
+    "technical_election": ["leader election*", "leader elect*", "master election*", "raft", "paxos", "consensus", "zookeeper", "etcd", "cluster*", "failover", "distributed lock*"],
+    "campaign_logistics": ["logistic*", "volunteer schedul*", "volunteer management", "volunteer shift*", "canvass* rout*", "route planning", "route optimi*", "event planning", "event schedul*", "schedul*", "donation processing", "donor management", "expense*", "finance report*", "compliance report*", "office admin*", "administrative", "inventory", "yard sign*"],
+    "voter_influence": ["persua*", "microtarget*", "micro target*", "targeting", "targeted messag*", "political advertising", "political ad", "political ads", "voter outreach", "voter contact", "get out the vote", "gotv", "disinformation", "messaging", "message generation"],
+    "health_pii": ["health", "medical", "medical_record", "diagnosis", "health_insurance_id"],
+    "financial_pii": ["credit_card", "bank_account", "iban", "income", "salary", "credit_score", "tax_id"],
+    "identity_pii": ["national_id", "ssn", "passport", "date_of_birth", "drivers_license"],
+    "biometric_verification": ["biometric verification", "identity verification", "face verification", "facial verification", "voice verification", "speaker verification", "liveness*", "face unlock", "biometric login", "biometric authentication"]
+  },
+  "rules": [
+    {
+      "id": "eu_ai_act.annex_iii.1a.remote_biometric_identification",
+      "category": "biometrics",
+      "level": "high",
+      "reference": "Annex III, point 1(a)",
+      "title": "Remote biometric identification",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["biometric identification", "remote biometric*", "facial recognition", "face recognition", "face identification", "face search", "face matching", "speaker identification", "voice identification", "gait recognition"]}
+        ]
+      },
+      "unless": [
+        {"signal": "use_case", "keywords": "@biometric_verification"},
+        {"signal": "calling_service", "keywords": "@biometric_verification"}
+      ],
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@biometric_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.1b.biometric_categorisation",
+      "category": "biometrics",
+      "level": "high",
+      "reference": "Annex III, point 1(b)",
+      "title": "Biometric categorisation by sensitive or protected attributes",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["biometric categori*", "ethnicity detection", "ethnicity classification", "facial attribute*", "face attribute*"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@biometric_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.1c.emotion_recognition",
+      "category": "biometrics",
+      "level": "high",
+      "reference": "Annex III, point 1(c)",
+      "title": "Emotion recognition",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["emotion recognition", "emotion detection", "affect recognition", "affective computing", "facial expression analysis"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@biometric_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.2.critical_infrastructure",
+      "category": "critical_infrastructure",
+      "level": "high",
+      "reference": "Annex III, point 2",
+      "title": "Safety component in critical infrastructure (digital infrastructure, road traffic, water, gas, heating, electricity)",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["critical infrastructure", "power grid", "electricity grid", "grid operation*", "grid control", "water supply", "water treatment", "gas supply", "gas pipeline*", "district heating", "heating supply", "road traffic", "traffic control", "traffic management", "scada", "substation*"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": ["utilities", "grid operations", "energy", "transport*"]}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.3a.education_access",
+      "category": "education",
+      "level": "high",
+      "reference": "Annex III, point 3(a)",
+      "title": "Access or admission to education and vocational training",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["student application*", "student enrol*", "university application*", "university admission*", "college admission*", "school admission*", "school placement"]},
+          {
+            "signal": "text", "keywords": ["admission*", "admissions office"],
+            "context": [
+              {"signal": "text", "keywords": "@education_context"},
+              {"signal": "business_unit", "keywords": "@education_context"}
+            ],
+            "exclude": [
+              {"signal": "text", "keywords": "@healthcare_context"},
+              {"signal": "business_unit", "keywords": "@healthcare_context"}
+            ]
+          }
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": "@education_units"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.3b.learning_outcomes",
+      "category": "education",
+      "level": "high",
+      "reference": "Annex III, point 3(b)",
+      "title": "Evaluating learning outcomes",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["grading", "auto grading", "autograd*", "essay scoring", "exam scoring", "exam marking", "learning outcome*", "student assessment*", "student evaluation*", "homework grading"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": "@education_units"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.3c.education_level",
+      "category": "education",
+      "level": "high",
+      "reference": "Annex III, point 3(c)",
+      "title": "Assessing the appropriate level of education for an individual",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["placement test*", "course placement", "level placement", "education level assessment"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": "@education_units"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.3d.test_proctoring",
+      "category": "education",
+      "level": "high",
+      "reference": "Annex III, point 3(d)",
+      "title": "Monitoring and detecting prohibited behaviour of students during tests",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["proctor*", "exam monitoring", "test monitoring", "cheating detection", "exam integrity"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": "@education_units"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.4a.recruitment",
+      "category": "employment",
+      "level": "high",
+      "reference": "Annex III, point 4(a)",
+      "title": "Recruitment or selection: targeted job ads, filtering applications, evaluating candidates",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["recruit*", "hiring", "resume*", "cv screening", "cv parsing", "job application*", "job applicant*", "job candidate*", "talent acquisition", "job ad*", "job posting*", "interview screening", "interview scoring", "interview analysis"]},
+          {
+            "signal": "text", "keywords": ["candidate*", "applicant*"],
+            "context": [
+              {"signal": "text", "keywords": "@employment_context"},
+              {"signal": "business_unit", "keywords": "@hr_units"},
+              {"signal": "data_sources", "keywords": ["ats", "applicant tracking*"]}
+            ],
+            "exclude": [
+              {"signal": "text", "keywords": "@non_employment_applicant"}
+            ]
+          },
+          {"signal": "data_sources", "keywords": ["ats", "applicant tracking*"]},
+          {"signal": "business_unit", "keywords": ["talent acquisition", "recruiting", "recruitment"], "strength": "weak"}
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": "@hr_units"},
+        {"signal": "pii_types", "any_of": "@identity_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.4b.workforce_management",
+      "category": "employment",
+      "level": "high",
+      "reference": "Annex III, point 4(b)",
+      "title": "Decisions on promotion or termination, task allocation, monitoring or evaluating workers",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["performance review*", "performance evaluation*", "employee performance", "employee monitoring", "worker monitoring", "workforce analytics", "promotion decision*", "termination decision*", "dismissal*", "task allocation", "shift allocation", "productivity monitoring", "employee scoring", "attrition prediction", "flight risk"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": "@hr_units"},
+        {"signal": "pii_types", "any_of": "@identity_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.5a.public_benefits",
+      "category": "essential_services",
+      "level": "high",
+      "reference": "Annex III, point 5(a)",
+      "title": "Eligibility for public assistance benefits and services, including healthcare",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["benefit eligibility", "benefits eligibility", "eligibility assessment*", "eligibility determination*", "social welfare", "social benefit*", "public assistance", "unemployment benefit*", "housing benefit*", "medicaid", "healthcare eligibility"]},
+          {
+            "signal": "text", "keywords": ["welfare"],
+            "context": [{"signal": "text", "keywords": "@benefit_context"}],
+            "exclude": [{"signal": "text", "keywords": "@non_public_welfare"}]
+          },
+          {
+            "signal": "text", "keywords": ["social security"],
+            "exclude": [{"signal": "text", "keywords": ["social security number*", "social security no", "ssn*"]}]
+          },
+          {"signal": "business_unit", "keywords": "@public_sector_units", "strength": "weak"}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@identity_pii"},
+        {"signal": "pii_types", "any_of": "@health_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.5b.creditworthiness",
+      "category": "essential_services",
+      "level": "high",
+      "reference": "Annex III, point 5(b)",
+      "title": "Creditworthiness evaluation or credit scoring (fraud detection excluded)",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["credit scor*", "creditworth*", "credit risk", "credit decision*", "loan approval*", "loan underwriting", "loan application*", "loan applicant*", "mortgage applicant*", "credit applicant*", "lending decision*", "credit limit*"]},
+          {"signal": "business_unit", "keywords": "@finance_units", "strength": "weak"}
+        ]
+      },
+      "unless": [
+        {"signal": "use_case", "keywords": ["fraud*"]},
+        {"signal": "calling_service", "keywords": ["fraud*"]}
+      ],
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@financial_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.5c.life_health_insurance",
+      "category": "essential_services",
+      "level": "high",
+      "reference": "Annex III, point 5(c)",
+      "title": "Risk assessment and pricing for life and health insurance",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["life insurance", "health insurance", "medical underwriting"]},
+          {"signal": "text", "keywords": ["insurance underwriting", "insurance pricing", "premium pricing", "premium calculation*"], "strength": "weak"}
+        ]
+      },
+      "supporting": [
+        {"signal": "business_unit", "keywords": "@insurance_units"},
+        {"signal": "pii_types", "any_of": "@health_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.5d.emergency_response",
+      "category": "essential_services",
+      "level": "high",
+      "reference": "Annex III, point 5(d)",
+      "title": "Evaluating emergency calls, dispatching emergency services, emergency patient triage",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["emergency call*", "emergency dispatch", "ambulance dispatch", "police dispatch", "fire dispatch", "emergency services", "first responder*", "patient triage", "emergency triage", "medical triage"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@health_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.6.law_enforcement",
+      "category": "law_enforcement",
+      "level": "high",
+      "reference": "Annex III, point 6",
+      "title": "Law enforcement: victim or offending risk, polygraphs, evidence reliability, profiling",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["law enforcement", "police", "policing", "crime prediction", "predictive policing", "recidivism", "reoffend*", "re offend*", "criminal risk", "offender profiling", "suspect identification", "evidence analysis", "evidence reliability", "polygraph*", "lie detection", "criminal investigation*", "victim risk"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@identity_pii"},
+        {"signal": "pii_types", "any_of": "@biometric_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.7.migration_border",
+      "category": "migration_border_control",
+      "level": "high",
+      "reference": "Annex III, point 7",
+      "title": "Migration, asylum and border control management",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["asylum", "visa application*", "visa applicant*", "visa processing", "residence permit*", "immigration", "border control", "border security", "irregular migration", "migration risk"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@identity_pii"},
+        {"signal": "pii_types", "any_of": "@biometric_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.annex_iii.8a.administration_of_justice",
+      "category": "justice_democratic_processes",
+      "level": "high",
+      "reference": "Annex III, point 8(a)",
+      "title": "Assisting a judicial authority in researching and interpreting facts and law, or alternative dispute resolution",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["judicial", "court ruling*", "court decision*", "sentencing", "adjudicat*", "dispute resolution", "arbitration"]}
+        ]
+      }
+    },
+    {
+      "id": "eu_ai_act.annex_iii.8b.elections",
+      "category": "justice_democratic_processes",
+      "level": "high",
+      "reference": "Annex III, point 8(b)",
+      "title": "Influencing the outcome of an election or referendum, or voting behaviour (tools that only organise, optimise or structure political campaigns from an administrative or logistical point of view are excluded)",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["electoral", "voter*", "referendum*", "political campaign*", "political advertising"]},
+          {
+            "signal": "text", "keywords": ["election*"],
+            "exclude": [{"signal": "text", "keywords": "@technical_election"}]
+          },
+          {
+            "signal": "text", "keywords": ["voting"], "strength": "weak",
+            "exclude": [{"signal": "text", "keywords": ["ensemble*", "majority voting", "model voting", "classifier*", "self consistency"]}]
+          }
+        ]
+      },
+      "unless": [
+        {
+          "signal": "use_case", "keywords": "@campaign_logistics",
+          "exclude": [{"signal": "text", "keywords": "@voter_influence"}]
+        },
+        {
+          "signal": "calling_service", "keywords": "@campaign_logistics",
+          "exclude": [{"signal": "text", "keywords": "@voter_influence"}]
+        }
+      ]
+    }
+  ]
+}

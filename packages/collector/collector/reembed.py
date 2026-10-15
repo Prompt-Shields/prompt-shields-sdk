@@ -17,6 +17,7 @@ from db.models import AIAsset
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from collector import rls
 from collector.config import settings
 from collector.embeddings import build_asset_text, get_embedder, get_embedding
 
@@ -66,7 +67,12 @@ async def _main() -> None:
     engine = create_async_engine(settings.database_url)
     try:
         embedded, failed = await reembed(
-            async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            async_sessionmaker(
+                engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+                info=rls.bypass_info("reembed-cli"),
+            )
         )
     finally:
         await engine.dispose()

@@ -12,6 +12,7 @@ from collector.data_flows import record_event_flows
 from collector.dedup import find_or_create_asset
 from collector.embeddings import build_asset_text, get_embedding
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
+from collector.webhooks import AssetChanges
 
 router = APIRouter()
 
@@ -118,6 +119,7 @@ async def ingest_events(
 
 async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
     assets_created = 0
+    changes = AssetChanges()
     for event in events:
         asset, is_new = await find_or_create_asset(
             db=db,
@@ -132,6 +134,7 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             environment=event.environment,
             data_classification=event.data_classification,
         )
+        changes.record(asset, is_new)
         if is_new:
             assets_created += 1
             await db.flush()
@@ -179,4 +182,5 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             calling_service=event.calling_service,
         )
 
+    await changes.enqueue(db, tenant_id)
     return assets_created
