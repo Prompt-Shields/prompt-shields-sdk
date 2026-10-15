@@ -31,7 +31,8 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
       assertAzureAmbientUpstreamIsAzure(
         providerOptions,
         transformedRequestUrl,
-        c
+        c,
+        fn
       );
     }
 

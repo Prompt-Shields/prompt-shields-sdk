@@ -97,7 +97,8 @@ const AzureAIInferenceAPI: ProviderAPIConfig = {
       assertAzureAmbientUpstreamIsAzure(
         providerOptions,
         transformedRequestUrl,
-        c
+        c,
+        fn
       );
     }
 

@@ -23,7 +23,8 @@ function callHeaders(
   config: any,
   providerOptions: Partial<Options>,
   transformedRequestUrl: string = AZURE_URL,
-  requestHeaders: Record<string, string> = {}
+  requestHeaders: Record<string, string> = {},
+  fn: string = 'chatComplete'
 ) {
   return config.headers({
     providerOptions: {
@@ -31,7 +32,7 @@ function callHeaders(
       apiKey: 'caller-key',
       ...providerOptions,
     } as Options,
-    fn: 'chatComplete',
+    fn,
     transformedRequestUrl,
     c: { req: { header: (name: string) => requestHeaders[name] } },
   });
@@ -207,7 +208,11 @@ describe.each(configs)(
       [{}, 'https://models.inference.ai.azure.com/chat/completions'],
       [{}, 'https://my-res.cognitiveservices.azure.com/openai/x'],
       [{}, 'wss://my-resource.openai.azure.com/openai/realtime?deployment=d'],
-      [{}, 'https://acct.blob.core.windows.net/c/output.jsonl'],
+      [
+        { azureEntraScope: 'https://cognitiveservices.azure.com/.default' },
+        AZURE_URL,
+      ],
+      [{ azureEntraScope: 'https://cognitiveservices.azure.com/' }, AZURE_URL],
     ])('allows Azure upstream %p %s', async (providerOptions, url) => {
       fetchSpy.mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'host-token' }))
@@ -216,6 +221,68 @@ describe.each(configs)(
         config,
         { azureAuthMode: 'managed', ...providerOptions },
         url
+      );
+      expect(headers.Authorization).toBe('Bearer host-token');
+    });
+
+    describe.each(['managed', 'workload'])('azureAuthMode %s scope', (mode) => {
+      test.each([
+        'https://management.azure.com/',
+        'https://management.azure.com/.default',
+        'https://storage.azure.com/.default',
+        'https://vault.azure.net/.default',
+        'https://graph.microsoft.com/.default',
+        'api://some-app/.default',
+      ])('refuses caller scope %p', async (azureEntraScope) => {
+        await expectRefused(mode, { azureEntraScope });
+      });
+
+      test('refuses a storage scope outside the batch-output download', async () => {
+        await expectRefused(
+          mode,
+          { azureEntraScope: 'https://storage.azure.com/.default' },
+          'https://acct.blob.core.windows.net/c/x.openai.azure.com'
+        );
+      });
+
+      test('refuses Blob Storage for caller requests (proxy path)', async () => {
+        await expectRefused(
+          mode,
+          {},
+          'https://acct.blob.core.windows.net/c/x.openai.azure.com'
+        );
+      });
+
+      test('refuses the storage scope on a non-Blob host for file content', async () => {
+        const err = await callHeaders(
+          config,
+          {
+            azureAuthMode: mode,
+            azureEntraScope: 'https://storage.azure.com/.default',
+          },
+          AZURE_URL,
+          {},
+          'retrieveFileContent'
+        ).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(GatewayError);
+        expect(err.status).toBe(400);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    test('batch output blob download may use a storage token', async () => {
+      fetchSpy.mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'host-token' }))
+      );
+      const headers = await callHeaders(
+        config,
+        {
+          azureAuthMode: 'managed',
+          azureEntraScope: 'https://storage.azure.com/.default',
+        },
+        'https://acct.blob.core.windows.net/c/output.jsonl',
+        {},
+        'retrieveFileContent'
       );
       expect(headers.Authorization).toBe('Bearer host-token');
     });

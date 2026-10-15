@@ -50,21 +50,48 @@ const AZURE_AMBIENT_HOST_SUFFIXES = [
   '.cognitiveservices.azure.us',
   '.openai.azure.cn',
   '.cognitiveservices.azure.cn',
+];
+
+// Blob Storage only for the batch-output download in getBatchOutput.ts, which
+// asks for a storage token itself; never for a caller-built URL.
+const AZURE_AMBIENT_BLOB_SUFFIXES = [
   '.blob.core.windows.net',
   '.blob.core.usgovcloudapi.net',
   '.blob.core.chinacloudapi.cn',
 ];
 
+// Audiences a caller may ask the host identity for (`azureEntraScope`). A
+// caller-chosen audience on a caller-chosen Azure host makes the gateway a
+// confused deputy (e.g. a storage token reading the operator's blobs), so
+// only the Cognitive Services audience is allowed.
+const AZURE_AMBIENT_SCOPES = [
+  'https://cognitiveservices.azure.com',
+  'https://cognitiveservices.azure.us',
+  'https://cognitiveservices.azure.cn',
+];
+const AZURE_STORAGE_SCOPES = [
+  'https://storage.azure.com',
+  'https://storage.azure.us',
+  'https://storage.azure.cn',
+];
+
+function normalizeAzureScope(scope: string) {
+  return scope.replace(/\/\.default$/, '').replace(/\/$/, '');
+}
+
 const AZURE_RESOURCE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/i;
 
-function isAzureAmbientUpstreamURL(rawUrl: string | undefined): boolean {
+function isAzureAmbientUpstreamURL(
+  rawUrl: string | undefined,
+  suffixes: string[] = AZURE_AMBIENT_HOST_SUFFIXES
+): boolean {
   if (typeof rawUrl !== 'string' || !rawUrl) return false;
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:' && url.protocol !== 'wss:') return false;
     if (url.username || url.password || url.port) return false;
     const host = url.hostname.toLowerCase();
-    return AZURE_AMBIENT_HOST_SUFFIXES.some(
+    return suffixes.some(
       (suffix) => host.endsWith(suffix) && host.length > suffix.length
     );
   } catch {
@@ -85,9 +112,11 @@ export function assertAzureAmbientUpstreamIsAzure(
     customHost?: string;
     resourceName?: string;
     azureFoundryUrl?: string;
+    azureEntraScope?: string;
   },
   transformedRequestUrl: string | undefined,
-  c?: { req?: { header?: (name: string) => string | undefined } }
+  c?: { req?: { header?: (name: string) => string | undefined } },
+  fn?: string
 ) {
   const headerHost =
     typeof c?.req?.header === 'function'
@@ -108,6 +137,36 @@ export function assertAzureAmbientUpstreamIsAzure(
     !isAzureAmbientUpstreamURL(azureFoundryUrl)
   ) {
     throw new GatewayError('Invalid Azure Foundry URL', 400);
+  }
+  const { azureEntraScope } = providerOptions;
+  const scope =
+    typeof azureEntraScope === 'string' && azureEntraScope
+      ? normalizeAzureScope(azureEntraScope.trim().toLowerCase())
+      : undefined;
+  // The batch-output blob download: a storage token, to Blob Storage only.
+  if (
+    fn === 'retrieveFileContent' &&
+    scope !== undefined &&
+    AZURE_STORAGE_SCOPES.includes(scope)
+  ) {
+    if (
+      !isAzureAmbientUpstreamURL(
+        transformedRequestUrl,
+        AZURE_AMBIENT_BLOB_SUFFIXES
+      )
+    ) {
+      throw new GatewayError(
+        'azureAuthMode managed and workload can only be used with Azure hosts',
+        400
+      );
+    }
+    return;
+  }
+  if (scope !== undefined && !AZURE_AMBIENT_SCOPES.includes(scope)) {
+    throw new GatewayError(
+      'azureAuthMode managed and workload only allow the Cognitive Services scope',
+      400
+    );
   }
   if (!isAzureAmbientUpstreamURL(transformedRequestUrl)) {
     throw new GatewayError(
