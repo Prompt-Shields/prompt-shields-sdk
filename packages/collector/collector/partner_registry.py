@@ -313,7 +313,10 @@ async def get_data_flows(
     await _audit(
         request, principal, f"/partner/v1/assets/{asset_id}/data-flows", "GET", 200, len(rows)
     )
-    return {"data": [_flow_dict(f) for f in rows]}
+    return {
+        "data": [_flow_dict(f) for f in rows],
+        "meta": {"tenant_id": str(principal.tenant_id)},
+    }
 
 
 @router.get("/assets/{asset_id}/risks", summary="Get risk mappings for an asset")
@@ -615,6 +618,9 @@ async def get_changes(
             "has_more": has_more,
             "next_cursor": next_cursor,
             "sync_token": latest_change.isoformat(),
+            # The credential's tenant, so a connector can check that the
+            # key it was configured with belongs to the tenant it syncs.
+            "tenant_id": str(principal.tenant_id),
         },
     }
 
@@ -691,5 +697,6 @@ async def export_registry(
             "total": len(rows),
             "exported_at": now.isoformat() + "Z",
             "sync_token": now.isoformat() + "Z",
+            "tenant_id": str(principal.tenant_id),
         },
     }

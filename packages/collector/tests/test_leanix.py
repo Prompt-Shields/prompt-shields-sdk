@@ -387,6 +387,8 @@ class Fakes:
         self.leanix_requests: list[httpx.Request] = []
         self.ldifs: list[dict] = []
         self.fail_leanix_with: int | None = None
+        # Tenant of the partner key, as the Partner API reports it.
+        self.key_tenant: str | None = str(TENANT)
 
     def partner(self, r: httpx.Request) -> httpx.Response:
         self.partner_requests.append(r)
@@ -395,21 +397,23 @@ class Fakes:
         assert r.headers["host"] == "collector.example.com"
         assert r.extensions["sni_hostname"] == "collector.example.com"
         assert r.headers["authorization"] == f"Bearer {PARTNER_KEY}"
+        tenant = {"tenant_id": self.key_tenant}
         if r.url.path == "/partner/v1/export":
             return httpx.Response(
                 200,
                 json={
                     "data": self.assets,
-                    "meta": {"sync_token": "2026-10-15T12:00:00Z"},
+                    "meta": {"sync_token": "2026-10-15T12:00:00Z", **tenant},
                 },
             )
         if r.url.path == "/partner/v1/changes":
             return httpx.Response(
-                200, json={"data": self.changes, "meta": {"has_more": False}}
+                200,
+                json={"data": self.changes, "meta": {"has_more": False, **tenant}},
             )
         if r.url.path.endswith("/data-flows"):
             flows = [_flow()] if f"/assets/{A1}/" in r.url.path else []
-            return httpx.Response(200, json={"data": flows})
+            return httpx.Response(200, json={"data": flows, "meta": tenant})
         return httpx.Response(404)
 
     def leanix(self, r: httpx.Request) -> httpx.Response:
@@ -551,6 +555,26 @@ async def test_ssrf_guard_blocks_before_any_request():
     out = await lx.sync_leanix(db, TENANT, **kw)
     assert out["status"] == "error" and "non-public" in out["error"]
     assert fakes.partner_requests == [] and fakes.leanix_requests == []
+
+
+@pytest.mark.parametrize("key_tenant", [str(uuid.uuid4()), None])
+async def test_partner_key_of_another_tenant_fails_closed(key_tenant):
+    """A partner key paired with the wrong tenant in PS_LEANIX (or a Partner
+    API that does not say whose key it is) stops the run before LeanIX."""
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"leanix": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    fakes.key_tenant = key_tenant
+    out = await lx.sync_leanix(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "error"
+    assert "does not belong to the configured tenant" in out["error"]
+    assert fakes.leanix_requests == []
+    state = db.tenant.settings["connectors"]["leanix"]
+    assert state["cursor"] == cursor and state["last_status"] == "error"
+    if key_tenant:
+        assert key_tenant not in out["error"]
 
 
 async def test_not_configured_and_unknown_tenant():

@@ -79,6 +79,10 @@ default 500). For a collector reached over an internal network, set
 - The LeanIX API token and the partner API key live only in the operator
   environment. They are never stored in the database, logged or returned by
   any endpoint; error messages carry status codes, never response bodies.
+- The partner API key must belong to the tenant it is configured under.
+  Every Partner API response names the key's tenant (`meta.tenant_id`); if
+  it is not the configured tenant, or missing, the run fails before
+  anything is sent to LeanIX and the cursor does not move.
 - `workspace_host` must be a DNS name ending in one of
   `PS_LEANIX_ALLOWED_HOST_SUFFIXES` (JSON list, default `[".leanix.net"]`).
   Calls go only to `https://<workspace_host>`, the host must resolve to public
