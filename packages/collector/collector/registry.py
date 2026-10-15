@@ -8,6 +8,7 @@ from db.models import AIAsset, DataFlow, RiskMapping
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import and_, case, func, or_, select
 
+from collector.attestation import add_attestation_summaries
 from collector.audit import record_read
 from collector.auth import resolve_tenant
 from collector.embeddings import get_embedding, mock_embedding
@@ -57,6 +58,7 @@ async def list_assets(
     assets = result.scalars().all()
 
     data = [_serialize_asset(a) for a in assets]
+    await add_attestation_summaries(db, tenant_id, assets, data)
     has_more = len(data) == limit and total > limit
     next_cursor = str(data[-1]["id"]) if has_more else None
 
@@ -82,6 +84,7 @@ async def get_asset(asset_id: UUID, request: Request):
         })
     # Serialize before the audit commit so no expired attribute is reloaded.
     body = _serialize_asset(asset)
+    await add_attestation_summaries(db, tenant_id, [asset], [body])
     await record_read(request, tenant_id=tenant_id, status_code=200, response_count=1)
     return body
 

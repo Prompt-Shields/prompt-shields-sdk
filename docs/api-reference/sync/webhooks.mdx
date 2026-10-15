@@ -1,0 +1,179 @@
+---
+title: Change Webhooks
+description: Get asset changes pushed to your endpoint instead of polling /changes
+---
+
+# Change Webhooks
+
+Instead of polling [`/partner/v1/changes`](/api-reference/sync/get-changes), a partner integration can receive a signed HTTPS `POST` when an asset in the tenant's registry changes.
+
+## Events
+
+| Type | Sent when |
+|------|-----------|
+| `asset.created` | A new AI asset is discovered (SDK, gateway or OTel telemetry) |
+| `asset.changed` | An asset's discovery sources, confidence, owner, data classification or lifecycle state changes. This includes going `stale` and being reactivated. `data.changed_fields` names the fields that changed. |
+| `asset.retired` | The lifecycle sweep retires an asset |
+
+Body:
+
+```json
+{
+  "id": "6f1c2d1e-8a8e-4b4e-9d4f-1d2a3b4c5d6e",
+  "type": "asset.changed",
+  "created_at": "2026-10-15T09:12:44.120391+00:00",
+  "tenant_id": "0b7d…",
+  "data": {
+    "asset": {
+      "id": "3c9e…",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "use_case_name": "resume-screening",
+      "business_unit": "HR",
+      "environment": "production",
+      "status": "active",
+      "data_classification": "confidential",
+      "discovery_source": ["sdk", "gateway"],
+      "confidence": "verified",
+      "lifecycle_state": "active",
+      "first_seen": "2026-09-01T10:00:00+00:00",
+      "last_seen": "2026-10-15T09:12:44+00:00",
+      "lifecycle_changed_at": null
+    },
+    "changed_fields": ["confidence", "discovery_source"]
+  }
+}
+```
+
+Payloads hold an asset summary only. They never include the owner's email address, prompt content or usage events. To get the full asset, call [`GET /partner/v1/assets/{id}`](/api-reference/assets/get-asset).
+
+Headers:
+
+| Header | Value |
+|--------|-------|
+| `Prompt-Shields-Signature` | `t=<unix seconds>,v1=<hex HMAC-SHA256>` |
+| `Prompt-Shields-Event-Id` | The event `id`. It stays the same across retries, so use it to drop duplicates. |
+| `Prompt-Shields-Event-Type` | The event `type` |
+| `Prompt-Shields-Delivery-Attempt` | `1` for the first try, then `2`, `3` and so on |
+
+## Verifying signatures
+
+`v1` is `HMAC-SHA256(secret, "<t>." + raw_body)`, written as hex. Before you parse the JSON:
+
+1. Recompute the HMAC over the **raw** request body.
+2. Compare the two values in constant time.
+3. Reject the request if `t` is more than 5 minutes from your clock. This stops a captured request from being replayed later.
+
+Python:
+
+```python
+import hashlib
+import hmac
+import time
+
+TOLERANCE_SECONDS = 300
+
+
+def verify_prompt_shields_signature(secret: str, raw_body: bytes, header: str) -> bool:
+    try:
+        parts = dict(item.split("=", 1) for item in header.split(","))
+        timestamp = int(parts["t"])
+    except (KeyError, ValueError):
+        return False
+    if abs(time.time() - timestamp) > TOLERANCE_SECONDS:
+        return False
+    expected = hmac.new(
+        secret.encode(), f"{timestamp}.".encode() + raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, parts.get("v1", ""))
+
+
+# Flask example
+# @app.post("/prompt-shields")
+# def receive():
+#     if not verify_prompt_shields_signature(
+#         SECRET, request.get_data(), request.headers.get("Prompt-Shields-Signature", "")
+#     ):
+#         abort(400)
+#     event = request.get_json()
+#     ...
+```
+
+Node.js:
+
+```javascript
+import crypto from "node:crypto";
+
+export function verifyPromptShieldsSignature(secret, rawBody, header, toleranceSeconds = 300) {
+  const parts = Object.fromEntries(
+    (header || "").split(",").map((p) => {
+      const i = p.indexOf("=");
+      return [p.slice(0, i), p.slice(i + 1)];
+    }),
+  );
+  const timestamp = Number.parseInt(parts.t, 10);
+  if (!Number.isFinite(timestamp) || !parts.v1) return false;
+  if (Math.abs(Date.now() / 1000 - timestamp) > toleranceSeconds) return false;
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(`${timestamp}.`)
+    .update(rawBody) // Buffer of the raw body, not re-serialized JSON
+    .digest("hex");
+  const a = Buffer.from(expected);
+  const b = Buffer.from(parts.v1);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+```
+
+Reply with any `2xx` status within 10 seconds. Do slow work after you respond.
+
+## Retries and dead letters
+
+A delivery fails when the response is not `2xx`, including redirects (redirects are not followed), or when the connection fails or times out. Failed deliveries are retried after 1 minute, 5 minutes, 30 minutes, 2 hours, 6 hours, 12 hours, and then every 24 hours. After `PS_WEBHOOK_MAX_ATTEMPTS` attempts (default 8, about a day and a half in total), the delivery is marked `dead`.
+
+Events can arrive out of order, and an event can arrive more than once. Use `Prompt-Shields-Event-Id` to drop duplicates, and compare `created_at` or re-read the asset when order matters.
+
+If the partner credential is revoked or expired, or no longer has the scope for the event (`changes:read` for asset events), its subscriptions stop receiving events. Queued deliveries are moved to `dead` and are not sent.
+
+## Managing subscriptions (tenant admin)
+
+The tenant manages subscriptions with its own API key, not with partner credentials, because the tenant decides where its registry data is sent. The partner credential must be active and have the `changes:read` scope, which asset events need because they carry the same data as the [changes feed](/api-reference/sync/get-changes). Phase 1 credentials with `registry:read` already include it. A credential with only `assets:read` cannot be subscribed.
+
+```bash
+curl -X POST https://collector.example.com/api/v1/admin/webhooks/subscriptions \
+  -H "Authorization: Bearer $PS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"partner_id": "<partner credential id>",
+       "url": "https://ea-tool.example.com/hooks/prompt-shields",
+       "event_types": ["asset.created", "asset.changed", "asset.retired"]}'
+```
+
+The response includes `secret` (`whsec_…`). This is the only time it is shown, so give it to the partner over a secure channel. `POST /subscriptions/{id}/rotate-secret` issues a new secret, and the old one stops working at once.
+
+| Method and path (under `/api/v1/admin/webhooks`) | |
+|---|---|
+| `POST /subscriptions` | Create a subscription. Returns the secret once. |
+| `GET /subscriptions[?partner_id=]` | List subscriptions (secrets are never returned) |
+| `GET /subscriptions/{id}` | Get one subscription |
+| `DELETE /subscriptions/{id}` | Delete a subscription and its deliveries |
+| `POST /subscriptions/{id}/rotate-secret` | Issue a new secret. Returns it once. |
+| `GET /deliveries?status=dead\|pending\|succeeded` | Dead-letter view (the default) and the other statuses |
+| `POST /deliveries/{id}/redeliver` | Queue a dead or succeeded delivery again |
+
+### Endpoint rules
+
+- The URL must use `https`, must not contain credentials or a fragment, and can be at most 2048 characters.
+- Every address the host name resolves to must be public. Loopback, private, link-local (including cloud metadata `169.254.169.254`), carrier-grade NAT, multicast, deprecated IPv6 ranges (IPv4-compatible `::/96`, site-local `fec0::/10`) and IPv4-mapped, 6to4, Teredo and NAT64 (`64:ff9b::/96`) forms of these are refused. This is checked when the subscription is created and again on every delivery. The request goes to the address that was checked, and TLS is verified against the host name.
+- A partner credential can have at most 10 subscriptions.
+
+## Operating the collector
+
+| Setting | Default | |
+|---|---|---|
+| `PS_WEBHOOK_SECRET_KEY` | (empty) | Encrypts signing secrets at rest (AES-GCM). At least 32 characters, for example `openssl rand -base64 32`. While it is empty, webhooks are off. If you change it, every subscription needs a new secret. |
+| `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` | `0` | When above 0, each collector process runs the delivery loop in the background. Otherwise, run `python -m collector.webhooks deliver --loop` as its own worker. Workers claim rows with `SKIP LOCKED`, so several can run at the same time. |
+| `PS_WEBHOOK_MAX_ATTEMPTS` | `8` | Attempts before a delivery is marked `dead` |
+| `PS_WEBHOOK_TIMEOUT_SECONDS` | `10` | Overall deadline for each attempt (resolve, connect, send, response headers). Keep it well under 5 minutes, the worker's claim lease |
+| `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `30` | `succeeded` and `dead` rows older than this are deleted (by the worker once an hour, or by `python -m collector.webhooks purge`) |
+| `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | For local development only |
+
+Events are written to the `webhook_deliveries` outbox in the same transaction as the change that caused them. Ingest requests never wait on partner endpoints.
