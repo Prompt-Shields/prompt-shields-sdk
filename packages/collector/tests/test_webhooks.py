@@ -5,6 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
+import pathlib
+import re
+import shutil
+import subprocess
 import time
 import uuid
 
@@ -352,3 +357,136 @@ def test_timeout_setting_accepts_values_up_to_the_cap(monkeypatch):
     monkeypatch.setattr(settings, "webhook_timeout_seconds", 900.0)
     assert webhooks.attempt_timeout_seconds() == WEBHOOK_MAX_TIMEOUT_SECONDS
     assert WEBHOOK_MAX_TIMEOUT_SECONDS < webhooks.CLAIM_LEASE.total_seconds()
+
+
+# ── missing keys are told apart from unreadable secrets ───────────────
+
+
+def test_missing_key_is_secret_key_missing_but_bad_tokens_are_not(monkeypatch):
+    sid = uuid.uuid4()
+    legacy = webhooks.encrypt_secret("whsec_old", sid)
+    monkeypatch.setattr(settings, "webhook_secret_keys", f"k2:{K2}")
+    token = webhooks.encrypt_secret("whsec_x", sid)
+
+    monkeypatch.setattr(settings, "webhook_secret_keys", f"k1:{K1}")
+    with pytest.raises(webhooks.SecretKeyMissing) as exc:
+        webhooks.decrypt_secret(token, sid)
+    assert exc.value.key_id == "k2" and K2 not in str(exc.value)
+    monkeypatch.setattr(settings, "webhook_secret_key", "")
+    with pytest.raises(webhooks.SecretKeyMissing) as exc:
+        webhooks.decrypt_secret(legacy, sid)
+    assert exc.value.key_id is None
+
+    # Configured key, bad token: an ordinary ValueError (dead-lettered).
+    monkeypatch.setattr(settings, "webhook_secret_keys", f"k2:{K2}")
+    for bad in (token[:-4] + "AAAA", "v2.k2.!!!", "v2.k2.AAAA"):
+        with pytest.raises(ValueError) as exc:
+            webhooks.decrypt_secret(bad, sid)
+        assert not isinstance(exc.value, webhooks.SecretKeyMissing)
+
+
+# ── malformed signature headers never raise ───────────────────────────
+
+BODY = b'{"id":"e1"}'
+DOCS_PAGE = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "docs"
+    / "api-reference"
+    / "sync"
+    / "webhooks.mdx"
+)
+
+
+def _signature_cases() -> list[tuple[str, object]]:
+    """(name, header) pairs: valid, rotated and malformed headers."""
+    ts = int(time.time())
+    good = webhooks.sign_payload("whsec_x", BODY, ts)
+    v1 = good.split("v1=", 1)[1]
+    return [
+        ("valid", good),
+        ("rotated", webhooks.sign_payload(["whsec_new", "whsec_x"], BODY, ts)),
+        ("valid with junk item", f"{good},junk"),
+        ("junk item first", f"junk,{good}"),
+        ("junk item and bad v1", "t=1,v1=x,junk"),
+        ("current t, bad v1, junk", f"t={ts},v1=x,junk"),
+        ("non-ASCII v1", f"t={ts},v1=é{v1[1:]}"),
+        ("non-ASCII v1 only", f"t={ts},v1=ü"),
+        ("non-ASCII digits in t", f"t=١٢٣,v1={v1}"),
+        ("superscript t", f"t=²,v1={v1}"),
+        ("huge t", "t=" + "9" * 500 + f",v1={v1}"),
+        ("signed t", f"t=+{ts},v1={v1}"),
+        ("float t", f"t={ts}.0,v1={v1}"),
+        ("spaces", f"t= {ts},v1={v1}"),
+        ("no v1", f"t={ts}"),
+        ("no t", f"v1={v1}"),
+        ("empty", ""),
+        ("only commas", ",,,"),
+        ("equals only", "="),
+        ("emoji", "t=🙂,v1=🙂"),
+        ("lone surrogate", f"t={ts},v1=\udcff"),
+        ("not a string", None),
+        ("bytes", good.encode()),
+    ]
+
+
+EXPECTED_VALID = {"valid", "rotated", "valid with junk item", "junk item first"}
+
+
+@pytest.mark.parametrize("name, header", _signature_cases())
+def test_verify_signature_never_raises(name, header):
+    assert webhooks.verify_signature("whsec_x", BODY, header) is (name in EXPECTED_VALID)
+
+
+def _docs_block(language: str, marker: str) -> str:
+    """The fenced `language` block in the webhooks docs that contains `marker`."""
+    blocks = re.findall(rf"```{language}\n(.*?)```", DOCS_PAGE.read_text(), re.DOTALL)
+    (block,) = [b for b in blocks if marker in b]
+    return block
+
+
+def test_documented_python_sample_matches_the_reference():
+    namespace: dict = {}
+    source = _docs_block("python", "def verify_prompt_shields_signature")
+    exec(compile(source, "webhooks.mdx", "exec"), namespace)  # noqa: S102
+    verify = namespace["verify_prompt_shields_signature"]
+    for name, header in _signature_cases():
+        assert verify("whsec_x", BODY, header) is (name in EXPECTED_VALID), name
+    stale = webhooks.sign_payload("whsec_x", BODY, int(time.time()) - 301)
+    assert verify("whsec_x", BODY, stale) is False
+
+
+def test_documented_node_sample_matches_the_reference(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    (tmp_path / "verify.mjs").write_text(_docs_block("javascript", "verifyPromptShieldsSignature"))
+    (tmp_path / "run.mjs").write_text(
+        'import { verifyPromptShieldsSignature as verify } from "./verify.mjs";\n'
+        'import { readFileSync } from "node:fs";\n'
+        'const cases = JSON.parse(readFileSync(0, "utf8"));\n'
+        "const body = Buffer.from(cases.body);\n"
+        "const out = {};\n"
+        "for (const [name, header] of cases.headers) {\n"
+        "  try { out[name] = verify('whsec_x', body, header); }\n"
+        "  catch (e) { out[name] = 'threw: ' + e; }\n"
+        "}\n"
+        "out['array header'] = verify('whsec_x', body, ['t=1', 'v1=x']);\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    stale = webhooks.sign_payload("whsec_x", BODY, int(time.time()) - 301)
+    headers = [
+        (name, header if isinstance(header, str) else None)
+        for name, header in _signature_cases()
+        if name not in ("lone surrogate", "bytes")  # not representable in JSON
+    ] + [("stale", stale)]
+    result = subprocess.run(
+        [node, str(tmp_path / "run.mjs")],
+        input=json.dumps({"body": BODY.decode(), "headers": headers}),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    expected = {name: name in EXPECTED_VALID for name, _ in headers}
+    expected["array header"] = False
+    assert json.loads(result.stdout) == expected

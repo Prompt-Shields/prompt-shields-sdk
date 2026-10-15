@@ -76,6 +76,7 @@ Headers:
 1. Recompute the HMAC over the **raw** request body.
 2. Compare it in constant time with **every** `v1` value in the header, and accept the request if any one matches. There are two `v1` values while a rotated-out secret is still in its grace period (see [Rotating the secret](#rotating-the-secret)).
 3. Reject the request if `t` is more than 5 minutes from your clock. This stops a captured request from being replayed later.
+4. Treat a header you cannot parse (no `t`, a `t` that is not a number, no `v1`, non-ASCII characters) as a failed check, not an error.
 
 Python:
 
@@ -88,18 +89,37 @@ TOLERANCE_SECONDS = 300
 
 
 def verify_prompt_shields_signature(secret: str, raw_body: bytes, header: str) -> bool:
-    try:
-        items = [item.split("=", 1) for item in header.split(",")]
-        timestamp = int(next(v for k, v in items if k == "t"))
-    except (StopIteration, ValueError):
+    """True if the header carries a valid signature. Never raises on a bad header."""
+    if not isinstance(header, str):
         return False
-    if abs(time.time() - timestamp) > TOLERANCE_SECONDS:
+    timestamp, signatures = None, []
+    for item in header.split(","):
+        key, sep, value = item.partition("=")
+        if not sep:
+            continue  # not "key=value": ignore it
+        if key == "t" and timestamp is None:
+            timestamp = value
+        elif key == "v1":
+            signatures.append(value)
+    if (
+        timestamp is None
+        or not signatures
+        or not (timestamp.isascii() and timestamp.isdigit())
+        or len(timestamp) > 12
+    ):
+        return False
+    t = int(timestamp)
+    if abs(time.time() - t) > TOLERANCE_SECONDS:
         return False
     expected = hmac.new(
-        secret.encode(), f"{timestamp}.".encode() + raw_body, hashlib.sha256
+        secret.encode(), f"{t}.".encode() + raw_body, hashlib.sha256
     ).hexdigest()
-    # One v1 per valid secret during a rotation: accept any match.
-    return any(hmac.compare_digest(expected, v) for k, v in items if k == "v1")
+    # One v1 per valid secret during a rotation: accept any match. Check
+    # every value so the time taken does not show which one matched.
+    matched = False
+    for v in signatures:
+        matched |= v.isascii() and hmac.compare_digest(expected, v)
+    return matched
 
 
 # Flask example
@@ -118,15 +138,21 @@ Node.js:
 ```javascript
 import crypto from "node:crypto";
 
+// Returns true if the header carries a valid signature. Never throws on a bad header.
 export function verifyPromptShieldsSignature(secret, rawBody, header, toleranceSeconds = 300) {
-  const items = (header || "").split(",").map((p) => {
-    const i = p.indexOf("=");
-    return [p.slice(0, i), p.slice(i + 1)];
-  });
-  const t = items.find(([k]) => k === "t");
-  const signatures = items.filter(([k]) => k === "v1").map(([, v]) => v);
-  const timestamp = t ? Number.parseInt(t[1], 10) : Number.NaN;
-  if (!Number.isFinite(timestamp) || signatures.length === 0) return false;
+  if (typeof header !== "string") return false;
+  let t;
+  const signatures = [];
+  for (const item of header.split(",")) {
+    const i = item.indexOf("=");
+    if (i < 0) continue; // not "key=value": ignore it
+    const key = item.slice(0, i);
+    const value = item.slice(i + 1);
+    if (key === "t" && t === undefined) t = value;
+    else if (key === "v1") signatures.push(value);
+  }
+  if (t === undefined || signatures.length === 0 || !/^[0-9]{1,12}$/.test(t)) return false;
+  const timestamp = Number(t);
   if (Math.abs(Date.now() / 1000 - timestamp) > toleranceSeconds) return false;
   const expected = Buffer.from(
     crypto
@@ -136,10 +162,12 @@ export function verifyPromptShieldsSignature(secret, rawBody, header, toleranceS
       .digest("hex"),
   );
   // One v1 per valid secret during a rotation: accept any match.
-  return signatures.some((v) => {
+  let matched = false;
+  for (const v of signatures) {
     const b = Buffer.from(v);
-    return b.length === expected.length && crypto.timingSafeEqual(expected, b);
-  });
+    if (b.length === expected.length && crypto.timingSafeEqual(expected, b)) matched = true;
+  }
+  return matched;
 }
 ```
 
@@ -177,13 +205,35 @@ curl -X POST https://collector.example.com/api/v1/admin/webhooks/subscriptions/$
   -d '{"grace_period_seconds": 86400}'
 ```
 
-Until `rotation_grace_ends_at` (shown on the subscription), every delivery carries two signatures, `t=…,v1=<new secret>,v1=<old secret>`. A receiver that checks every `v1` (as in the samples above) accepts requests with either secret, so it can be given the new secret at any point in the window. After the window only the new secret signs. Rotating again ends any earlier grace period; only the secret being replaced is kept.
+Until `rotation_grace_ends_at` (shown on the subscription), every delivery carries two signatures, `t=…,v1=<new secret>,v1=<old secret>`. A receiver that checks every `v1` (as in the samples above) accepts requests with either secret, so it can be given the new secret at any point in the window. After the window only the new secret signs, and the collector deletes the old one within the hour (the worker's hourly cleanup, or `python -m collector.webhooks purge`), even for a subscription with no deliveries. Rotating again ends any earlier grace period; only the secret being replaced is kept.
+
+### Changing or pausing a subscription
+
+`PATCH /subscriptions/{id}` changes any of `url`, `event_types` and `is_active`. Fields you leave out keep their value. An empty body, `null` values and unknown fields are refused (`422`).
+
+```bash
+# Pause
+curl -X PATCH https://collector.example.com/api/v1/admin/webhooks/subscriptions/$SUB_ID \
+  -H "Authorization: Bearer $PS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"is_active": false}'
+
+# Move to a new endpoint and narrow the events
+curl -X PATCH https://collector.example.com/api/v1/admin/webhooks/subscriptions/$SUB_ID \
+  -H "Authorization: Bearer $PS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://ea-tool.example.com/hooks/v2", "event_types": ["asset.retired"]}'
+```
+
+- A new `url` gets the same checks as on creation (see [Endpoint rules](#endpoint-rules)). Queued deliveries go to the new URL.
+- New `event_types` must be known event types, and the partner credential must be active and hold the scope for each (`changes:read`). The same check applies when you resume a paused subscription. Pausing always works, even for a revoked credential.
+- While paused, no events are queued for the subscription, and deliveries already queued are moved to `dead` ("subscription disabled") instead of being sent. After you resume, redeliver them from the dead-letter view, and read [`/partner/v1/changes`](/api-reference/sync/get-changes) to catch up on changes made during the pause.
+- The response is the updated subscription (never the secret). Every call is written to the audit log with the names of the fields that changed, not their values.
 
 | Method and path (under `/api/v1/admin/webhooks`) | |
 |---|---|
 | `POST /subscriptions` | Create a subscription. Returns the secret once. |
 | `GET /subscriptions[?partner_id=]` | List subscriptions (secrets are never returned) |
 | `GET /subscriptions/{id}` | Get one subscription |
+| `PATCH /subscriptions/{id}` | Change `url`, `event_types` or `is_active` (pause or resume). See [Changing or pausing a subscription](#changing-or-pausing-a-subscription). |
 | `DELETE /subscriptions/{id}` | Delete a subscription and its deliveries |
 | `POST /subscriptions/{id}/rotate-secret` | Issue a new secret. Returns it once. Optional body `{"grace_period_seconds": n}` keeps the old one signing for up to 7 days. |
 | `GET /deliveries?status=dead\|pending\|succeeded` | Dead-letter view (the default) and the other statuses |
@@ -204,17 +254,22 @@ Until `rotation_grace_ends_at` (shown on the subscription), every delivery carri
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` | `0` | When above 0, each collector process runs the delivery loop in the background. Otherwise, run `python -m collector.webhooks deliver --loop` as its own worker. Workers claim rows with `SKIP LOCKED`, so several can run at the same time. |
 | `PS_WEBHOOK_MAX_ATTEMPTS` | `8` | Attempts before a delivery is marked `dead` |
 | `PS_WEBHOOK_TIMEOUT_SECONDS` | `10` | Overall deadline for each attempt (resolve, connect, send, response headers). Above 0 and at most 60, so attempts fit inside the worker's 5-minute claim lease; the collector refuses to start otherwise |
-| `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `30` | `succeeded` and `dead` rows older than this are deleted (by the worker once an hour, or by `python -m collector.webhooks purge`) |
+| `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `30` | `succeeded` and `dead` rows older than this are deleted (by the worker once an hour, or by `python -m collector.webhooks purge`). The same run deletes rotated-out secrets whose grace period is over. |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | For local development only |
 
 Events are written to the `webhook_deliveries` outbox in the same transaction as the change that caused them. Ingest requests never wait on partner endpoints.
 
 ### Rotating the encryption key
 
-Stored secrets record the id of the key that encrypted them, so the encryption key can change without re-issuing every subscription secret:
+Stored secrets record the id of the key that encrypted them, so the encryption key can change without re-issuing every subscription secret. The first key in `PS_WEBHOOK_SECRET_KEYS` is the active one, and every process re-encrypts secrets with its active key as it uses them. So every process must have a key before any process makes it active. With more than one collector process or worker, roll a new key out in two restarts:
 
-1. Put a new key at the front of `PS_WEBHOOK_SECRET_KEYS` and keep the old one after it (`2026b:<new>,2026a:<old>`). On the first move from the single key, keep `PS_WEBHOOK_SECRET_KEY` set as well. Restart the collector and workers.
-2. Secrets are re-encrypted with the new key as deliveries use them. To do all of them now, run `python -m collector.webhooks rekey`. It prints `checked`, `rekeyed`, `unchanged` and `unreadable` counts.
-3. When a run reports `unreadable: 0` and nothing left to rekey, remove the old key (and `PS_WEBHOOK_SECRET_KEY`) and restart.
+1. **Add the new key after the active one, everywhere** (`2026a:<old>,2026b:<new>`) and restart every collector process and worker. Nothing is encrypted with the new key yet, and every process can now read it.
+2. **Make it active, everywhere**: move it to the front (`2026b:<new>,2026a:<old>`) and restart again. Processes that have not restarted yet keep encrypting with the old key, which every process can still read.
+3. Secrets are re-encrypted with the new key as deliveries use them. To do all of them now, run `python -m collector.webhooks rekey` once every process has the new order. It prints `checked`, `rekeyed`, `unchanged` and `unreadable` counts.
+4. When a run reports `unreadable: 0` and nothing left to rekey, remove the old key (and `PS_WEBHOOK_SECRET_KEY`) from every process and restart.
 
-A secret whose key is no longer configured cannot be read: its deliveries are marked `dead` with "signing secret unreadable; rotate the secret". Put the key back and redeliver, or rotate that subscription's secret.
+On the first move from the single `PS_WEBHOOK_SECRET_KEY` to a keyring, keep `PS_WEBHOOK_SECRET_KEY` set when you add the keyring. The first keyring key is active at once (there is no step 1), so processes that have not restarted yet cannot read secrets that restarted ones have re-encrypted. Their deliveries are retried as described below, so finish the restart well within the retry window, or stop the workers while you switch.
+
+If a process finds a secret encrypted with a key it does not have (a restart still in progress, or step 1 skipped), it does not send that delivery. It logs one warning per key id, counts the attempt and retries with the normal backoff, with `last_error` "signing secret uses key id … not configured on this worker; will retry". A process that has the key delivers it on a later attempt. Only after `PS_WEBHOOK_MAX_ATTEMPTS` attempts does the delivery go `dead`; put the key back and redeliver it.
+
+A secret that a configured key cannot decrypt (corrupted, or not written for that subscription) is marked `dead` at once with "signing secret unreadable; rotate the secret". Rotate that subscription's secret.

@@ -7,6 +7,7 @@ as event producers, and the delivery worker against an httpx MockTransport.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -14,6 +15,7 @@ import pytest
 from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import (
     AIAsset,
+    PartnerAuditLog,
     PartnerCredential,
     Tenant,
     WebhookDelivery,
@@ -578,15 +580,111 @@ async def test_rekey_reports_unreadable_secrets_and_keeps_a_grace_secret(env, mo
     assert webhooks.decrypt_secret(row.previous_secret_ciphertext, row.id) == sub["secret"]
 
 
-async def test_unknown_key_id_dead_letters_with_a_clear_reason(env, monkeypatch):
+async def test_unknown_key_id_is_retried_then_delivered_by_a_process_with_the_key(
+    env, monkeypatch, caplog
+):
+    """A rolling restart that adds a key: a process without it backs off
+    (logging once) instead of dead-lettering; one with the key delivers."""
+    monkeypatch.setattr(webhooks, "_missing_keys_logged", set())
+    new_keys = "new:" + "n" * 40 + ",old:" + "o" * 40
+    monkeypatch.setattr(settings, "webhook_secret_keys", new_keys)
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        await _subscribe(c, env["pa"], event_types=["asset.created"])
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+
+    # This process has not been restarted with the new key yet.
+    monkeypatch.setattr(settings, "webhook_secret_keys", "old:" + "o" * 40)
+    caplog.set_level(logging.WARNING, logger="collector.webhooks")
+    rx = Receiver(200)
+    run = await webhooks.deliver_due(env["factory"], transport=rx.transport())
+    assert (run.claimed, run.retrying, run.dead) == (2, 2, 0)
+    assert rx.requests == []
+    for row in await _deliveries(env["factory"]):
+        assert row.status == "pending" and row.attempts == 1
+        assert row.last_error == (
+            "signing secret uses key id new, not configured on this worker; will retry"
+        )
+        assert row.next_attempt_at > datetime.now(UTC) + timedelta(seconds=50)
+    warnings = [r for r in caplog.records if "key id 'new'" in r.getMessage()]
+    assert len(warnings) == 1  # once per key, not per delivery
+
+    # A process with the key picks the retry up and signs it normally.
+    monkeypatch.setattr(settings, "webhook_secret_keys", new_keys)
+    later = datetime.now(UTC) + timedelta(minutes=2)
+    run = await webhooks.deliver_due(env["factory"], transport=rx.transport(), now=later)
+    assert run.succeeded == 2
+    signed = [r for r in rx.requests if webhooks.verify_signature(
+        sub["secret"], r.content, r.headers[webhooks.SIGNATURE_HEADER]
+    )]
+    assert len(signed) == 1
+    assert {r.attempts for r in await _deliveries(env["factory"])} == {2}
+
+
+async def test_unknown_key_id_goes_dead_only_after_the_normal_attempts(env, monkeypatch):
     monkeypatch.setattr(settings, "webhook_secret_keys", "gone:" + "g" * 40)
     async with _client() as c:
         await _subscribe(c, env["pa"])
         await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
     monkeypatch.setattr(settings, "webhook_secret_keys", "new:" + "n" * 40)
     rx = Receiver(200)
-    assert (await webhooks.deliver_due(env["factory"], transport=rx.transport())).dead == 1
+    future = datetime.now(UTC)
+    outcomes = []
+    for _ in range(3):  # max_attempts=3
+        run = await webhooks.deliver_due(env["factory"], transport=rx.transport(), now=future)
+        outcomes.append((run.retrying, run.dead))
+        future += timedelta(days=10)
+    assert outcomes == [(1, 0), (1, 0), (0, 1)]
     assert rx.requests == []
+    (row,) = await _deliveries(env["factory"])
+    assert row.status == "dead" and row.attempts == 3
+    assert "key id gone" in row.last_error
+    assert "gave up" in row.last_error and "will retry" not in row.last_error
+
+
+async def test_documented_rollout_order_never_strands_a_delivery(env, monkeypatch):
+    """Step 1 (new key added after the active one) and step 2 (new key
+    first) may overlap during a restart: either process reads the other's
+    secrets."""
+    old, new = "old:" + "o" * 40, "new:" + "n" * 40
+    monkeypatch.setattr(settings, "webhook_secret_keys", old)
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+
+    vendors = iter(range(100))
+
+    async def deliver_with(keys: str) -> str:
+        monkeypatch.setattr(settings, "webhook_secret_keys", keys)
+        event = {"vendor": f"vendor-{next(vendors)}"}
+        async with _client() as c:
+            await c.post("/ingest/events", headers=H_A, json={"events": [event]})
+        rx = Receiver(200)
+        assert (await webhooks.deliver_due(env["factory"], transport=rx.transport())).succeeded == 1
+        req = rx.requests[0]
+        assert webhooks.verify_signature(
+            sub["secret"], req.content, req.headers[webhooks.SIGNATURE_HEADER]
+        )
+        return (await _subscriptions(env["factory"]))[sub["id"]].secret_ciphertext
+
+    assert (await deliver_with(f"{old},{new}")).startswith("v2.old.")  # step 1
+    assert (await deliver_with(f"{new},{old}")).startswith("v2.new.")  # step 2, restarted
+    assert (await deliver_with(f"{old},{new}")).startswith("v2.old.")  # step 2, not yet
+    assert (await deliver_with(f"{new},{old}")).startswith("v2.new.")
+
+
+async def test_corrupt_secret_still_dead_letters_at_once(env):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+    async with env["factory"]() as s:
+        await s.execute(
+            update(WebhookSubscription)
+            .where(WebhookSubscription.id == sub["id"])
+            .values(secret_ciphertext="v1.AAAA")
+        )
+        await s.commit()
+    run = await webhooks.deliver_due(env["factory"], transport=Receiver(200).transport())
+    assert run.dead == 1
     (row,) = await _deliveries(env["factory"])
     assert row.last_error == "signing secret unreadable; rotate the secret"
 
@@ -671,3 +769,211 @@ async def test_attestation_event_needs_changes_scope(env):
         )
         assert resp.status_code == 201
     assert await _deliveries(env["factory"]) == []
+
+
+# ── idle subscriptions: expired previous secrets are swept ────────────
+
+
+async def test_sweep_clears_expired_previous_secrets_on_idle_subscriptions(env):
+    async with _client() as c:
+        expired = (await _subscribe(c, env["pa"])).json()
+        await _rotate(c, expired["id"], grace_period_seconds=60)
+        current = (await _subscribe(c, env["pa"])).json()
+        await _rotate(c, current["id"], grace_period_seconds=3600)
+        untouched = (await _subscribe(c, env["pa"])).json()
+    async with env["factory"]() as s:
+        await s.execute(
+            update(WebhookSubscription)
+            .where(WebhookSubscription.id == expired["id"])
+            .values(previous_secret_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await s.commit()
+    before = await _subscriptions(env["factory"])
+
+    assert await webhooks.clear_expired_previous_secrets(env["factory"]) == 1
+    after = await _subscriptions(env["factory"])
+    row = after[expired["id"]]
+    assert row.previous_secret_ciphertext is None and row.previous_secret_expires_at is None
+    assert row.updated_at == before[expired["id"]].updated_at
+    assert after[current["id"]].previous_secret_ciphertext is not None
+    assert after[untouched["id"]].previous_secret_ciphertext is None
+    # Nothing left; later, the other grace period ends too.
+    assert await webhooks.clear_expired_previous_secrets(env["factory"]) == 0
+    later = datetime.now(UTC) + timedelta(hours=2)
+    assert await webhooks.clear_expired_previous_secrets(env["factory"], now=later) == 1
+
+
+# ── PATCH /subscriptions/{id} ─────────────────────────────────────────
+
+
+def _patch(c, sid, headers=H_A, **body):
+    return c.patch(f"/api/v1/admin/webhooks/subscriptions/{sid}", headers=headers, json=body)
+
+
+async def _patch_audit(factory) -> list[PartnerAuditLog]:
+    async with factory() as s:
+        return (
+            await s.execute(
+                select(PartnerAuditLog)
+                .where(PartnerAuditLog.method == "PATCH")
+                .order_by(PartnerAuditLog.timestamp)
+            )
+        ).scalars().all()
+
+
+async def test_patch_updates_url_and_event_types_and_is_audited(env):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        resp = await _patch(
+            c,
+            sub["id"],
+            url="https://new.partner.example/hook?token=abc",
+            event_types=["asset.retired", "asset.created", "asset.created"],
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["url"] == "https://new.partner.example/hook?token=abc"
+        assert body["event_types"] == ["asset.created", "asset.retired"]
+        assert "secret" not in body
+        got = (await c.get(f"/api/v1/admin/webhooks/subscriptions/{sub['id']}", headers=H_A)).json()
+        assert got == body
+
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "openai"}]})
+    rx = Receiver(200)
+    await webhooks.deliver_due(env["factory"], transport=rx.transport())
+    (req,) = rx.requests
+    assert req.headers["Host"] == "new.partner.example"
+    # The secret is unchanged.
+    assert webhooks.verify_signature(sub["secret"], req.content, req.headers[webhooks.SIGNATURE_HEADER])
+
+    (audit,) = await _patch_audit(env["factory"])
+    assert audit.tenant_id == env["tenant_a"] and audit.status_code == 200
+    assert audit.endpoint == "/api/v1/admin/webhooks/subscriptions/{subscription_id}"
+    assert audit.query_params == {"changed_fields": ["url", "event_types"]}
+    assert audit.api_key_prefix and audit.partner_id is None
+    assert "token=abc" not in json.dumps(audit.query_params)
+
+
+async def test_patch_pause_stops_events_and_resume_restarts_them(env):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "queued"}]})
+        resp = await _patch(c, sub["id"], is_active=False)
+        assert resp.status_code == 200 and resp.json()["is_active"] is False
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "paused"}]})
+        assert len(await _deliveries(env["factory"])) == 1
+
+        rx = Receiver(200)
+        assert (await webhooks.deliver_due(env["factory"], transport=rx.transport())).dead == 1
+        assert rx.requests == []
+        (row,) = await _deliveries(env["factory"])
+        assert row.last_error == "subscription disabled"
+
+        assert (await _patch(c, sub["id"], is_active=True)).json()["is_active"] is True
+        await c.post("/ingest/events", headers=H_A, json={"events": [{"vendor": "resumed"}]})
+        assert (await webhooks.deliver_due(env["factory"], transport=rx.transport())).succeeded == 1
+    assert [a.query_params["changed_fields"] for a in await _patch_audit(env["factory"])] == [
+        ["is_active"],
+        ["is_active"],
+    ]
+
+
+async def test_patch_checks_scopes_on_new_events_and_on_resume_but_not_on_pause(env):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        async with env["factory"]() as s:
+            await s.execute(
+                update(PartnerCredential)
+                .where(PartnerCredential.id == env["pa"])
+                .values(scopes=["assets:read"])
+            )
+            await s.commit()
+        resp = await _patch(c, sub["id"], event_types=["asset.retired"])
+        assert resp.status_code == 400 and "changes:read" in resp.text
+        # Pausing still works; resuming needs the scope back.
+        assert (await _patch(c, sub["id"], is_active=False)).status_code == 200
+        resp = await _patch(c, sub["id"], is_active=True)
+        assert resp.status_code == 400 and "changes:read" in resp.text
+        async with env["factory"]() as s:
+            await s.execute(
+                update(PartnerCredential)
+                .where(PartnerCredential.id == env["pa"])
+                .values(is_active="false", scopes=["changes:read"])
+            )
+            await s.commit()
+        resp = await _patch(c, sub["id"], is_active=True)
+        assert resp.status_code == 400 and "revoked" in resp.text
+        got = (await c.get(f"/api/v1/admin/webhooks/subscriptions/{sub['id']}", headers=H_A)).json()
+        assert got["is_active"] is False and got["event_types"] == sub["event_types"]
+    assert [(a.status_code, a.query_params) for a in await _patch_audit(env["factory"])] == [
+        (400, None),
+        (200, {"changed_fields": ["is_active"]}),
+        (400, None),
+        (400, None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "url, resolved",
+    [
+        ("http://hooks.partner.example/ps", "93.184.216.34"),
+        ("https://user:pw@hooks.partner.example/ps", "93.184.216.34"),
+        ("https://internal.example/ps", "10.0.0.5"),
+        ("https://metadata.example/ps", "169.254.169.254"),
+    ],
+)
+async def test_patch_url_gets_the_full_destination_checks(env, monkeypatch, url, resolved):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+
+        async def resolve(host, port):
+            return [resolved]
+
+        monkeypatch.setattr(webhooks, "_resolve_host", resolve)
+        resp = await _patch(c, sub["id"], url=url)
+        assert resp.status_code == 400 and "Invalid webhook URL" in resp.text
+        got = (await c.get(f"/api/v1/admin/webhooks/subscriptions/{sub['id']}", headers=H_A)).json()
+        assert got["url"] == URL
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"event_types": ["asset.deleted"]},
+        {"event_types": []},
+        {"url": None},
+        {"is_active": None},
+        {"url": ""},
+        {"secret": "whsec_mine"},
+        {"partner_id": "00000000-0000-0000-0000-000000000000"},
+    ],
+)
+async def test_patch_rejects_invalid_bodies(env, body):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        resp = await c.patch(
+            f"/api/v1/admin/webhooks/subscriptions/{sub['id']}", headers=H_A, json=body
+        )
+        assert resp.status_code == 422, resp.text
+
+
+async def test_patch_is_tenant_scoped(env):
+    async with _client() as c:
+        sub = (await _subscribe(c, env["pa"])).json()
+        resp = await _patch(c, sub["id"], headers=H_B, is_active=False)
+        assert resp.status_code == 404
+        assert (await _patch(c, sub["id"], headers={"Authorization": "Bearer nope"}, is_active=False)).status_code == 401
+        got = (await c.get(f"/api/v1/admin/webhooks/subscriptions/{sub['id']}", headers=H_A)).json()
+        assert got["is_active"] is True
+    (audit,) = await _patch_audit(env["factory"])
+    assert audit.status_code == 404 and audit.tenant_id != env["tenant_a"]
+
+
+def test_patch_is_in_the_openapi_schema():
+    schema = app.openapi()
+    op = schema["paths"]["/api/v1/admin/webhooks/subscriptions/{subscription_id}"]["patch"]
+    ref = op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    model = schema["components"]["schemas"][ref.rsplit("/", 1)[1]]
+    assert set(model["properties"]) == {"url", "event_types", "is_active"}
+    assert model.get("additionalProperties") is False
