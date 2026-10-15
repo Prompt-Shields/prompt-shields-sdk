@@ -8,10 +8,12 @@ from db.models import AIAsset, DataFlow, RiskMapping
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import and_, case, func, or_, select
 
+from collector.attestation import add_attestation_summaries
 from collector.audit import record_read
 from collector.auth import resolve_tenant
 from collector.embeddings import get_embedding, mock_embedding
 from collector.lifecycle import LifecycleState
+from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 
 router = APIRouter(prefix="/api/v1/registry")
 
@@ -57,6 +59,7 @@ async def list_assets(
     assets = result.scalars().all()
 
     data = [_serialize_asset(a) for a in assets]
+    await add_attestation_summaries(db, tenant_id, assets, data)
     has_more = len(data) == limit and total > limit
     next_cursor = str(data[-1]["id"]) if has_more else None
 
@@ -82,6 +85,7 @@ async def get_asset(asset_id: UUID, request: Request):
         })
     # Serialize before the audit commit so no expired attribute is reloaded.
     body = _serialize_asset(asset)
+    await add_attestation_summaries(db, tenant_id, [asset], [body])
     await record_read(request, tenant_id=tenant_id, status_code=200, response_count=1)
     return body
 
@@ -100,14 +104,26 @@ async def get_data_flows(asset_id: UUID, request: Request):
 
 
 @router.get("/assets/{asset_id}/risks")
-async def get_risks(asset_id: UUID, request: Request):
+async def get_risks(
+    asset_id: UUID,
+    request: Request,
+    status: RiskStatus | None = None,
+):
     tenant_id = await resolve_tenant(request)
     db = request.state.db
 
-    stmt = select(RiskMapping).where(RiskMapping.asset_id == asset_id, RiskMapping.tenant_id == tenant_id)
+    stmt = (
+        select(RiskMapping)
+        .where(
+            RiskMapping.asset_id == asset_id,
+            RiskMapping.tenant_id == tenant_id,
+            risk_status_filter(status),
+        )
+        .order_by(RiskMapping.framework, RiskMapping.risk_category, RiskMapping.id)
+    )
     result = await db.execute(stmt)
     risks = result.scalars().all()
-    data = [_serialize_risk(r) for r in risks]
+    data = [risk_dict(r) for r in risks]
     await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(data))
     return {"data": data}
 
@@ -261,13 +277,4 @@ def _serialize_flow(f: DataFlow) -> dict:
         "data_classification": f.data_classification,
         "direction": f.direction,
         "detected_pii_types": f.detected_pii_types,
-    }
-
-
-def _serialize_risk(r: RiskMapping) -> dict:
-    return {
-        "id": str(r.id),
-        "risk_category": r.risk_category,
-        "risk_level": r.risk_level,
-        "framework": r.framework,
     }

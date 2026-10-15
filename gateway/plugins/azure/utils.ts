@@ -2,6 +2,9 @@ import { AzureCredentials } from './types';
 
 const cacheExpiry = 15 * 60; // 15 minutes
 
+const AZURE_RESOURCE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/i;
+const COGNITIVE_SERVICES_RESOURCE = 'https://cognitiveservices.azure.com/';
+
 /** Thrown by `pii`, whose token lookup reports errors by throwing. */
 export class AzureHostIdentityDisabledError extends Error {}
 
@@ -136,8 +139,27 @@ export const getAccessToken = async (
         denied: true,
       };
     }
+    // The host token may only go to `<resourceName>.cognitiveservices.azure.com`:
+    // no caller custom host (TLS checks are also off for those), and a
+    // resource name that cannot rewrite the host. Upstream passed
+    // resourceName as the IMDS resource too, which only produced a usable
+    // token together with a custom host; ask IMDS for Cognitive Services.
+    if (credentials.customHost) {
+      return {
+        token: '',
+        error: 'azureAuthMode managed cannot be used with a custom host',
+        denied: true,
+      };
+    }
+    if (!AZURE_RESOURCE_NAME.test(credentials.resourceName ?? '')) {
+      return {
+        token: '',
+        error: 'azureAuthMode managed requires a valid Azure resource name',
+        denied: true,
+      };
+    }
     tokenResult = await getAzureManagedIdentityToken(
-      credentials?.resourceName ?? '',
+      COGNITIVE_SERVICES_RESOURCE,
       check,
       clientId,
       options,

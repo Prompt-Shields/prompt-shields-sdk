@@ -101,7 +101,7 @@ Requires Python 3.11+.
     Measured at the SDK boundary
   </Card>
   <Card title="Tool calls" icon="screwdriver-wrench">
-    OpenAI `tool_calls` and Anthropic `tool_use` blocks
+    OpenAI `tool_calls` and Anthropic `tool_use` blocks, plus provider-hosted MCP calls (tool and server name only)
   </Card>
   <Card title="PII categories" icon="user-shield">
     Local pattern scan — categories only, never content
@@ -141,8 +141,8 @@ response = client.chat.completions.create(
 
 To get telemetry without changing call sites, call `instrument()` once at
 startup. It patches the installed `openai` and `anthropic` SDKs, sync and
-async: `chat.completions.create`, `responses.create` and `messages.create`,
-including `stream=True`.
+async: `chat.completions.create`, `responses.create`, `messages.create` and
+`beta.messages.create`, including `stream=True`.
 
 ```python
 import openai
@@ -163,6 +163,7 @@ Pass `vendors=("openai",)` to patch only some providers.
 - Missing packages are skipped. Telemetry errors never affect the call.
 - Calls made through `ShieldsClient` are not counted twice. To skip other calls, wrap them in `with prompt_shields.suppress_instrumentation():`.
 - `.with_raw_response` calls, and positional-argument calls, are not instrumented.
+- MCP tools the provider calls for you (OpenAI Responses `mcp` tool, Anthropic MCP connector) appear in `tool_calls_used` as `{"name": ..., "type": "mcp", "server": ...}`. Tool arguments, results and server URLs are never recorded. Tools your own code calls through an MCP client library are not captured.
 
 ## Cost-Aware Routing
 

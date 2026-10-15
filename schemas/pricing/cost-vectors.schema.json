@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://promptshields.com/schemas/pricing/cost-vectors.schema.json",
+  "title": "Golden cost vectors",
+  "description": "Normalised usage for one call and the USD cost every implementation (SDK, gateway) must compute for it at the default list prices. Usage uses the SDK event field names: tokens_in is the whole prompt (cache reads and writes and audio included), tokens_out includes reasoning and audio tokens, and the other counts are subsets of those. expected_cost null means the call must be reported as unmetered, not as zero. A runner compares cost within 1e-9 USD, and cost_source when expected_cost_source is present.",
+  "type": "object",
+  "required": ["vectors"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "description": { "type": "string" },
+    "vectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/vector" }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "vector": {
+      "type": "object",
+      "required": [
+        "id",
+        "dimension",
+        "vendor",
+        "model",
+        "usage",
+        "expected_cost",
+        "derivation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "dimension": {
+          "enum": [
+            "base",
+            "cache_read",
+            "cache_write",
+            "cache_write_1h",
+            "service_tier",
+            "long_context",
+            "audio_tokens",
+            "tool_fee",
+            "provider_reported"
+          ]
+        },
+        "vendor": { "type": "string" },
+        "model": { "type": "string" },
+        "usage": {
+          "type": "object",
+          "required": ["tokens_in", "tokens_out"],
+          "additionalProperties": false,
+          "properties": {
+            "tokens_in": { "$ref": "#/$defs/count" },
+            "tokens_out": { "$ref": "#/$defs/count" },
+            "tokens_cached": { "$ref": "#/$defs/count" },
+            "tokens_cache_write": { "$ref": "#/$defs/count" },
+            "tokens_cache_write_1h": { "$ref": "#/$defs/count" },
+            "tokens_audio_in": { "$ref": "#/$defs/count" },
+            "tokens_audio_out": { "$ref": "#/$defs/count" },
+            "web_search_requests": { "$ref": "#/$defs/count" },
+            "service_tier": { "type": "string" },
+            "provider_cost": { "type": "number", "minimum": 0 }
+          }
+        },
+        "expected_cost": { "type": ["number", "null"], "minimum": 0 },
+        "expected_cost_source": {
+          "enum": ["pricing_table", "provider_reported"]
+        },
+        "derivation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The hand calculation from published list prices (USD per 1M tokens unless stated)."
+        }
+      }
+    }
+  }
+}

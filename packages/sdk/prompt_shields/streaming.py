@@ -30,7 +30,10 @@ from typing import Any
 from prompt_shields.providers import (
     _field,
     _int,
+    _str,
+    anthropic_usage_extras,
     anthropic_usage_fields,
+    mcp_tool_call,
     openai_usage_fields,
 )
 
@@ -105,9 +108,13 @@ class StreamAccumulator:
         self._anthropic_input: int | None = None
         self._anthropic_cache_read: int | None = None
         self._anthropic_cache_write: int | None = None
+        # Further pricing details (service tier, audio tokens, 1-hour cache
+        # writes, tool fees, provider-reported cost); latest non-None wins.
+        self.pricing_fields: dict[str, Any] = {}
         self.served_model: str | None = None
         self.output_chars = 0
         self._tool_calls: dict[Any, str | None] = {}
+        self._mcp_calls: list[dict] = []
 
     def observe(self, chunk: Any) -> None:
         if self._vendor == "openai":
@@ -119,6 +126,9 @@ class StreamAccumulator:
         model = getattr(chunk, "model", None)
         if model:
             self.served_model = model
+        self._update_pricing(
+            {"service_tier": _str(getattr(chunk, "service_tier", None))}
+        )
         usage = getattr(chunk, "usage", None)
         if usage is not None:
             fields = openai_usage_fields(usage)
@@ -126,6 +136,7 @@ class StreamAccumulator:
             self.tokens_out = fields["tokens_out"]
             self.tokens_cached = fields["tokens_cached"]
             self.tokens_reasoning = fields["tokens_reasoning"]
+            self._update_pricing(fields)
         for choice in getattr(chunk, "choices", None) or []:
             delta = getattr(choice, "delta", None)
             if delta is None:
@@ -157,14 +168,24 @@ class StreamAccumulator:
             block = getattr(event, "content_block", None)
             if getattr(block, "type", None) == "tool_use":
                 self._tool_calls[len(self._tool_calls)] = getattr(block, "name", None)
+            elif (mcp := mcp_tool_call(block)) is not None:
+                self._mcp_calls.append(mcp)
         elif etype == "content_block_delta":
             text = getattr(getattr(event, "delta", None), "text", None)
             if isinstance(text, str):
                 self.output_chars += len(text)
 
+    def _update_pricing(self, fields: dict) -> None:
+        for key in ("service_tier", "tokens_audio_in", "tokens_audio_out",
+                    "tokens_cache_write_1h", "web_search_requests",
+                    "provider_cost"):
+            if fields.get(key) is not None:
+                self.pricing_fields[key] = fields[key]
+
     def _observe_anthropic_usage(self, usage: Any) -> None:
         if usage is None:
             return
+        self._update_pricing(anthropic_usage_extras(usage))
         out = _int(_field(usage, "output_tokens"))
         if out is not None:
             self.tokens_out = out
@@ -191,13 +212,14 @@ class StreamAccumulator:
         tool_type = "tool_use" if self._vendor == "anthropic" else "function"
         tool_calls = [
             {"name": name, "type": tool_type} for name in self._tool_calls.values()
-        ]
+        ] + self._mcp_calls
         fields: dict = {
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "tokens_cached": self.tokens_cached,
             "tokens_cache_write": self.tokens_cache_write,
             "tokens_reasoning": self.tokens_reasoning,
+            **self.pricing_fields,
             "tool_calls_used": tool_calls or None,
             "served_model": self.served_model,
         }

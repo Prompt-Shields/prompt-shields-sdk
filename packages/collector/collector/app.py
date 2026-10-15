@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -13,7 +15,18 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_embedder()  # fail fast on a bad PS_EMBEDDINGS_* configuration
+    worker = None
+    if settings.webhook_worker_interval_seconds > 0:
+        from collector.webhooks import run_worker
+
+        worker = asyncio.create_task(
+            run_worker(SessionLocal, settings.webhook_worker_interval_seconds)
+        )
     yield
+    if worker is not None:
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
     await engine.dispose()
 
 
@@ -42,12 +55,14 @@ from collector.lifecycle import router as lifecycle_router
 from collector.loss_accounting import router as loss_accounting_router  # noqa: E402
 from collector.otel_ingest import router as otel_ingest_router  # noqa: E402
 from collector.registry import router as registry_router  # noqa: E402
+from collector.risk_suggestions import router as risk_suggestions_router  # noqa: E402
 
 app.include_router(ingest_router)
 app.include_router(registry_router)
 app.include_router(lifecycle_router)
 app.include_router(otel_ingest_router)
 app.include_router(loss_accounting_router)
+app.include_router(risk_suggestions_router)
 
 # Partner API surface (read-only, OAuth + API key)
 from collector.oauth import router as oauth_router  # noqa: E402
@@ -57,6 +72,18 @@ from collector.partner_registry import router as partner_registry_router  # noqa
 app.include_router(oauth_router)
 app.include_router(partner_admin_router)
 app.include_router(partner_registry_router)
+
+# Partner change webhooks: tenant admin management (#103)
+from collector.webhook_admin import router as webhook_admin_router  # noqa: E402
+
+app.include_router(webhook_admin_router)
+
+# Human attestation: tenant registry and Partner API routes (#98)
+from collector.attestation_api import partner_router as attestation_partner_router  # noqa: E402
+from collector.attestation_api import tenant_router as attestation_tenant_router  # noqa: E402
+
+app.include_router(attestation_tenant_router)
+app.include_router(attestation_partner_router)
 
 # Platform signal: provider org usage pull (admin trigger)
 from collector.provider_usage_admin import router as provider_usage_router  # noqa: E402
