@@ -32,7 +32,7 @@ LeanIX through the **Integration API** as LDIF synchronisation runs:
 |---------|-------------------|-------------|
 | AI Asset | IT Component | `promptshields:asset:<asset id>` |
 | AI Vendor | Provider | `promptshields:provider:<vendor>` |
-| Business Unit | Organization | `promptshields:business-unit:<name>` |
+| Business Unit | Organization (or UserGroup, see `business_unit_type`) | `promptshields:business-unit:<name>` |
 | Data Flow | Interface | `promptshields:flow:<flow id>` |
 
 Relations: IT Component → Provider (`relITComponentToProvider`) and
@@ -70,8 +70,17 @@ PS_LEANIX='{
 
 Optional per-tenant fields: `connector_id` (default `prompt-shields`; set it
 when several Prompt Shields instances feed one workspace),
-`include_data_flows` (default `true`) and `batch_size` (assets per run,
-default 500). For a collector reached over an internal network, set
+`include_data_flows` (default `true`), `batch_size` (assets per run,
+default 500), `business_unit_type` and `lx_workspace`:
+
+- `business_unit_type`: the fact sheet type business units are written to.
+  `Organization` (default) in the current meta model (v4); `UserGroup` in
+  workspaces still on the earlier meta model. Check which one your
+  workspace has under Administration → Meta Model Configuration.
+- `lx_workspace`: your workspace UUID. Optional; when set it is sent as
+  the LDIF `lxWorkspace`, so a token for another workspace makes the run
+  fail instead of writing there. The workspace is otherwise taken from the
+  API token. For a collector reached over an internal network, set
 `"allow_private_network": true` under `partner_api`; it must still be https.
 
 ### Security
@@ -83,6 +92,9 @@ default 500). For a collector reached over an internal network, set
   Every Partner API response names the key's tenant (`meta.tenant_id`); if
   it is not the configured tenant, or missing, the run fails before
   anything is sent to LeanIX and the cursor does not move.
+- The access token is refreshed shortly before its `expires_in` runs out
+  (long runs poll for up to 15 minutes each) and once more after a `401`;
+  a second `401` fails the run. Tokens are never logged.
 - `workspace_host` must be a DNS name ending in one of
   `PS_LEANIX_ALLOWED_HOST_SUFFIXES` (JSON list, default `[".leanix.net"]`).
   Calls go only to `https://<workspace_host>`, the host must resolve to public

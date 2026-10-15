@@ -452,15 +452,19 @@ components:
           nullable: true
         sync_token:
           type: string
-          description: Token for delta sync (only on /changes endpoint)
+          description: >-
+            Token for delta sync; pass it as `since` to the next /changes
+            call. Returned by /changes (not by the /assets list); /export
+            returns it in its meta too.
           nullable: true
         tenant_id:
           type: string
           format: uuid
           description: >-
-            Tenant of the credential that made the request (only on /changes).
-            Lets an integration check that its key belongs to the tenant it
-            syncs.
+            Tenant of the credential that made the request. Returned by
+            /changes (not by the /assets list); /export and
+            /assets/{asset_id}/data-flows return it in their meta too. Lets an
+            integration check that its key belongs to the tenant it syncs.
 
     Error:
       type: object

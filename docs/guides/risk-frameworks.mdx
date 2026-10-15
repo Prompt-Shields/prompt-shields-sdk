@@ -78,13 +78,18 @@ is a versioned ruleset:
 | Ruleset | Frameworks | Covers |
 |---------|------------|--------|
 | `eu_ai_act_annex_iii` | `EU_AI_ACT` | The eight Annex III high-risk areas (biometrics, critical infrastructure, education, employment, essential services, law enforcement, migration and border control, justice and democratic processes), one rule per point or sub-point |
+| `eu_ai_act_article_5` | `EU_AI_ACT` | The Article 5(1)(a)–(h) prohibited practices, level `critical`, category `prohibited_practice`; keywords cannot establish the legal conditions or exceptions, so every match needs human (legal) review |
+| `eu_ai_act_article_50` | `EU_AI_ACT` | The Article 50(1)–(4) transparency obligations (AI interaction disclosure, marking synthetic audio/image/video, emotion recognition and biometric categorisation notices, deep fakes and public-interest text), level `medium`, category `transparency` |
 | `data_protection` | `NIST_AI_RMF`, `ISO_42001` | Personal and sensitive PII, restricted data (NIST privacy-enhanced and secure-and-resilient; ISO/IEC 42001 Annex A.7 data and A.5 impact assessment) |
 
 A rule fires when its `when` conditions match and no `unless` condition does
 (for example, Annex III point 5(b) credit scoring excludes fraud detection).
 Conditions match keywords against signals (whole words, or word prefixes with
 a trailing `*`), PII categories (`any_of`, `present`) or a minimum data
-classification (`at_least`). `supporting` conditions add evidence and raise
+classification (`at_least`). A condition can carry `context` (at least one of
+these conditions must also match somewhere on the asset) and `exclude` (none
+may match), which scope an ambiguous keyword such as `applicant*` or
+`admission*` without dropping the rest of the rule. `supporting` conditions add evidence and raise
 confidence: `low` when only weak triggers matched (a business unit name, for
 instance), `high` when supporting evidence matched too, otherwise `medium`.
 

@@ -9,7 +9,9 @@ through the Identification and Reconciliation Engine (IRE) REST API,
   Prompt Shields   CMDB                                Identifier
   ===============  ==================================  ==============================
   AI asset         ``asset_class`` CI                  ``promptshields:asset:<id>``
-                   (default ``cmdb_ci_ai_application``)
+                   (default ``cmdb_ci_function_ai``,
+                   ``self_hosted_asset_class`` for
+                   self-hosted vendors)
   Vendor           ``provider_class`` CI               ``promptshields:provider:<v>``
                    (default ``cmdb_ci_service``)
   Asset -> vendor  ``cmdb_rel_ci`` "Depends on::Used by"
@@ -25,6 +27,14 @@ before inserting or updating, applies reconciliation and data refresh
 rules, creates relationships from the same payload and tags every write
 with the data source. ServiceNow asks CMDB integrations to write through
 IRE for those reasons.
+
+The AI classes come from the CMDB CI Class Models store app (1.68.0 and
+later): ``cmdb_ci_function_ai`` (AI Function) for AI hosted or developed
+outside the organisation, which covers the SaaS model APIs Prompt Shields
+mostly sees, and ``cmdb_ci_appl_ai_application`` (AI Application, under
+``cmdb_ci_appl``) for AI the organisation hosts itself. An asset whose
+vendor is in ``self_hosted_vendors`` goes to ``self_hosted_asset_class``,
+every other asset to ``asset_class``.
 
 Every CI carries the AI-BOM (CycloneDX) ``bom-ref`` twice: as
 ``correlation_id`` (the CMDB field meant for an external system's id, and
@@ -61,6 +71,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any, Self
 from uuid import UUID
@@ -81,6 +92,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import aibom, rls
 from collector.connectors import (
+    BearerToken,
+    Clock,
     ConnectorError,
     GuardedClient,
     PartnerApiClient,
@@ -101,7 +114,21 @@ CONNECTOR = "servicenow"
 TOKEN_PATH = "/oauth_token.do"
 IRE_PATH = "/api/now/identifyreconcile"
 
-DEFAULT_ASSET_CLASS = "cmdb_ci_ai_application"
+# CMDB CI Class Models (store app, 1.68.0+): externally hosted AI (SaaS
+# model APIs) and AI the organisation hosts itself.
+DEFAULT_ASSET_CLASS = "cmdb_ci_function_ai"
+DEFAULT_SELF_HOSTED_ASSET_CLASS = "cmdb_ci_appl_ai_application"
+# Vendors (as the registry names them) that mean a self-hosted model
+# server rather than a SaaS API.
+DEFAULT_SELF_HOSTED_VENDORS = (
+    "ollama",
+    "vllm",
+    "llamacpp",
+    "localai",
+    "tgi",
+    "triton",
+    "self_hosted",
+)
 DEFAULT_PROVIDER_CLASS = "cmdb_ci_service"
 DEFAULT_DATA_SOURCE = "PromptShields"
 RELATION_TYPE = "Depends on::Used by"
@@ -139,17 +166,27 @@ class ServiceNowConnection(BaseModel):
     password: SecretStr | None = None
     # Must exist in the cmdb_ci.discovery_source choice list.
     data_source: str = DEFAULT_DATA_SOURCE
+    # Class for assets of a SaaS / externally hosted vendor.
     asset_class: str = DEFAULT_ASSET_CLASS
+    # Class for assets whose vendor is in self_hosted_vendors; None sends
+    # them to asset_class too.
+    self_hosted_asset_class: str | None = DEFAULT_SELF_HOSTED_ASSET_CLASS
+    self_hosted_vendors: list[str] = list(DEFAULT_SELF_HOSTED_VENDORS)
     # None: push assets only, no vendor CIs or relations.
     provider_class: str | None = DEFAULT_PROVIDER_CLASS
     batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, le=100)
 
-    @field_validator("asset_class", "provider_class")
+    @field_validator("asset_class", "self_hosted_asset_class", "provider_class")
     @classmethod
     def _table(cls, v: str | None) -> str | None:
         if v is not None and not _TABLE.match(v):
             raise ValueError("must be a CMDB table name, e.g. cmdb_ci_appl")
         return v
+
+    @field_validator("self_hosted_vendors")
+    @classmethod
+    def _vendors(cls, v: list[str]) -> list[str]:
+        return [s.strip().lower() for s in v if s.strip()]
 
     @field_validator("data_source")
     @classmethod
@@ -177,6 +214,15 @@ class ServiceNowConnection(BaseModel):
     @property
     def auth_method(self) -> str:
         return "oauth_client_credentials" if self.oauth_client_id else "basic"
+
+    def class_for(self, vendor: Any) -> str:
+        """CMDB class of an asset of ``vendor``."""
+        if (
+            self.self_hosted_asset_class
+            and str(vendor).strip().lower() in self.self_hosted_vendors
+        ):
+            return self.self_hosted_asset_class
+        return self.asset_class
 
 
 class ServiceNowSettings(BaseSettings):
@@ -236,15 +282,16 @@ def _text(value: Any, limit: int) -> str:
     return str(value)[:limit] if value is not None else ""
 
 
-def _sn_datetime(value: str | None) -> str | None:
-    """ISO 8601 -> ServiceNow ``yyyy-MM-dd HH:mm:ss`` (UTC)."""
-    if not value:
+def _sn_datetime(value: Any) -> str | None:
+    """ISO 8601 -> ServiceNow ``yyyy-MM-dd HH:mm:ss`` (UTC). Anything else
+    (missing, not a string, not a date) -> None."""
+    if not value or not isinstance(value, str):
         return None
     try:
         dt = datetime.fromisoformat(value)
-    except ValueError:
+        dt = dt.astimezone(UTC) if dt.tzinfo else dt
+    except (ValueError, OverflowError):  # e.g. 0001-01-01T00:00:00+05:00
         return None
-    dt = dt.astimezone(UTC) if dt.tzinfo else dt
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -297,7 +344,7 @@ def asset_item(a: dict, conn: ServiceNowConnection) -> dict:
     install, operational = _status(a)
     ref = asset_ref(a["id"])
     return {
-        "className": conn.asset_class,
+        "className": conn.class_for(a.get("vendor")),
         "values": {
             "name": _asset_name(a),
             "short_description": _asset_description(a),
@@ -422,6 +469,7 @@ class ServiceNowClient:
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Resolver = default_resolver,
         sleep: Sleep = asyncio.sleep,
+        clock: Clock = time.monotonic,
     ):
         self._conn = conn
         self._http = GuardedClient(
@@ -431,7 +479,11 @@ class ServiceNowClient:
             resolver=resolver,
             sleep=sleep,
         )
-        self._token: str | None = None
+        self._token = (
+            BearerToken(self._http, self._fetch_token, clock=clock)
+            if conn.oauth_client_id
+            else None
+        )
 
     async def __aenter__(self) -> Self:
         return self
@@ -439,41 +491,33 @@ class ServiceNowClient:
     async def __aexit__(self, *exc) -> None:
         await self._http.__aexit__(*exc)
 
-    async def _auth(self) -> dict[str, Any]:
-        """``headers`` / ``auth`` kwargs for an API request."""
+    async def _fetch_token(self) -> Any:
         conn = self._conn
-        if conn.username:
-            return {"auth": (conn.username, conn.password.get_secret_value())}
-        if self._token is None:
-            body = await self._http.json(
-                "POST",
-                TOKEN_PATH,
-                what="token request",
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": conn.oauth_client_id,
-                    "client_secret": conn.oauth_client_secret.get_secret_value(),
-                },
-            )
-            token = body.get("access_token") if isinstance(body, dict) else None
-            if not isinstance(token, str) or not token:
-                raise ConnectorError("servicenow: token response had no access_token")
-            self._token = token
-        return {"headers": {"Authorization": f"Bearer {self._token}"}}
+        return await self._http.json(
+            "POST",
+            TOKEN_PATH,
+            what="token request",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": conn.oauth_client_id,
+                "client_secret": conn.oauth_client_secret.get_secret_value(),
+            },
+        )
 
     async def identify_reconcile(self, payload: dict) -> dict[str, int]:
-        auth = await self._auth()
-        headers = {"Accept": "application/json", **auth.pop("headers", {})}
-        body = await self._http.json(
-            "POST",
-            IRE_PATH,
-            what="identify and reconcile",
-            expected=(200, 201),
-            params={"sysparm_data_source": self._conn.data_source},
-            json=payload,
-            headers=headers,
-            **auth,
-        )
+        kwargs: dict[str, Any] = {
+            "what": "identify and reconcile",
+            "expected": (200, 201),
+            "params": {"sysparm_data_source": self._conn.data_source},
+            "json": payload,
+            "headers": {"Accept": "application/json"},
+        }
+        if self._token is not None:
+            body = await self._token.json("POST", IRE_PATH, **kwargs)
+        else:
+            conn = self._conn
+            auth = (conn.username, conn.password.get_secret_value())
+            body = await self._http.json("POST", IRE_PATH, auth=auth, **kwargs)
         return check_ire_result(body, payload)
 
 
@@ -541,7 +585,8 @@ async def sync_servicenow(
                     relations += len(payload["relations"])
                     for op, n in ops.items():
                         operations[op] = operations.get(op, 0) + n
-    except (ConnectorError, ValueError) as exc:
+    except (ConnectorError, ValueError, TypeError, OverflowError) as exc:
+        # Malformed Partner API data is a failed run, not a server error.
         error = str(exc) if isinstance(exc, ConnectorError) else "invalid response data"
         logger.warning("servicenow sync failed for tenant %s: %s", tenant_id, error)
         state.update(last_run_at=now.isoformat(), last_status="error", last_error=error)
@@ -628,6 +673,7 @@ async def status_endpoint(tenant_id: UUID, request: Request) -> dict:
         "instance_host": conn.instance_host if conn else None,
         "auth_method": conn.auth_method if conn else None,
         "asset_class": conn.asset_class if conn else None,
+        "self_hosted_asset_class": conn.self_hosted_asset_class if conn else None,
         "provider_class": conn.provider_class if conn else None,
         "data_source": conn.data_source if conn else None,
         "config_error": config_error,

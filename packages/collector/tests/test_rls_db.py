@@ -542,6 +542,162 @@ async def test_vertex_inventory_pull_runs_as_the_target_tenant_under_rls(rls_db)
         assert hidden.first() is None
 
 
+async def test_inventoried_region_reaches_registry_partner_api_and_ai_bom(rls_db):
+    """Region is captured for sovereignty reporting (#94): an Azure, AWS
+    and GCP pull for tenant B (under RLS) shows each asset's region in the
+    tenant registry API, the Partner API (list, detail, JSON export) and
+    the CycloneDX AI-BOM, and none of it to tenant A."""
+    from collector import cloud_inventory as ci
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    b = rls_db["b"]
+    sub = "aaaaaaaa-0000-0000-0000-000000000001"
+    account = (
+        f"/subscriptions/{sub}/resourceGroups/rg/providers/"
+        "Microsoft.CognitiveServices/accounts/foundry-se"
+    )
+    pt = "arn:aws:bedrock:eu-central-1:123456789012:provisioned-model/pt-1"
+    endpoint = "projects/42/locations/europe-west4/endpoints/7"
+
+    def cloud(request: httpx.Request) -> httpx.Response:
+        host, path = request.url.host, request.url.path
+        if host in ("login.microsoftonline.com", "oauth2.googleapis.com"):
+            return httpx.Response(200, json={"access_token": "tok"})
+        if host == "management.azure.com":
+            if path.endswith("/accounts"):
+                acct = {"id": account, "kind": "OpenAI", "location": "swedencentral"}
+                return httpx.Response(200, json={"value": [acct]})
+            dep = {
+                "name": "gpt4o",
+                "properties": {
+                    "model": {"name": "gpt-4o"},
+                    "provisioningState": "Succeeded",
+                },
+            }
+            return httpx.Response(200, json={"value": [dep]})
+        if host == "bedrock.eu-central-1.amazonaws.com":
+            if path == "/provisioned-model-throughputs":
+                summary = {
+                    "provisionedModelArn": pt,
+                    "foundationModelArn": "arn:aws:bedrock:eu-central-1::"
+                    "foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+                    "status": "InService",
+                }
+                return httpx.Response(
+                    200, json={"provisionedModelSummaries": [summary]}
+                )
+            return httpx.Response(200, json={})
+        assert host == "europe-west4-aiplatform.googleapis.com"
+        if path.endswith("/endpoints"):
+            dm = {"id": "1", "displayName": "gemma2-claims"}
+            return httpx.Response(
+                200, json={"endpoints": [{"name": endpoint, "deployedModels": [dm]}]}
+            )
+        return httpx.Response(200, json={})
+
+    pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    settings = ci.CloudInventorySettings(
+        cloud_inventory={
+            str(b): ci.TenantCloudCredentials(
+                azure=ci.AzureInventoryCredentials(
+                    directory_id="contoso.onmicrosoft.com",
+                    client_id="app",
+                    client_secret="s",
+                    subscription_ids=[sub],
+                ),
+                aws=ci.AwsInventoryCredentials(
+                    access_key_id="AKIAEXAMPLEKEY12345",
+                    secret_access_key="s",
+                    regions=["eu-central-1"],
+                ),
+                gcp=ci.GcpInventoryCredentials(
+                    service_account={
+                        "client_email": "inv@acme-ml.iam.gserviceaccount.com",
+                        "private_key": pem,
+                    },
+                    project_ids=["acme-ml-prod"],
+                    regions=["europe-west4"],
+                ),
+            )
+        }
+    )
+
+    async def _no_sleep(_s: float) -> None:
+        return None
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        result = await ci.pull_cloud_inventory(
+            s,
+            b,
+            settings=settings,
+            transport=httpx.MockTransport(cloud),
+            sleep=_no_sleep,
+        )
+    assert {k: v["status"] for k, v in result["clouds"].items()} == {
+        "azure": "ok",
+        "aws": "ok",
+        "gcp": "ok",
+    }, result
+
+    expected = {
+        "microsoft": "swedencentral",
+        "amazon": "eu-central-1",
+        "google": "europe-west4",
+    }
+
+    def regions(rows: list[dict]) -> dict:
+        return {r["vendor"]: r["region"] for r in rows if r["vendor"] in expected}
+
+    tenant_b = {"Authorization": f"Bearer {KEY_B}"}
+    partner_b = {"Authorization": f"Bearer {PARTNER_KEY_B}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/registry/assets", headers=tenant_b)
+        assert resp.status_code == 200, resp.text
+        assert regions(resp.json()["data"]) == expected
+
+        resp = await c.get("/partner/v1/assets", headers=partner_b)
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()["data"]
+        assert regions(rows) == expected
+        for row in rows:
+            if row["vendor"] in expected:
+                detail = await c.get(f"/partner/v1/assets/{row['id']}", headers=partner_b)
+                assert detail.status_code == 200, detail.text
+                assert detail.json()["region"] == expected[row["vendor"]]
+
+        resp = await c.get("/partner/v1/export", headers=partner_b)
+        assert resp.status_code == 200, resp.text
+        assert regions(resp.json()["data"]) == expected
+
+        resp = await c.get("/partner/v1/export?format=cyclonedx", headers=partner_b)
+        assert resp.status_code == 200, resp.text
+        bom_regions = {}
+        for comp in resp.json()["components"]:
+            props = {p["name"]: p["value"] for p in comp.get("properties", [])}
+            if props.get("promptshields:vendor") in expected:
+                bom_regions[props["promptshields:vendor"]] = props.get(
+                    "promptshields:region"
+                )
+        assert bom_regions == expected
+
+        # Tenant A sees none of B's inventoried assets.
+        resp = await c.get(
+            "/api/v1/registry/assets", headers={"Authorization": f"Bearer {KEY_A}"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert regions(resp.json()["data"]) == {}
+
+
 async def test_webhook_worker_claims_across_tenants_and_delivers_as_each(
     rls_db, monkeypatch, caplog
 ):

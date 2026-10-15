@@ -11,7 +11,7 @@ synchronisation runs processed by the inbound processor configuration in
   ===================  =========================  ===============================
   AI asset             IT Component               ``promptshields:asset:<id>``
   Vendor               Provider                   ``promptshields:provider:<v>``
-  Business unit        Organization               ``promptshields:business-unit:<bu>``
+  Business unit        Organization (or UserGroup) ``promptshields:business-unit:<bu>``
   Data flow            Interface                  ``promptshields:flow:<id>``
   ===================  =========================  ===============================
 
@@ -21,6 +21,12 @@ sheet can be traced to the BOM entry. Fact sheets are matched on external
 id, so re-running a sync updates the same fact sheets (idempotent upsert);
 runs use ``processingMode: partial`` and never delete. Retired assets get
 the ``endOfLife`` lifecycle phase.
+
+Business units go to ``business_unit_type``: ``Organization`` in the
+current meta model (v4), ``UserGroup`` in workspaces still on the older
+one. ``lx_workspace`` (the workspace UUID) is optional; when set it is
+sent as the LDIF ``lxWorkspace`` so a run fails instead of landing in
+another workspace than the one intended.
 
 Configuration (operator environment only, per tenant)::
 
@@ -48,8 +54,9 @@ import asyncio
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime
-from typing import Any, Self
+from typing import Any, Literal, Self
 from uuid import UUID
 
 import httpx
@@ -61,6 +68,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import aibom, rls
 from collector.connectors import (
+    BearerToken,
+    Clock,
     ConnectorError,
     GuardedClient,
     PartnerApiClient,
@@ -115,6 +124,11 @@ class LeanIXConnection(BaseModel):
     connector_id: str = "prompt-shields"
     include_data_flows: bool = True
     batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, le=5000)
+    # Fact sheet type for business units: Organization (meta model v4) or
+    # UserGroup (earlier meta model).
+    business_unit_type: Literal["Organization", "UserGroup"] = "Organization"
+    # Workspace UUID, sent as the optional LDIF lxWorkspace.
+    lx_workspace: UUID | None = None
 
     @field_validator("connector_id")
     @classmethod
@@ -186,8 +200,8 @@ def _text(value: Any) -> str:
     return str(value)[:MAX_TEXT] if value is not None else ""
 
 
-def _date(value: str | None) -> str | None:
-    if not value:
+def _date(value: Any) -> str | None:
+    if not value or not isinstance(value, str):
         return None
     try:
         return datetime.fromisoformat(value).date().isoformat()
@@ -233,9 +247,9 @@ def _lifecycle(a: dict) -> tuple[str, str | None]:
     return "active", _date(a.get("first_seen"))
 
 
-def asset_items(a: dict) -> list[dict]:
+def asset_items(a: dict, business_unit_type: str = "Organization") -> list[dict]:
     """LDIF content items for one asset: its IT Component, Provider and,
-    when set, Organization."""
+    when set, business unit (``business_unit_type`` fact sheet)."""
     phase, start = _lifecycle(a)
     data: dict[str, Any] = {
         "name": _asset_name(a),
@@ -259,7 +273,7 @@ def asset_items(a: dict) -> list[dict]:
     if a.get("business_unit"):
         items.append(
             {
-                "type": "Organization",
+                "type": business_unit_type,
                 "id": business_unit_external_id(a["business_unit"]),
                 "data": {
                     "name": _text(a["business_unit"])[:250],
@@ -299,6 +313,8 @@ def build_ldif(
     *,
     connector_id: str,
     description: str = "Prompt Shields AI asset registry",
+    business_unit_type: str = "Organization",
+    lx_workspace: UUID | str | None = None,
 ) -> dict:
     """One LDIF document for ``assets`` (Partner API asset dicts) and their
     flows (asset id -> Partner API flow dicts). Shared fact sheets
@@ -308,7 +324,7 @@ def build_ldif(
     for a in assets:
         if not a.get("id") or not a.get("vendor"):
             continue
-        items = asset_items(a)
+        items = asset_items(a, business_unit_type)
         items += [
             flow_item(a["id"], f) for f in (flows or {}).get(a["id"], []) if f.get("id")
         ]
@@ -317,11 +333,16 @@ def build_ldif(
             if key not in seen:
                 seen.add(key)
                 content.append(item)
-    return {
+    ldif: dict[str, Any] = {
         "connectorType": CONNECTOR_TYPE,
         "connectorId": connector_id,
         "connectorVersion": CONNECTOR_VERSION,
         "lxVersion": LX_VERSION,
+    }
+    if lx_workspace:
+        ldif["lxWorkspace"] = str(lx_workspace)
+    return {
+        **ldif,
         "processingDirection": "inbound",
         "processingMode": "partial",
         "description": description,
@@ -369,7 +390,9 @@ def _relation_processor(name: str, rel_type: str, from_type: str, to_expr: str) 
     }
 
 
-def processor_configuration(connector_id: str) -> dict:
+def processor_configuration(
+    connector_id: str, business_unit_type: str = "Organization"
+) -> dict:
     """Inbound processor configuration matching `build_ldif`."""
     lifecycle = {
         "key": {"expr": "lifecycle"},
@@ -394,7 +417,9 @@ def processor_configuration(connector_id: str) -> dict:
                 "Prompt Shields AI assets", "ITComponent", [lifecycle]
             ),
             _fact_sheet_processor("Prompt Shields AI vendors", "Provider", []),
-            _fact_sheet_processor("Prompt Shields business units", "Organization", []),
+            _fact_sheet_processor(
+                "Prompt Shields business units", business_unit_type, []
+            ),
             _fact_sheet_processor("Prompt Shields data flows", "Interface", []),
             _relation_processor(
                 "AI asset to vendor",
@@ -425,6 +450,7 @@ class LeanIXClient:
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Resolver = default_resolver,
         sleep: Sleep = asyncio.sleep,
+        clock: Clock = time.monotonic,
     ):
         self._conn = conn
         self._sleep = sleep
@@ -435,7 +461,7 @@ class LeanIXClient:
             resolver=resolver,
             sleep=sleep,
         )
-        self._token: str | None = None
+        self._token = BearerToken(self._http, self._fetch_token, clock=clock)
 
     async def __aenter__(self) -> Self:
         return self
@@ -443,40 +469,34 @@ class LeanIXClient:
     async def __aexit__(self, *exc) -> None:
         await self._http.__aexit__(*exc)
 
-    async def _headers(self) -> dict[str, str]:
-        if self._token is None:
-            body = await self._http.json(
-                "POST",
-                TOKEN_PATH,
-                what="token request",
-                auth=("apitoken", self._conn.api_token.get_secret_value()),
-                data={"grant_type": "client_credentials"},
-            )
-            token = body.get("access_token") if isinstance(body, dict) else None
-            if not isinstance(token, str) or not token:
-                raise ConnectorError("leanix: token response had no access_token")
-            self._token = token
-        return {"Authorization": f"Bearer {self._token}"}
+    async def _fetch_token(self) -> Any:
+        return await self._http.json(
+            "POST",
+            TOKEN_PATH,
+            what="token request",
+            auth=("apitoken", self._conn.api_token.get_secret_value()),
+            data={"grant_type": "client_credentials"},
+        )
 
     async def put_processor_configuration(self) -> None:
-        await self._http.request(
+        await self._token.request(
             "PUT",
             f"{INTEGRATION_API}/configurations/",
             what="processor configuration",
             expected=(200, 201, 204),
-            json=processor_configuration(self._conn.connector_id),
-            headers=await self._headers(),
+            json=processor_configuration(
+                self._conn.connector_id, self._conn.business_unit_type
+            ),
         )
 
     async def start_run(self, ldif: dict) -> str:
-        body = await self._http.json(
+        body = await self._token.json(
             "POST",
             f"{INTEGRATION_API}/synchronizationRuns",
             what="start synchronization run",
             expected=(200, 201),
             params={"start": "true"},
             json=ldif,
-            headers=await self._headers(),
         )
         run_id = body.get("id") if isinstance(body, dict) else None
         if not isinstance(run_id, str) or not _RUN_ID.match(run_id):
@@ -486,13 +506,13 @@ class LeanIXClient:
     async def wait_for_run(self, run_id: str, max_wait_s: float = MAX_POLL_S) -> str:
         waited = 0.0
         while True:
-            body = await self._http.json(
+            body = await self._token.json(
                 "GET",
                 f"{INTEGRATION_API}/synchronizationRuns/{run_id}/status",
                 what="synchronization run status",
-                headers=await self._headers(),
             )
-            status = str((body or {}).get("status") or "").upper()
+            status = str((body if isinstance(body, dict) else {}).get("status") or "")
+            status = status.upper()
             if status in RUN_DONE:
                 return status
             if status in RUN_FAILED:
@@ -569,12 +589,15 @@ async def sync_leanix(
                         batch,
                         {a["id"]: flows.get(a["id"], []) for a in batch if a.get("id")},
                         connector_id=conn.connector_id,
+                        business_unit_type=conn.business_unit_type,
+                        lx_workspace=conn.lx_workspace,
                     )
                     items += len(ldif["content"])
                     run_id = await lx.start_run(ldif)
                     run_ids.append(run_id)
                     await lx.wait_for_run(run_id)
-    except (ConnectorError, ValueError) as exc:
+    except (ConnectorError, ValueError, TypeError, OverflowError) as exc:
+        # Malformed Partner API data is a failed run, not a server error.
         error = str(exc) if isinstance(exc, ConnectorError) else "invalid response data"
         logger.warning("leanix sync failed for tenant %s: %s", tenant_id, error)
         state.update(last_run_at=now.isoformat(), last_status="error", last_error=error)
@@ -665,6 +688,7 @@ async def status_endpoint(tenant_id: UUID, request: Request) -> dict:
         "configured": conn is not None,
         # Host only: the API token and partner key are never returned.
         "workspace_host": conn.workspace_host if conn else None,
+        "business_unit_type": conn.business_unit_type if conn else None,
         "config_error": config_error,
         **state,
     }

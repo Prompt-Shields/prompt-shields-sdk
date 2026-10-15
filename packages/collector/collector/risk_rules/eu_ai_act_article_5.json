@@ -1,0 +1,172 @@
+{
+  "ruleset": "eu_ai_act_article_5",
+  "version": "1.0.0",
+  "framework": "EU_AI_ACT",
+  "title": "EU AI Act Article 5 prohibited AI practices",
+  "description": "Flags assets whose use case, calling service, data flows or detected PII resemble a practice prohibited by Article 5(1)(a)-(h) of Regulation (EU) 2024/1689 (applicable since 2 February 2025). Every rule is level 'critical' so it sorts first, and every match is only a suggestion for a human (legal or compliance) to review: keyword signals cannot establish the legal conditions of a prohibition (for example 'significant harm', 'based solely on profiling', 'real-time', 'publicly accessible spaces') or its exceptions (medical or safety reasons in point (f), the law-enforcement objectives and authorisation in point (h) and Article 5(2)-(7)). Rule references quote the operative words of each point.",
+  "lists": {
+    "biometric_pii": ["biometric", "biometric_data", "face", "face_image", "facial_image", "fingerprint", "iris", "voiceprint", "voice_print"],
+    "biometric_text": ["biometric*", "face", "faces", "facial*", "face image*", "voice*", "speaker*", "gait", "iris", "fingerprint*"],
+    "biometric_identification": ["biometric identification", "remote biometric*", "facial recognition", "face recognition", "face identification", "face search", "face matching", "speaker identification", "voice identification", "gait recognition"],
+    "biometric_verification": ["biometric verification", "identity verification", "face verification", "facial verification", "voice verification", "speaker verification", "liveness*", "face unlock", "biometric login", "biometric authentication"],
+    "emotion_recognition": ["emotion recognition", "emotion detection", "emotion inference", "emotion analysis", "emotion analytics", "emotion tracking", "emotion classification", "affect recognition", "affective computing", "facial expression analysis", "mood detection", "mood recognition"],
+    "hr_units": ["hr", "human resources", "people", "people ops", "people operations", "talent", "talent acquisition", "recruiting", "recruitment", "workforce"],
+    "education_units": ["education", "school*", "universit*", "academic*", "admissions", "registrar", "student*"],
+    "one_to_many_search": ["watchlist*", "wanted person*", "suspect*", "face search", "crowd*"],
+    "detection_purpose": ["detect*", "audit*", "moderation", "moderat*", "classif*", "red team*", "safeguard*", "protect*", "prevention", "compliance check*"]
+  },
+  "rules": [
+    {
+      "id": "eu_ai_act.article_5.1a.manipulative_techniques",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(a): \"deploys subliminal techniques beyond a person's consciousness or purposefully manipulative or deceptive techniques\" materially distorting behaviour and causing significant harm",
+      "title": "Possible prohibited practice: subliminal, manipulative or deceptive techniques (human review required)",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["subliminal*", "dark pattern*", "manipulative technique*", "manipulative design", "manipulative persuasion", "deceptive technique*", "deceptive design", "deceptive persuasion", "covert persuasion", "behavioural manipulation", "behavioral manipulation", "psychological manipulation"]}
+        ]
+      },
+      "unless": [
+        {"signal": "use_case", "keywords": "@detection_purpose"},
+        {"signal": "calling_service", "keywords": "@detection_purpose"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.article_5.1b.exploiting_vulnerabilities",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(b): \"exploits any of the vulnerabilities of a natural person or a specific group of persons due to their age, disability or a specific social or economic situation\" materially distorting behaviour and causing significant harm",
+      "title": "Possible prohibited practice: exploiting vulnerabilities due to age, disability or social or economic situation (human review required)",
+      "when": {
+        "all": [
+          {"signal": "text", "keywords": ["child", "children", "kid", "kids", "minors", "teen*", "elderly", "older adult*", "pensioner*", "disabilit*", "disabled", "vulnerable", "financial distress", "financially distressed", "low income", "over indebted", "problem gambl*", "gambling addict*", "addict*", "dementia", "cognitive impair*"]}
+        ],
+        "any": [
+          {"signal": "text", "keywords": ["exploit*", "persua*", "nudg*", "upsell*", "pressure selling", "high pressure", "manipulat*", "dark pattern*", "compulsive", "engagement maximi*"]}
+        ]
+      },
+      "unless": [
+        {"signal": "use_case", "keywords": "@detection_purpose"},
+        {"signal": "calling_service", "keywords": "@detection_purpose"},
+        {"signal": "use_case", "keywords": ["child safety", "csam", "abuse report*"]},
+        {"signal": "calling_service", "keywords": ["child safety", "csam", "abuse report*"]}
+      ]
+    },
+    {
+      "id": "eu_ai_act.article_5.1c.social_scoring",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(c): \"evaluation or classification of natural persons or groups of persons over a certain period of time based on their social behaviour or known, inferred or predicted personal or personality characteristics\" with the social score leading to detrimental or unfavourable treatment",
+      "title": "Possible prohibited practice: social scoring (human review required)",
+      "when": {
+        "any": [
+          {"signal": "text", "keywords": ["social scor*", "social credit scor*", "social credit system*", "citizen scor*", "citizen rating*", "social behaviour scor*", "social behavior scor*", "trustworthiness scor*", "trustworthiness rating*", "civic scor*"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": ["national_id", "ssn", "passport", "date_of_birth", "drivers_license"]}
+      ]
+    },
+    {
+      "id": "eu_ai_act.article_5.1d.individual_crime_prediction",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(d): risk assessments \"to assess or predict the risk of a natural person committing a criminal offence, based solely on the profiling of a natural person or on assessing their personality traits and characteristics\" (not support for a human assessment already based on objective and verifiable facts)",
+      "title": "Possible prohibited practice: predicting an individual's criminal offending from profiling or personality traits (human review required)",
+      "when": {
+        "all": [
+          {"signal": "text", "keywords": ["crime prediction", "crime predict*", "predictive policing", "criminal risk", "criminality", "offending risk", "risk of offending", "offence prediction", "offense prediction", "reoffend*", "re offend*", "recidivism", "pre crime", "precrime", "future crime*", "likely offender*", "potential offender*"]}
+        ],
+        "any": [
+          {"signal": "text", "keywords": ["profil*", "personality", "personality trait*", "individual*", "person level", "per person", "citizen*", "persons", "people"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": ["national_id", "ssn", "passport", "date_of_birth", "drivers_license"]}
+      ]
+    },
+    {
+      "id": "eu_ai_act.article_5.1e.facial_image_scraping",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(e): AI systems \"that create or expand facial recognition databases through the untargeted scraping of facial images from the internet or CCTV footage\"",
+      "title": "Possible prohibited practice: untargeted scraping of facial images for facial recognition databases (human review required)",
+      "when": {
+        "all": [
+          {"signal": "text", "keywords": ["scrap*", "crawl*", "harvest*"]}
+        ],
+        "any": [
+          {"signal": "text", "keywords": ["face", "faces", "facial*", "face image*", "headshot*", "selfie*", "profile photo*", "profile picture*"]}
+        ]
+      },
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@biometric_pii"},
+        {"signal": "text", "keywords": ["cctv", "facial recognition", "face recognition", "face database*", "face dataset*"]}
+      ]
+    },
+    {
+      "id": "eu_ai_act.article_5.1f.emotion_recognition_workplace_education",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(f): AI systems \"to infer emotions of a natural person in the areas of workplace and education institutions, except where the use of the AI system is intended to be put in place or into the market for medical or safety reasons\"",
+      "title": "Possible prohibited practice: emotion recognition in the workplace or education (human review required)",
+      "when": {
+        "all": [
+          {"signal": "text", "keywords": "@emotion_recognition"}
+        ],
+        "any": [
+          {"signal": "text", "keywords": ["employee*", "worker*", "staff", "workplace", "workforce", "office", "student*", "pupil*", "classroom*", "school*", "universit*", "lecture*", "exam", "exams", "job interview*", "candidate*", "applicant*", "teacher*"]},
+          {"signal": "business_unit", "keywords": "@hr_units"},
+          {"signal": "business_unit", "keywords": "@education_units"}
+        ]
+      },
+      "unless": [
+        {"signal": "use_case", "keywords": ["medical", "clinical", "therap*", "mental health", "safety", "driver monitoring", "drowsiness", "fatigue"]},
+        {"signal": "calling_service", "keywords": ["medical", "clinical", "therap*", "mental health", "safety", "driver monitoring", "drowsiness", "fatigue"]}
+      ],
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@biometric_pii"}
+      ]
+    },
+    {
+      "id": "eu_ai_act.article_5.1g.biometric_categorisation_sensitive_traits",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(g): biometric categorisation systems that categorise individually natural persons based on their biometric data \"to deduce or infer their race, political opinions, trade union membership, religious or philosophical beliefs, sex life or sexual orientation\" (does not cover labelling or filtering of lawfully acquired biometric datasets, or categorising biometric data in the area of law enforcement)",
+      "title": "Possible prohibited practice: biometric categorisation inferring sensitive traits (human review required)",
+      "when": {
+        "all": [
+          {"signal": "text", "keywords": ["race", "racial*", "ethnic*", "political opinion*", "political orientation", "political affiliation*", "political leaning*", "trade union*", "religio*", "philosophical belief*", "sex life", "sexual orientation", "sexuality"]}
+        ],
+        "any": [
+          {"signal": "text", "keywords": "@biometric_text"},
+          {"signal": "pii_types", "any_of": "@biometric_pii"}
+        ]
+      }
+    },
+    {
+      "id": "eu_ai_act.article_5.1h.realtime_remote_biometric_identification",
+      "category": "prohibited_practice",
+      "level": "critical",
+      "reference": "Article 5(1)(h): \"the use of 'real-time' remote biometric identification systems in publicly accessible spaces for the purposes of law enforcement\", unless strictly necessary for one of the listed objectives",
+      "title": "Possible prohibited practice: real-time remote biometric identification in public spaces for law enforcement (human review required)",
+      "when": {
+        "all": [
+          {"signal": "text", "keywords": "@biometric_identification"},
+          {"signal": "text", "keywords": ["real time", "realtime", "live", "cctv", "video stream*", "camera feed*", "public space*", "publicly accessible", "street*", "crowd*", "body cam*", "bodycam*"]}
+        ],
+        "any": [
+          {"signal": "text", "keywords": ["police", "policing", "law enforcement", "watchlist*", "wanted person*", "suspect*"]}
+        ]
+      },
+      "unless": [
+        {"signal": "use_case", "keywords": "@biometric_verification", "exclude": [{"signal": "text", "keywords": "@one_to_many_search"}]},
+        {"signal": "calling_service", "keywords": "@biometric_verification", "exclude": [{"signal": "text", "keywords": "@one_to_many_search"}]}
+      ],
+      "supporting": [
+        {"signal": "pii_types", "any_of": "@biometric_pii"}
+      ]
+    }
+  ]
+}
