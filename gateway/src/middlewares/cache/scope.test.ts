@@ -205,6 +205,54 @@ describe('cache key is scoped to the caller', () => {
     expect(await proxy('https://api.openai.com/v1/models')).toBe(models);
   });
 
+  it('separates proxy callers by custom-named forwarded credential headers', async () => {
+    const proxy = (headers: Record<string, string>) =>
+      computeCacheScope({
+        provider: 'azure-openai',
+        providerOption: { provider: 'azure-openai' },
+        requestHeaders: headers,
+        endpoint: 'proxy',
+        requestURL: 'https://apim.example.com/openai/chat',
+      });
+    const a = await proxy({ 'ocp-apim-subscription-key': 'tenant-a' });
+    const b = await proxy({ 'ocp-apim-subscription-key': 'tenant-b' });
+    expect(a).not.toBe(b);
+    // Per-request tracing headers do not split the same caller's entries.
+    expect(
+      await proxy({
+        'ocp-apim-subscription-key': 'tenant-a',
+        traceparent: '00-abc-def-01',
+        'x-request-id': 'r1',
+      })
+    ).toBe(a);
+  });
+
+  it('separates callers by headers named in forward_headers', async () => {
+    const fwd = (value: string) =>
+      scopeFor(SECRET_A, {
+        requestHeaders: {
+          authorization: `Bearer ${SECRET_A}`,
+          'x-custom-key': value,
+        },
+        forwardHeaders: ['X-Custom-Key'],
+      });
+    expect(await fwd('one')).not.toBe(await fwd('two'));
+  });
+
+  it('separates keyless callers on different custom hosts', async () => {
+    const host = (requestURL: string) =>
+      computeCacheScope({
+        provider: 'ollama',
+        providerOption: { provider: 'ollama' },
+        requestHeaders: {},
+        endpoint: 'chatComplete',
+        requestURL,
+      });
+    expect(await host('http://tenant-a:11434/v1/chat/completions')).not.toBe(
+      await host('http://tenant-b:11434/v1/chat/completions')
+    );
+  });
+
   it('never puts raw secrets in the scope or the key', async () => {
     const honoContext = fakeHono();
     const service = new CacheService(honoContext, {

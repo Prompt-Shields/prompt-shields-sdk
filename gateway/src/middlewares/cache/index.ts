@@ -94,19 +94,68 @@ const pickIdentity = (
     .map(([k, v]): [string, string] => [k.toLowerCase(), canonicalJSON(v)])
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 
+// Incoming headers the gateway sends upstream (all non-x-portkey headers on
+// /v1/proxy, plus `forward_headers`) can carry credentials under any name,
+// e.g. Azure APIM's `Ocp-Apim-Subscription-Key`. Those are scoped by value
+// except for these per-request, non-identity headers, which would otherwise
+// make every key unique.
+const VOLATILE_FORWARDED_HEADERS = new Set([
+  'accept-encoding',
+  'baggage',
+  'cdn-loop',
+  'connection',
+  'content-length',
+  'date',
+  'host',
+  'sentry-trace',
+  'traceparent',
+  'tracestate',
+  'x-amzn-trace-id',
+  'x-correlation-id',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-port',
+  'x-forwarded-proto',
+  'x-real-ip',
+  'x-request-id',
+]);
+
+const pickForwarded = (
+  requestHeaders: Record<string, string> | undefined | null,
+  endpoint: string | undefined,
+  forwardHeaders: string[] | undefined
+): [string, string][] => {
+  const forwarded = new Set(
+    (forwardHeaders ?? []).map((h) => String(h).trim().toLowerCase())
+  );
+  return Object.entries(requestHeaders ?? {})
+    .map(([k, v]): [string, string] => [k.toLowerCase(), String(v)])
+    .filter(
+      ([k]) =>
+        (forwarded.has(k) ||
+          (endpoint === 'proxy' && !k.startsWith('x-portkey-'))) &&
+        !VOLATILE_FORWARDED_HEADERS.has(k) &&
+        !k.startsWith('cf-')
+    )
+    .sort(([a, av], [b, bv]) =>
+      a < b ? -1 : a > b ? 1 : av < bv ? -1 : av > bv ? 1 : 0
+    );
+};
+
 export interface CacheScopeInput {
   provider?: string;
   providerOption?: Record<string, any> | null;
   requestHeaders?: Record<string, string> | null;
   endpoint?: string;
   requestURL?: string;
+  forwardHeaders?: string[];
 }
 
 /**
  * SHA-256 of who is calling which upstream: provider, the caller's credential
- * and identity fields (provider options and incoming headers), and for
- * `/v1/proxy` the upstream URL (path and query). Only this digest reaches the
- * cache key; raw credentials never do.
+ * and identity fields (provider options and incoming headers), headers the
+ * gateway forwards upstream, and the upstream URL (custom host, path and
+ * query). Only this digest reaches the cache key; raw credentials never do.
  */
 export const computeCacheScope = async ({
   provider,
@@ -114,6 +163,7 @@ export const computeCacheScope = async ({
   requestHeaders,
   endpoint,
   requestURL,
+  forwardHeaders,
 }: CacheScopeInput): Promise<string> => {
   const ambientAws = ['assumedRole', 'serviceRole'].includes(
     providerOption?.awsAuthType
@@ -127,7 +177,10 @@ export const computeCacheScope = async ({
         ambientAws ? GATEWAY_DERIVED_AWS_KEYS : []
       ),
       headers: pickIdentity(requestHeaders),
-      upstream: endpoint === 'proxy' ? requestURL ?? '' : null,
+      forwarded: pickForwarded(requestHeaders, endpoint, forwardHeaders),
+      // Always the full upstream URL: with no credentials (e.g. a keyless
+      // self-hosted model) two custom hosts must not share entries.
+      upstream: requestURL ?? '',
     })
   );
 };

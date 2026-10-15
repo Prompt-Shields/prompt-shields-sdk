@@ -113,6 +113,7 @@ export class CacheService {
       requestHeaders: context.requestHeaders,
       endpoint: context.endpoint,
       requestURL: context.requestURL,
+      forwardHeaders: context.forwardHeaders,
     });
     setCacheScopeForTarget(this.honoContext, context.index, cacheScope);
 
