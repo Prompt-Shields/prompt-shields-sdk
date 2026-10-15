@@ -23,7 +23,7 @@ servers:
     description: Sandbox (synthetic data)
 
 security:
-  - OAuth2: [registry:read]
+  - OAuth2: [assets:read]
   - PartnerApiKey: []
 
 tags:
@@ -47,12 +47,14 @@ components:
         clientCredentials:
           tokenUrl: /oauth/token
           scopes:
-            registry:read: Read AI assets, vendors, models, business units
+            assets:read: Read AI assets, vendors, models, business units
             data-flows:read: Read data flow lineage per asset
             risks:read: Read risk mappings per asset
             usage:read: Read aggregated usage statistics
             export:read: Access bulk export endpoint
             changes:read: Access delta feed endpoint
+            webhooks:manage: Manage webhook subscriptions (never granted by default)
+            registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
       type: http
@@ -334,7 +336,20 @@ components:
           example: 3600
         scope:
           type: string
-          example: "registry:read data-flows:read risks:read usage:read export:read changes:read"
+          example: "assets:read data-flows:read risks:read usage:read export:read changes:read"
+
+  responses:
+    Forbidden:
+      description: The credential lacks the scope this endpoint requires
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: about:blank
+            title: Forbidden
+            status: 403
+            detail: "Token lacks required scope: export:read"
 
   parameters:
     LimitParam:
@@ -482,7 +497,12 @@ paths:
         - $ref: '#/components/parameters/VendorParam'
         - $ref: '#/components/parameters/ConfidenceParam'
         - $ref: '#/components/parameters/DataClassificationParam'
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Paginated list of AI assets
           content:
@@ -542,7 +562,12 @@ paths:
           schema:
             type: string
             format: uuid
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Asset details
           content:
@@ -572,7 +597,12 @@ paths:
           schema:
             type: string
             format: uuid
+      security:
+        - OAuth2: [data-flows:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Data flows for the asset
           content:
@@ -616,7 +646,12 @@ paths:
           schema:
             type: string
             format: uuid
+      security:
+        - OAuth2: [risks:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Risk mappings for the asset
           content:
@@ -663,7 +698,12 @@ paths:
             enum: [7d, 30d, 90d]
             default: 30d
           description: Time period for aggregation
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Usage summary
           content:
@@ -677,7 +717,12 @@ paths:
       tags: [Taxonomy]
       summary: List AI vendors
       description: Returns all distinct AI vendors found in the tenant's asset registry.
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: List of vendor names
           content:
@@ -698,7 +743,12 @@ paths:
       tags: [Taxonomy]
       summary: List AI models
       description: Returns all distinct AI models found in the tenant's asset registry.
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: List of model names
           content:
@@ -719,7 +769,12 @@ paths:
       tags: [Taxonomy]
       summary: List business units
       description: Returns all distinct business units that have AI usage recorded.
+      security:
+        - OAuth2: [assets:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: List of business unit names
           content:
@@ -759,7 +814,12 @@ paths:
           example: "2026-03-25T10:00:00Z"
         - $ref: '#/components/parameters/LimitParam'
         - $ref: '#/components/parameters/AfterParam'
+      security:
+        - OAuth2: [changes:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Change feed
           content:
@@ -827,7 +887,12 @@ paths:
             enum: [json]
             default: json
           description: Export format
+      security:
+        - OAuth2: [export:read]
+        - PartnerApiKey: []
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Full registry export
           content:

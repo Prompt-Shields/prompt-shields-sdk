@@ -185,6 +185,9 @@ class PartnerCredential(Base):
     api_key_hash = Column(Text)
     scopes = Column(ARRAY(Text), nullable=False, default=lambda: ["registry:read"])
     rate_limit = Column(Integer, default=1000)
+    # Named tier from collector.partner_scopes.RATE_LIMIT_TIERS; NULL means
+    # the custom `rate_limit` above applies (all Phase 1 credentials).
+    rate_limit_tier = Column(Text)
     is_active = Column(Text, default="true")  # 'true' | 'false' — text for portability
     partner_metadata = Column(JSONB, default=dict)
     expires_at = Column(TIMESTAMP(timezone=True))

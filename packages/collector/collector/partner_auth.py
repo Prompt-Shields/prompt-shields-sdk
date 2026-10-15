@@ -10,6 +10,10 @@ Supports two flows:
 `resolve_partner(request)` returns a PartnerPrincipal regardless of which
 flow was used. Tenant boundary is implicit: the credentials row owns its
 tenant_id and that's what every Partner API query is scoped against.
+
+Scopes and rate-limit tiers are defined in `collector.partner_scopes`.
+Guard a route with `require_scope("<scope>")`; it returns 403 unless the
+credential holds that scope.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector.audit import record_read
+from collector.partner_scopes import SCOPES, effective_rate_limit, expand_scopes
 from db.models import PartnerCredential
 
 
@@ -140,9 +146,14 @@ class PartnerPrincipal:
     partner_id: UUID
     client_id: str
     scopes: set[str]
+    # Requests per minute, resolved from the credential's tier or custom
+    # limit. None when the principal was built without a credential row.
+    rate_limit: int | None = None
 
     def has_scope(self, required: str) -> bool:
-        return required in self.scopes
+        """Deny by default: true only if `required` is among the expanded
+        scopes (so a Phase 1 `registry:read` still covers the read scopes)."""
+        return required in expand_scopes(self.scopes)
 
 
 async def _lookup_by_api_key(db: AsyncSession, plaintext_key: str) -> PartnerCredential | None:
@@ -217,11 +228,15 @@ async def resolve_partner(request: Request) -> PartnerPrincipal:
                     "detail": "Partner credential expired",
                 },
             )
+        # A token never grants more than the credential holds now, so a
+        # scope removed by the admin stops working before the token expires.
+        token_scopes = expand_scopes((payload.get("scope") or "").split())
         return PartnerPrincipal(
             tenant_id=UUID(payload["tenant_id"]),
             partner_id=partner_id,
             client_id=payload["sub"],
-            scopes=set((payload.get("scope") or "").split()),
+            scopes=set(token_scopes & expand_scopes(partner.scopes)),
+            rate_limit=_rate_limit_for(partner),
         )
 
     # API key fallback
@@ -250,16 +265,36 @@ async def resolve_partner(request: Request) -> PartnerPrincipal:
         tenant_id=partner.tenant_id,
         partner_id=partner.id,
         client_id=partner.client_id,
-        scopes=set(partner.scopes or []),
+        scopes=set(expand_scopes(partner.scopes)),
+        rate_limit=_rate_limit_for(partner),
     )
 
 
+def _rate_limit_for(partner: PartnerCredential) -> int:
+    return effective_rate_limit(partner.rate_limit_tier, partner.rate_limit)
+
+
 def require_scope(scope: str):
-    """Dependency factory: ensures the principal has the named scope."""
+    """Dependency factory: ensures the principal has the named scope.
+
+    `scope` must be defined in `partner_scopes.SCOPES`; a typo fails at
+    import time instead of silently locking every partner out. A missing
+    scope is a 403, recorded in the audit log.
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"Unknown partner scope: {scope!r}")
 
     async def _dep(request: Request) -> PartnerPrincipal:
         principal = await resolve_partner(request)
         if not principal.has_scope(scope):
+            await record_read(
+                request,
+                tenant_id=principal.tenant_id,
+                partner_id=principal.partner_id,
+                endpoint=str(request.url.path),
+                method=request.method,
+                status_code=403,
+            )
             raise HTTPException(
                 status_code=403,
                 detail={
