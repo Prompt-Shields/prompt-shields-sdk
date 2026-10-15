@@ -17,7 +17,10 @@ connector needs and nothing tool specific:
     ``/assets/{id}/data-flows`` with a scoped partner API key, so a
     connector sees exactly what its credential's scopes allow
     (``export:read``, ``changes:read``, ``data-flows:read``) and every read
-    lands in the partner audit log.
+    lands in the partner audit log. Every response must name the tenant
+    being synced (``meta.tenant_id``), so a key paired with the wrong
+    tenant fails closed. `read_registry` / `next_cursor` turn it into one
+    run's assets, flows and next cursor.
   - Sync state (cursor, last run) per tenant and connector, kept in
     ``tenants.settings["connectors"][<name>]``. Never holds secrets.
 
@@ -32,6 +35,8 @@ import ipaddress
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, Self
 from urllib.parse import quote
 from uuid import UUID
@@ -266,16 +271,26 @@ class PartnerApiConnection(BaseModel):
 
 
 class PartnerApiClient:
-    """Reads the registry through ``/partner/v1``."""
+    """Reads the registry through ``/partner/v1``.
+
+    ``tenant_id`` is the tenant the connector syncs. Every response must
+    name that tenant in ``meta.tenant_id`` (the tenant of the credential
+    that authenticated the read); otherwise the read fails, so a partner
+    key configured under the wrong tenant can never move one tenant's
+    registry into another tenant's target or sync state. A response
+    without ``meta.tenant_id`` fails too (fail closed).
+    """
 
     def __init__(
         self,
         conn: PartnerApiConnection,
         *,
+        tenant_id: UUID,
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Resolver = default_resolver,
         sleep: Sleep = asyncio.sleep,
     ):
+        self._tenant_id = str(UUID(str(tenant_id)))
         self._http = GuardedClient(
             conn.base_url,
             name="partner-api",
@@ -301,6 +316,14 @@ class PartnerApiClient:
         )
         if not isinstance(body, dict):
             raise ConnectorError(f"partner-api: {what} returned an unexpected body")
+        meta = body.get("meta")
+        tenant = meta.get("tenant_id") if isinstance(meta, dict) else None
+        if not isinstance(tenant, str) or tenant.lower() != self._tenant_id:
+            # Neither tenant id is echoed: the message names the cause only.
+            raise ConnectorError(
+                f"partner-api: {what}: the partner API key does not belong to "
+                "the configured tenant; refused"
+            )
         return body
 
     async def export_assets(self) -> tuple[list[dict], str | None]:
@@ -333,6 +356,73 @@ class PartnerApiClient:
 
 def _dicts(value: Any) -> list[dict]:
     return [v for v in value or [] if isinstance(v, dict)]
+
+
+# Re-read this much before the newest change seen, so a change committed
+# while a sync was paging is not skipped. Upserts make the overlap harmless.
+CURSOR_OVERLAP = timedelta(minutes=5)
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def next_cursor(
+    since: str | None, changes: list[dict], server_token: str | None
+) -> str | None:
+    """Cursor for the next incremental run.
+
+    After a full export: the server's sync token less the overlap. After
+    ``/changes``: the newest ``changed_at`` less the overlap, never going
+    back before ``since``.
+    """
+    previous = _parse_ts(since)
+    if previous is None:
+        token = _parse_ts(server_token)
+        return (token - CURSOR_OVERLAP).isoformat() if token else None
+    newest = max(
+        (t for t in (_parse_ts(c.get("changed_at")) for c in changes) if t),
+        default=None,
+    )
+    if newest is None:
+        return previous.isoformat()
+    return max(previous, newest - CURSOR_OVERLAP).isoformat()
+
+
+@dataclass
+class RegistryRead:
+    """What one sync run read: the assets to push, their flows (when
+    requested) and the cursor to store once the push succeeded."""
+
+    assets: list[dict]
+    flows: dict[str, list[dict]] = field(default_factory=dict)
+    cursor: str | None = None
+
+
+async def read_registry(
+    partner: PartnerApiClient, since: str | None, *, include_data_flows: bool
+) -> RegistryRead:
+    """``/export`` when there is no cursor, else ``/changes`` since it, plus
+    each asset's data flows when ``include_data_flows``."""
+    if since:
+        changes = await partner.changes(since)
+        assets = [c["asset"] for c in changes if isinstance(c.get("asset"), dict)]
+        cursor = next_cursor(since, changes, None)
+    else:
+        assets, token = await partner.export_assets()
+        cursor = next_cursor(None, [], token)
+    flows: dict[str, list[dict]] = {}
+    if include_data_flows:
+        for a in assets:
+            if a.get("id"):
+                flows[a["id"]] = await partner.data_flows(a["id"])
+    return RegistryRead(assets=assets, flows=flows, cursor=cursor)
 
 
 # ──────────────────────────────────────────────────────────────────────

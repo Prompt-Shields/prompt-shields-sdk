@@ -563,3 +563,84 @@ async def test_risk_suggestions_run_and_all_tenants_cli_under_rls(rls_db):
                 .scalars()
             )
             assert owners == {tenant}
+
+
+async def test_servicenow_sync_runs_as_its_tenant_under_rls(rls_db, monkeypatch):
+    """The ServiceNow operator routes are scoped to the target tenant (no
+    bypass). A sync scoped the same way reads only that tenant's registry
+    through the Partner API, and a partner key of another tenant is refused
+    before ServiceNow is called."""
+    from collector import app as app_module
+    from collector import servicenow as sn
+
+    b = rls_db["b"]
+    monkeypatch.setenv("PS_ADMIN_TOKEN", TOKEN)
+    monkeypatch.delenv("PS_SERVICENOW", raising=False)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        op = {"Authorization": f"Bearer {TOKEN}"}
+        resp = await c.post(
+            "/api/v1/admin/connectors/servicenow/sync",
+            headers=op,
+            json={"tenant_id": str(b)},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "not_configured"
+        resp = await c.get(
+            "/api/v1/admin/connectors/servicenow/status",
+            headers=op,
+            params={"tenant_id": str(b)},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["configured"] is False
+
+    # The in-process Partner API keeps loaded rows after commit, as in production.
+    monkeypatch.setattr(app_module, "SessionLocal", rls_db["plain"])
+    payloads: list[dict] = []
+
+    def servicenow(r: httpx.Request) -> httpx.Response:
+        payload = json.loads(r.content)
+        payloads.append(payload)
+        items = [
+            {"className": i["className"], "operation": "INSERT", "sysId": "a" * 32}
+            for i in payload["items"]
+        ]
+        return httpx.Response(200, json={"result": {"items": items}})
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    async def sync(partner_key: str) -> dict:
+        conn = {
+            "instance_host": "acme.service-now.com",
+            "username": "ps",
+            "password": "pw",
+            "partner_api": {"base_url": "https://collector.test", "api_key": partner_key},
+        }
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, b)
+            return await sn.sync_servicenow(
+                s,
+                b,
+                settings=sn.ServiceNowSettings(servicenow={str(b): conn}),
+                partner_transport=ASGITransport(app=app),
+                servicenow_transport=httpx.MockTransport(servicenow),
+                resolver=public,
+            )
+
+    out = await sync(PARTNER_KEY_B)
+    assert out["status"] == "ok", out
+    vendors = {
+        i["values"]["name"]
+        for i in payloads[0]["items"]
+        if i["className"] == "cmdb_ci_service"
+    }
+    assert vendors == {"vendor-b"}
+
+    payloads.clear()
+    out = await sync(PARTNER_KEY_A)
+    assert out["status"] == "error"
+    assert "does not belong to the configured tenant" in out["error"]
+    assert payloads == []
+    async with rls_db["admin"]() as s:
+        state = (await s.get(Tenant, b)).settings["connectors"]["servicenow"]
+    assert state["last_status"] == "error" and state["cursor"]
