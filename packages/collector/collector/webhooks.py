@@ -72,6 +72,7 @@ from sqlalchemy import delete, inspect, or_, select, update
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import egress
 from collector.config import settings
 from collector.partner_scopes import expand_scopes
 
@@ -264,31 +265,12 @@ def check_url(url: str) -> SplitResult:
     return parts
 
 
-# IPv6 ranges that embed or stand for an IPv4 address, or are deprecated,
-# and that `is_global` does not catch on every Python version:
-# NAT64 well-known prefix (64:ff9b::/96 reaches the embedded IPv4 address
-# through a NAT64 gateway, e.g. 64:ff9b::a9fe:a9fe -> 169.254.169.254),
-# IPv4-compatible ::/96 and site-local fec0::/10.
-_NAT64 = ipaddress.ip_network("64:ff9b::/96")
-_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
-_SITE_LOCAL = ipaddress.ip_network("fec0::/10")
-
-
 def ip_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True for publicly routable unicast addresses only."""
-    if ip.version == 6:
-        if ip in _IPV4_COMPATIBLE or ip in _SITE_LOCAL:
-            return False
-        embedded = ip.ipv4_mapped or ip.sixtofour or (ip.teredo[1] if ip.teredo else None)
-        if embedded is None and ip in _NAT64:
-            embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-        if embedded is not None and not ip_allowed(embedded):
-            return False
-    if ip.is_unspecified or ip.is_multicast:
-        return False
-    if settings.webhook_allow_private_destinations:
-        return True
-    return ip.is_global
+    """True for publicly routable unicast addresses only (see
+    `collector.egress.ip_is_public`)."""
+    return egress.ip_is_public(
+        ip, allow_private=settings.webhook_allow_private_destinations
+    )
 
 
 async def _resolve_host(host: str, port: int) -> list[str]:
