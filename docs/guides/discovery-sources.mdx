@@ -45,9 +45,9 @@ The `discovery_source` field is an array showing all channels that detected this
 
 ## Cloud AI Inventory (Platform Signal)
 
-Model deployments in your cloud accounts are AI assets whether or not their traffic is instrumented. The collector can read them, read-only, from the cloud control plane. Each deployment becomes an asset with `discovery_source: ["platform_signal"]` (`medium` confidence until another source corroborates it), its cloud `region` for sovereignty reporting, and `owner_email`, `environment` and `business_unit` taken from resource tags (`owner`, `env`/`environment`, `department`/`business_unit`; deployment tags override account tags). Tag values only fill empty fields, so owners curated in the registry are kept. `calling_service` is `azure:<deployment resource id>` or `aws:<Bedrock resource ARN>`.
+Model deployments in your cloud accounts are AI assets whether or not their traffic is instrumented. The collector can read them, read-only, from the cloud control plane. Each deployment becomes an asset with `discovery_source: ["platform_signal"]` (`medium` confidence until another source corroborates it), its cloud `region` for sovereignty reporting, and `owner_email`, `environment` and `business_unit` taken from resource tags (`owner`, `env`/`environment`, `department`/`business_unit`; deployment tags override account tags). Tag values only fill empty fields, so owners curated in the registry are kept. `calling_service` is `azure:<deployment resource id>`, `aws:<Bedrock resource ARN>` or `gcp:<Vertex AI resource name>`.
 
-Supported today: **Azure OpenAI and AI Foundry** (`OpenAI` and `AIServices` Cognitive Services accounts) and **Amazon Bedrock**. Google Vertex AI is planned.
+Supported today: **Azure OpenAI and AI Foundry** (`OpenAI` and `AIServices` Cognitive Services accounts), **Amazon Bedrock** and **Google Vertex AI**.
 
 ### Azure: read-only service principal
 
@@ -147,3 +147,34 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"aws": {
 ```
 
 `role_arn` and `external_id` are optional; `session_token` is accepted for temporary keys. The collector never uses its own AWS environment, profiles or instance metadata. It signs requests itself (SigV4, no AWS SDK) and calls only `bedrock.<region>.amazonaws.com` and, to assume the role, `sts.<first region>.amazonaws.com`. Region names are validated strictly (commercial and GovCloud regions only). A region that fails is reported under `region_errors` and does not stop the others.
+
+### Google Cloud: Vertex AI
+
+Vertex AI is regional, so list every region to inventory, per project. In each project and region the collector records, each as its own asset with vendor `google`:
+
+| Resource | Why it is an asset | `model` |
+| --- | --- | --- |
+| Model deployed to an endpoint (`…/endpoints/<id>/deployedModels/<id>`) | Serving capacity, the counterpart of an Azure deployment. Covers custom models, tuned models and **Model Garden** deployments of open or partner models | Base model of a tuned model, the Model Garden model id (for example `llama3_1`), else the Model Registry display name |
+| Tuned model (`…/models/<id>`, from a succeeded tuning job) | Trained on your data, so recorded even when it is not deployed | Base model id (for example `gemini-2.0-flash-001`) |
+
+A tuned model that is deployed is therefore two assets: the model and its deployment. Endpoints with nothing deployed, failed tuning jobs and registry models that are neither tuned nor deployed are not recorded. Serverless use of Google and partner models (Gemini, or Model-as-a-Service models such as Claude on Vertex AI) creates no resource in the project, so it shows up through the SDK, the gateway or audit logs instead.
+
+Labels are read like tags: endpoint labels override the model's, and a tuned model's registry labels override its tuning job's. GCP label values cannot contain `@`, so an `owner` label never fills `owner_email`; set owners in the registry.
+
+Create a service account with the predefined **Vertex AI Viewer** role (`roles/aiplatform.viewer`) on each project to inventory. It only grants `aiplatform.*.get` / `list` permissions (the inventory uses `aiplatform.endpoints.list`, `aiplatform.models.list` and `aiplatform.tuningJobs.list`) and no `aiplatform.endpoints.predict`, so the account cannot call models. Create a JSON key for it, and put the key file's content in the operator configuration:
+
+```bash
+gcloud projects add-iam-policy-binding <project id> \
+  --member="serviceAccount:ps-inventory@<project id>.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.viewer"
+```
+
+```bash
+PS_CLOUD_INVENTORY='{"<tenant uuid>": {"gcp": {
+  "service_account": {"type": "service_account", "client_email": "...", "private_key": "...", ...},
+  "project_ids": ["<project id>"],
+  "regions": ["europe-west4", "us-central1"]
+}}}'
+```
+
+`service_account` may also be the key file as a JSON string. Leave `project_ids` empty to inventory the service account's own project. The collector signs a JWT with the key and exchanges it at the fixed `oauth2.googleapis.com` (the key file's `token_uri` is ignored), then calls only `<region>-aiplatform.googleapis.com`. Region names are validated strictly (`us-central1`, `europe-west4`, …; not `global`). A project/region that fails, for example because the Vertex AI API is not enabled there, is reported under `region_errors` and does not stop the others.

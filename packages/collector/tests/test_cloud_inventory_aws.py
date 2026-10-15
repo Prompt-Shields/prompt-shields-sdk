@@ -601,6 +601,7 @@ async def test_not_configured_aws_makes_no_calls():
     assert result["clouds"] == {
         "azure": {"status": "not_configured"},
         "aws": {"status": "not_configured"},
+        "gcp": {"status": "not_configured"},
     }
 
 
