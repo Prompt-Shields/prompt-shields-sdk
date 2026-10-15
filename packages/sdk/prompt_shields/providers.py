@@ -30,11 +30,24 @@ def _int(value: Any) -> int | None:
     return None
 
 
+def _cost(value: Any) -> float | None:
+    """A non-negative reported cost in USD (not bools, mocks, or None)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return None
+
+
+def _str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def openai_usage_fields(usage: Any) -> dict:
     """Token counts from an OpenAI Chat Completions `usage` object.
 
-    `prompt_tokens` already includes cached tokens and `completion_tokens`
-    already includes reasoning tokens; the details are reported as subsets.
+    `prompt_tokens` already includes cached and audio tokens and
+    `completion_tokens` already includes reasoning and audio tokens; the
+    details are reported as subsets. OpenAI-compatible routers that report
+    the billed cost (OpenRouter `usage.cost`, USD) yield `provider_cost`.
     """
     prompt_details = _field(usage, "prompt_tokens_details")
     completion_details = _field(usage, "completion_tokens_details")
@@ -44,6 +57,27 @@ def openai_usage_fields(usage: Any) -> dict:
         "tokens_cached": _int(_field(prompt_details, "cached_tokens")),
         "tokens_cache_write": None,
         "tokens_reasoning": _int(_field(completion_details, "reasoning_tokens")),
+        "tokens_audio_in": _int(_field(prompt_details, "audio_tokens")) or None,
+        "tokens_audio_out": _int(_field(completion_details, "audio_tokens")) or None,
+        "provider_cost": _cost(_field(usage, "cost")),
+    }
+
+
+def anthropic_usage_extras(usage: Any) -> dict:
+    """Pricing details from an Anthropic `usage` object, beyond token counts.
+
+    `cache_creation.ephemeral_1h_input_tokens` (1-hour TTL writes, a subset
+    of `cache_creation_input_tokens`), `server_tool_use.web_search_requests`
+    and `service_tier` ("standard", "priority" or "batch"). Absent values
+    are None.
+    """
+    write_1h = _int(_field(_field(usage, "cache_creation"),
+                           "ephemeral_1h_input_tokens"))
+    searches = _int(_field(_field(usage, "server_tool_use"), "web_search_requests"))
+    return {
+        "tokens_cache_write_1h": write_1h or None,
+        "web_search_requests": searches or None,
+        "service_tier": _str(_field(usage, "service_tier")),
     }
 
 
@@ -130,6 +164,7 @@ def _openai_like_extract(response: Any) -> dict:
     model = _field(response, "model")
     return {
         **openai_usage_fields(_field(response, "usage")),
+        "service_tier": _str(_field(response, "service_tier")),
         "tool_calls_used": tool_calls or None,
         "served_model": model if isinstance(model, str) else None,
     }
@@ -178,6 +213,7 @@ class OpenAIAdapter(ProviderAdapter):
 
         return {
             **usage_fields,
+            "service_tier": _str(getattr(response, "service_tier", None)),
             "tool_calls_used": tool_calls or None,
             "served_model": getattr(response, "model", None),
         }
@@ -194,6 +230,7 @@ class AnthropicAdapter(ProviderAdapter):
             _int(_field(usage, "cache_read_input_tokens")),
             _int(_field(usage, "cache_creation_input_tokens")),
         )
+        usage_fields.update(anthropic_usage_extras(usage))
 
         # Tool use extraction — Anthropic shape (content blocks)
         tool_calls: list[dict] = []
