@@ -11,17 +11,21 @@
   - azure_openai: the same methods, called on an `AzureOpenAI` /
                   `AsyncAzureOpenAI` client (deployment names are priced
                   through `azure_deployments`)
-  - anthropic:    `messages.create`, `beta.messages.create` (MCP connector)
-  - google:       google-genai `models.generate_content`
-  - mistral:      mistralai `chat.complete` / `chat.complete_async`
-  - cohere:       `chat` on v1 (`Client`) and v2 (`ClientV2`) clients
-  - bedrock:      boto3 `bedrock-runtime` `converse` and `invoke_model`, via
+  - anthropic:    `messages.create`, `beta.messages.create` (MCP connector),
+                  and the `messages.stream()` / `beta.messages.stream()` helpers
+  - google:       google-genai `models.generate_content`,
+                  `models.generate_content_stream`
+  - mistral:      mistralai `chat.complete` / `chat.complete_async`,
+                  `chat.stream` / `chat.stream_async`
+  - cohere:       `chat` and `chat_stream` on v1 (`Client`) and v2
+                  (`ClientV2`) clients
+  - bedrock:      boto3 `bedrock-runtime` `converse`, `converse_stream`,
+                  `invoke_model` and `invoke_model_with_response_stream`, via
                   botocore's `BaseClient._make_api_call`. `invoke_model` usage
                   comes from response headers; its body stream is never read.
 Missing packages, or methods an installed version lacks, are skipped.
-Streams are wrapped for openai, azure_openai and anthropic only; the other
-vendors' streaming methods (`generate_content_stream`, `chat.stream`,
-`chat_stream`, `converse_stream`, ...) are not patched yet.
+Streams (`stream=True` or a streaming method) are wrapped so they emit one
+event when they end or are closed; chunks reach the caller unchanged.
 
 Guarantees:
   - Idempotent: a second `instrument()` is a no-op and returns False.
@@ -93,17 +97,41 @@ _TARGETS = (
      "create", "messages"),
     ("anthropic", "anthropic.resources.beta.messages.messages", "AsyncMessages",
      "create", "messages"),
+    # `messages.stream()` helpers: they post directly, not through `create`.
+    ("anthropic", "anthropic.resources.messages", "Messages", "stream",
+     "messages_stream"),
+    ("anthropic", "anthropic.resources.messages", "AsyncMessages", "stream",
+     "messages_stream"),
+    ("anthropic", "anthropic.resources.beta.messages.messages", "Messages",
+     "stream", "messages_stream"),
+    ("anthropic", "anthropic.resources.beta.messages.messages", "AsyncMessages",
+     "stream", "messages_stream"),
     ("google", "google.genai.models", "Models", "generate_content", "gemini"),
     ("google", "google.genai.models", "AsyncModels", "generate_content", "gemini"),
+    ("google", "google.genai.models", "Models", "generate_content_stream",
+     "gemini_stream"),
+    ("google", "google.genai.models", "AsyncModels", "generate_content_stream",
+     "gemini_stream"),
     # mistralai >= 2 lives in `mistralai.client`; 1.x in `mistralai.chat`.
     ("mistral", "mistralai.client.chat", "Chat", "complete", "mistral"),
     ("mistral", "mistralai.client.chat", "Chat", "complete_async", "mistral"),
     ("mistral", "mistralai.chat", "Chat", "complete", "mistral"),
     ("mistral", "mistralai.chat", "Chat", "complete_async", "mistral"),
+    ("mistral", "mistralai.client.chat", "Chat", "stream", "mistral_stream"),
+    ("mistral", "mistralai.client.chat", "Chat", "stream_async", "mistral_stream"),
+    ("mistral", "mistralai.chat", "Chat", "stream", "mistral_stream"),
+    ("mistral", "mistralai.chat", "Chat", "stream_async", "mistral_stream"),
     ("cohere", "cohere.base_client", "BaseCohere", "chat", "cohere_v1"),
     ("cohere", "cohere.base_client", "AsyncBaseCohere", "chat", "cohere_v1"),
     ("cohere", "cohere.v2.client", "V2Client", "chat", "cohere_v2"),
     ("cohere", "cohere.v2.client", "AsyncV2Client", "chat", "cohere_v2"),
+    ("cohere", "cohere.base_client", "BaseCohere", "chat_stream",
+     "cohere_v1_stream"),
+    ("cohere", "cohere.base_client", "AsyncBaseCohere", "chat_stream",
+     "cohere_v1_stream"),
+    ("cohere", "cohere.v2.client", "V2Client", "chat_stream", "cohere_v2_stream"),
+    ("cohere", "cohere.v2.client", "AsyncV2Client", "chat_stream",
+     "cohere_v2_stream"),
     # boto3 builds client classes per service at runtime; every operation
     # goes through this one method, which passes non-Bedrock calls through.
     ("bedrock", "botocore.client", "BaseClient", "_make_api_call", "bedrock"),
@@ -112,7 +140,23 @@ _TARGETS = (
 # Patched for either vendor: Azure clients reuse the OpenAI resource classes.
 _TARGET_VENDORS = {"openai": ("openai", "azure_openai")}
 
-_BEDROCK_OPERATIONS = ("Converse", "InvokeModel")
+# Streaming operations -> the response key holding the botocore EventStream.
+_BEDROCK_STREAMS = {"ConverseStream": "stream",
+                    "InvokeModelWithResponseStream": "body"}
+_BEDROCK_OPERATIONS = ("Converse", "InvokeModel", *_BEDROCK_STREAMS)
+
+# Vendors whose stream methods return a generator that sends the request on
+# the first read, so a failed request raises from the stream, not the call.
+_LAZY_STREAM_VENDORS = ("google", "cohere")
+
+# Methods that always stream -> the API whose call details they share.
+_STREAM_ONLY_APIS = {
+    "messages_stream": "messages",
+    "gemini_stream": "gemini",
+    "mistral_stream": "mistral",
+    "cohere_v1_stream": "cohere_v1",
+    "cohere_v2_stream": "cohere_v2",
+}
 
 # Discovery metadata: argument name -> environment variable.
 _METADATA_ENV = {
@@ -417,9 +461,15 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
         if any(str(k).lower() == _RAW_RESPONSE_HEADER for k in headers):
             return None
         call_kwargs = dict(kwargs)
-        streaming = call_kwargs.get("stream") is True
-        if streaming and api not in _STREAMING_APIS:
-            return None  # e.g. mistral `complete(stream=True)`: not wrapped yet
+        helper = api == "messages_stream"  # returns a stream *manager*
+        stream_key = _BEDROCK_STREAMS.get(args[0]) if api == "bedrock" else None
+        if api in _STREAM_ONLY_APIS:
+            api = _STREAM_ONLY_APIS[api]
+            streaming = True
+        else:
+            streaming = stream_key is not None or call_kwargs.get("stream") is True
+            if streaming and api not in _STREAMING_APIS and stream_key is None:
+                return None  # e.g. mistral `complete(stream=True)`: no stream
         details = _DETAILS[api](resource, args, call_kwargs)
         upstream = details["upstream"]
         if vendor == "openai" and _is_azure(upstream):
@@ -458,6 +508,8 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             "model": model if isinstance(model, str) else None,
             "messages": details["messages"],
             "streaming": streaming,
+            "stream_helper": helper,
+            "stream_key": stream_key,
             "hide_usage_chunk": hide_usage_chunk,
             "api_key": api_key if isinstance(api_key, str) and api_key else None,
             "framework": framework,
@@ -624,7 +676,7 @@ def _cohere_v2_details(resource: Any, args: tuple, kwargs: dict) -> dict:
 
 def _bedrock_details(resource: Any, args: tuple, kwargs: dict) -> dict:
     operation, params = args
-    if operation == "Converse":
+    if operation in ("Converse", "ConverseStream"):
         messages = []
         system = _flat("system", params.get("system"))  # [{"text": ...}]
         if system is not None:
@@ -680,13 +732,15 @@ _STREAMING_APIS = ("chat", "responses", "messages")
 
 def _finish_sync(call: dict, response: Any, start: float) -> Any:
     try:
+        if call["stream_helper"]:
+            return _MessageStreamManager(response, call)
+        if call["stream_key"] is not None:
+            # Bedrock: the EventStream sits in the response dict.
+            key = call["stream_key"]
+            response[key] = _wrap_stream(call, response[key], start)
+            return response
         if call["streaming"]:
-            def on_finish(adapter_fields, stream_fields, latency_ms):
-                _send_sync(call, _stream_event(call, adapter_fields,
-                                               stream_fields, latency_ms))
-
-            return ShieldsStream(response, _accumulator(call), on_finish, start,
-                                 hide_usage_chunk=call["hide_usage_chunk"])
+            return _wrap_stream(call, response, start)
         latency_ms = int((time.monotonic() - start) * 1000)
         _send_sync(call, _event(call, response, latency_ms))
     except Exception as e:  # noqa: BLE001 - fail-open
@@ -697,19 +751,87 @@ def _finish_sync(call: dict, response: Any, start: float) -> Any:
 async def _finish_async(call: dict, response: Any, start: float) -> Any:
     try:
         if call["streaming"]:
-            async def on_finish(adapter_fields, stream_fields, latency_ms,
-                                flush=True):
-                await _send_async(call, _stream_event(
-                    call, adapter_fields, stream_fields, latency_ms), flush=flush)
-
-            return AsyncShieldsStream(response, _accumulator(call), on_finish,
-                                      start,
-                                      hide_usage_chunk=call["hide_usage_chunk"])
+            return _wrap_stream(call, response, start, is_async=True)
         latency_ms = int((time.monotonic() - start) * 1000)
         await _send_async(call, _event(call, response, latency_ms))
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"Instrumentation telemetry error: {e}")
     return response
+
+
+def _wrap_stream(call: dict, stream: Any, start: float,
+                 is_async: bool = False) -> Any:
+    """`ShieldsStream`, or `AsyncShieldsStream` for an async iterator (an
+    async generator such as cohere's `chat_stream` is returned unawaited)."""
+    options = {"hide_usage_chunk": call["hide_usage_chunk"]}
+    if call["vendor"] in _LAZY_STREAM_VENDORS:
+        options["on_failed_start"] = lambda: _release_framework_call(call)
+    if is_async or (hasattr(stream, "__aiter__") and not hasattr(stream, "__iter__")):
+        async def on_finish_async(adapter_fields, stream_fields, latency_ms,
+                                  flush=True):
+            await _send_async(call, _stream_event(
+                call, adapter_fields, stream_fields, latency_ms), flush=flush)
+
+        return AsyncShieldsStream(stream, _accumulator(call), on_finish_async,
+                                  start, **options)
+
+    def on_finish(adapter_fields, stream_fields, latency_ms):
+        _send_sync(call, _stream_event(call, adapter_fields,
+                                       stream_fields, latency_ms))
+
+    return ShieldsStream(stream, _accumulator(call), on_finish, start, **options)
+
+
+class _MessageStreamManager:
+    """Stands in for Anthropic's (Async)MessageStreamManager.
+
+    The request is made on enter; the raw event stream is then wrapped where
+    the SDK's `MessageStream` reads it (`_raw_stream`, before its first read),
+    so `text_stream`, `get_final_message()` and plain iteration are all
+    observed, and closing it emits the event. If that attribute is missing
+    (a different SDK version) the stream is returned unobserved.
+    """
+
+    def __init__(self, manager: Any, call: dict):
+        self._manager = manager
+        self._call = call
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._manager, name)
+
+    def _observe(self, stream: Any, start: float, is_async: bool) -> Any:
+        try:
+            raw = stream.__dict__["_raw_stream"]
+            stream._raw_stream = _wrap_stream(self._call, raw, start, is_async)
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.debug(f"Instrumentation stream helper error: {e}")
+        return stream
+
+    def __enter__(self):
+        start = time.monotonic()
+        try:
+            stream = self._manager.__enter__()
+        except BaseException:
+            _release_framework_call(self._call)
+            raise
+        return self._observe(stream, start, is_async=False)
+
+    def __exit__(self, *exc):
+        return self._manager.__exit__(*exc)
+
+    async def __aenter__(self):
+        start = time.monotonic()
+        try:
+            stream = await self._manager.__aenter__()
+        except BaseException:
+            _release_framework_call(self._call)
+            raise
+        return self._observe(stream, start, is_async=True)
+
+    async def __aexit__(self, *exc):
+        return await self._manager.__aexit__(*exc)
 
 
 # --- events ------------------------------------------------------------------
