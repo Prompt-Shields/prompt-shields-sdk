@@ -340,3 +340,51 @@ async def test_rls_required_refuses_an_unenforced_database(rls_db):
     async with rls_db["engine"].connect() as conn:
         with pytest.raises(RuntimeError, match="PS_RLS_REQUIRED"):
             await rls.check_required(conn)
+
+
+async def test_cloud_inventory_and_partner_admin_routes_work_under_rls(rls_db, monkeypatch):
+    """The cloud inventory operator pull is scoped to its target tenant (no
+    bypass); the partner credential PATCH (scopes, rate-limit tier) and the
+    per-route scope check, whose 403 writes an audit row, run as the tenant."""
+    a, b = rls_db["a"], rls_db["b"]
+    monkeypatch.setenv("PS_ADMIN_TOKEN", TOKEN)
+    monkeypatch.delenv("PS_CLOUD_INVENTORY", raising=False)
+    async with rls_db["admin"]() as s:
+        asset_b = (
+            await s.execute(select(AIAsset.id).where(AIAsset.tenant_id == b))
+        ).scalar_one()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/admin/cloud-inventory/pull",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"tenant_id": str(b)},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["clouds"] == {"azure": {"status": "not_configured"}}
+
+        key_b = {"Authorization": f"Bearer {KEY_B}"}
+        creds = (await c.get("/api/v1/admin/partner-credentials", headers=key_b)).json()
+        assert [x["client_id"] for x in creds["data"]] == ["client-b"]
+        url = f"/api/v1/admin/partner-credentials/{creds['data'][0]['id']}"
+        resp = await c.patch(
+            url, headers=key_b, json={"scopes": ["assets:read"], "rate_limit_tier": "basic"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["rate_limit_tier"] == "basic"
+
+        resp = await c.patch(
+            url, headers={"Authorization": f"Bearer {KEY_A}"}, json={"scopes": ["risks:read"]}
+        )
+        assert resp.status_code == 404
+
+        partner_b = {"Authorization": f"Bearer {PARTNER_KEY_B}"}
+        resp = await c.get(f"/partner/v1/assets/{asset_b}/risks", headers=partner_b)
+        assert resp.status_code == 403
+
+    async with rls_db["admin"]() as s:
+        denied = (
+            await s.execute(
+                select(PartnerAuditLog.tenant_id).where(PartnerAuditLog.status_code == 403)
+            )
+        ).scalars().all()
+    assert denied == [b] and a not in denied
