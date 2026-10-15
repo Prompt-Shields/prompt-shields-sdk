@@ -389,6 +389,9 @@ class _RawBody:
         self.reads += 1
         return self._buf.read(*args)
 
+    def close(self):
+        self.closed = True
+
 
 @pytest.fixture
 def aws(monkeypatch):
