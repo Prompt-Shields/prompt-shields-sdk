@@ -1,0 +1,31 @@
+{
+  "vendor": "mistral",
+  "model": "mistral-large-latest",
+  "note": "mistralai chat.complete response. Mistral Large: input $2/M, output $6/M.",
+  "response": {
+    "id": "cmpl-mistral-1",
+    "object": "chat.completion",
+    "model": "mistral-large-latest",
+    "created": 1760000000,
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [{"id": "abc123", "type": "function", "function": {"name": "lookup_order", "arguments": "{\"id\": 7}"}}]
+        }
+      }
+    ],
+    "usage": {"prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200}
+  },
+  "expected_fields": {
+    "tokens_in": 1000,
+    "tokens_out": 200,
+    "tokens_cached": null,
+    "tool_calls_used": [{"name": "lookup_order", "type": "function"}],
+    "served_model": "mistral-large-latest"
+  },
+  "expected_cost_usd": 0.0032
+}
