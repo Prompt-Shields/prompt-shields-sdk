@@ -304,8 +304,8 @@ class AssetAttestation(Base):
     One row per decision: who (`attested_by`, plus the authenticated caller),
     when, which field, the state chosen and a snapshot of the field's value
     at that moment. The current state of a field is its newest row. Rows are
-    never updated (a trigger rejects UPDATE on Postgres); tenant erasure
-    deletes them. Attestation never changes `AIAsset.confidence`.
+    never updated or deleted (triggers reject UPDATE, and DELETE outside
+    tenant erasure, on Postgres). Attestation never changes `AIAsset.confidence`.
     See collector/attestation.py.
     """
 
@@ -345,9 +345,33 @@ CREATE TRIGGER asset_attestations_no_update
 BEFORE UPDATE ON asset_attestations
 FOR EACH ROW EXECUTE FUNCTION asset_attestations_immutable()
 """
+# DELETE is allowed only for tenant erasure, which sets this transaction-local
+# setting to the tenant being erased (collector/retention.py). Any other
+# DELETE would let history be rewritten (delete, then insert a new row).
+ATTESTATION_ERASE_SETTING = "prompt_shields.erasing_tenant"
+ATTESTATION_NO_DELETE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION asset_attestations_no_delete() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('prompt_shields.erasing_tenant', true) = OLD.tenant_id::text THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'asset_attestations rows are append-only; only tenant erasure may delete them';
+END;
+$$ LANGUAGE plpgsql
+"""
+ATTESTATION_NO_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER asset_attestations_no_delete
+BEFORE DELETE ON asset_attestations
+FOR EACH ROW EXECUTE FUNCTION asset_attestations_no_delete()
+"""
 
-# Install the trigger when the schema is built with create_all too (tests).
-for _ddl in (ATTESTATION_IMMUTABLE_FUNCTION_SQL, ATTESTATION_IMMUTABLE_TRIGGER_SQL):
+# Install the triggers when the schema is built with create_all too (tests).
+for _ddl in (
+    ATTESTATION_IMMUTABLE_FUNCTION_SQL,
+    ATTESTATION_IMMUTABLE_TRIGGER_SQL,
+    ATTESTATION_NO_DELETE_FUNCTION_SQL,
+    ATTESTATION_NO_DELETE_TRIGGER_SQL,
+):
     event.listen(
         AssetAttestation.__table__,
         "after_create",

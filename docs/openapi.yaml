@@ -367,7 +367,10 @@ components:
           enum: [unreviewed, attested, disputed, retired]
         attested_by:
           type: string
-          description: The person signing off, e.g. an email
+          description: >-
+            The person signing off, e.g. an email. Asserted by the caller (API
+            keys and partner tokens are machine credentials); the authenticated
+            credential (tenant key prefix or partner id) is recorded alongside it.
           example: "ciso@acme.com"
         comment:
           type: string

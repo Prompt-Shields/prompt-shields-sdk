@@ -165,6 +165,60 @@ async def test_history_is_append_only_and_flags_value_changes(seeded_db):
         with pytest.raises(DBAPIError, match="immutable"):
             await s.execute(text("UPDATE asset_attestations SET state = 'attested'"))
         await s.rollback()
+        # Nor deleted (delete + re-insert would rewrite history) ...
+        with pytest.raises(DBAPIError, match="append-only"):
+            await s.execute(text("DELETE FROM asset_attestations"))
+        await s.rollback()
+        # ... and erasure of a different tenant does not unlock this one.
+        await s.execute(
+            text("SELECT set_config('prompt_shields.erasing_tenant', :t, true)"),
+            {"t": str(uuid.uuid4())},
+        )
+        with pytest.raises(DBAPIError, match="append-only"):
+            await s.execute(text("DELETE FROM asset_attestations"))
+        await s.rollback()
+        assert len((await s.execute(select(AssetAttestation))).scalars().all()) == 2
+
+
+@pytest.mark.asyncio
+async def test_tenant_erasure_deletes_attestations(seeded_db):
+    from collector.retention import erase_tenant
+
+    env = await _seed(seeded_db)
+    async with _client() as c:
+        r = await c.post(
+            f"/api/v1/registry/assets/{env.asset_id}/attestations",
+            headers=TENANT_KEY,
+            json={"field": "owner", "state": "attested", "attested_by": "a@test.com"},
+        )
+        assert r.status_code == 201
+    async with env.factory() as s:
+        result = await erase_tenant(s, env.tenant_id, batch_size=1)
+    assert result.rows_deleted["asset_attestations"] == 1
+    assert result.rows_deleted["ai_assets"] == 1
+    async with env.factory() as s:
+        assert (await s.execute(select(AssetAttestation))).scalars().all() == []
+        # The setting is transaction-local: a later plain DELETE is refused again.
+        assert (
+            await s.execute(text("SELECT current_setting('prompt_shields.erasing_tenant', true)"))
+        ).scalar() in (None, "")
+
+
+@pytest.mark.asyncio
+async def test_latest_attestations_accepts_more_ids_than_bind_limit(seeded_db):
+    """The export passes every asset id of the tenant in one call."""
+    env = await _seed(seeded_db)
+    async with _client() as c:
+        await c.post(
+            f"/api/v1/registry/assets/{env.asset_id}/attestations",
+            headers=TENANT_KEY,
+            json={"field": "owner", "state": "attested", "attested_by": "a@test.com"},
+        )
+    ids = [uuid.uuid4() for _ in range(40_000)] + [env.asset_id, env.foreign_id]
+    async with env.factory() as s:
+        latest = await attestation.latest_attestations(s, env.tenant_id, ids)
+    assert set(latest) == {env.asset_id}
+    assert latest[env.asset_id]["owner"].attested_by == "a@test.com"
 
 
 @pytest.mark.asyncio

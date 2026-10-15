@@ -10,8 +10,9 @@ returned side by side.
 Storage is `asset_attestations`, append-only: each decision is a new row
 with who (`attested_by` plus the authenticated tenant key prefix or
 partner), when, the state, a comment and a snapshot of the field's value at
-that moment. The current state of a field is its newest row. A database
-trigger rejects UPDATE, so history cannot be rewritten.
+that moment. The current state of a field is its newest row. Database
+triggers reject UPDATE, and DELETE outside tenant erasure, so history cannot
+be rewritten.
 
 Fields are generic. `register_attestable_field(name, getter)` adds one; the
 getter returns the field's current value from an `AIAsset` and is used to
@@ -38,7 +39,9 @@ from typing import Any, Literal
 from uuid import UUID
 
 from db.models import AIAsset, AssetAttestation
-from sqlalchemy import func, select
+from sqlalchemy import any_, bindparam, func, select
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 UNREVIEWED = "unreviewed"
@@ -163,7 +166,17 @@ async def latest_attestations(
         select(AssetAttestation.id, rank)
         .where(
             AssetAttestation.tenant_id == tenant_id,
-            AssetAttestation.asset_id.in_(list(asset_ids)),
+            # One array parameter rather than one bind per id: the export
+            # passes every asset of the tenant, which can exceed the driver's
+            # bind parameter limit (32767 for asyncpg) with IN (...).
+            AssetAttestation.asset_id
+            == any_(
+                bindparam(
+                    "attested_asset_ids",
+                    list(asset_ids),
+                    type_=ARRAY(PG_UUID(as_uuid=True)),
+                )
+            ),
         )
         .subquery()
     )
