@@ -68,6 +68,11 @@ from collector.cloud_inventory import router as cloud_inventory_router  # noqa: 
 
 app.include_router(cloud_inventory_router)
 
+# EA-tool connector: push the registry to LeanIX (operator trigger)
+from collector.leanix import router as leanix_router  # noqa: E402
+
+app.include_router(leanix_router)
+
 # Operator surface: retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router  # noqa: E402
 
