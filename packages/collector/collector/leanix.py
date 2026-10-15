@@ -151,10 +151,12 @@ def connection_for_tenant(
     conn = settings.leanix.get(str(tenant_id))
     if conn is None:
         return None
+    suffixes = tuple(s for s in settings.leanix_allowed_host_suffixes if s.strip("."))
+    if not suffixes:
+        # An empty list must not turn the allowlist off.
+        raise ConnectorError("leanix: PS_LEANIX_ALLOWED_HOST_SUFFIXES is empty")
     try:
-        host = validate_hostname(
-            conn.workspace_host, tuple(settings.leanix_allowed_host_suffixes)
-        )
+        host = validate_hostname(conn.workspace_host, suffixes)
     except ValueError as exc:
         raise ConnectorError(f"leanix: workspace_host: {exc}")
     return conn.model_copy(update={"workspace_host": host})

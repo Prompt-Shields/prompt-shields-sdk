@@ -131,6 +131,13 @@ def test_workspace_host_accepted_and_normalised():
         ("fd00::1", False),
         ("100.64.0.1", False),
         ("2606:4700::1111", True),
+        ("0.0.0.0", False),
+        ("64:ff9b::a9fe:a9fe", False),  # NAT64 -> 169.254.169.254
+        ("::a9fe:a9fe", False),  # IPv4-compatible
+        ("fec0::1", False),  # site-local
+        ("2002:a00:1::", False),  # 6to4 of 10.0.0.1
+        ("fe80::1%eth0", False),
+        ("not-an-ip", False),
     ],
 )
 def test_is_public_ip(ip, public):
@@ -141,6 +148,16 @@ def test_connection_refuses_host_outside_allowed_suffixes():
     with pytest.raises(cx.ConnectorError) as exc:
         lx.connection_for_tenant(TENANT, _settings(workspace_host="metadata.internal"))
     assert LX_TOKEN not in str(exc.value)
+
+
+def test_empty_allowed_suffixes_fail_closed():
+    settings = _settings(workspace_host="metadata.internal")
+    settings.leanix_allowed_host_suffixes = []
+    with pytest.raises(cx.ConnectorError, match="empty"):
+        lx.connection_for_tenant(TENANT, settings)
+    settings.leanix_allowed_host_suffixes = ["."]
+    with pytest.raises(cx.ConnectorError, match="empty"):
+        lx.connection_for_tenant(TENANT, settings)
 
 
 def test_partner_api_must_be_https():
@@ -166,6 +183,67 @@ async def test_guarded_client_refuses_private_resolution():
         with pytest.raises(cx.ConnectorError, match="non-public"):
             await c.request("GET", "/x", what="x")
     assert calls == []
+
+
+async def test_guarded_client_pins_connection_to_checked_address():
+    """DNS rebinding: the name is resolved once per request and the
+    connection goes to that checked address, so a second lookup returning
+    a private address is never used."""
+    answers = [["93.184.216.34"], ["169.254.169.254"]]
+    lookups, seen = [], []
+
+    async def rebinding(host, port):
+        lookups.append((host, port))
+        return answers[min(len(lookups) - 1, 1)]
+
+    def handler(r):
+        seen.append(r)
+        return httpx.Response(200)
+
+    async with cx.GuardedClient(
+        f"https://{HOST}",
+        name="t",
+        transport=httpx.MockTransport(handler),
+        resolver=rebinding,
+    ) as c:
+        await c.request("GET", "/x", what="x", headers={"X-A": "1"})
+        with pytest.raises(cx.ConnectorError, match="non-public"):
+            await c.request("GET", "/x", what="x")
+    assert lookups == [(HOST, 443), (HOST, 443)]
+    assert len(seen) == 1
+    r = seen[0]
+    assert str(r.url) == "https://93.184.216.34/x"
+    assert r.headers["host"] == HOST and r.headers["x-a"] == "1"
+    assert r.extensions["sni_hostname"] == HOST
+
+
+async def test_guarded_client_pins_ipv6_and_private_opt_in():
+    seen = []
+
+    async def v6(host, port):
+        return ["2606:4700::1111"]
+
+    async def internal(host, port):
+        return ["10.0.0.7"]
+
+    transport = httpx.MockTransport(lambda r: seen.append(r) or httpx.Response(200))
+    async with cx.GuardedClient(
+        f"https://{HOST}:8443", name="t", transport=transport, resolver=v6
+    ) as c:
+        await c.request("GET", "/x", what="x")
+    async with cx.GuardedClient(
+        "https://collector.internal",
+        name="t",
+        transport=transport,
+        resolver=internal,
+        allow_private_network=True,
+    ) as c:
+        await c.request("GET", "/x", what="x")
+    assert str(seen[0].url) == "https://[2606:4700::1111]:8443/x"
+    assert seen[0].headers["host"] == f"{HOST}:8443"
+    # Private opt-in still connects to the address it checked.
+    assert seen[1].url.host == "10.0.0.7"
+    assert seen[1].extensions["sni_hostname"] == "collector.internal"
 
 
 async def test_guarded_client_does_not_follow_redirects():
@@ -312,7 +390,10 @@ class Fakes:
 
     def partner(self, r: httpx.Request) -> httpx.Response:
         self.partner_requests.append(r)
-        assert r.url.host == "collector.example.com" and r.url.scheme == "https"
+        # Connected to the checked address; Host and SNI keep the name.
+        assert r.url.host == "93.184.216.34" and r.url.scheme == "https"
+        assert r.headers["host"] == "collector.example.com"
+        assert r.extensions["sni_hostname"] == "collector.example.com"
         assert r.headers["authorization"] == f"Bearer {PARTNER_KEY}"
         if r.url.path == "/partner/v1/export":
             return httpx.Response(
@@ -333,7 +414,8 @@ class Fakes:
 
     def leanix(self, r: httpx.Request) -> httpx.Response:
         self.leanix_requests.append(r)
-        assert r.url.host == HOST and r.url.scheme == "https"
+        assert r.url.host == "93.184.216.34" and r.url.scheme == "https"
+        assert r.headers["host"] == HOST and r.extensions["sni_hostname"] == HOST
         assert PARTNER_KEY not in r.headers.get("authorization", "")
         if r.url.path == lx.TOKEN_PATH:
             assert r.headers["authorization"].startswith("Basic ")

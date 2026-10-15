@@ -35,7 +35,8 @@ class FakeLeanIX:
         self.ldifs: list[dict] = []
 
     def __call__(self, r: httpx.Request) -> httpx.Response:
-        assert r.url.host == HOST
+        assert r.url.host == "93.184.216.34" and r.headers["host"] == HOST
+        assert r.extensions["sni_hostname"] == HOST
         if r.url.path == lx.TOKEN_PATH:
             return httpx.Response(200, json={"access_token": "bearer"})
         if r.url.path.endswith("/configurations/"):

@@ -6,8 +6,10 @@ connector needs and nothing tool specific:
 
   - `GuardedClient`: an HTTP client pinned to one ``https`` host. Every
     request is checked against that host (scheme, host and port), the host
-    must resolve only to public addresses (SSRF guard, re-checked on each
-    request), redirects are never followed, timeouts are fixed and 429,
+    must resolve only to public addresses (SSRF guard shared with the
+    webhook sender, re-checked on each request) and the connection goes
+    to the checked address (TLS still verified for the host name), so DNS
+    rebinding cannot redirect it; redirects are never followed, timeouts are fixed and 429,
     5xx and transport errors are retried a bounded number of times,
     honouring ``Retry-After``. Errors carry the status code only, never a
     response body or a credential.
@@ -29,7 +31,6 @@ import asyncio
 import ipaddress
 import logging
 import re
-import socket
 from collections.abc import Awaitable, Callable
 from typing import Any, Self
 from urllib.parse import quote
@@ -39,6 +40,8 @@ import httpx
 from db.models import Tenant
 from pydantic import BaseModel, SecretStr, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from collector import egress
 
 logger = logging.getLogger("prompt_shields.connectors")
 
@@ -84,30 +87,34 @@ def validate_hostname(host: str, allowed_suffixes: tuple[str, ...] = ()) -> str:
 
 
 def is_public_ip(value: str) -> bool:
+    """Same rules as the webhook sender (`collector.egress.ip_is_public`):
+    refuses private, loopback, link-local / metadata, CGNAT, reserved,
+    multicast, and IPv6 forms embedding them (mapped, 6to4, Teredo, NAT64,
+    IPv4-compatible) plus site-local."""
     try:
-        ip = ipaddress.ip_address(value)
+        ip = ipaddress.ip_address(value.split("%", 1)[0])
     except ValueError:
         return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return ip.is_global and not ip.is_multicast
+    return egress.ip_is_public(ip)
 
 
-async def default_resolver(host: str, port: int) -> list[str]:
-    infos = await asyncio.get_running_loop().getaddrinfo(
-        host, port, type=socket.SOCK_STREAM
-    )
-    return [info[4][0] for info in infos]
+default_resolver: Resolver = egress.resolve_host
 
 
-async def assert_public_host(host: str, port: int, resolver: Resolver) -> None:
+async def assert_public_host(
+    host: str, port: int, resolver: Resolver, *, allow_private: bool = False
+) -> str:
+    """Resolve ``host`` and return the address to connect to; every
+    resolved address must pass the SSRF check."""
     try:
         addresses = await resolver(host, port)
     except OSError as exc:
         raise ConnectorError(f"{host}: DNS lookup failed ({type(exc).__name__})")
     if not addresses:
         raise ConnectorError(f"{host}: DNS lookup returned no address")
-    if not all(is_public_ip(a) for a in addresses):
+    try:
+        return egress.check_addresses(addresses, allow_private=allow_private)
+    except egress.AddressNotAllowed:
         raise ConnectorError(f"{host}: resolves to a non-public address; refused")
 
 
@@ -150,6 +157,9 @@ class GuardedClient:
             transport=transport,
             timeout=httpx.Timeout(timeout, connect=min(timeout, 10.0)),
             follow_redirects=False,
+            # No proxy or .netrc from the environment: the connection must
+            # go to the checked address.
+            trust_env=False,
         )
 
     async def __aenter__(self) -> Self:
@@ -175,11 +185,23 @@ class GuardedClient:
         url = self.url(path)
         if (url.scheme, url.host, url.port) != self._origin:
             raise ConnectorError(f"{self.name}: {what}: refusing off-host request")
-        if not self._allow_private:
-            await assert_public_host(url.host, url.port or 443, self._resolver)
+        # Resolve once, check every address, then connect to the checked
+        # address (Host header and TLS SNI / certificate check keep the
+        # host name), so httpx never resolves the name again: no DNS
+        # rebinding between the check and the connection.
+        address = await assert_public_host(
+            url.host,
+            url.port or 443,
+            self._resolver,
+            allow_private=self._allow_private,
+        )
+        target, pin_headers, extensions = egress.pin_request(url, address)
+        headers = {**(kwargs.pop("headers", None) or {}), **pin_headers}
         for attempt in range(self._max_retries + 1):
             try:
-                resp = await self._client.request(method, url, **kwargs)
+                resp = await self._client.request(
+                    method, target, headers=headers, extensions=extensions, **kwargs
+                )
             except httpx.TransportError as exc:
                 if attempt == self._max_retries:
                     raise ConnectorError(
