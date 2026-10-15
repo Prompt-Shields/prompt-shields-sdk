@@ -4,10 +4,12 @@ human-set values left alone, withdrawal, review, reads and tenant isolation."""
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from collector.app import app
 from collector.partner_auth import hash_secret, issue_access_token
-from collector.risk_suggestions import _run_cli, suggest_risks
+from collector.risk_suggestions import _run_cli, load_rulesets, suggest_risks
 from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import AIAsset, PartnerCredential, RiskMapping, Tenant
 from httpx import ASGITransport, AsyncClient
@@ -41,6 +43,8 @@ NIST_SENSITIVE = "nist_ai_rmf.privacy.sensitive_pii"
 ISO_A7 = "iso_42001.a7.personal_data"
 ISO_A5 = "iso_42001.a5.impact_assessment"
 HIRING_RULES = {RECRUITMENT, NIST_SENSITIVE, ISO_A7, ISO_A5}
+# The support chatbot only gets the Article 50(1) transparency suggestion.
+CHATBOT = "eu_ai_act.article_50.1.ai_interaction_disclosure"
 
 
 def _session(engine):
@@ -128,13 +132,20 @@ async def test_suggestions_from_registry_and_telemetry_flows(seeded_db):
     result = await _suggest(seeded_db, tenant)
     assert (result.assets, result.created, result.updated, result.withdrawn) == (
         2,
-        4,
+        5,
         0,
         0,
     )
 
     risks = await _risks(seeded_db, tenant)
-    assert set(risks) == HIRING_RULES  # nothing for the support chatbot
+    assert set(risks) == HIRING_RULES | {CHATBOT}
+    assert risks[CHATBOT].asset_id == await _asset_id(
+        seeded_db, tenant, "support-chatbot"
+    )
+    assert (risks[CHATBOT].risk_category, risks[CHATBOT].risk_level) == (
+        "transparency",
+        "medium",
+    )
     hiring = await _asset_id(seeded_db, tenant, "resume-screening")
     r = risks[RECRUITMENT]
     assert r.asset_id == hiring
@@ -144,7 +155,7 @@ async def test_suggestions_from_registry_and_telemetry_flows(seeded_db):
         "high",
     )
     assert (r.status, r.source, r.confidence) == ("suggested", "rules", "high")
-    assert (r.framework_ref, r.ruleset_version) == ("Annex III, point 4(a)", "1.1.0")
+    assert (r.framework_ref, r.ruleset_version) == ("Annex III, point 4(a)", "1.2.0")
     assert r.reviewed_at is None and r.created_at is not None
     signals = {(e["signal"], e["role"]): e for e in r.evidence["signals"]}
     # Data sources and PII come from the telemetry-derived data flows.
@@ -259,6 +270,41 @@ async def test_human_set_values_are_never_overwritten(seeded_db):
 
 
 @pytest.mark.asyncio
+async def test_rejection_survives_a_ruleset_version_bump(seeded_db):
+    tenant = await _tenant_id(seeded_db)
+    await _ingest([HIRING_EVENT])
+    await _suggest(seeded_db, tenant)
+    risks = await _risks(seeded_db, tenant)
+    no = await _call(
+        "POST",
+        f"/api/v1/admin/risk-mappings/{risks[RECRUITMENT].id}/review",
+        json={"status": "rejected", "reviewed_by": "dpo@example.com"},
+    )
+    assert no.status_code == 200
+
+    # A new version of every ruleset (as when a rule's keywords change).
+    bumped = [
+        dataclasses.replace(
+            rs,
+            version="9.9.9",
+            rules=tuple(
+                dataclasses.replace(r, ruleset_version="9.9.9") for r in rs.rules
+            ),
+        )
+        for rs in load_rulesets()
+    ]
+    async with _session(seeded_db) as db:
+        result = await suggest_risks(db, tenant, rulesets=bumped)
+        await db.commit()
+    risks = await _risks(seeded_db, tenant)
+    # The human decision stands; open suggestions move to the new version.
+    assert risks[RECRUITMENT].status == "rejected"
+    assert risks[RECRUITMENT].ruleset_version == "1.2.0"
+    assert risks[ISO_A7].ruleset_version == "9.9.9"
+    assert (result.updated, result.skipped_human_set) == (3, 1)
+
+
+@pytest.mark.asyncio
 async def test_stale_suggestions_are_withdrawn(seeded_db):
     tenant = await _tenant_id(seeded_db)
     await _ingest(
@@ -273,7 +319,8 @@ async def test_stale_suggestions_are_withdrawn(seeded_db):
     )
     await _suggest(seeded_db, tenant)
     assert set(await _risks(seeded_db, tenant)) == {
-        "eu_ai_act.annex_iii.5b.creditworthiness"
+        "eu_ai_act.annex_iii.5b.creditworthiness",
+        CHATBOT,
     }
 
     asset = await _asset_id(seeded_db, tenant, "credit scoring")
@@ -282,7 +329,7 @@ async def test_stale_suggestions_are_withdrawn(seeded_db):
         await db.commit()
     result = await _suggest(seeded_db, tenant)
     assert result.withdrawn == 1
-    assert await _risks(seeded_db, tenant) == {}
+    assert set(await _risks(seeded_db, tenant)) == {CHATBOT}
 
 
 @pytest.mark.asyncio
