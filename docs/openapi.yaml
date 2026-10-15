@@ -454,6 +454,13 @@ components:
           type: string
           description: Token for delta sync (only on /changes endpoint)
           nullable: true
+        tenant_id:
+          type: string
+          format: uuid
+          description: >-
+            Tenant of the credential that made the request (only on /changes).
+            Lets an integration check that its key belongs to the tenant it
+            syncs.
 
     Error:
       type: object
@@ -765,6 +772,13 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/DataFlow'
+                  meta:
+                    type: object
+                    properties:
+                      tenant_id:
+                        type: string
+                        format: uuid
+                        description: Tenant of the credential that made the request
               example:
                 data:
                   - id: "019e1a2b-0000-7000-8000-000000000010"
@@ -1193,6 +1207,10 @@ paths:
                       sync_token:
                         type: string
                         description: Use as `since` parameter for delta sync
+                      tenant_id:
+                        type: string
+                        format: uuid
+                        description: Tenant of the credential that made the request
 
   /partner/v1/health:
     get:
