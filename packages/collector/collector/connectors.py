@@ -13,6 +13,9 @@ connector needs and nothing tool specific:
     5xx and transport errors are retried a bounded number of times,
     honouring ``Retry-After``. Errors carry the status code only, never a
     response body or a credential.
+  - `BearerToken`: an OAuth access token for a `GuardedClient`, fetched on
+    first use, refreshed shortly before ``expires_in`` runs out and once
+    more if the server answers 401 anyway, so long syncs outlive a token.
   - `PartnerApiClient`: reads ``/partner/v1/export``, ``/changes`` and
     ``/assets/{id}/data-flows`` with a scoped partner API key, so a
     connector sees exactly what its credential's scopes allow
@@ -34,6 +37,7 @@ import asyncio
 import ipaddress
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -239,10 +243,121 @@ class GuardedClient:
 
     async def json(self, method: str, path: str, *, what: str, **kwargs: Any) -> Any:
         resp = await self.request(method, path, what=what, **kwargs)
+        return self.decode(resp, what)
+
+    def decode(self, resp: httpx.Response, what: str) -> Any:
         try:
             return resp.json()
         except ValueError:
             raise ConnectorError(f"{self.name}: {what} returned invalid JSON")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OAuth access token
+# ──────────────────────────────────────────────────────────────────────
+
+# Refresh this long before the token's ``expires_in`` runs out (at most a
+# tenth of its lifetime for short-lived tokens).
+TOKEN_REFRESH_MARGIN_S = 60.0
+
+Clock = Callable[[], float]
+
+
+class BearerToken:
+    """An OAuth access token for one `GuardedClient`.
+
+    ``fetch`` performs the token request and returns its JSON body. The
+    token is fetched on first use and again once ``expires_in`` (less a
+    margin) has passed, so a sync that outlives the token keeps working.
+    If a call still answers 401, the token is dropped, fetched again and
+    the call repeated once; a second 401 fails the call. There is no other
+    retry. The token is never logged or put in an error message.
+    """
+
+    def __init__(
+        self,
+        http: GuardedClient,
+        fetch: Callable[[], Awaitable[Any]],
+        *,
+        clock: Clock = time.monotonic,
+    ):
+        self._http = http
+        self._fetch = fetch
+        self._clock = clock
+        self._token: str | None = None
+        self._refresh_at: float | None = None
+
+    def invalidate(self) -> None:
+        self._token = None
+        self._refresh_at = None
+
+    async def _get(self) -> str:
+        if self._token is not None and (
+            self._refresh_at is None or self._clock() < self._refresh_at
+        ):
+            return self._token
+        self.invalidate()
+        body = await self._fetch()
+        token = body.get("access_token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ConnectorError(
+                f"{self._http.name}: token response had no access_token"
+            )
+        lifetime = _expires_in(body.get("expires_in"))
+        self._token = token
+        if lifetime is not None:
+            margin = min(TOKEN_REFRESH_MARGIN_S, lifetime / 10)
+            self._refresh_at = self._clock() + lifetime - margin
+        return token
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        what: str,
+        expected: tuple[int, ...] = (200,),
+        headers: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """`GuardedClient.request` with ``Authorization: Bearer``."""
+        for attempt in range(2):
+            auth = {**(headers or {}), "Authorization": f"Bearer {await self._get()}"}
+            resp = await self._http.request(
+                method,
+                path,
+                what=what,
+                expected=(*expected, 401),
+                headers=auth,
+                **kwargs,
+            )
+            if resp.status_code != 401 or 401 in expected:
+                return resp
+            if attempt == 0:
+                logger.info(
+                    "%s: %s returned 401; refreshing token", self._http.name, what
+                )
+                self.invalidate()
+        raise ConnectorError(f"{self._http.name}: {what} returned HTTP 401")
+
+    async def json(self, method: str, path: str, *, what: str, **kwargs: Any) -> Any:
+        resp = await self.request(method, path, what=what, **kwargs)
+        return self._http.decode(resp, what)
+
+
+def _expires_in(value: Any) -> float | None:
+    """Seconds from a token response's ``expires_in`` (number or numeric
+    string); None when absent or unusable."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if isinstance(value, int | float) and 0 < value < 10**9:
+        return float(value)
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -350,7 +465,9 @@ class PartnerApiClient:
         raise ConnectorError(f"partner-api: changes: more than {MAX_PAGES} pages")
 
     async def data_flows(self, asset_id: str) -> list[dict]:
-        path = f"/partner/v1/assets/{quote(str(UUID(asset_id)))}/data-flows"
+        # str(): a non-string id from the API must raise ValueError (a failed
+        # run), not the AttributeError UUID() raises for it (HTTP 500).
+        path = f"/partner/v1/assets/{quote(str(UUID(str(asset_id))))}/data-flows"
         return _dicts((await self._get(path, "data flows")).get("data"))
 
 
@@ -363,8 +480,8 @@ def _dicts(value: Any) -> list[dict]:
 CURSOR_OVERLAP = timedelta(minutes=5)
 
 
-def _parse_ts(value: str | None) -> datetime | None:
-    if not value:
+def _parse_ts(value: Any) -> datetime | None:
+    if not value or not isinstance(value, str):
         return None
     try:
         dt = datetime.fromisoformat(value)

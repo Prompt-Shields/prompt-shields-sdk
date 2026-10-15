@@ -166,11 +166,11 @@ def test_payload_maps_assets_vendors_and_relations():
     items = payload["items"]
     # A1, openai, A2, anthropic, A3 (openai once); the vendorless entry is skipped.
     assert [i["className"] for i in items] == [
-        "cmdb_ci_ai_application",
+        "cmdb_ci_function_ai",
         "cmdb_ci_service",
-        "cmdb_ci_ai_application",
+        "cmdb_ci_function_ai",
         "cmdb_ci_service",
-        "cmdb_ci_ai_application",
+        "cmdb_ci_function_ai",
     ]
     a1 = items[0]
     assert a1["values"]["correlation_id"] == f"promptshields:asset:{A1}"
@@ -218,6 +218,65 @@ def test_provider_class_none_pushes_assets_only():
     payload = sn.build_payload([_asset(A1), _asset(A2)], conn)
     assert [i["className"] for i in payload["items"]] == ["cmdb_ci_appl"] * 2
     assert payload["relations"] == []
+
+
+def test_self_hosted_vendors_map_to_the_self_hosted_class():
+    conn = _connection()
+    assert conn.asset_class == "cmdb_ci_function_ai"
+    assert conn.self_hosted_asset_class == "cmdb_ci_appl_ai_application"
+    payload = sn.build_payload(
+        [_asset(A1), _asset(A2, vendor="Ollama"), _asset(A3, vendor="vllm")], conn
+    )
+    classes = {i["values"]["correlation_id"]: i["className"] for i in payload["items"]}
+    assert classes[f"promptshields:asset:{A1}"] == "cmdb_ci_function_ai"
+    assert classes[f"promptshields:asset:{A2}"] == "cmdb_ci_appl_ai_application"
+    assert classes[f"promptshields:asset:{A3}"] == "cmdb_ci_appl_ai_application"
+    # Vendors keep the provider class whatever the hosting.
+    assert classes["promptshields:provider:Ollama"] == "cmdb_ci_service"
+
+
+def test_self_hosted_mapping_is_configurable():
+    conn = _connection(
+        self_hosted_vendors=[" InHouse "], self_hosted_asset_class="u_ai_app"
+    )
+    assert conn.class_for("inhouse") == "u_ai_app"
+    assert conn.class_for("ollama") == "cmdb_ci_function_ai"
+    # None: every asset goes to asset_class.
+    conn = _connection(self_hosted_asset_class=None)
+    assert conn.class_for("ollama") == "cmdb_ci_function_ai"
+    with pytest.raises(ValueError):
+        _connection(self_hosted_asset_class="Not A Table")
+
+
+@pytest.mark.parametrize(
+    "last_seen",
+    [12345, 1.5, ["2026"], {"a": 1}, True, "nope", "", "0001-01-01T00:00:00+05:00"],
+)
+def test_malformed_last_seen_is_dropped_not_raised(last_seen):
+    item = sn.asset_item(_asset(last_seen=last_seen), _connection())
+    assert "source_recency_timestamp" not in item["sys_object_source_info"]
+
+
+async def test_malformed_partner_data_is_a_failed_or_ok_run_not_a_500():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"servicenow": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(last_seen=12345), "changed_at": 1700000000}]
+    )
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "ok", out
+    sent = fakes.payloads[0]["items"][0]["sys_object_source_info"]
+    assert "source_recency_timestamp" not in sent
+    # Non-string changed_at does not move the cursor.
+    assert db.tenant.settings["connectors"]["servicenow"]["cursor"] == cursor
+
+
+async def test_out_of_range_changed_at_is_a_failed_run_not_a_500():
+    db = FakeSession({"connectors": {"servicenow": {"cursor": "2026-10-15T00:00:00Z"}}})
+    fakes = Fakes(changes=[{"asset": _asset(), "changed_at": "0001-01-01T00:01:00Z"}])
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "error", out
+    assert out["error"] == "invalid response data"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -408,7 +467,7 @@ async def test_full_then_incremental_sync_is_an_idempotent_upsert(caplog):
     assert out["status"] == "ok" and out["mode"] == "incremental"
     assert fakes.partner_requests[0].url.params["since"] == "2026-10-15T11:55:00+00:00"
     assert out["operations"] == {"UPDATE": 1, "NO_CHANGE": 1}
-    retired = fakes.cmdb[("cmdb_ci_ai_application", f"promptshields:asset:{A1}")]
+    retired = fakes.cmdb[("cmdb_ci_function_ai", f"promptshields:asset:{A1}")]
     assert retired["install_status"] == "7" and retired["operational_status"] == "6"
     assert len(fakes.cmdb) == 4
     assert db.tenant.settings["connectors"]["servicenow"]["cursor"] == (
@@ -512,3 +571,113 @@ async def test_not_configured_and_unknown_tenant():
     assert out["status"] == "not_configured"
     out = await sn.sync_servicenow(db, uuid.uuid4(), settings=_settings())
     assert out["status"] == "tenant_not_found"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Token refresh
+# ──────────────────────────────────────────────────────────────────────
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class TokenFakes:
+    """ServiceNow issuing numbered tokens; ``reject`` lists tokens the IRE
+    endpoint answers 401 to."""
+
+    def __init__(self, expires_in=1800):
+        self.expires_in = expires_in
+        self.issued = 0
+        self.reject: set[str] = set()
+        self.calls: list[tuple[str, str]] = []
+
+    def handler(self, r: httpx.Request) -> httpx.Response:
+        if r.url.path == sn.TOKEN_PATH:
+            self.issued += 1
+            self.calls.append(("token", ""))
+            body = {"access_token": f"{BEARER}-{self.issued}"}
+            if self.expires_in is not None:
+                body["expires_in"] = self.expires_in
+            return httpx.Response(200, json=body)
+        auth = r.headers["authorization"].removeprefix("Bearer ")
+        self.calls.append(("ire", auth))
+        if auth in self.reject:
+            return httpx.Response(401, text=f"bad token {auth}")
+        payload = json.loads(r.content)
+        items = [{"operation": "INSERT", "sysId": "a" * 32} for _ in payload["items"]]
+        return httpx.Response(200, json={"result": {"items": items}})
+
+    def client(self, clock):
+        return sn.ServiceNowClient(
+            _connection(),
+            transport=httpx.MockTransport(self.handler),
+            resolver=_public,
+            sleep=_no_sleep,
+            clock=clock,
+        )
+
+
+PAYLOAD = {"items": [{"className": "x", "values": {}}], "relations": []}
+
+
+async def test_token_is_refreshed_before_expires_in():
+    fakes, clock = TokenFakes(expires_in=1800), Clock()
+    async with fakes.client(clock) as client:
+        await client.identify_reconcile(PAYLOAD)
+        clock.t += 1700  # inside the lifetime less the margin: reused
+        await client.identify_reconcile(PAYLOAD)
+        clock.t += 60  # 1760s: within 60s of expiry, refreshed first
+        await client.identify_reconcile(PAYLOAD)
+    assert fakes.calls == [
+        ("token", ""),
+        ("ire", f"{BEARER}-1"),
+        ("ire", f"{BEARER}-1"),
+        ("token", ""),
+        ("ire", f"{BEARER}-2"),
+    ]
+
+
+async def test_token_without_expires_in_is_kept_until_a_401():
+    fakes, clock = TokenFakes(expires_in=None), Clock()
+    async with fakes.client(clock) as client:
+        await client.identify_reconcile(PAYLOAD)
+        clock.t += 10**6
+        fakes.reject.add(f"{BEARER}-1")
+        await client.identify_reconcile(PAYLOAD)
+    assert fakes.calls == [
+        ("token", ""),
+        ("ire", f"{BEARER}-1"),
+        ("ire", f"{BEARER}-1"),
+        ("token", ""),
+        ("ire", f"{BEARER}-2"),
+    ]
+
+
+async def test_second_401_fails_without_looping_or_leaking(caplog):
+    caplog.set_level(logging.DEBUG)
+    fakes, clock = TokenFakes(), Clock()
+    fakes.reject = {f"{BEARER}-1", f"{BEARER}-2", f"{BEARER}-3"}
+    async with fakes.client(clock) as client:
+        with pytest.raises(sn.ConnectorError) as exc:
+            await client.identify_reconcile(PAYLOAD)
+    assert str(exc.value) == "servicenow: identify and reconcile returned HTTP 401"
+    # One refresh, one repeat; nothing more.
+    assert [c[0] for c in fakes.calls] == ["token", "ire", "token", "ire"]
+    assert BEARER not in caplog.text and CLIENT_SECRET not in caplog.text
+
+
+async def test_basic_auth_401_is_not_retried():
+    db = FakeSession()
+    fakes = Fakes()
+    fakes.fail_with = 401
+    settings = _settings(
+        oauth_client_id=None, oauth_client_secret=None, username="ps", password=PASSWORD
+    )
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs(settings))
+    assert out["error"] == "servicenow: identify and reconcile returned HTTP 401"
+    assert len(fakes.sn_requests) == 1
