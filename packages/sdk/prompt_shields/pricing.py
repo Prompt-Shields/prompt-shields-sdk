@@ -32,6 +32,14 @@ CACHE_WRITE_MULTIPLIER: dict[str, float] = {
     "anthropic": 1.25,
 }
 
+# Vendors that resell another vendor's models at its list prices: a missing
+# (vendor, model) entry is looked up under the fallback vendor, cache
+# multipliers included. Azure OpenAI global standard deployments are billed
+# at OpenAI list prices.
+PRICING_VENDOR_FALLBACK: dict[str, str] = {
+    "azure_openai": "openai",
+}
+
 # (input_per_1k_tokens, output_per_1k_tokens) in USD
 # Source: public pricing pages as of 2026-Q1. Override at runtime if needed.
 DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
@@ -54,6 +62,37 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
     # Google
     ("google", "gemini-1.5-pro"): (0.00125, 0.005),
     ("google", "gemini-1.5-flash"): (0.000075, 0.0003),
+    ("google", "gemini-2.0-flash"): (0.0001, 0.0004),
+    ("google", "gemini-2.5-flash"): (0.0003, 0.0025),
+    ("google", "gemini-2.5-pro"): (0.00125, 0.010),  # prompts <= 200k
+
+    # Amazon Bedrock (on-demand, us-east-1). Cache rates are per model:
+    # Claude reads 10% / writes 125%, Nova reads 25% / no write charge.
+    ("bedrock", "anthropic.claude-sonnet-4-20250514-v1:0"):
+        (0.003, 0.015, 0.0003, 0.00375),
+    ("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0"):
+        (0.003, 0.015, 0.0003, 0.00375),
+    ("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0"):
+        (0.0008, 0.004, 0.00008, 0.001),
+    ("bedrock", "anthropic.claude-3-haiku-20240307-v1:0"): (0.00025, 0.00125),
+    ("bedrock", "amazon.nova-pro-v1:0"): (0.0008, 0.0032, 0.0002, 0.0),
+    ("bedrock", "amazon.nova-lite-v1:0"): (0.00006, 0.00024, 0.000015, 0.0),
+    ("bedrock", "amazon.nova-micro-v1:0"): (0.000035, 0.00014, 0.00000875, 0.0),
+    ("bedrock", "meta.llama3-1-70b-instruct-v1:0"): (0.00072, 0.00072),
+
+    # Mistral (La Plateforme)
+    ("mistral", "mistral-large-latest"): (0.002, 0.006),
+    ("mistral", "mistral-medium-latest"): (0.0004, 0.002),
+    ("mistral", "mistral-small-latest"): (0.0001, 0.0003),
+    ("mistral", "codestral-latest"): (0.0003, 0.0009),
+
+    # Cohere
+    ("cohere", "command-a-03-2025"): (0.0025, 0.010),
+    ("cohere", "command-r-plus-08-2024"): (0.0025, 0.010),
+    ("cohere", "command-r-08-2024"): (0.00015, 0.0006),
+    ("cohere", "command-r7b-12-2024"): (0.0000375, 0.00015),
+
+    # Azure OpenAI: priced via PRICING_VENDOR_FALLBACK (OpenAI list prices).
 }
 
 
@@ -78,6 +117,9 @@ def estimate_cost(
 
     table = pricing_table if pricing_table is not None else DEFAULT_PRICING
     rates = table.get((vendor, model))
+    if rates is None and vendor in PRICING_VENDOR_FALLBACK:
+        vendor = PRICING_VENDOR_FALLBACK[vendor]
+        rates = table.get((vendor, model))
     if rates is None:
         return None
 

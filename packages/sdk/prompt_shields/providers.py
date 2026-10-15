@@ -4,8 +4,13 @@ event metadata structure.
 Each provider class wraps the upstream SDK and exposes a single `extract(response)`
 method that returns a dict of fields the collector understands. New providers
 add ~20 lines.
+
+Adapters only read response objects and never import a vendor SDK, so every
+vendor package stays an optional install. Each accepts the SDK's response
+model or the equivalent raw JSON dict.
 """
 
+import re
 from typing import Any
 
 
@@ -93,6 +98,34 @@ def gemini_usage_fields(usage_metadata: Any) -> dict:
     }
 
 
+def _count(value: Any) -> int | None:
+    """An integer count, also from a digit string (HTTP header values)."""
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return _int(value)
+
+
+def _openai_like_extract(response: Any) -> dict:
+    """Usage and tool calls from a Chat Completions-shaped response.
+
+    Used for APIs that copy that shape (Azure OpenAI, Mistral). Reads SDK
+    objects and raw JSON dicts alike.
+    """
+    tool_calls: list[dict] = []
+    for choice in _field(response, "choices") or []:
+        message = _field(choice, "message")
+        for tc in _field(message, "tool_calls") or []:
+            fn = _field(tc, "function")
+            if fn is not None:
+                tool_calls.append({"name": _field(fn, "name"), "type": "function"})
+    model = _field(response, "model")
+    return {
+        **openai_usage_fields(_field(response, "usage")),
+        "tool_calls_used": tool_calls or None,
+        "served_model": model if isinstance(model, str) else None,
+    }
+
+
 class ProviderAdapter:
     """Base class — subclasses MUST set `vendor` and implement `extract`."""
 
@@ -101,6 +134,15 @@ class ProviderAdapter:
     def extract(self, response: Any) -> dict:
         """Return event-shaped fields parsed from a provider response."""
         raise NotImplementedError
+
+    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
+        """The model name to look up in the pricing table.
+
+        Defaults to the requested model. Adapters override it where the
+        requested name is not a priced model id (Azure deployment names,
+        Bedrock cross-region inference profiles).
+        """
+        return model
 
 
 class OpenAIAdapter(ProviderAdapter):
@@ -163,11 +205,7 @@ class AnthropicAdapter(ProviderAdapter):
 
 
 class GeminiAdapter(ProviderAdapter):
-    """Gemini `generateContent` responses (google-genai SDK or raw JSON).
-
-    Not registered in `ADAPTERS`: the wrapped clients have no Gemini upstream
-    yet. Usable directly by integrations that observe Gemini responses.
-    """
+    """Gemini `generateContent` responses (google-genai SDK or raw JSON)."""
 
     vendor = "google"
 
@@ -195,10 +233,203 @@ class GeminiAdapter(ProviderAdapter):
         }
 
 
+# Azure echoes the underlying model with a version date, e.g.
+# "gpt-4o-2024-08-06"; the pricing table keys the base name.
+_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+class AzureOpenAIAdapter(ProviderAdapter):
+    """Azure OpenAI chat completions (`openai.AzureOpenAI` or raw JSON).
+
+    Azure calls name a *deployment*, not a model. `deployments` maps
+    deployment names to model ids for pricing, e.g. `{"prod-chat": "gpt-4o"}`.
+    An unmapped deployment is priced by the model Azure reports in the
+    response, without its version date. Rates fall back to OpenAI list
+    prices (`pricing.PRICING_VENDOR_FALLBACK`).
+    """
+
+    vendor = "azure_openai"
+
+    def __init__(self, deployments: dict[str, str] | None = None):
+        self.deployments = dict(deployments or {})
+
+    def extract(self, response: Any) -> dict:
+        return _openai_like_extract(response)
+
+    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
+        if model in self.deployments:
+            return self.deployments[model]
+        if served_model and served_model != model:
+            return _DATE_SUFFIX.sub("", served_model)
+        return model
+
+
+class MistralAdapter(ProviderAdapter):
+    """Mistral `chat.complete` responses (`mistralai` SDK or raw JSON).
+
+    The response has the Chat Completions shape. Reasoning (Magistral)
+    tokens are inside `completion_tokens` and not reported separately.
+    """
+
+    vendor = "mistral"
+
+    def extract(self, response: Any) -> dict:
+        return _openai_like_extract(response)
+
+
+class CohereAdapter(ProviderAdapter):
+    """Cohere chat responses: v2 (`ClientV2.chat`) and v1 (`Client.chat`).
+
+    Counts come from `billed_units` (what Cohere charges), falling back to
+    `tokens`. v2 nests them under `usage`, v1 under `meta`. Cohere reports
+    no cached or reasoning tokens and no served model.
+    """
+
+    vendor = "cohere"
+
+    def extract(self, response: Any) -> dict:
+        usage = _field(response, "usage")
+        if usage is None:
+            usage = _field(response, "meta")
+        billed = _field(usage, "billed_units")
+        tokens = _field(usage, "tokens")
+
+        def count(name: str) -> int | None:
+            value = _count(_field(billed, name))
+            return value if value is not None else _count(_field(tokens, name))
+
+        message = _field(response, "message")
+        calls = _field(message, "tool_calls")
+        if calls is None:
+            calls = _field(response, "tool_calls")  # v1
+        tool_calls: list[dict] = []
+        for tc in calls or []:
+            fn = _field(tc, "function")
+            name = _field(fn, "name") if fn is not None else _field(tc, "name")
+            tool_calls.append({"name": name, "type": "function"})
+
+        return {
+            "tokens_in": count("input_tokens"),
+            "tokens_out": count("output_tokens"),
+            "tokens_cached": None,
+            "tokens_cache_write": None,
+            "tokens_reasoning": None,
+            "tool_calls_used": tool_calls or None,
+            "served_model": None,
+        }
+
+
+# Cross-region inference profiles prefix the model id, e.g.
+# "us.anthropic.claude-3-5-haiku-20241022-v1:0"; prices are the base model's.
+_BEDROCK_PROFILE_PREFIX = re.compile(r"^(?:us|eu|apac|us-gov|global|jp|au|ca)\.")
+
+
+class BedrockAdapter(ProviderAdapter):
+    """Amazon Bedrock runtime responses from boto3 (`bedrock-runtime`).
+
+    Accepts:
+      - `converse` responses (`usage.inputTokens`, `cacheReadInputTokens`, ...);
+      - `invoke_model` responses, read from the `x-amzn-bedrock-*-token-count`
+        HTTP headers so the streaming `body` is never consumed;
+      - an `invoke_model` body the caller already parsed: Anthropic Messages,
+        Amazon Nova or Meta Llama shape.
+
+    Bedrock input counts exclude cache reads and writes (Converse
+    `totalTokens` = input + output + cache read + cache write), so they are
+    added back: `tokens_in` is the total prompt size, as for other vendors.
+    Converse does not name the model, so `served_model` is None unless an
+    Anthropic body reports it.
+    """
+
+    vendor = "bedrock"
+
+    def extract(self, response: Any) -> dict:
+        usage = _field(response, "usage")
+        served_model = None
+        if usage is not None and _field(usage, "input_tokens") is not None:
+            # Anthropic Messages body.
+            counts = (
+                _count(_field(usage, "input_tokens")),
+                _count(_field(usage, "output_tokens")),
+                _count(_field(usage, "cache_read_input_tokens")),
+                _count(_field(usage, "cache_creation_input_tokens")),
+            )
+            model = _field(response, "model")
+            served_model = model if isinstance(model, str) else None
+        elif usage is not None:
+            # Converse, or an Amazon Nova body (`...TokenCount` cache keys).
+            counts = (
+                _count(_field(usage, "inputTokens")),
+                _count(_field(usage, "outputTokens")),
+                _first_count(usage, "cacheReadInputTokens", "cacheReadInputTokenCount"),
+                _first_count(usage, "cacheWriteInputTokens", "cacheWriteInputTokenCount"),
+            )
+        elif _field(response, "prompt_token_count") is not None:
+            # Meta Llama body.
+            counts = (
+                _count(_field(response, "prompt_token_count")),
+                _count(_field(response, "generation_token_count")),
+                None,
+                None,
+            )
+        else:
+            counts = _bedrock_header_counts(response)
+
+        tool_calls: list[dict] = []
+        message = _field(_field(response, "output"), "message")
+        for block in _field(message, "content") or []:
+            tool_use = _field(block, "toolUse")
+            if tool_use is not None:
+                tool_calls.append({"name": _field(tool_use, "name"), "type": "tool_use"})
+        for block in _field(response, "content") or []:  # Anthropic body
+            if _field(block, "type") == "tool_use":
+                tool_calls.append({"name": _field(block, "name"), "type": "tool_use"})
+
+        return {
+            **anthropic_usage_fields(*counts),
+            "tool_calls_used": tool_calls or None,
+            "served_model": served_model,
+        }
+
+    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
+        return _BEDROCK_PROFILE_PREFIX.sub("", model) if model else model
+
+
+def _first_count(obj: Any, *names: str) -> int | None:
+    for name in names:
+        value = _count(_field(obj, name))
+        if value is not None:
+            return value
+    return None
+
+
+def _bedrock_header_counts(response: Any) -> tuple:
+    """Token counts from an `invoke_model` response's HTTP headers."""
+    headers = _field(_field(response, "ResponseMetadata"), "HTTPHeaders")
+    if not isinstance(headers, dict):
+        headers = vars(headers) if hasattr(headers, "__dict__") else {}
+    lowered = {str(k).lower(): v for k, v in headers.items()}
+
+    def header(name: str) -> int | None:
+        return _count(lowered.get(f"x-amzn-bedrock-{name}"))
+
+    return (
+        header("input-token-count"),
+        header("output-token-count"),
+        header("cache-read-input-token-count"),
+        header("cache-write-input-token-count"),
+    )
+
+
 # Registry — keyed by vendor name
 ADAPTERS: dict[str, ProviderAdapter] = {
     "openai": OpenAIAdapter(),
     "anthropic": AnthropicAdapter(),
+    "google": GeminiAdapter(),
+    "azure_openai": AzureOpenAIAdapter(),
+    "bedrock": BedrockAdapter(),
+    "mistral": MistralAdapter(),
+    "cohere": CohereAdapter(),
 }
 
 

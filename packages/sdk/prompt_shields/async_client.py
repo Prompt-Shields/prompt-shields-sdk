@@ -122,7 +122,8 @@ class AsyncShieldsClient:
             "latency_ms": latency_ms,
             "tool_calls_used": adapter_fields.get("tool_calls_used"),
             "cost": estimate_cost(
-                vendor=self._vendor, model=model,
+                vendor=self._vendor,
+                model=self._adapter.pricing_model(model, served_model),
                 tokens_in=tokens_in, tokens_out=tokens_out,
                 pricing_table=self._pricing_table,
                 tokens_cached=adapter_fields.get("tokens_cached"),
