@@ -304,6 +304,21 @@ def test_stream_consumed_in_another_context(fakes, handler, instrumented):  # no
     assert all(e["framework"] == "llamaindex" for e in events)
 
 
+def test_unregister_drops_pending_streams(fakes):  # noqa: F811
+    prompt_shields.instrument(ps_api_key="ps_key")
+    before = len(inst._deferred_calls)
+    li.register()
+    llm = LocalLLM(resource=fakes.chat.Completions())
+    abandoned = [llm.stream_chat(PROMPT) for _ in range(3)]  # never read
+    assert len(inst._deferred_calls) == before + 3
+    li.unregister()
+    assert len(inst._deferred_calls) == before
+    assert all(s is not None for s in abandoned)
+    llm.chat(PROMPT)  # reported by instrument() alone
+    (event,) = _events()
+    assert "framework" not in event
+
+
 @pytest.mark.parametrize("instrumented", [False, True])
 def test_llm_call_made_while_a_stream_is_read_reports_once(
         fakes, handler, instrumented):  # noqa: F811
@@ -660,3 +675,82 @@ def test_real_llama_index_openai(recording, instrumented):  # noqa: F811
     assert first["served_model"] == "gpt-4o-2024-08-06"
     if instrumented:
         assert (second["tokens_in"], second["tokens_out"]) == (5, 1)
+
+
+# --- an instrumented vendor stream helper under a LlamaIndex stream ------------
+
+
+_ANTHROPIC_SSE = [
+    ("message_start", {"type": "message_start", "message": {
+        "id": "m1", "type": "message", "role": "assistant", "content": [],
+        "model": "claude-test", "stop_reason": None, "stop_sequence": None,
+        "usage": {"input_tokens": 9, "output_tokens": 1}}}),
+    ("content_block_start", {"type": "content_block_start", "index": 0,
+                             "content_block": {"type": "text", "text": ""}}),
+    ("content_block_delta", {"type": "content_block_delta", "index": 0,
+                             "delta": {"type": "text_delta", "text": "hello"}}),
+    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+    ("message_delta", {"type": "message_delta",
+                       "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                       "usage": {"output_tokens": 5}}),
+    ("message_stop", {"type": "message_stop"}),
+]
+
+
+@pytest.mark.parametrize("close_early", [False, True])
+def test_anthropic_stream_helper_under_llamaindex_stream(recording, close_early):  # noqa: F811
+    # The LlamaIndex stream opens Anthropic's `messages.stream()` (observed
+    # in place by instrument()) only when it is read, here in a thread that
+    # does not share the caller's context. One event, from instrument().
+    import threading
+
+    anthropic = pytest.importorskip("anthropic")
+    prompt_shields.instrument(ps_api_key="ps_key")
+    http = _http(anthropic)
+    text = "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n"
+                   for name, data in _ANTHROPIC_SSE)
+    client = anthropic.Anthropic(api_key="sk-ant", http_client=http.Client(
+        transport=http.MockTransport(lambda r: http.Response(
+            200, text=text, headers={"content-type": "text/event-stream"}))))
+
+    class ClaudeLLM(LocalLLM):
+        @classmethod
+        def class_name(cls):
+            return "Anthropic_LLM"
+
+        @llm_chat_callback()
+        def stream_chat(self, messages, **kwargs):
+            def gen():
+                with client.messages.stream(model="claude-test", max_tokens=10,
+                                            messages=MESSAGES) as s:
+                    for delta in s.text_stream:
+                        yield ChatResponse(message=ChatMessage(
+                            role="assistant", content=delta), delta=delta)
+            return gen()
+
+    handler = li.register()
+    try:
+        stream = ClaudeLLM().stream_chat(PROMPT)
+        _FRAMEWORK_CALL.set(None)
+
+        def consume():
+            if close_early:
+                next(stream)
+                stream.close()
+            else:
+                list(stream)
+
+        thread = threading.Thread(target=consume)
+        thread.start()
+        thread.join()
+        LocalLLM().chat(PROMPT)  # unrelated, reported by the integration
+    finally:
+        li.unregister()
+    stream_event, chat_event = _events()
+    assert stream_event["framework"] == chat_event["framework"] == "llamaindex"
+    assert stream_event["vendor"] == "anthropic"
+    assert stream_event["stream_completed"] is not close_early
+    assert stream_event["tokens_in"] == 9
+    assert chat_event["tokens_in"] == 100
+    assert not handler._runs
+    assert not inst._deferred_calls

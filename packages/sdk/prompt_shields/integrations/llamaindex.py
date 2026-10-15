@@ -34,12 +34,13 @@ from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 
+# LlamaIndex's own pydantic (pydantic.v1 before llama-index-core 0.11).
+from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.instrumentation import get_dispatcher
 from llama_index.core.instrumentation import root_manager as _root_manager
 from llama_index.core.instrumentation.event_handlers import BaseEventHandler
 from llama_index.core.instrumentation.span import SimpleSpan
 from llama_index.core.instrumentation.span_handlers import BaseSpanHandler
-from pydantic import PrivateAttr
 
 from prompt_shields import instrumentation
 from prompt_shields.instrumentation import (
@@ -208,6 +209,7 @@ class PromptShieldsEventHandler(BaseEventHandler):
                 _, dropped = self._runs.popitem(last=False)
                 for old in dropped:
                     old.fc.finished = True
+                    forget_framework_call(old.fc)
 
     def _enclosing_run(self, entry: Any) -> "_Run | None":
         """The unfinished run of an ancestor span, if any (lock held)."""
@@ -435,3 +437,12 @@ def _remove(handlers: Any) -> None:
             h for h in dispatcher.event_handlers if not any(h is x for x in handlers)]
         dispatcher.span_handlers = [
             h for h in dispatcher.span_handlers if not any(h is x for x in handlers)]
+    # Streams still pending will never be reported: drop their calls.
+    events = handlers[0]
+    with events._lock:
+        runs = [run for group in events._runs.values() for run in group]
+        events._runs.clear()
+        events._spans.clear()
+    for run in runs:
+        run.fc.finished = True
+        forget_framework_call(run.fc)

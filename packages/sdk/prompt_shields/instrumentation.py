@@ -239,8 +239,11 @@ def current_framework_call() -> FrameworkCall | None:
     return fc
 
 
-# Deferred calls (see `FrameworkCall`) not yet claimed or finished.
-_deferred_calls: set[FrameworkCall] = set()
+# Deferred calls (see `FrameworkCall`) not yet forgotten, by id of their
+# generator frame (kept alive by `fc.frame`, so the id stays unique). Kept
+# as an index so a claim costs one walk up the stack, however many streams
+# are pending.
+_deferred_calls: dict[int, FrameworkCall] = {}
 _MAX_STACK_DEPTH = 300
 
 
@@ -251,38 +254,41 @@ def defer_framework_call(fc: FrameworkCall, generator: Any) -> bool:
     if frame is None:
         return False
     with _claim_lock:
-        if fc.captured or fc.finished:
+        if fc.captured or fc.finished or fc.frame is not None:
             return False
         fc.frame = frame
-        _deferred_calls.add(fc)
+        _deferred_calls[id(frame)] = fc
     return True
 
 
 def forget_framework_call(fc: FrameworkCall) -> None:
     """Drop a finished deferred call (and its frame reference)."""
     with _claim_lock:
-        _deferred_calls.discard(fc)
-        fc.frame = None
+        _forget(fc)
+
+
+def _forget(fc: FrameworkCall) -> None:
+    # Caller holds `_claim_lock`.
+    if fc.frame is not None and _deferred_calls.get(id(fc.frame)) is fc:
+        del _deferred_calls[id(fc.frame)]
+    fc.frame = None
 
 
 def _deferred_on_stack() -> FrameworkCall | None:
-    """The innermost unclaimed deferred call whose generator is running."""
-    by_frame = {}
-    for fc in list(_deferred_calls):
-        if fc.finished or fc.frame is None:
-            _deferred_calls.discard(fc)
-            fc.frame = None
-        elif not fc.captured:  # a claim given back is claimable again
-            by_frame[id(fc.frame)] = fc
-    if not by_frame:
-        return None
+    """The innermost unclaimed deferred call whose generator is running.
+
+    Caller holds `_claim_lock`.
+    """
     frame = sys._getframe(1)
     for _ in range(_MAX_STACK_DEPTH):
         if frame is None:
             break
-        fc = by_frame.get(id(frame))
+        fc = _deferred_calls.get(id(frame))
         if fc is not None:
-            return fc
+            if fc.finished:
+                _forget(fc)
+            elif not fc.captured:  # a claim given back is claimable again
+                return fc
         frame = frame.f_back
     return None
 
