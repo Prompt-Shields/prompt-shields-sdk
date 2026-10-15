@@ -1,4 +1,4 @@
-import { AZURE_OPEN_AI } from '../../globals';
+import { AZURE_OPEN_AI, HEADER_KEYS } from '../../globals';
 import { Options } from '../../types/requestBody';
 import { OpenAIErrorResponseTransform } from '../openai/utils';
 import { ErrorResponse } from '../types';
@@ -22,12 +22,97 @@ export function assertAzureAuthModeAllowed(
   env?: Record<string, any>
 ) {
   if (
-    (azureAuthMode === 'managed' || azureAuthMode === 'workload') &&
+    isAzureAmbientAuthMode(azureAuthMode) &&
     !ambientAzureCredentialsEnabled(env)
   ) {
     throw new GatewayError(
       `azureAuthMode ${azureAuthMode} is disabled on this gateway`,
       403
+    );
+  }
+}
+
+export function isAzureAmbientAuthMode(azureAuthMode: string | undefined) {
+  return azureAuthMode === 'managed' || azureAuthMode === 'workload';
+}
+
+// Microsoft-run Azure AI hosts (public, US Gov and China clouds) plus Blob
+// Storage for batch output. Deliberately not all of `.azure.com`: hosts such
+// as `*.cloudapp.azure.com` (VM DNS labels) or `*.inference.ml.azure.com`
+// (customer containers) are run by whoever created them.
+const AZURE_AMBIENT_HOST_SUFFIXES = [
+  '.openai.azure.com',
+  '.cognitiveservices.azure.com',
+  '.services.ai.azure.com',
+  '.models.ai.azure.com',
+  '.inference.ai.azure.com',
+  '.openai.azure.us',
+  '.cognitiveservices.azure.us',
+  '.openai.azure.cn',
+  '.cognitiveservices.azure.cn',
+  '.blob.core.windows.net',
+  '.blob.core.usgovcloudapi.net',
+  '.blob.core.chinacloudapi.cn',
+];
+
+const AZURE_RESOURCE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/i;
+
+function isAzureAmbientUpstreamURL(rawUrl: string | undefined): boolean {
+  if (typeof rawUrl !== 'string' || !rawUrl) return false;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:' && url.protocol !== 'wss:') return false;
+    if (url.username || url.password || url.port) return false;
+    const host = url.hostname.toLowerCase();
+    return AZURE_AMBIENT_HOST_SUFFIXES.some(
+      (suffix) => host.endsWith(suffix) && host.length > suffix.length
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `managed` / `workload` tokens are bearer tokens for the gateway host's own
+ * Azure identity, so they may only go to Azure: refuse a caller custom host,
+ * a resource name or Foundry URL that could rewrite the upstream host, and
+ * any final upstream URL outside Microsoft's Azure AI hosts. Call before
+ * minting the token. Caller-supplied credentials (api key, `azureAdToken`,
+ * `entra` client secret) are not checked here.
+ */
+export function assertAzureAmbientUpstreamIsAzure(
+  providerOptions: {
+    customHost?: string;
+    resourceName?: string;
+    azureFoundryUrl?: string;
+  },
+  transformedRequestUrl: string | undefined,
+  c?: { req?: { header?: (name: string) => string | undefined } }
+) {
+  const headerHost =
+    typeof c?.req?.header === 'function'
+      ? c.req.header(HEADER_KEYS.CUSTOM_HOST)
+      : undefined;
+  if (providerOptions.customHost || headerHost) {
+    throw new GatewayError(
+      'azureAuthMode managed and workload cannot be used with a custom host',
+      400
+    );
+  }
+  const { resourceName, azureFoundryUrl } = providerOptions;
+  if (resourceName !== undefined && !AZURE_RESOURCE_NAME.test(resourceName)) {
+    throw new GatewayError('Invalid Azure resource name', 400);
+  }
+  if (
+    azureFoundryUrl !== undefined &&
+    !isAzureAmbientUpstreamURL(azureFoundryUrl)
+  ) {
+    throw new GatewayError('Invalid Azure Foundry URL', 400);
+  }
+  if (!isAzureAmbientUpstreamURL(transformedRequestUrl)) {
+    throw new GatewayError(
+      'azureAuthMode managed and workload can only be used with Azure hosts',
+      400
     );
   }
 }
