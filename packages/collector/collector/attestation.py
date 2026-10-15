@@ -26,7 +26,8 @@ registry value has since moved away from what was signed off. Built in:
 Risk classification can register its own field the same way.
 
 Recording an attestation bumps the asset's `updated_at` so it shows up in
-the Partner API delta feed (`/partner/v1/changes`). HTTP routes live in
+the Partner API delta feed (`/partner/v1/changes`) and queues an
+`asset.attested` partner webhook (collector.webhooks). HTTP routes live in
 `collector.attestation_api`.
 """
 
@@ -43,6 +44,8 @@ from sqlalchemy import any_, bindparam, func, select
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from collector import webhooks
 
 UNREVIEWED = "unreviewed"
 ATTESTED = "attested"
@@ -145,6 +148,8 @@ async def record_attestation(
     # Surface the change in the delta feed. `confidence` is left untouched.
     asset.updated_at = now
     await db.flush()
+    # Partner webhooks: asset.attested, in this transaction (outbox).
+    await webhooks.enqueue_attestation_event(db, tenant_id, asset, row, now=now)
     return row
 
 

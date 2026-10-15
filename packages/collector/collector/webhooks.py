@@ -10,10 +10,15 @@ Events
   asset.changed   discovery sources, confidence, owner, classification or
                   lifecycle state changed (including stale and reactivated)
   asset.retired   the lifecycle sweep retired the asset
+  asset.attested  a person recorded an attestation for one of the asset's
+                  fields (collector.attestation): field, state, actor type
+                  and time. The free-text comment, the attested value and
+                  `attested_by` (usually an email) are left out.
 
 Flow
-  1. Producers (ingest, OTel ingest, lifecycle sweep) call
-     `enqueue_asset_events` in the same transaction as the asset change.
+  1. Producers (ingest, OTel ingest, lifecycle sweep, attestation) call
+     `enqueue_asset_events` (or `enqueue_attestation_event`) in the same
+     transaction as the change.
      It writes one `webhook_deliveries` row per matching subscription: an
      outbox, so nothing is sent on the request path.
   2. A worker (`deliver_due`, run by `python -m collector.webhooks deliver`
@@ -31,9 +36,17 @@ Security
   - Signing: `Prompt-Shields-Signature: t=<unix>,v1=<hex>` where v1 is
     HMAC-SHA256(secret, "<t>." + body). Receivers reject stale timestamps
     (SIGNATURE_TOLERANCE_SECONDS) to stop replays; the event id is stable
-    across retries for idempotency.
-  - Secrets: per subscription, returned once, stored AES-GCM encrypted with
-    a key derived from PS_WEBHOOK_SECRET_KEY and bound to the row id.
+    across retries for idempotency. During a secret rotation's grace
+    period the header carries one v1 per valid secret, newest first;
+    receivers accept the request if any v1 matches.
+  - Secrets: per subscription, returned once, stored AES-GCM encrypted and
+    bound to the row id. Keys come from the PS_WEBHOOK_SECRET_KEYS keyring
+    ("kid:key,..."; first entry encrypts) and the token records the key
+    id ("v2.<kid>.<data>"). Tokens without a key id ("v1.<data>") were
+    written with the legacy PS_WEBHOOK_SECRET_KEY and still decrypt with
+    it. Secrets under an older key are re-encrypted with the active key
+    when used for a delivery, or all at once by
+    `python -m collector.webhooks rekey`.
   - Scope: only partners that are active, unexpired and hold the scope
     for the event (EVENT_SCOPES; `registry:read` still covers it through
     the partner_scopes alias) get events, checked at enqueue and again at
@@ -52,10 +65,11 @@ import hmac
 import ipaddress
 import json
 import logging
+import re
 import secrets
 import socket
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -67,13 +81,23 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from db.models import AIAsset, PartnerCredential, WebhookDelivery, WebhookSubscription
+from db.models import (
+    AIAsset,
+    AssetAttestation,
+    PartnerCredential,
+    WebhookDelivery,
+    WebhookSubscription,
+)
 from sqlalchemy import delete, inspect, or_, select, update
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import egress, rls
-from collector.config import settings
+from collector.config import (
+    WEBHOOK_CLAIM_LEASE_SECONDS,
+    WEBHOOK_MAX_TIMEOUT_SECONDS,
+    settings,
+)
 from collector.partner_scopes import expand_scopes
 
 logger = logging.getLogger(__name__)
@@ -81,17 +105,22 @@ logger = logging.getLogger(__name__)
 ASSET_CREATED = "asset.created"
 ASSET_CHANGED = "asset.changed"
 ASSET_RETIRED = "asset.retired"
-EVENT_TYPES: tuple[str, ...] = (ASSET_CREATED, ASSET_CHANGED, ASSET_RETIRED)
-EventType = Literal["asset.created", "asset.changed", "asset.retired"]
+ASSET_ATTESTED = "asset.attested"
+EVENT_TYPES: tuple[str, ...] = (ASSET_CREATED, ASSET_CHANGED, ASSET_RETIRED, ASSET_ATTESTED)
+EventType = Literal["asset.created", "asset.changed", "asset.retired", "asset.attested"]
 
 # Scope a partner must hold to receive each event type. Asset events carry
-# the same asset data `/partner/v1/changes` returns under `changes:read`.
-# Checked with partner_scopes.expand_scopes, so Phase 1 `registry:read`
-# credentials qualify through the alias.
+# the same asset data `/partner/v1/changes` returns under `changes:read`;
+# an attestation is reported by that feed too (it bumps the asset's
+# updated_at and the asset carries its attestation summary), so
+# asset.attested needs the same scope. Checked with
+# partner_scopes.expand_scopes, so Phase 1 `registry:read` credentials
+# qualify through the alias.
 EVENT_SCOPES: dict[str, str] = {
     ASSET_CREATED: "changes:read",
     ASSET_CHANGED: "changes:read",
     ASSET_RETIRED: "changes:read",
+    ASSET_ATTESTED: "changes:read",
 }
 
 
@@ -111,7 +140,9 @@ SIGNATURE_TOLERANCE_SECONDS = 300
 # Delay before attempt n+1, indexed by attempts made so far (last entry repeats).
 RETRY_SCHEDULE_SECONDS: tuple[int, ...] = (60, 300, 1800, 7200, 21600, 43200, 86400)
 # A claimed delivery is retried after this if the worker dies mid-attempt.
-CLAIM_LEASE = timedelta(minutes=5)
+CLAIM_LEASE = timedelta(seconds=WEBHOOK_CLAIM_LEASE_SECONDS)
+# Longest overlap a secret rotation may keep the old secret valid for.
+MAX_SECRET_GRACE = timedelta(days=7)
 MAX_SUBSCRIPTIONS_PER_PARTNER = 10
 MAX_URL_LENGTH = 2048
 MAX_ERROR_LENGTH = 200
@@ -148,7 +179,9 @@ PAYLOAD_TIMESTAMPS: tuple[str, ...] = (
 
 
 class WebhooksNotConfigured(RuntimeError):
-    """PS_WEBHOOK_SECRET_KEY is missing or too short."""
+    """No usable encryption key: PS_WEBHOOK_SECRET_KEYS and
+    PS_WEBHOOK_SECRET_KEY are both unset, a key is too short, or the
+    keyring is malformed."""
 
 
 class DestinationNotAllowed(ValueError):
@@ -168,36 +201,133 @@ def generate_signing_secret() -> str:
     return f"whsec_{secrets.token_urlsafe(32)}"
 
 
-def _aead() -> AESGCM:
-    key = settings.webhook_secret_key
-    if len(key) < 32:
-        raise WebhooksNotConfigured(
-            "PS_WEBHOOK_SECRET_KEY must be set (at least 32 characters) to use webhooks"
-        )
-    derived = HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=None,
-        info=b"prompt-shields webhook signing secrets v1",
-    ).derive(key.encode())
+MIN_KEY_LENGTH = 32
+_KEY_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
+_INFO_LEGACY = b"prompt-shields webhook signing secrets v1"
+_INFO_KEYRING = b"prompt-shields webhook signing secrets v2"
+
+
+def _derive(key: str, info: bytes) -> AESGCM:
+    derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(
+        key.encode()
+    )
     return AESGCM(derived)
 
 
+def keyring() -> list[tuple[str, str]]:
+    """(key id, key) pairs from PS_WEBHOOK_SECRET_KEYS, active key first.
+
+    Raises WebhooksNotConfigured if the keyring is malformed. Messages name
+    key ids, never key material.
+    """
+    raw = settings.webhook_secret_keys.strip()
+    if not raw:
+        return []
+    ring: list[tuple[str, str]] = []
+    for position, entry in enumerate(raw.split(","), start=1):
+        kid, sep, key = (part.strip() for part in entry.partition(":"))
+        if not sep or not _KEY_ID_RE.fullmatch(kid):
+            raise WebhooksNotConfigured(
+                f"PS_WEBHOOK_SECRET_KEYS entry {position} must be <key id>:<key>, "
+                "with a key id of 1-32 characters from A-Z a-z 0-9 _ -"
+            )
+        if any(kid == seen for seen, _ in ring):
+            raise WebhooksNotConfigured(f"PS_WEBHOOK_SECRET_KEYS repeats key id {kid!r}")
+        if len(key) < MIN_KEY_LENGTH:
+            raise WebhooksNotConfigured(
+                f"PS_WEBHOOK_SECRET_KEYS key {kid!r} must be at least "
+                f"{MIN_KEY_LENGTH} characters"
+            )
+        ring.append((kid, key))
+    return ring
+
+
+def active_key_id() -> str | None:
+    """Key id new secrets are encrypted with; None means the legacy
+    PS_WEBHOOK_SECRET_KEY. Raises WebhooksNotConfigured if there is none."""
+    ring = keyring()
+    if ring:
+        return ring[0][0]
+    if len(settings.webhook_secret_key) < MIN_KEY_LENGTH:
+        raise WebhooksNotConfigured(
+            "PS_WEBHOOK_SECRET_KEYS or PS_WEBHOOK_SECRET_KEY (at least "
+            f"{MIN_KEY_LENGTH} characters) must be set to use webhooks"
+        )
+    return None
+
+
+def _legacy_aead() -> AESGCM:
+    if len(settings.webhook_secret_key) < MIN_KEY_LENGTH:
+        raise ValueError("secret needs the legacy key; PS_WEBHOOK_SECRET_KEY is not set")
+    return _derive(settings.webhook_secret_key, _INFO_LEGACY)
+
+
+def _keyring_aad(subscription_id: UUID, kid: str) -> bytes:
+    # The key id is authenticated too, so a token cannot be relabelled.
+    return subscription_id.bytes + b"." + kid.encode()
+
+
 def encrypt_secret(plaintext: str, subscription_id: UUID) -> str:
+    """Encrypt with the active key, bound to the subscription id.
+
+    "v2.<kid>.<data>" with a keyring, else the legacy "v1.<data>".
+    Raises WebhooksNotConfigured.
+    """
+    kid = active_key_id()
     nonce = secrets.token_bytes(12)
-    ct = _aead().encrypt(nonce, plaintext.encode(), subscription_id.bytes)
-    return "v1." + base64.urlsafe_b64encode(nonce + ct).decode()
+    if kid is None:
+        ct = _legacy_aead().encrypt(nonce, plaintext.encode(), subscription_id.bytes)
+        return "v1." + base64.urlsafe_b64encode(nonce + ct).decode()
+    key = dict(keyring())[kid]
+    ct = _derive(key, _INFO_KEYRING).encrypt(
+        nonce, plaintext.encode(), _keyring_aad(subscription_id, kid)
+    )
+    return f"v2.{kid}." + base64.urlsafe_b64encode(nonce + ct).decode()
+
+
+def token_key_id(token: str) -> str | None:
+    """Key id a stored token was encrypted with (None: the legacy key).
+    Raises ValueError for an unknown format."""
+    version, _, rest = token.partition(".")
+    if version == "v1" and rest:
+        return None
+    if version == "v2":
+        kid, _, blob = rest.partition(".")
+        if kid and blob:
+            return kid
+    raise ValueError("unknown secret format")
+
+
+def needs_rekey(token: str) -> bool:
+    """True if `token` was not encrypted with the active key.
+    Raises WebhooksNotConfigured."""
+    active = active_key_id()
+    try:
+        return token_key_id(token) != active
+    except ValueError:
+        return False  # unreadable either way; nothing to re-encrypt
 
 
 def decrypt_secret(token: str, subscription_id: UUID) -> str:
-    """Raises ValueError if the token is malformed or was not encrypted
-    for this subscription with the current key."""
-    version, _, blob = token.partition(".")
-    if version != "v1" or not blob:
-        raise ValueError("unknown secret format")
+    """Decrypt with the key the token names (the legacy key for "v1.").
+
+    Raises ValueError if the token is malformed, its key is not configured
+    any more, or it was not encrypted for this subscription with that key.
+    Raises WebhooksNotConfigured if the keyring itself is malformed (so a
+    configuration mistake never dead-letters deliveries).
+    """
+    kid = token_key_id(token)
+    blob = token.rsplit(".", 1)[1]
+    if kid is None:
+        aead, aad = _legacy_aead(), subscription_id.bytes
+    else:
+        key = dict(keyring()).get(kid)
+        if key is None:
+            raise ValueError(f"secret key id {kid!r} is not in PS_WEBHOOK_SECRET_KEYS")
+        aead, aad = _derive(key, _INFO_KEYRING), _keyring_aad(subscription_id, kid)
     raw = base64.urlsafe_b64decode(blob.encode())
     try:
-        pt = _aead().decrypt(raw[:12], raw[12:], subscription_id.bytes)
+        pt = aead.decrypt(raw[:12], raw[12:], aad)
     except InvalidTag as exc:
         raise ValueError("secret could not be decrypted") from exc
     return pt.decode()
@@ -214,9 +344,12 @@ def _mac(secret: str, body: bytes, timestamp: int) -> str:
     ).hexdigest()
 
 
-def sign_payload(secret: str, body: bytes, timestamp: int) -> str:
-    """Value for the Prompt-Shields-Signature header."""
-    return f"t={timestamp},v1={_mac(secret, body, timestamp)}"
+def sign_payload(secret: str | Sequence[str], body: bytes, timestamp: int) -> str:
+    """Value for the Prompt-Shields-Signature header: one v1 per secret, in
+    order (the current secret first, then one still in its grace period)."""
+    secret_list = [secret] if isinstance(secret, str) else list(secret)
+    v1 = ",".join(f"v1={_mac(s, body, timestamp)}" for s in secret_list)
+    return f"t={timestamp},{v1}"
 
 
 def verify_signature(
@@ -227,16 +360,23 @@ def verify_signature(
     tolerance: int = SIGNATURE_TOLERANCE_SECONDS,
     now: float | None = None,
 ) -> bool:
-    """Reference receiver check (the docs carry the same code)."""
+    """Reference receiver check (the docs carry the same code). Accepts the
+    request if any v1 in the header matches."""
     try:
-        parts = dict(p.split("=", 1) for p in header.split(","))
-        timestamp = int(parts["t"])
-    except (KeyError, ValueError):
+        items = [p.split("=", 1) for p in header.split(",")]
+        timestamps = [v for k, v in items if k == "t"]
+        timestamp = int(timestamps[0])
+    except (IndexError, ValueError):
         return False
     if abs((time.time() if now is None else now) - timestamp) > tolerance:
         return False
     expected = _mac(secret, body, timestamp)
-    return hmac.compare_digest(expected, parts.get("v1", ""))
+    # Compare against every candidate so timing does not reveal which matched.
+    matched = False
+    for key, value in items:
+        if key == "v1":
+            matched |= hmac.compare_digest(expected, value)
+    return matched
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -304,6 +444,16 @@ async def resolve_destination(url: str) -> tuple[SplitResult, str]:
     return parts, addresses[0]
 
 
+def attempt_timeout_seconds() -> float:
+    """PS_WEBHOOK_TIMEOUT_SECONDS, capped at WEBHOOK_MAX_TIMEOUT_SECONDS.
+
+    The setting is validated at startup; the cap also covers a value set
+    at runtime. A deadline at or above the claim lease would make every
+    attempt skip itself (see `_attempt`), so nothing would ever be sent.
+    """
+    return min(settings.webhook_timeout_seconds, WEBHOOK_MAX_TIMEOUT_SECONDS)
+
+
 async def post_signed(
     url: str,
     body: bytes,
@@ -321,7 +471,7 @@ async def post_signed(
     the delivery claimed and sent again by another worker.
     """
     try:
-        async with asyncio.timeout(settings.webhook_timeout_seconds):
+        async with asyncio.timeout(attempt_timeout_seconds()):
             return await _post_signed(url, body, headers, transport=transport)
     except TimeoutError as exc:
         raise httpx.TimeoutException("webhook attempt exceeded its deadline") from exc
@@ -340,7 +490,7 @@ async def _post_signed(
     target = urlunsplit(
         (parts.scheme, f"{host}:{port}", parts.path or "/", parts.query, "")
     )
-    timeout = httpx.Timeout(settings.webhook_timeout_seconds)
+    timeout = httpx.Timeout(attempt_timeout_seconds())
     async with httpx.AsyncClient(
         transport=transport,
         follow_redirects=False,
@@ -433,10 +583,52 @@ async def enqueue_asset_events(
     the caller's transaction with the change itself. Returns the number of
     deliveries queued.
     """
-    events = list(events)
+    extra = [
+        (etype, asset, {"changed_fields": list(fields or [])} if etype == ASSET_CHANGED else {})
+        for etype, asset, fields in events
+    ]
+    return await _enqueue(db, tenant_id, extra, now or _utcnow())
+
+
+async def enqueue_attestation_event(
+    db: AsyncSession,
+    tenant_id: UUID,
+    asset: AIAsset,
+    attestation: AssetAttestation,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Queue asset.attested for a just-recorded attestation (flushed, so it
+    has an id). Does not commit.
+
+    Carries the field, state, actor type and time. Left out: `comment`
+    (free text that can name people), `value` (the `owner` field's value is
+    the owner's email) and `attested_by` (the person, usually an email);
+    partners read those from the attestation history endpoint.
+    """
+    attested_at = attestation.created_at or now or _utcnow()
+    data = {
+        "attestation": {
+            "id": str(attestation.id),
+            "field": attestation.field,
+            "state": attestation.state,
+            "actor_type": attestation.actor_type,
+            "attested_at": attested_at.isoformat(),
+        }
+    }
+    return await _enqueue(db, tenant_id, [(ASSET_ATTESTED, asset, data)], now or attested_at)
+
+
+async def _enqueue(
+    db: AsyncSession,
+    tenant_id: UUID,
+    events: list[tuple[str, AIAsset, dict]],
+    now: datetime,
+) -> int:
+    """Outbox rows for (event_type, asset, extra data) to every eligible
+    subscription of the tenant. `data` is {"asset": ..., **extra}."""
     if not events:
         return 0
-    now = now or _utcnow()
     subs = (
         await db.execute(
             select(
@@ -457,7 +649,7 @@ async def enqueue_asset_events(
         return 0
 
     queued = 0
-    for event_type, asset, fields in events:
+    for event_type, asset, extra in events:
         scope = required_scope(event_type)
         targets = [
             s.id
@@ -467,9 +659,7 @@ async def enqueue_asset_events(
         if not targets:
             continue
         event_id = uuid4()
-        data: dict = {"asset": asset_payload(asset)}
-        if event_type == ASSET_CHANGED:
-            data["changed_fields"] = list(fields or [])
+        data: dict = {"asset": asset_payload(asset), **extra}
         payload = {
             "id": str(event_id),
             "type": event_type,
@@ -594,7 +784,7 @@ async def _attempt(
         # Not enough lease left to finish within the attempt deadline (e.g.
         # queued behind slow attempts): leave it, the lease expires and the
         # row is claimed again. Sending now could overlap another worker.
-        deadline = timedelta(seconds=settings.webhook_timeout_seconds)
+        deadline = timedelta(seconds=attempt_timeout_seconds())
         if _utcnow() + deadline >= lease_until:
             return "skipped"
         d = await db.get(WebhookDelivery, delivery_id)
@@ -606,7 +796,7 @@ async def _attempt(
         reason = _ineligible(sub, partner, now, d.event_type)
         if reason is None:
             try:
-                secret = decrypt_secret(sub.secret_ciphertext, sub.id)
+                secrets_to_sign = signing_secrets(sub, now)
             except ValueError:
                 reason = "signing secret unreadable; rotate the secret"
         if reason is not None:
@@ -621,7 +811,7 @@ async def _attempt(
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "PromptShields-Webhooks/1",
-            SIGNATURE_HEADER: sign_payload(secret, body, int(time.time())),
+            SIGNATURE_HEADER: sign_payload(secrets_to_sign, body, int(time.time())),
             EVENT_ID_HEADER: str(d.event_id),
             EVENT_TYPE_HEADER: d.event_type,
             ATTEMPT_HEADER: str(d.attempts),
@@ -650,14 +840,84 @@ async def _attempt(
         else:
             d.next_attempt_at = _utcnow() + retry_delay(d.attempts)
             outcome = "retrying"
+        # Re-encrypt secrets stored under an older key, and drop an expired
+        # previous secret. After the POST so the row lock is held briefly.
+        try:
+            await refresh_stored_secrets(db, sub, now)
+        except ValueError:
+            pass  # current secret readable (we just signed); previous skipped
         await db.commit()
         return outcome
 
 
-def worker_session_factory(session_factory):
-    """Sessions that bypass row-level security, for the cross-tenant claim
-    and purge. The bypass is logged once, when this is called."""
-    info = rls.bypass_info("webhook-worker")
+def previous_secret_valid(sub: WebhookSubscription, now: datetime) -> bool:
+    """True while a rotation's grace period keeps the old secret signing."""
+    return (
+        sub.previous_secret_ciphertext is not None
+        and sub.previous_secret_expires_at is not None
+        and sub.previous_secret_expires_at > now
+    )
+
+
+def signing_secrets(sub: WebhookSubscription, now: datetime) -> list[str]:
+    """Secrets to sign a delivery with: the current one, then the previous
+    one while its grace period lasts. Raises ValueError if the current one
+    is unreadable; an unreadable previous one is skipped."""
+    out = [decrypt_secret(sub.secret_ciphertext, sub.id)]
+    if previous_secret_valid(sub, now):
+        try:
+            out.append(decrypt_secret(sub.previous_secret_ciphertext, sub.id))
+        except ValueError:
+            logger.warning("webhook subscription %s: previous secret unreadable", sub.id)
+    return out
+
+
+async def refresh_stored_secrets(
+    db: AsyncSession, sub: WebhookSubscription, now: datetime
+) -> bool:
+    """Re-encrypt `sub`'s secrets that are not under the active key, and
+    clear a previous secret whose grace period is over. Does not commit.
+
+    Compare-and-set on the ciphertexts that were read, so a rotation that
+    lands in between is never overwritten; `updated_at` is left alone.
+    Returns True if the row was updated. Raises ValueError if the current
+    secret is unreadable (an unreadable previous secret is left as is).
+    """
+    values: dict = {}
+    if needs_rekey(sub.secret_ciphertext):
+        plain = decrypt_secret(sub.secret_ciphertext, sub.id)
+        values["secret_ciphertext"] = encrypt_secret(plain, sub.id)
+    previous = sub.previous_secret_ciphertext
+    if previous is not None:
+        if not previous_secret_valid(sub, now):
+            values["previous_secret_ciphertext"] = None
+            values["previous_secret_expires_at"] = None
+        elif needs_rekey(previous):
+            try:
+                plain = decrypt_secret(previous, sub.id)
+            except ValueError:
+                pass
+            else:
+                values["previous_secret_ciphertext"] = encrypt_secret(plain, sub.id)
+    if not values:
+        return False
+    result = await db.execute(
+        update(WebhookSubscription)
+        .where(
+            WebhookSubscription.id == sub.id,
+            WebhookSubscription.secret_ciphertext == sub.secret_ciphertext,
+            WebhookSubscription.previous_secret_ciphertext.is_not_distinct_from(previous),
+        )
+        .values(**values, updated_at=WebhookSubscription.updated_at)
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
+
+def worker_session_factory(session_factory, reason: str = "webhook-worker"):
+    """Sessions that bypass row-level security, for the cross-tenant claim,
+    purge and rekey listing. The bypass is logged once, when this is called."""
+    info = rls.bypass_info(reason)
     return lambda: session_factory(info=info)
 
 
@@ -675,7 +935,7 @@ async def deliver_due(
     The claim spans tenants (``claim_factory``, an RLS bypass; built from
     ``session_factory`` when not given). Each attempt runs as its tenant.
     """
-    _aead()  # fail fast when the key is missing, without burning attempts
+    active_key_id()  # fail fast when no key is set, without burning attempts
     now = now or _utcnow()
     claim_factory = claim_factory or worker_session_factory(session_factory)
     async with claim_factory() as db:
@@ -750,8 +1010,63 @@ async def run_worker(session_factory, interval: float) -> None:
         await asyncio.sleep(interval)
 
 
+@dataclass
+class RekeyRun:
+    checked: int = 0
+    rekeyed: int = 0  # re-encrypted, or an expired previous secret dropped
+    unchanged: int = 0
+    unreadable: int = 0  # current secret cannot be decrypted: rotate it
+
+
+async def rekey_all(
+    session_factory, *, now: datetime | None = None, list_factory=None
+) -> RekeyRun:
+    """Re-encrypt every subscription secret not under the active key.
+
+    Run after adding a key at the front of PS_WEBHOOK_SECRET_KEYS; once it
+    reports no unreadable rows (and `unchanged == checked` on a second run)
+    the old key can be removed. Listing the tenants with subscriptions is a
+    logged RLS bypass (``list_factory``); each tenant's rows are updated
+    under that tenant's context, one transaction per tenant.
+    """
+    active_key_id()  # WebhooksNotConfigured before touching anything
+    now = now or _utcnow()
+    list_factory = list_factory or worker_session_factory(session_factory, "webhook-rekey")
+    async with list_factory() as db:
+        tenant_ids = (
+            await db.execute(select(WebhookSubscription.tenant_id).distinct())
+        ).scalars().all()
+
+    run = RekeyRun()
+    for tenant_id in tenant_ids:
+        async with session_factory() as db:
+            await rls.set_tenant(db, tenant_id)
+            subs = (
+                await db.execute(
+                    select(WebhookSubscription)
+                    .where(WebhookSubscription.tenant_id == tenant_id)
+                    .order_by(WebhookSubscription.id)
+                )
+            ).scalars().all()
+            for sub in subs:
+                run.checked += 1
+                try:
+                    decrypt_secret(sub.secret_ciphertext, sub.id)
+                    changed = await refresh_stored_secrets(db, sub, now)
+                except ValueError:
+                    run.unreadable += 1
+                    logger.warning("webhook subscription %s: secret unreadable", sub.id)
+                    continue
+                if changed:
+                    run.rekeyed += 1
+                else:
+                    run.unchanged += 1
+            await db.commit()
+    return run
+
+
 # ──────────────────────────────────────────────────────────────────────
-# CLI: python -m collector.webhooks deliver|purge
+# CLI: python -m collector.webhooks deliver|purge|rekey
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -764,6 +1079,8 @@ async def _run_cli(command: str, loop: bool, interval: float) -> None:
         if command == "purge":
             async with worker_session_factory(factory)() as db:
                 print(f"webhook deliveries purged: {await purge_old_deliveries(db)}")
+        elif command == "rekey":
+            print(f"webhook secret rekey: {asdict(await rekey_all(factory))}")
         elif loop:
             await run_worker(factory, interval)
         else:
@@ -775,9 +1092,12 @@ async def _run_cli(command: str, loop: bool, interval: float) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m collector.webhooks",
-        description="Deliver queued partner webhooks, or purge old delivery rows.",
+        description=(
+            "Deliver queued partner webhooks, purge old delivery rows, or "
+            "re-encrypt signing secrets with the active PS_WEBHOOK_SECRET_KEYS key."
+        ),
     )
-    parser.add_argument("command", choices=("deliver", "purge"))
+    parser.add_argument("command", choices=("deliver", "purge", "rekey"))
     parser.add_argument("--loop", action="store_true", help="keep delivering")
     parser.add_argument("--interval", type=float, default=5.0)
     args = parser.parse_args(argv)
