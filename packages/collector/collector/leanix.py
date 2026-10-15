@@ -59,7 +59,7 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validat
 from pydantic_settings import BaseSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import aibom
+from collector import aibom, rls
 from collector.connectors import (
     ConnectorError,
     GuardedClient,
@@ -680,6 +680,8 @@ class LeanIXSyncBody(BaseModel):
 )
 async def sync_endpoint(body: LeanIXSyncBody, request: Request) -> dict:
     db = request.state.db
+    # One tenant per sync: scope the session to it instead of bypassing RLS.
+    await rls.set_tenant(db, body.tenant_id)
     if await db.get(Tenant, body.tenant_id) is None:
         raise _not_found()
     return await sync_leanix(db, body.tenant_id, full=body.full)
@@ -691,6 +693,7 @@ async def sync_endpoint(body: LeanIXSyncBody, request: Request) -> dict:
     dependencies=[Depends(require_operator)],
 )
 async def status_endpoint(tenant_id: UUID, request: Request) -> dict:
+    await rls.set_tenant(request.state.db, tenant_id)
     state = await load_sync_state(request.state.db, tenant_id, CONNECTOR)
     if state is None:
         raise _not_found()
@@ -714,6 +717,7 @@ async def _main(tenant: UUID, full: bool) -> dict:
 
     try:
         async with SessionLocal() as db:
+            await rls.set_tenant(db, tenant)
             return await sync_leanix(db, tenant, full=full)
     finally:
         await engine.dispose()

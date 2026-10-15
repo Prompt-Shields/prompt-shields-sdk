@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings
 
+from collector import rls
 from collector.provider_usage import SUPPORTED_PROVIDERS, pull_provider_usage
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
@@ -78,6 +79,8 @@ async def pull_provider_usage_endpoint(
     body: ProviderUsagePullBody, request: Request
 ) -> dict:
     db = request.state.db
+    # One tenant per pull: scope the session to it instead of bypassing RLS.
+    await rls.set_tenant(db, body.tenant_id)
     if await db.get(Tenant, body.tenant_id) is None:
         raise _problem(404, "Not Found", "Tenant not found")
     end = datetime.now(UTC)
@@ -96,6 +99,7 @@ async def _main(tenant: UUID, days: int, providers: list[str] | None) -> dict:
     end = datetime.now(UTC)
     try:
         async with SessionLocal() as db:
+            await rls.set_tenant(db, tenant)
             return await pull_provider_usage(
                 db,
                 tenant,

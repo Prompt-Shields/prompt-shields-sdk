@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from collector import retention
+from collector import retention, rls
 from collector.config import settings
 
 router = APIRouter(prefix="/api/v1/operator", tags=["Operator"])
@@ -35,7 +35,11 @@ def _problem(status: int, title: str, detail: str) -> HTTPException:
 
 
 async def require_operator(request: Request) -> str:
-    """Check the operator token. Returns the actor name used in the audit log."""
+    """Check the operator token. Returns the actor name used in the audit log.
+
+    Operator routes act across tenants, so the request's session bypasses
+    row-level security (logged on ``collector.rls``).
+    """
     token = settings.admin_token
     if not token:
         raise _problem(404, "Not Found", "Not Found")
@@ -45,7 +49,11 @@ async def require_operator(request: Request) -> str:
     )
     if not presented or not hmac.compare_digest(presented.encode(), token.encode()):
         raise _problem(401, "Unauthorized", "Invalid operator token")
-    return "operator-api"
+    actor = "operator-api"
+    await rls.bypass(
+        request.state.db, f"operator:{request.method} {request.url.path}", actor=actor
+    )
+    return actor
 
 
 class PurgeBody(BaseModel):

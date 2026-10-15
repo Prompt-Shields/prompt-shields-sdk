@@ -11,10 +11,14 @@ Supported so far:
 
   - Azure: Azure OpenAI and AI Foundry (``AIServices``) accounts and their
     model deployments, via Azure Resource Manager.
+  - AWS: Amazon Bedrock provisioned throughput, custom (fine-tuned) models,
+    imported models and application inference profiles, per configured
+    region, via the Bedrock control plane (SigV4-signed, read-only).
 
-Each asset's ``calling_service`` is ``azure:<ARM deployment resource id>``,
-which marks where it came from. Asset ids are UUIDv5 values derived from
-the tenant and that resource id, so re-runs update the same rows.
+Each asset's ``calling_service`` is ``azure:<ARM deployment resource id>``
+or ``aws:<Bedrock resource ARN>``, which marks where it came from. Asset ids
+are UUIDv5 values derived from the tenant, the cloud and that resource id,
+so re-runs update the same rows.
 
 Run it with ``POST /api/v1/admin/cloud-inventory/pull`` (operator only:
 ``Authorization: Bearer $PS_ADMIN_TOKEN``, ``{"tenant_id": ...}``; 404 when
@@ -23,30 +27,37 @@ the token is unset) or ``python -m collector.cloud_inventory --tenant <uuid>``.
 Credentials come from the operator's environment only, per tenant, in
 ``PS_CLOUD_INVENTORY`` (JSON, see ``CloudInventorySettings``); never from a
 request body. Secrets are held as ``SecretStr`` and are never logged or
-returned. HTTP calls go only to the fixed Microsoft hosts below; ARM
-``nextLink`` URLs and resource ids are checked before they are followed.
+returned. HTTP calls go only to the fixed Microsoft hosts below, and to
+``bedrock.<region>.amazonaws.com`` / ``sts.<region>.amazonaws.com`` for
+strictly validated region names; ARM ``nextLink`` URLs, resource ids and
+ARNs are checked before they are followed or stored.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
 import uuid
+import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
 from db.models import AIAsset, Tenant
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, SecretStr, field_validator
+from pydantic import BaseModel, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import rls
 from collector.dedup import compute_confidence
 from collector.lifecycle import reactivate
 from collector.provider_usage_admin import require_operator
@@ -54,7 +65,7 @@ from collector.provider_usage_admin import require_operator
 logger = logging.getLogger("prompt_shields.cloud_inventory")
 
 SOURCE = "platform_signal"
-SUPPORTED_CLOUDS = ("azure",)
+SUPPORTED_CLOUDS = ("azure", "aws")
 
 # Fixed hosts. Never derived from tenant input.
 AZURE_LOGIN_HOST = "login.microsoftonline.com"
@@ -66,6 +77,35 @@ ARM_COGNITIVE_API = "2024-10-01"
 AZURE_AI_KINDS = {"openai", "aiservices"}
 # Deployments in these states are not serving and are not inventoried.
 INACTIVE_STATES = {"failed", "deleting", "deleted", "canceled"}
+
+# AWS: hosts are built only from a validated region name.
+AWS_BEDROCK_HOST = "bedrock.{region}.amazonaws.com"
+AWS_STS_HOST = "sts.{region}.amazonaws.com"
+STS_API_VERSION = "2011-06-15"
+STS_SESSION_SECONDS = 900
+# Commercial and GovCloud regions (the amazonaws.com partitions), e.g.
+# "eu-central-1", "us-gov-west-1", "ap-southeast-4".
+_AWS_REGION = re.compile(
+    r"^(?:us|eu|ap|ca|sa|me|af|il|mx)(?:-gov)?-"
+    r"(?:north|south|east|west|central|northeast|northwest|southeast|southwest)"
+    r"-[1-9]$"
+)
+_AWS_ACCESS_KEY = re.compile(r"^[A-Z0-9]{16,128}$")
+_AWS_ROLE_ARN = re.compile(r"^arn:aws(?:-us-gov)?:iam::\d{12}:role/[\w+=,.@/-]{1,512}$")
+_AWS_EXTERNAL_ID = re.compile(r"^[\w+=,.@:/-]{2,1224}$")
+_AWS_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$")
+# Bedrock resources inventoried, keyed by ARN resource type.
+_BEDROCK_ARN = re.compile(
+    r"^arn:aws(?:-us-gov)?:bedrock:(?P<region>[a-z0-9-]+):\d{12}:"
+    r"(?P<type>custom-model|provisioned-model|imported-model"
+    r"|application-inference-profile)/[A-Za-z0-9._:/+-]{1,1011}$"
+)
+_FOUNDATION_MODEL_ARN = re.compile(
+    r"^arn:aws(?:-us-gov)?:bedrock:[a-z0-9-]+:\d{0,12}:"
+    r"(?:foundation-model|inference-profile)/(?P<id>[A-Za-z0-9._:-]{1,256})$"
+)
+# Bedrock states that are not (or no longer) usable.
+AWS_INACTIVE_STATES = {"failed", "deleting", "deleted"}
 
 MAX_PAGES = 200
 MAX_RETRIES = 4
@@ -120,13 +160,78 @@ class AzureInventoryCredentials(BaseModel):
         return v
 
 
+class AwsInventoryCredentials(BaseModel):
+    """A read-only IAM principal (minimal policy in the guide).
+
+    Static access keys, used directly or, with ``role_arn``, only to call
+    ``sts:AssumeRole`` (with ``external_id`` when the role requires one) for
+    short-lived credentials in the target account. Nothing is read from the
+    process's own AWS environment, profile files or instance metadata.
+    """
+
+    access_key_id: str
+    secret_access_key: SecretStr
+    session_token: SecretStr | None = None
+    role_arn: str | None = None
+    external_id: SecretStr | None = None
+    role_session_name: str = "prompt-shields-inventory"
+    # Bedrock is regional: every region to inventory must be listed.
+    regions: list[str]
+    # Also report whether model invocation logging is enabled per region.
+    check_invocation_logging: bool = False
+
+    @field_validator("access_key_id")
+    @classmethod
+    def _access_key(cls, v: str) -> str:
+        if not _AWS_ACCESS_KEY.match(v):
+            raise ValueError("access_key_id is malformed")
+        return v
+
+    @field_validator("role_arn")
+    @classmethod
+    def _role(cls, v: str | None) -> str | None:
+        if v is not None and not _AWS_ROLE_ARN.match(v):
+            raise ValueError("role_arn must be an IAM role ARN")
+        return v
+
+    @field_validator("external_id")
+    @classmethod
+    def _external_id(cls, v: SecretStr | None) -> SecretStr | None:
+        if v is not None and not _AWS_EXTERNAL_ID.match(v.get_secret_value()):
+            raise ValueError("external_id is malformed")
+        return v
+
+    @field_validator("role_session_name")
+    @classmethod
+    def _session_name(cls, v: str) -> str:
+        if not _AWS_SESSION_NAME.match(v):
+            raise ValueError("role_session_name is malformed")
+        return v
+
+    @field_validator("regions")
+    @classmethod
+    def _regions(cls, v: list[str]) -> list[str]:
+        if not v or len(v) > 40 or not all(_AWS_REGION.match(r) for r in v):
+            raise ValueError("regions must be 1-40 AWS region names")
+        return list(dict.fromkeys(v))
+
+    @model_validator(mode="after")
+    def _external_id_needs_role(self):
+        if self.external_id is not None and self.role_arn is None:
+            raise ValueError("external_id requires role_arn")
+        return self
+
+
 class TenantCloudCredentials(BaseModel):
     azure: AzureInventoryCredentials | None = None
+    aws: AwsInventoryCredentials | None = None
 
 
 class CloudInventorySettings(BaseSettings):
     """``PS_CLOUD_INVENTORY='{"<tenant uuid>": {"azure": {"directory_id": ...,
-    "client_id": ..., "client_secret": ..., "subscription_ids": [...]}}}'``"""
+    "client_id": ..., "client_secret": ..., "subscription_ids": [...]},
+    "aws": {"access_key_id": ..., "secret_access_key": ..., "role_arn": ...,
+    "external_id": ..., "regions": [...]}}}'``"""
 
     cloud_inventory: dict[str, TenantCloudCredentials] = {}
 
@@ -179,16 +284,22 @@ async def _request(
     *,
     what: str,
     sleep: Sleep,
+    cloud: str = "azure",
+    as_text: bool = False,
+    sign: Callable[[], dict[str, str]] | None = None,
     **kwargs,
-) -> dict:
-    """Request with retry on 429/5xx, honouring Retry-After."""
+):
+    """Request with retry on 429/5xx, honouring Retry-After. ``sign``, when
+    given, builds fresh headers for every attempt."""
     for attempt in range(MAX_RETRIES + 1):
+        if sign is not None:
+            kwargs["headers"] = sign()
         try:
             resp = await client.request(method, url, **kwargs)
         except httpx.TransportError as exc:
             if attempt == MAX_RETRIES:
                 raise CloudInventoryError(
-                    f"azure: {what}: transport error ({type(exc).__name__})"
+                    f"{cloud}: {what}: transport error ({type(exc).__name__})"
                 )
             await sleep(min(2.0**attempt, MAX_RETRY_WAIT_S))
             continue
@@ -199,10 +310,17 @@ async def _request(
             continue
         if resp.status_code != 200:
             # The body is not echoed: token errors can quote the request.
-            raise CloudInventoryError(f"azure: {what} returned HTTP {resp.status_code}")
-        return resp.json()
+            raise CloudInventoryError(
+                f"{cloud}: {what} returned HTTP {resp.status_code}"
+            )
+        if as_text:
+            return resp.text
+        try:
+            return resp.json()
+        except ValueError:
+            raise CloudInventoryError(f"{cloud}: {what} returned invalid JSON")
     raise CloudInventoryError(
-        f"azure: {what} still failing after {MAX_RETRIES} retries"
+        f"{cloud}: {what} still failing after {MAX_RETRIES} retries"
     )
 
 
@@ -345,6 +463,462 @@ async def fetch_azure_deployments(
     return accounts_seen, deployments
 
 
+# --- AWS Bedrock -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AwsKeys:
+    access_key_id: str
+    secret_access_key: str = field(repr=False)
+    session_token: str | None = field(default=None, repr=False)
+
+
+def _aws_quote(value: str) -> str:
+    # SigV4 URI encoding: everything but RFC 3986 unreserved characters.
+    return quote(value, safe="-_.~")
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hmac(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+
+def canonical_query(params: dict[str, str]) -> str:
+    return "&".join(
+        f"{_aws_quote(k)}={_aws_quote(v)}"
+        for k, v in sorted((str(k), str(v)) for k, v in params.items())
+    )
+
+
+def sigv4_headers(
+    method: str,
+    host: str,
+    path: str,
+    query: str,
+    body: bytes,
+    *,
+    region: str,
+    service: str,
+    keys: AwsKeys,
+    now: datetime,
+    content_type: str | None = None,
+) -> dict[str, str]:
+    """AWS Signature Version 4 headers for one request.
+
+    ``query`` must already be canonical (``canonical_query``) and is sent
+    exactly as signed; ``path`` must not need encoding. The returned headers
+    include ``host`` because it is signed.
+    """
+    amz_date = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    day = amz_date[:8]
+    headers = {"host": host, "x-amz-date": amz_date}
+    if content_type:
+        headers["content-type"] = content_type
+    if keys.session_token:
+        headers["x-amz-security-token"] = keys.session_token
+    signed = sorted(headers)
+    canonical_request = "\n".join(
+        [
+            method,
+            path,
+            query,
+            "".join(f"{h}:{' '.join(headers[h].split())}\n" for h in signed),
+            ";".join(signed),
+            _sha256(body),
+        ]
+    )
+    scope = f"{day}/{region}/{service}/aws4_request"
+    to_sign = "\n".join(
+        ["AWS4-HMAC-SHA256", amz_date, scope, _sha256(canonical_request.encode())]
+    )
+    key = _hmac(("AWS4" + keys.secret_access_key).encode(), day)
+    for part in (region, service, "aws4_request"):
+        key = _hmac(key, part)
+    signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+    headers["authorization"] = (
+        f"AWS4-HMAC-SHA256 Credential={keys.access_key_id}/{scope}, "
+        f"SignedHeaders={';'.join(signed)}, Signature={signature}"
+    )
+    return headers
+
+
+Clock = Callable[[], datetime]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+async def _aws_call(
+    client: httpx.AsyncClient,
+    method: str,
+    host: str,
+    path: str,
+    *,
+    region: str,
+    service: str,
+    keys: AwsKeys,
+    what: str,
+    sleep: Sleep,
+    clock: Clock,
+    params: dict[str, str] | None = None,
+    body: bytes = b"",
+    content_type: str | None = None,
+    as_text: bool = False,
+):
+    query = canonical_query(params or {})
+
+    def sign() -> dict[str, str]:
+        # Each attempt is signed afresh, so retries after a long backoff stay
+        # inside the five-minute SigV4 clock-skew window.
+        return sigv4_headers(
+            method,
+            host,
+            path,
+            query,
+            body,
+            region=region,
+            service=service,
+            keys=keys,
+            now=clock(),
+            content_type=content_type,
+        )
+
+    url = f"https://{host}{path}" + (f"?{query}" if query else "")
+    return await _request(
+        client,
+        method,
+        url,
+        what=what,
+        sleep=sleep,
+        cloud="aws",
+        as_text=as_text,
+        sign=sign,
+        content=body,
+    )
+
+
+def _xml_text(root: ET.Element, name: str) -> str | None:
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == name and el.text:
+            return el.text.strip()
+    return None
+
+
+async def _aws_assume_role(
+    client: httpx.AsyncClient,
+    creds: AwsInventoryCredentials,
+    base: AwsKeys,
+    sleep: Sleep,
+    clock: Clock,
+) -> AwsKeys:
+    """Short-lived credentials for ``creds.role_arn`` from the regional STS
+    endpoint of the first configured region."""
+    region = creds.regions[0]
+    form = {
+        "Action": "AssumeRole",
+        "Version": STS_API_VERSION,
+        "RoleArn": creds.role_arn,
+        "RoleSessionName": creds.role_session_name,
+        "DurationSeconds": str(STS_SESSION_SECONDS),
+    }
+    if creds.external_id is not None:
+        form["ExternalId"] = creds.external_id.get_secret_value()
+    text = await _aws_call(
+        client,
+        "POST",
+        AWS_STS_HOST.format(region=region),
+        "/",
+        region=region,
+        service="sts",
+        keys=base,
+        what="assume role",
+        sleep=sleep,
+        clock=clock,
+        body=canonical_query(form).encode(),
+        content_type="application/x-www-form-urlencoded; charset=utf-8",
+        as_text=True,
+    )
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        raise CloudInventoryError("aws: assume role returned invalid XML")
+    key_id = _xml_text(root, "AccessKeyId")
+    secret = _xml_text(root, "SecretAccessKey")
+    token = _xml_text(root, "SessionToken")
+    if not (key_id and secret and token):
+        raise CloudInventoryError("aws: assume role response had no credentials")
+    return AwsKeys(key_id, secret, token)
+
+
+async def _bedrock_list(
+    client: httpx.AsyncClient,
+    region: str,
+    path: str,
+    items_key: str,
+    keys: AwsKeys,
+    what: str,
+    sleep: Sleep,
+    clock: Clock,
+    params: dict[str, str] | None = None,
+):
+    host = AWS_BEDROCK_HOST.format(region=region)
+    token: str | None = None
+    for _ in range(MAX_PAGES):
+        page = {**(params or {}), "maxResults": "100"}
+        if token:
+            page["nextToken"] = token
+        body = await _aws_call(
+            client,
+            "GET",
+            host,
+            path,
+            region=region,
+            service="bedrock",
+            keys=keys,
+            what=f"{what} ({region})",
+            sleep=sleep,
+            clock=clock,
+            params=page,
+        )
+        for item in body.get(items_key) or []:
+            if isinstance(item, dict):
+                yield item
+        token = body.get("nextToken")
+        if not isinstance(token, str) or not token:
+            return
+    raise CloudInventoryError(f"aws: {what} ({region}): more than {MAX_PAGES} pages")
+
+
+async def _bedrock_tags(
+    client: httpx.AsyncClient,
+    region: str,
+    arn: str,
+    keys: AwsKeys,
+    sleep: Sleep,
+    clock: Clock,
+) -> dict[str, str]:
+    # ListTagsForResource is a read, sent as POST with a JSON body.
+    body = await _aws_call(
+        client,
+        "POST",
+        AWS_BEDROCK_HOST.format(region=region),
+        "/listTagsForResource",
+        region=region,
+        service="bedrock",
+        keys=keys,
+        what=f"tag list ({region})",
+        sleep=sleep,
+        clock=clock,
+        body=json.dumps({"resourceARN": arn}).encode(),
+        content_type="application/json",
+    )
+    return {
+        str(t["key"]): str(t["value"])
+        for t in body.get("tags") or []
+        if isinstance(t, dict) and t.get("key") and t.get("value") is not None
+    }
+
+
+def _bedrock_arn(value, region: str, kind: str) -> str | None:
+    """The ARN if it is a well-formed Bedrock ARN of ``kind`` in ``region``."""
+    if not isinstance(value, str):
+        return None
+    m = _BEDROCK_ARN.match(value)
+    if not m or m["region"] != region or m["type"] != kind:
+        return None
+    return value
+
+
+def _model_id(arn) -> str | None:
+    """``anthropic.claude-3-haiku-...`` from a foundation model or
+    system-defined inference profile ARN."""
+    if not isinstance(arn, str):
+        return None
+    m = _FOUNDATION_MODEL_ARN.match(arn)
+    return m["id"] if m else None
+
+
+def _active(item: dict, status_key: str) -> bool:
+    return str(item.get(status_key) or "").lower() not in AWS_INACTIVE_STATES
+
+
+async def _bedrock_region(
+    client: httpx.AsyncClient,
+    region: str,
+    keys: AwsKeys,
+    sleep: Sleep,
+    clock: Clock,
+) -> list[CloudDeployment]:
+    """Bedrock resources in one region that represent AI in use."""
+    # (arn, model, kind, parent arn whose tags it inherits)
+    found: list[tuple[str, str | None, str, str | None]] = []
+
+    # Custom (fine-tuned, continued pre-training, distilled) models.
+    custom_models: dict[str, str | None] = {}
+    async for m in _bedrock_list(
+        client,
+        region,
+        "/custom-models",
+        "modelSummaries",
+        keys,
+        "custom model list",
+        sleep,
+        clock,
+    ):
+        arn = _bedrock_arn(m.get("modelArn"), region, "custom-model")
+        if arn is None or not _active(m, "modelStatus"):
+            continue
+        model = _model_id(m.get("baseModelArn")) or m.get("baseModelName")
+        custom_models[arn] = model
+        found.append((arn, model, "custom", None))
+
+    # Imported (bring-your-own-weights) models.
+    async for m in _bedrock_list(
+        client,
+        region,
+        "/imported-models",
+        "modelSummaries",
+        keys,
+        "imported model list",
+        sleep,
+        clock,
+    ):
+        arn = _bedrock_arn(m.get("modelArn"), region, "imported-model")
+        if arn is None:
+            continue
+        name = m.get("modelName")
+        found.append((arn, name if isinstance(name, str) else None, "imported", None))
+
+    # Provisioned throughput: dedicated, paid serving capacity.
+    async for p in _bedrock_list(
+        client,
+        region,
+        "/provisioned-model-throughputs",
+        "provisionedModelSummaries",
+        keys,
+        "provisioned throughput list",
+        sleep,
+        clock,
+    ):
+        arn = _bedrock_arn(p.get("provisionedModelArn"), region, "provisioned-model")
+        if arn is None or not _active(p, "status"):
+            continue
+        parent = p.get("modelArn") if p.get("modelArn") in custom_models else None
+        model = _model_id(p.get("foundationModelArn")) or custom_models.get(parent)
+        found.append((arn, model, "provisioned", parent))
+
+    # Application inference profiles: created to route and meter usage.
+    async for p in _bedrock_list(
+        client,
+        region,
+        "/inference-profiles",
+        "inferenceProfileSummaries",
+        keys,
+        "inference profile list",
+        sleep,
+        clock,
+        params={"type": "APPLICATION"},
+    ):
+        arn = _bedrock_arn(
+            p.get("inferenceProfileArn"), region, "application-inference-profile"
+        )
+        if arn is None or not _active(p, "status"):
+            continue
+        models = [
+            m.get("modelArn") for m in p.get("models") or [] if isinstance(m, dict)
+        ]
+        model = next((i for i in map(_model_id, models) if i), None)
+        found.append((arn, model, "inference_profile", None))
+
+    tags_by_arn: dict[str, dict[str, str]] = {}
+    for arn, *_ in found:
+        tags_by_arn[arn] = await _bedrock_tags(client, region, arn, keys, sleep, clock)
+    return [
+        CloudDeployment(
+            cloud="aws",
+            resource_id=arn,
+            region=region,
+            model=model,
+            model_format=kind,
+            # A provisioned custom model's own tags override the model's.
+            tags={**tags_by_arn.get(parent or "", {}), **tags_by_arn[arn]},
+        )
+        for arn, model, kind, parent in found
+    ]
+
+
+async def _bedrock_logging_enabled(
+    client: httpx.AsyncClient,
+    region: str,
+    keys: AwsKeys,
+    sleep: Sleep,
+    clock: Clock,
+) -> bool:
+    body = await _aws_call(
+        client,
+        "GET",
+        AWS_BEDROCK_HOST.format(region=region),
+        "/logging/modelinvocations",
+        region=region,
+        service="bedrock",
+        keys=keys,
+        what=f"invocation logging config ({region})",
+        sleep=sleep,
+        clock=clock,
+    )
+    config = body.get("loggingConfig") or {}
+    return bool(config.get("cloudWatchConfig") or config.get("s3Config"))
+
+
+async def fetch_aws_deployments(
+    creds: AwsInventoryCredentials,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    sleep: Sleep = asyncio.sleep,
+    clock: Clock = _utcnow,
+) -> tuple[dict, list[CloudDeployment]]:
+    """Return (summary, Bedrock resources) for one IAM principal.
+
+    A failing region is reported in ``summary["region_errors"]`` and does
+    not stop the others. Failing to assume the role, or every region
+    failing, raises ``CloudInventoryError``.
+    """
+    keys = AwsKeys(
+        creds.access_key_id,
+        creds.secret_access_key.get_secret_value(),
+        creds.session_token.get_secret_value() if creds.session_token else None,
+    )
+    deployments: list[CloudDeployment] = []
+    errors: dict[str, str] = {}
+    logging_enabled: dict[str, bool] = {}
+    async with httpx.AsyncClient(
+        transport=transport, timeout=30.0, follow_redirects=False
+    ) as client:
+        if creds.role_arn:
+            keys = await _aws_assume_role(client, creds, keys, sleep, clock)
+        for region in creds.regions:
+            try:
+                deployments += await _bedrock_region(client, region, keys, sleep, clock)
+                if creds.check_invocation_logging:
+                    logging_enabled[region] = await _bedrock_logging_enabled(
+                        client, region, keys, sleep, clock
+                    )
+            except CloudInventoryError as exc:
+                errors[region] = str(exc)
+    if len(errors) == len(creds.regions):
+        raise CloudInventoryError("; ".join(errors.values()))
+    summary: dict = {"regions": len(creds.regions)}
+    if errors:
+        summary["region_errors"] = errors
+    if creds.check_invocation_logging:
+        summary["invocation_logging"] = logging_enabled
+    return summary, deployments
+
+
 def _tag(tags: dict[str, str], names: tuple[str, ...]) -> str | None:
     lowered = {k.lower(): v.strip() for k, v in tags.items()}
     for n in names:
@@ -365,7 +939,7 @@ def environment_from_tags(tags: dict[str, str]) -> str | None:
 
 def vendor_for(d: CloudDeployment) -> str:
     # The cloud provider is the supplier (and processor) of a hosted model.
-    return {"azure": "microsoft"}[d.cloud]
+    return {"azure": "microsoft", "aws": "amazon"}[d.cloud]
 
 
 def asset_id_for(tenant_id: UUID, d: CloudDeployment) -> UUID:
@@ -452,9 +1026,15 @@ async def pull_cloud_inventory(
             result[cloud] = {"status": "not_configured"}
             continue
         try:
-            accounts, deployments = await fetch_azure_deployments(
-                cloud_creds, transport=transport, sleep=sleep
-            )
+            if cloud == "azure":
+                accounts, deployments = await fetch_azure_deployments(
+                    cloud_creds, transport=transport, sleep=sleep
+                )
+                summary: dict = {"accounts": accounts}
+            else:
+                summary, deployments = await fetch_aws_deployments(
+                    cloud_creds, transport=transport, sleep=sleep
+                )
         except CloudInventoryError as exc:
             logger.warning("cloud inventory failed for tenant %s: %s", tenant_id, exc)
             result[cloud] = {"status": "error", "error": str(exc)}
@@ -464,7 +1044,7 @@ async def pull_cloud_inventory(
         logger.info("cloud inventory: tenant=%s cloud=%s %s", tenant_id, cloud, counts)
         result[cloud] = {
             "status": "ok",
-            "accounts": accounts,
+            **summary,
             "deployments": len(deployments),
             **counts,
         }
@@ -488,6 +1068,8 @@ async def pull_cloud_inventory_endpoint(
     body: CloudInventoryPullBody, request: Request
 ) -> dict:
     db = request.state.db
+    # One tenant per pull: scope the session to it instead of bypassing RLS.
+    await rls.set_tenant(db, body.tenant_id)
     if await db.get(Tenant, body.tenant_id) is None:
         raise HTTPException(
             status_code=404,
@@ -506,6 +1088,7 @@ async def _main(tenant: UUID, clouds: list[str] | None) -> dict:
 
     try:
         async with SessionLocal() as db:
+            await rls.set_tenant(db, tenant)
             return await pull_cloud_inventory(db, tenant, clouds=clouds)
     finally:
         await engine.dispose()

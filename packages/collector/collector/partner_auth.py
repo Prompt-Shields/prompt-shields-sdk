@@ -36,6 +36,8 @@ from collector.audit import record_read
 from collector.partner_scopes import SCOPES, effective_rate_limit, expand_scopes
 from db.models import PartnerCredential
 
+from collector import rls
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Constants and JWT config
@@ -199,6 +201,9 @@ async def resolve_partner(request: Request) -> PartnerPrincipal:
     # JWT format check — 3 dot-separated base64url segments
     if token.count(".") == 2 and not token.startswith("ps-pk-"):
         payload = verify_access_token(token)
+        # The signed token names the tenant, so the revocation check below
+        # already runs under row-level security for that tenant.
+        await rls.set_tenant(db, UUID(payload["tenant_id"]))
         # Confirm the partner still exists and is active. Cheap, prevents
         # using a token issued before the partner was revoked.
         partner_id = UUID(payload["partner_id"])
@@ -240,7 +245,8 @@ async def resolve_partner(request: Request) -> PartnerPrincipal:
         )
 
     # API key fallback
-    partner = await _lookup_by_api_key(db, token)
+    async with rls.auth_lookup(db):
+        partner = await _lookup_by_api_key(db, token)
     if partner is None:
         raise HTTPException(
             status_code=401,
@@ -261,6 +267,7 @@ async def resolve_partner(request: Request) -> PartnerPrincipal:
                 "detail": "Partner credential expired",
             },
         )
+    await rls.set_tenant(db, partner.tenant_id)
     return PartnerPrincipal(
         tenant_id=partner.tenant_id,
         partner_id=partner.id,
