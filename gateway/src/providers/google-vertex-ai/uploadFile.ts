@@ -19,6 +19,7 @@ import GoogleApiConfig from './api';
 import { VertexBatchEmbedConfig } from './embed';
 import { GatewayError } from '../../errors/GatewayError';
 import { externalServiceFetch } from '../../utils/fetch';
+import { assertSafeUpstreamURL } from '../../middlewares/requestValidator';
 
 const PROVIDER_CONFIG: Record<
   string,
@@ -62,6 +63,12 @@ export const GoogleFileUploadRequestHandler: RequestHandler<
       400
     );
   }
+  // generateSignedURL puts the bucket name in the host
+  // (`<bucket>.storage.googleapis.com`), so check it before streaming anything.
+  assertSafeUpstreamURL(
+    `https://${vertexStorageBucketName}.storage.googleapis.com/`,
+    c
+  );
 
   const objectKey = filename ?? `${crypto.randomUUID()}.jsonl`;
   const bytes = requestHeaders['content-length'];
