@@ -131,6 +131,15 @@ def test_azure_async_and_vendor_filter():
     assert [e["vendor"] for e in _events()] == ["azure_openai"]
 
 
+def test_openai_vendor_filter_still_covers_azure():
+    # Backward compatibility: Azure clients were instrumented as "openai".
+    openai = pytest.importorskip("openai")
+    http = _openai_http(openai)
+    prompt_shields.instrument(ps_api_key="ps_key", vendors=("openai",))
+    _azure(openai, http).chat.completions.create(model="dep", messages=MESSAGES)
+    assert [e["vendor"] for e in _events()] == ["azure_openai"]
+
+
 def test_azure_stream_is_wrapped_without_stream_options():
     openai = pytest.importorskip("openai")
     http = _openai_http(openai)

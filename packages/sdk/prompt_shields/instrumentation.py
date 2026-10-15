@@ -185,6 +185,8 @@ def instrument(
 
     `vendors` limits instrumentation (e.g. `("openai",)`); default is all:
     openai, azure_openai, anthropic, google, mistral, cohere, bedrock.
+    "openai" also covers Azure clients (tagged azure_openai); select only
+    "azure_openai" to instrument Azure without plain OpenAI.
     `azure_deployments` maps Azure deployment names to model ids for
     pricing, e.g. `{"prod-chat": "gpt-4o"}` (see `AzureOpenAIAdapter`).
     Returns True if this call instrumented, False if already instrumented.
@@ -335,7 +337,12 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             details["model"] = (
                 getattr(upstream, "_azure_deployment", None) or details["model"]
             )
-        if state.vendors is not None and vendor not in state.vendors:
+        if state.vendors is not None and not (
+            vendor in state.vendors
+            # Azure clients were instrumented as "openai" before they had
+            # their own tag; selecting "openai" still covers them.
+            or (vendor == "azure_openai" and "openai" in state.vendors)
+        ):
             return None
         hide_usage_chunk = False
         if (

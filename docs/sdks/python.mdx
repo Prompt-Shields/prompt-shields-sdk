@@ -172,8 +172,9 @@ client.chat.completions.create(model="gpt-4o", messages=[...])  # emits an event
 Unset arguments fall back to `PS_API_KEY`, `PS_COLLECTOR_URL`,
 `PS_BUSINESS_UNIT`, `PS_USE_CASE`, `PS_OWNER`, `PS_DATA_CLASSIFICATION`,
 `PS_ENVIRONMENT`, `PS_CALLING_SERVICE`, `PS_ATLAS_URL` and `PS_ATLAS_API_KEY`.
-Pass `vendors=("openai",)` to instrument only some providers (Azure clients
-need `"azure_openai"`).
+Pass `vendors=("openai",)` to instrument only some providers. `"openai"` also
+covers Azure clients (tagged `azure_openai`); pass `("azure_openai",)` alone to
+instrument Azure without plain OpenAI.
 
 - Calling `instrument()` again does nothing; `uninstrument()` restores the original methods.
 - Missing packages are skipped. Telemetry errors never affect the call.
