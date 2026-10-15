@@ -30,6 +30,9 @@ Guarantees:
     response (or exception) is what the caller gets.
   - No double events: calls made through `ShieldsClient` / `AsyncShieldsClient`
     run inside `suppress_instrumentation()` and are left to those clients.
+    Framework integrations (`prompt_shields.integrations`) announce each call
+    as a `FrameworkCall`; a patched call made inside it claims it, adds the
+    framework fields to its event, and the integration then emits nothing.
 
 Events are built by the same code as `ShieldsClient` (`_build_event`) and
 streams are wrapped by the same `ShieldsStream` / `AsyncShieldsStream`.
@@ -50,7 +53,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from prompt_shields.providers import (
+    ADAPTERS,
     AzureOpenAIAdapter,
+    ProviderAdapter,
     _field,
     _int,
     _str,
@@ -129,6 +134,79 @@ _SUPPRESSED: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 _lock = threading.Lock()
 _state: "_State | None" = None
+
+
+class FrameworkCall:
+    """One LLM call announced by a framework integration.
+
+    Set in `_FRAMEWORK_CALL` before the framework reaches the provider SDK.
+    The first patched call made inside it claims it (`captured`), so the
+    integration knows the event was already emitted. `model`, when set, must
+    match the requested model for the claim (a guard against a stale value).
+    `previous` is the value it replaced: a batch (LangChain `generate` with
+    several prompts) announces every run before making the calls, so a call
+    that finds the newest one already claimed claims the next older one.
+    A call that raises gives its claim back (it emits no event).
+    """
+
+    __slots__ = ("captured", "finished", "framework", "model", "previous",
+                 "use_case_hint")
+
+    def __init__(self, framework: str, use_case_hint: str | None = None,
+                 model: str | None = None,
+                 previous: "FrameworkCall | None" = None):
+        self.framework = framework
+        self.use_case_hint = use_case_hint
+        self.model = model
+        self.previous = previous
+        self.captured = False
+        self.finished = False
+
+
+_FRAMEWORK_CALL: contextvars.ContextVar[FrameworkCall | None] = (
+    contextvars.ContextVar("prompt_shields_framework_call", default=None)
+)
+
+
+def _same_model(a: str, b: str) -> bool:
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+
+_claim_lock = threading.Lock()
+
+
+def current_framework_call() -> FrameworkCall | None:
+    """The innermost unfinished `FrameworkCall` (the `previous` for a new one)."""
+    fc = _FRAMEWORK_CALL.get()
+    while fc is not None and fc.finished:
+        fc = fc.previous
+    return fc
+
+
+def _claim_framework_call(model: Any) -> FrameworkCall | None:
+    with _claim_lock:
+        fc = _FRAMEWORK_CALL.get()
+        while fc is not None and fc.captured and not fc.finished:
+            fc = fc.previous
+        if fc is None or fc.captured or fc.finished:
+            return None
+        if fc.model and isinstance(model, str) and not _same_model(fc.model, model):
+            return None
+        fc.captured = True
+        return fc
+
+
+def _release_framework_call(call: dict) -> None:
+    fc = call.get("framework")
+    if fc is not None:
+        fc.captured = False
+
+
+def apply_framework_fields(event: dict, fc: FrameworkCall) -> None:
+    """Tag an event with its framework; the hint fills an unset use case."""
+    event["framework"] = fc.framework
+    if fc.use_case_hint and not event.get("use_case_name"):
+        event["use_case_name"] = fc.use_case_hint
 
 
 @contextlib.contextmanager
@@ -292,7 +370,11 @@ def _make_wrapper(original: Any, vendor: str, api: str) -> Any:
         if call is None:
             return original(self, *args, **kwargs)
         start = time.monotonic()
-        response = original(self, *args, **call["kwargs"])
+        try:
+            response = original(self, *args, **call["kwargs"])
+        except BaseException:
+            _release_framework_call(call)
+            raise
         if inspect.isawaitable(response):
             return _await_and_finish(call, response, start)
         return _finish_sync(call, response, start)
@@ -302,7 +384,12 @@ def _make_wrapper(original: Any, vendor: str, api: str) -> Any:
 
 
 async def _await_and_finish(call: dict, awaitable: Any, start: float) -> Any:
-    return await _finish_async(call, await awaitable, start)
+    try:
+        response = await awaitable
+    except BaseException:
+        _release_framework_call(call)
+        raise
+    return await _finish_async(call, response, start)
 
 
 def _prepare(resource: Any, vendor: str, api: str, args: tuple,
@@ -358,6 +445,7 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             hide_usage_chunk = request_openai_stream_usage(call_kwargs)
         api_key = details["api_key"]
         model = details["model"]
+        framework = _claim_framework_call(model if isinstance(model, str) else None)
         return {
             "state": state,
             "vendor": vendor,
@@ -372,6 +460,7 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             "streaming": streaming,
             "hide_usage_chunk": hide_usage_chunk,
             "api_key": api_key if isinstance(api_key, str) and api_key else None,
+            "framework": framework,
         }
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"Instrumentation prepare error: {e}")
@@ -626,38 +715,57 @@ async def _finish_async(call: dict, response: Any, start: float) -> Any:
 # --- events ------------------------------------------------------------------
 
 
-def _event(call: dict, response: Any, latency_ms: int,
-           adapter_fields: dict | None = None) -> dict:
+def build_event(state: _State, *, vendor: str, model: Any, messages: list,
+                latency_ms: int, adapter_fields: dict,
+                api_key: str | None = None,
+                adapter: ProviderAdapter | None = None) -> dict:
+    """A `ShieldsClient`-shaped event from already extracted usage fields."""
     # Imported here: client.py imports this module for suppress_instrumentation.
     from prompt_shields.client import ShieldsClient, _fingerprint
 
+    # Duck-typed stand-in for a ShieldsClient: the attributes _build_event reads.
+    shim = SimpleNamespace(
+        _vendor=vendor,
+        # Only pricing_model() is used (fields are already extracted); a
+        # vendor without an adapter is priced by the requested model.
+        _adapter=adapter or ADAPTERS.get(vendor) or ProviderAdapter(),
+        _metadata=state.metadata,
+        _scan_pii=state.scan_pii,
+        _send_prompt_text=state.send_prompt_text,
+        _pricing_table=state.pricing_table,
+        _api_key_fingerprint=_fingerprint(api_key) if api_key else None,
+    )
+    return ShieldsClient._build_event(
+        shim,
+        model=model,
+        messages=messages,
+        response=None,
+        latency_ms=latency_ms,
+        adapter_fields=adapter_fields,
+    )
+
+
+def _event(call: dict, response: Any, latency_ms: int,
+           adapter_fields: dict | None = None) -> dict:
     adapter = call.get("adapter") or get_adapter(call["vendor"])
     if adapter_fields is None:
         adapter_fields = (
             _extract_responses(response) if call["api"] == "responses"
             else adapter.extract(response)
         )
-    state = call["state"]
-    # Duck-typed stand-in for a ShieldsClient: the attributes _build_event reads.
-    shim = SimpleNamespace(
-        _vendor=call["vendor"],
-        _adapter=adapter,
-        _metadata=state.metadata,
-        _scan_pii=state.scan_pii,
-        _send_prompt_text=state.send_prompt_text,
-        _pricing_table=state.pricing_table,
-        _api_key_fingerprint=(
-            _fingerprint(call["api_key"]) if call["api_key"] else None
-        ),
-    )
-    return ShieldsClient._build_event(
-        shim,
+    event = build_event(
+        call["state"],
+        vendor=call["vendor"],
+        adapter=adapter,
         model=call["model"],
         messages=call["messages"],
-        response=response,
         latency_ms=latency_ms,
         adapter_fields=adapter_fields,
+        api_key=call["api_key"],
     )
+    if call.get("framework") is not None:
+        apply_framework_fields(event, call["framework"])
+    return event
 
 
 def _stream_event(call: dict, adapter_fields: dict, stream_fields: dict,

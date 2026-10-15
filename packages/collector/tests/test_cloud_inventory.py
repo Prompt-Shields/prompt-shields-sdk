@@ -307,7 +307,10 @@ async def test_not_configured_tenant_makes_no_calls():
         settings=_settings(),
         transport=httpx.MockTransport(handler),
     )
-    assert result["clouds"] == {"azure": {"status": "not_configured"}}
+    assert result["clouds"] == {
+        "azure": {"status": "not_configured"},
+        "aws": {"status": "not_configured"},
+    }
 
 
 async def test_errors_and_logs_never_contain_the_secret(caplog):
