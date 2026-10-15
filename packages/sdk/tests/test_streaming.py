@@ -498,3 +498,64 @@ def test_anthropic_stream_records_mcp_tool_use():
         {"name": "get_weather", "type": "tool_use"},
         {"name": "search_issues", "type": "mcp", "server": "github"},
     ]
+
+
+# --- abandoned streams (ShieldsClient) ---------------------------------------
+
+
+def _collect():
+    import gc
+
+    for _ in range(3):
+        gc.collect()
+
+
+def test_sync_client_stream_abandoned_is_enqueued_on_gc():
+    client, events = _sync_client("openai", FakeStream(_oa_chunks()))
+    flushes = []
+    client._telemetry.flush_sync = lambda: flushes.append(1)
+    stream = client.chat.completions.create(
+        model="gpt-4o", messages=MESSAGES, stream=True
+    )
+    next(stream)
+    del stream
+    _collect()
+    assert len(events) == 1
+    assert events[0]["stream_completed"] is False
+    assert events[0]["stream_abandoned"] is True
+    assert flushes == []  # no I/O from the garbage collector
+
+
+async def test_async_client_stream_abandoned_is_enqueued_on_gc():
+    client, events = _async_client("openai", FakeAsyncStream(_oa_chunks()))
+    stream = await client.chat.completions.create(
+        model="gpt-4o", messages=MESSAGES, stream=True
+    )
+    await stream.__anext__()
+    del stream
+    _collect()
+    assert len(events) == 1
+    assert events[0]["stream_abandoned"] is True
+
+
+def test_early_end_latency_runs_to_the_last_chunk_read(monkeypatch):
+    from prompt_shields import streaming
+
+    now = [100.0]
+    monkeypatch.setattr(streaming.time, "monotonic", lambda: now[0])
+    for end in ("abandon", "close"):
+        client, events = _sync_client("openai", FakeStream(_oa_chunks()))
+        stream = client.chat.completions.create(
+            model="gpt-4o", messages=MESSAGES, stream=True
+        )
+        start = stream._start
+        now[0] = start + 0.25
+        next(stream)  # the last chunk read
+        now[0] = start + 60.0  # collected (or closed) a minute later
+        if end == "close":
+            stream.close()
+        else:
+            del stream
+            _collect()
+        assert len(events) == 1
+        assert events[0]["latency_ms"] == 250

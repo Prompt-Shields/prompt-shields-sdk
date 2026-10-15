@@ -11,7 +11,7 @@ import asyncio
 import concurrent.futures
 import json
 from types import SimpleNamespace as S
-from typing import Any
+from typing import Any, ClassVar
 
 import prompt_shields
 import pytest
@@ -498,6 +498,39 @@ def test_register_is_fail_open_when_internals_differ(monkeypatch, caplog):
     monkeypatch.setattr(li, "_remove", lambda handlers: 1 / 0)
     li.unregister()  # logged, not raised
     assert li._registered is None
+
+
+class _StuckDispatcher:
+    """A dispatcher whose handler lists cannot be replaced."""
+
+    event_handlers: ClassVar[list] = []
+    span_handlers: ClassVar[list] = []
+
+    def __setattr__(self, name, value):
+        raise RuntimeError("read-only handlers")
+
+
+def test_register_keeps_tracking_handlers_it_could_not_remove(monkeypatch):
+    root = get_dispatcher()
+    before = len(root.event_handlers), len(root.span_handlers)
+    old = li.register()
+    old_pair = li._registered
+    # Its span handler went missing, so register() replaces the pair, but
+    # removing the old one fails on another dispatcher.
+    root.span_handlers = [h for h in root.span_handlers if h is not old_pair[1]]
+    monkeypatch.setitem(li._root_manager.dispatchers, "ps-stuck", _StuckDispatcher())
+    assert li.register() is None
+    assert li._registered is old_pair  # still tracked, not leaked
+    # Removed where it could be; no new pair attached next to what is left.
+    assert _ours(root) == []
+    assert old is old_pair[0]
+    li.unregister()  # fails again: logged, still tracked
+    assert li._registered is old_pair
+
+    li._root_manager.dispatchers.pop("ps-stuck")
+    li.unregister()
+    assert li._registered is None
+    assert (len(root.event_handlers), len(root.span_handlers)) == before
 
 
 def test_register_is_idempotent_and_unregister_removes_handlers(fakes):  # noqa: F811

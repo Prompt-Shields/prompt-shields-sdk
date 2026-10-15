@@ -5,7 +5,9 @@ and only *observe* it on the way through. One telemetry event is emitted when
 the stream ends: exhausted (`stream_completed=True`), raises, or is closed
 early (`stream_completed=False`, with `stream_error` set on errors). With
 `on_abandon` (auto-instrumentation), a stream garbage-collected unfinished
-is reported too (`stream_abandoned=True`).
+is reported too (`stream_abandoned=True`). The `latency_ms` of a stream that
+ends early without an error (closed or abandoned) runs to the last chunk
+read, not to the close or the garbage collection.
 
 Usage comes from the provider when it sends it:
   - OpenAI: the final usage chunk, present when
@@ -392,6 +394,11 @@ class _StreamBase:
     it must not block or do I/O (enqueue the event, do not send it). It is
     skipped at interpreter shutdown, and a lazy stream (`on_failed_start`)
     that was never read sent no request, so it gets `on_failed_start()`.
+
+    `close_flush=False` makes `close()` call `on_finish(..., flush=False)`:
+    enqueue, do not send. For a stream closed by code that may run in the
+    garbage collector (cohere's `chat_stream` generator closes its event
+    stream when it is collected).
     """
 
     def __init__(
@@ -402,6 +409,7 @@ class _StreamBase:
         start: float,
         hide_usage_chunk: bool = False,
         on_failed_start: Callable[[], Any] | None = None,
+        close_flush: bool = True,
     ):
         self._stream = stream
         self._acc = accumulator
@@ -409,7 +417,11 @@ class _StreamBase:
         self._start = start
         self._hide_usage_chunk = hide_usage_chunk
         self._on_failed_start = on_failed_start
+        self._close_flush = close_flush
         self._chunks = 0
+        # When the last chunk was read (or the stream was wrapped): the end
+        # of an early-ended stream's latency.
+        self._last_read = time.monotonic()
         self._finished = False
         # Set by the subclasses once fully constructed.
         self._on_abandon: Callable[..., Any] | None = None
@@ -446,6 +458,7 @@ class _StreamBase:
     def _observe(self, chunk: Any) -> bool:
         """Record a chunk; return True if it should be hidden from the caller."""
         self._chunks += 1
+        self._last_read = time.monotonic()
         try:
             self._acc.observe(chunk)
             return self._hide_usage_chunk and _is_injected_usage_chunk(chunk)
@@ -466,7 +479,11 @@ class _StreamBase:
             stream_fields: dict = {"stream": True, "stream_completed": completed}
             if error is not None:
                 stream_fields["stream_error"] = type(error).__name__
-            latency_ms = int((time.monotonic() - self._start) * 1000)
+            # A stream ended early (closed or abandoned) is timed to its last
+            # chunk: the close may come much later, from the garbage collector.
+            end = (self._last_read if not completed and error is None
+                   else time.monotonic())
+            latency_ms = int((end - self._start) * 1000)
             return self._acc.adapter_fields(), stream_fields, latency_ms
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"Stream telemetry finish error: {e}")
@@ -498,12 +515,16 @@ class ShieldsStream(_StreamBase):
             if self._finished or not self._observe(chunk):
                 return chunk
 
-    def _finish(self, completed: bool, error: BaseException | None = None) -> None:
+    def _finish(self, completed: bool, error: BaseException | None = None,
+                flush: bool = True) -> None:
         args = self._finish_args(completed, error)
         if args is None:
             return
         try:
-            self._on_finish(*args)
+            if flush:
+                self._on_finish(*args)
+            else:
+                self._on_finish(*args, flush=False)
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"Stream telemetry emit error: {e}")
 
@@ -514,7 +535,7 @@ class ShieldsStream(_StreamBase):
             if close is not None:
                 close()
         finally:
-            self._finish(completed=False)
+            self._finish(completed=False, flush=self._close_flush)
 
     def __enter__(self):
         return self
@@ -575,7 +596,7 @@ class AsyncShieldsStream(_StreamBase):
                 if hasattr(result, "__await__"):
                     await result
         finally:
-            await self._finish(completed=False)
+            await self._finish(completed=False, flush=self._close_flush)
 
     async def aclose(self) -> None:
         """Alias of `close()` (openai's AsyncStream, `contextlib.aclosing`).
