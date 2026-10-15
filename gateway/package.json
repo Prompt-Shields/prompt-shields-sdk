@@ -36,6 +36,7 @@
     "format:check": "prettier --check \"./**/*.{js,jsx,ts,tsx,json}\"",
     "test:gateway": "jest src/",
     "test:plugins": "jest plugins/",
+    "test:integration": "jest -c jest.integration.config.js",
     "pre-push": "npm run build && node start-test.js",
     "prepare": "node -e \"if (process.env.NODE_ENV !== 'production'){process.exit(1)} \" || husky",
     "postinstall": "patch-package"
