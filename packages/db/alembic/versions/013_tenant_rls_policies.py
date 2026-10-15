@@ -13,8 +13,8 @@ Downgrade turns enforcement off and drops the policies (#83).
 The SQL is inlined (a snapshot of db/rls.py at this revision) so later edits
 to db/rls.py don't rewrite history.
 
-Revision ID: 012
-Revises: 011
+Revision ID: 013
+Revises: 012
 Create Date: 2026-10-15
 """
 
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "012"
-down_revision: str | None = "011"
+revision: str = "013"
+down_revision: str | None = "012"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -38,6 +38,7 @@ TENANT_TABLES = {
     "partner_audit_log": "tenant_id",
     "retention_audit_log": "tenant_id",
     "telemetry_client_stats": "tenant_id",
+    "asset_attestations": "tenant_id",
 }
 
 

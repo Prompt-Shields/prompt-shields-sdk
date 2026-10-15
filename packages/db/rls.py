@@ -14,7 +14,7 @@ write is rejected. The runtime side (setting them per request or job) lives
 in ``collector/rls.py``.
 
 The policies are inert until RLS is switched on for the tables. Migration
-012 only creates them; ``enable_statements`` turns enforcement on, with
+013 only creates them; ``enable_statements`` turns enforcement on, with
 FORCE so the table owner is bound too (the collector has historically
 connected as the owner). Run as the table owner:
 
@@ -43,6 +43,7 @@ TENANT_TABLES: dict[str, str] = {
     "partner_audit_log": "tenant_id",
     "retention_audit_log": "tenant_id",
     "telemetry_client_stats": "tenant_id",
+    "asset_attestations": "tenant_id",
 }
 
 

@@ -23,6 +23,7 @@ from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import (
     AIAsset,
     AIUsageEvent,
+    AssetAttestation,
     Base,
     DataFlow,
     PartnerAuditLog,
@@ -92,6 +93,14 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 ),
                 RetentionAuditLog(tenant_id=tenant_id, action="purge", actor="test"),
                 TelemetryClientStats(tenant_id=tenant_id, client_id=f"client-{name}"),
+                AssetAttestation(
+                    tenant_id=tenant_id,
+                    asset_id=a.id,
+                    field="owner",
+                    state="attested",
+                    attested_by=f"owner@{name}.example",
+                    actor_type="tenant",
+                ),
             ]
         )
         await s.commit()
@@ -312,6 +321,7 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["rows_deleted"]["tenants"] == 1
+        assert resp.json()["rows_deleted"]["asset_attestations"] == 1
 
     assert any(
         "rls bypass granted reason=operator:POST /api/v1/operator/retention/purge"
@@ -320,7 +330,17 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
     )
     async with rls_db["admin"]() as s:
         tenants = set((await s.execute(select(Tenant.id))).scalars())
+        attested = set((await s.execute(select(AssetAttestation.tenant_id))).scalars())
     assert tenants == {a}
+    assert attested == {a}
+
+
+async def test_attestation_delete_stays_blocked_under_a_bypass(rls_db):
+    """An RLS bypass is not an erasure: the append-only trigger still
+    refuses a DELETE that doesn't name the tenant being erased."""
+    async with rls_db["admin"]() as s:
+        with pytest.raises(DBAPIError, match="append-only"):
+            await s.execute(text("DELETE FROM asset_attestations"))
 
 
 async def test_disable_turns_enforcement_off(rls_db):
@@ -380,6 +400,17 @@ async def test_cloud_inventory_and_partner_admin_routes_work_under_rls(rls_db, m
         partner_b = {"Authorization": f"Bearer {PARTNER_KEY_B}"}
         resp = await c.get(f"/partner/v1/assets/{asset_b}/risks", headers=partner_b)
         assert resp.status_code == 403
+
+        attest = f"/api/v1/registry/assets/{asset_b}/attestations"
+        body = {"field": "asset", "state": "attested", "attested_by": "x@b.example"}
+        resp = await c.post(attest, headers=key_b, json=body)
+        assert resp.status_code == 201, resp.text
+        resp = await c.get(attest, headers=key_b)
+        assert resp.status_code == 200, resp.text
+        resp = await c.post(
+            attest, headers={"Authorization": f"Bearer {KEY_A}"}, json=body
+        )
+        assert resp.status_code == 404
 
     async with rls_db["admin"]() as s:
         denied = (
