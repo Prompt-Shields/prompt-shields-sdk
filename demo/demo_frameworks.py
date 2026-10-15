@@ -1,10 +1,12 @@
-"""Framework integrations demo: LangChain and LiteLLM calls -> registry assets.
+"""Framework integrations demo: LangChain, LiteLLM and LlamaIndex calls ->
+registry assets.
 
-Runs offline: the LangChain model is a local fake and LiteLLM uses
-`mock_response`, so no provider API key is needed. Needs the collector
+Runs offline: the LangChain and LlamaIndex models are local fakes and LiteLLM
+uses `mock_response`, so no provider API key is needed. Needs the collector
 (docker compose up) with the demo tenant seeded (demo/seed_data.py), plus
-`pip install langchain-core litellm`.
+`pip install langchain-core litellm llama-index-core`.
 """
+import asyncio
 import time
 
 import httpx
@@ -13,6 +15,10 @@ import prompt_shields
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
+from llama_index.core.llms import CompletionResponse, CustomLLM, LLMMetadata
+from llama_index.core.llms.callbacks import llm_completion_callback
+from llama_index.core.workflow import StartEvent, StopEvent, Workflow, step
+from prompt_shields.integrations import llamaindex
 from prompt_shields.integrations.langchain import PromptShieldsCallbackHandler
 from prompt_shields.integrations.litellm import register
 
@@ -27,6 +33,37 @@ class DemoChatModel(GenericFakeChatModel):
     def _get_ls_params(self, stop=None, **kwargs):
         return {"ls_provider": "openai", "ls_model_name": "gpt-4o-mini",
                 "ls_model_type": "chat"}
+
+
+class DemoLlamaLLM(CustomLLM):
+    """A local LlamaIndex LLM that reports itself as OpenAI gpt-4o."""
+
+    @classmethod
+    def class_name(cls):
+        return "openai_llm"
+
+    @property
+    def metadata(self):
+        return LLMMetadata(model_name="gpt-4o")
+
+    @llm_completion_callback()
+    def complete(self, prompt, formatted=False, **kwargs):
+        return CompletionResponse(
+            text="Claim C-7 is covered.",
+            additional_kwargs={"prompt_tokens": 210, "completion_tokens": 9})
+
+    @llm_completion_callback()
+    def stream_complete(self, prompt, formatted=False, **kwargs):
+        raise NotImplementedError
+
+
+class CoverageCheck(Workflow):
+    """A LlamaIndex workflow: its class name becomes the use case."""
+
+    @step
+    async def check(self, ev: StartEvent) -> StopEvent:
+        answer = await DemoLlamaLLM().acomplete(ev.question)
+        return StopEvent(result=answer.text)
 
 
 def main():
@@ -59,13 +96,21 @@ def main():
         metadata={"ps_use_case": "policy_summaries"},
     )
 
-    print("\n3. Registry assets discovered from the framework calls:")
+    print("3. LlamaIndex workflow 'CoverageCheck' (instrumentation handlers)...")
+    llamaindex.register()
+
+    async def check_coverage():
+        return await CoverageCheck().run(question="Is claim C-7 covered?")
+
+    asyncio.run(check_coverage())
+
+    print("\n4. Registry assets discovered from the framework calls:")
     # LiteLLM logs sync calls from a background thread; give it a moment.
     for _ in range(50):
         resp = httpx.get(
             f"{COLLECTOR_URL}/api/v1/registry/assets?business_unit=Claims",
             headers=HEADERS)
-        if resp.json()["meta"]["total"] >= 2:
+        if resp.json()["meta"]["total"] >= 3:
             break
         time.sleep(0.1)
     for a in resp.json()["data"]:

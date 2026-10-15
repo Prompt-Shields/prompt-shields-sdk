@@ -62,6 +62,24 @@ def text_of(content: Any) -> str:
     return ""
 
 
+def claim_outer_call(framework: str) -> FrameworkCall | None:
+    """Take over the unclaimed call an enclosing framework call announced.
+
+    A framework called from another one's run (LiteLLM or LlamaIndex under
+    LangChain, LangChain under LlamaIndex), or from a deferred stream of its
+    own framework while it is iterated, reports the call itself: the outer
+    call is marked captured so its integration emits nothing. Returns the
+    outer call (for its use-case hint).
+    """
+    with instrumentation._claim_lock:
+        outer = instrumentation._claimable_framework_call()
+        if outer is None or (outer.framework == framework
+                             and outer.frame is None):
+            return None
+        outer.captured = True
+    return outer
+
+
 def emit(fc: FrameworkCall, *, vendor: str, model: Any, messages: list,
          latency_ms: int, adapter_fields: dict,
          cost_fallback: Any = None) -> None:
