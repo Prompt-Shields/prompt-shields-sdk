@@ -1,0 +1,81 @@
+{
+  "ruleset": "data_protection",
+  "version": "1.0.0",
+  "title": "NIST AI RMF and ISO/IEC 42001 data protection signals",
+  "description": "Suggests privacy and data-governance mappings from the PII categories and data classification seen in an asset's telemetry-derived data flows. Every match is a suggestion for a human to confirm or reject.",
+  "lists": {
+    "sensitive_pii": ["health", "medical", "medical_record", "diagnosis", "health_insurance_id", "biometric", "biometric_data", "face", "face_image", "facial_image", "fingerprint", "iris", "voiceprint", "voice_print", "genetic", "national_id", "ssn", "passport", "racial_or_ethnic_origin", "ethnicity", "religion", "religious_belief", "sexual_orientation", "political_opinion", "trade_union_membership", "criminal_record"]
+  },
+  "rules": [
+    {
+      "id": "nist_ai_rmf.privacy.sensitive_pii",
+      "framework": "NIST_AI_RMF",
+      "category": "privacy",
+      "level": "high",
+      "reference": "Trustworthy characteristic: Privacy-enhanced (MAP, MEASURE)",
+      "title": "Sensitive or special-category personal data reaches the model",
+      "when": {
+        "any": [
+          {"signal": "pii_types", "any_of": "@sensitive_pii"}
+        ]
+      }
+    },
+    {
+      "id": "nist_ai_rmf.privacy.personal_data",
+      "framework": "NIST_AI_RMF",
+      "category": "privacy",
+      "level": "medium",
+      "reference": "Trustworthy characteristic: Privacy-enhanced (MAP, MEASURE)",
+      "title": "Personal data reaches the model",
+      "when": {
+        "any": [
+          {"signal": "pii_types", "present": true}
+        ]
+      },
+      "unless": [
+        {"signal": "pii_types", "any_of": "@sensitive_pii"}
+      ]
+    },
+    {
+      "id": "nist_ai_rmf.security.restricted_data",
+      "framework": "NIST_AI_RMF",
+      "category": "security",
+      "level": "high",
+      "reference": "Trustworthy characteristic: Secure and resilient (MEASURE)",
+      "title": "Restricted data is sent to the model",
+      "when": {
+        "any": [
+          {"signal": "data_classification", "at_least": "restricted"}
+        ]
+      }
+    },
+    {
+      "id": "iso_42001.a7.personal_data",
+      "framework": "ISO_42001",
+      "category": "data_for_ai_systems",
+      "level": "medium",
+      "reference": "Annex A, A.7 (Data for AI systems)",
+      "title": "Personal data used by the AI system needs data governance controls",
+      "when": {
+        "any": [
+          {"signal": "pii_types", "present": true},
+          {"signal": "data_classification", "at_least": "confidential"}
+        ]
+      }
+    },
+    {
+      "id": "iso_42001.a5.impact_assessment",
+      "framework": "ISO_42001",
+      "category": "impact_assessment",
+      "level": "high",
+      "reference": "Annex A, A.5 (Assessing impacts of AI systems)",
+      "title": "Sensitive personal or restricted data calls for an AI system impact assessment",
+      "when": {
+        "any": [
+          {"signal": "pii_types", "any_of": "@sensitive_pii"},
+          {"signal": "data_classification", "at_least": "restricted"}
+        ]
+      }
+    }
+  ]
+}

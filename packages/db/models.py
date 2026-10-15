@@ -151,12 +151,35 @@ class RiskMapping(Base):
     risk_category = Column(Text, nullable=False)
     risk_level = Column(Text, nullable=False)
     framework = Column(Text)
+    # Rule-based suggestions (collector/risk_suggestions.py, #97). Hand-entered
+    # rows are source 'manual', status 'confirmed'. The engine writes source
+    # 'rules', status 'suggested' and only ever changes or withdraws rows that
+    # are still 'suggested'; a human review sets 'confirmed' or 'rejected'.
+    status = Column(Text, nullable=False, default="confirmed", server_default="confirmed")
+    source = Column(Text, nullable=False, default="manual", server_default="manual")
+    rule_id = Column(Text)
+    ruleset_version = Column(Text)
+    framework_ref = Column(Text)
+    confidence = Column(Text)
+    # Which signals triggered the rule: [{signal, field, value, matched, role}].
+    evidence = Column(JSONB)
+    created_at = Column(TIMESTAMP(timezone=True), default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True), default=utcnow)
+    reviewed_at = Column(TIMESTAMP(timezone=True))
 
     asset = relationship("AIAsset", back_populates="risk_mappings")
 
     __table_args__ = (
         Index("ix_risk_mappings_tenant_asset", "tenant_id", "asset_id"),
         Index("ix_risk_mappings_tenant_cat", "tenant_id", "risk_category"),
+        Index("ix_risk_mappings_tenant_status", "tenant_id", "status"),
+        # One row per rule per asset; the engine's upsert key.
+        Index(
+            "ux_risk_mappings_rule",
+            "tenant_id", "asset_id", "rule_id",
+            unique=True,
+            postgresql_where=rule_id.isnot(None),
+        ),
     )
 
 

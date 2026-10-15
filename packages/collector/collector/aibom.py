@@ -186,8 +186,13 @@ def build_bom(
         ]
         props.extend(_prop(k, v) for k, v in optional if v)
         for r in risks_by_asset.get(a.id, []):
+            if r.status == "rejected":
+                continue
             framework = r.framework or "unspecified"
-            props.append(_prop(f"risk:{framework}:{r.risk_category}", r.risk_level))
+            # Rule-based suggestions nobody has confirmed are kept apart from
+            # risk classifications (#97).
+            kind = "risk-suggestion" if r.status == "suggested" else "risk"
+            props.append(_prop(f"{kind}:{framework}:{r.risk_category}", r.risk_level))
 
         components.append(
             {

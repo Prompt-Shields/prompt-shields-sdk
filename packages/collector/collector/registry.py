@@ -12,6 +12,7 @@ from collector.audit import record_read
 from collector.auth import resolve_tenant
 from collector.embeddings import get_embedding, mock_embedding
 from collector.lifecycle import LifecycleState
+from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 
 router = APIRouter(prefix="/api/v1/registry")
 
@@ -100,14 +101,26 @@ async def get_data_flows(asset_id: UUID, request: Request):
 
 
 @router.get("/assets/{asset_id}/risks")
-async def get_risks(asset_id: UUID, request: Request):
+async def get_risks(
+    asset_id: UUID,
+    request: Request,
+    status: RiskStatus | None = None,
+):
     tenant_id = await resolve_tenant(request)
     db = request.state.db
 
-    stmt = select(RiskMapping).where(RiskMapping.asset_id == asset_id, RiskMapping.tenant_id == tenant_id)
+    stmt = (
+        select(RiskMapping)
+        .where(
+            RiskMapping.asset_id == asset_id,
+            RiskMapping.tenant_id == tenant_id,
+            risk_status_filter(status),
+        )
+        .order_by(RiskMapping.framework, RiskMapping.risk_category, RiskMapping.id)
+    )
     result = await db.execute(stmt)
     risks = result.scalars().all()
-    data = [_serialize_risk(r) for r in risks]
+    data = [risk_dict(r) for r in risks]
     await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(data))
     return {"data": data}
 
@@ -260,13 +273,4 @@ def _serialize_flow(f: DataFlow) -> dict:
         "data_classification": f.data_classification,
         "direction": f.direction,
         "detected_pii_types": f.detected_pii_types,
-    }
-
-
-def _serialize_risk(r: RiskMapping) -> dict:
-    return {
-        "id": str(r.id),
-        "risk_category": r.risk_category,
-        "risk_level": r.risk_level,
-        "framework": r.framework,
     }

@@ -201,14 +201,21 @@ components:
 
     RiskMapping:
       type: object
-      description: Risk assessment linked to an AI asset
+      description: |
+        Risk assessment linked to an AI asset. Rows with `status: suggested`
+        come from the rules engine and are suggestions, not determinations:
+        a human confirms or rejects them.
       properties:
         id:
           type: string
           format: uuid
         risk_category:
           type: string
-          enum: [strategic, operational, compliance, cyber, reputational]
+          description: |
+            Hand-entered mappings typically use strategic, operational,
+            compliance, cyber or reputational. Suggestions use the framework's
+            own category, e.g. `employment` (EU AI Act Annex III point 4) or
+            `privacy` (NIST AI RMF).
           example: "compliance"
         risk_level:
           type: string
@@ -220,10 +227,51 @@ components:
           enum: [NIST_AI_RMF, ISO_42001, EU_AI_ACT, custom]
           example: "EU_AI_ACT"
           nullable: true
+        status:
+          type: string
+          enum: [suggested, confirmed, rejected]
+          description: Hand-entered mappings are `confirmed`.
+          example: "suggested"
+        source:
+          type: string
+          enum: [manual, rules]
+          example: "rules"
+        rule_id:
+          type: string
+          nullable: true
+          description: Rule that produced the suggestion
+          example: "eu_ai_act.annex_iii.4a.recruitment"
+        ruleset_version:
+          type: string
+          nullable: true
+          example: "1.0.0"
+        framework_ref:
+          type: string
+          nullable: true
+          description: Where in the framework the rule points
+          example: "Annex III, point 4(a)"
+        confidence:
+          type: string
+          nullable: true
+          enum: [low, medium, high, null]
+          example: "high"
+        evidence:
+          type: object
+          nullable: true
+          description: |
+            Why the rule fired: `summary` (one line), `rule_title`, `ruleset`
+            and `signals`, each `{signal, value, matched, role}` where role is
+            `trigger` or `supporting`.
+        reviewed_at:
+          type: string
+          format: date-time
+          nullable: true
       required:
         - id
         - risk_category
         - risk_level
+        - status
+        - source
 
     UsageSummary:
       type: object
@@ -603,7 +651,9 @@ paths:
       summary: Get risk mappings
       description: |
         Returns risk assessments for an AI asset, mapped to governance
-        frameworks (NIST AI RMF, ISO 42001, EU AI Act).
+        frameworks (NIST AI RMF, ISO 42001, EU AI Act). Rule-based
+        suggestions are included with `status: suggested`; rejected
+        mappings are left out unless asked for with `status=rejected`.
       parameters:
         - name: asset_id
           in: path
@@ -611,6 +661,13 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: status
+          in: query
+          required: false
+          description: Only mappings with this status. Default is all but rejected.
+          schema:
+            type: string
+            enum: [suggested, confirmed, rejected]
       responses:
         '200':
           description: Risk mappings for the asset
@@ -626,13 +683,41 @@ paths:
               example:
                 data:
                   - id: "019e1a2b-0000-7000-8000-000000000020"
-                    risk_category: "compliance"
+                    risk_category: "employment"
                     risk_level: "high"
                     framework: "EU_AI_ACT"
+                    status: "suggested"
+                    source: "rules"
+                    rule_id: "eu_ai_act.annex_iii.4a.recruitment"
+                    ruleset_version: "1.0.0"
+                    framework_ref: "Annex III, point 4(a)"
+                    confidence: "high"
+                    evidence:
+                      rule_title: "Recruitment or selection: targeted job ads, filtering applications, evaluating candidates"
+                      ruleset: "eu_ai_act_annex_iii"
+                      summary: "Annex III, point 4(a), Recruitment or selection: ...: use_case 'resume-screening' matched resume* (trigger); business_unit 'HR' matched hr (supporting)"
+                      signals:
+                        - signal: "use_case"
+                          value: "resume-screening"
+                          matched: ["resume*"]
+                          role: "trigger"
+                        - signal: "business_unit"
+                          value: "HR"
+                          matched: ["hr"]
+                          role: "supporting"
+                    reviewed_at: null
                   - id: "019e1a2b-0000-7000-8000-000000000021"
                     risk_category: "operational"
                     risk_level: "medium"
                     framework: "NIST_AI_RMF"
+                    status: "confirmed"
+                    source: "manual"
+                    rule_id: null
+                    ruleset_version: null
+                    framework_ref: null
+                    confidence: null
+                    evidence: null
+                    reviewed_at: null
         '404':
           description: Asset not found
 
