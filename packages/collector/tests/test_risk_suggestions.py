@@ -188,7 +188,7 @@ def test_suggestion_carries_rule_and_evidence():
         "high",
     )
     assert s.rule.reference == "Annex III, point 4(a)"
-    assert s.rule.ruleset_version == "1.0.0"
+    assert s.rule.ruleset_version == "1.1.0"
     assert s.confidence == "high"
     signals = s.evidence["signals"]
     assert {
@@ -245,6 +245,22 @@ def test_unless_excludes_fraud_detection_from_credit_scoring():
         _annex(AssetSignals(use_case="credit scoring", calling_service="fraud-svc"))
         == []
     )
+    # The exclusion is about the system's purpose: a credit scoring system
+    # that merely reads fraud signals is still Annex III point 5(b).
+    assert _annex(
+        AssetSignals(use_case="credit scoring", data_sources=["fraud_signals_db"])
+    ) == ["eu_ai_act.annex_iii.5b.creditworthiness"]
+
+
+def test_unless_excludes_biometric_verification_from_remote_identification():
+    rid = "eu_ai_act.annex_iii.1a.remote_biometric_identification"
+    assert rid in _annex(AssetSignals(use_case="facial recognition in store cameras"))
+    # Annex III point 1(a) excludes verification whose sole purpose is to
+    # confirm a person is who they claim to be.
+    assert rid not in _annex(
+        AssetSignals(use_case="face matching", calling_service="kyc-identity-verification")
+    )
+    assert rid not in _annex(AssetSignals(use_case="face recognition liveness check"))
 
 
 def test_keywords_match_whole_words_unless_starred():

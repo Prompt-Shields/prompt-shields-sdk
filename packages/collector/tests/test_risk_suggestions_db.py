@@ -144,7 +144,7 @@ async def test_suggestions_from_registry_and_telemetry_flows(seeded_db):
         "high",
     )
     assert (r.status, r.source, r.confidence) == ("suggested", "rules", "high")
-    assert (r.framework_ref, r.ruleset_version) == ("Annex III, point 4(a)", "1.0.0")
+    assert (r.framework_ref, r.ruleset_version) == ("Annex III, point 4(a)", "1.1.0")
     assert r.reviewed_at is None and r.created_at is not None
     signals = {(e["signal"], e["role"]): e for e in r.evidence["signals"]}
     # Data sources and PII come from the telemetry-derived data flows.
@@ -207,20 +207,27 @@ async def test_human_set_values_are_never_overwritten(seeded_db):
     ok = await _call(
         "POST",
         f"/api/v1/admin/risk-mappings/{risks[RECRUITMENT].id}/review",
-        json={"status": "confirmed"},
+        json={"status": "confirmed", "reviewed_by": "dpo@example.com"},
     )
     assert ok.status_code == 200, ok.text
     assert ok.json()["status"] == "confirmed" and ok.json()["reviewed_at"]
+    assert ok.json()["reviewed_by"] == "dpo@example.com"
+    anonymous = await _call(
+        "POST",
+        f"/api/v1/admin/risk-mappings/{risks[ISO_A7].id}/review",
+        json={"status": "confirmed"},
+    )
+    assert anonymous.status_code == 422  # a review names the person deciding
     no = await _call(
         "POST",
         f"/api/v1/admin/risk-mappings/{risks[ISO_A5].id}/review",
-        json={"status": "rejected"},
+        json={"status": "rejected", "reviewed_by": "dpo@example.com"},
     )
     assert no.status_code == 200
     bad = await _call(
         "POST",
         f"/api/v1/admin/risk-mappings/{risks[ISO_A7].id}/review",
-        json={"status": "suggested"},
+        json={"status": "suggested", "reviewed_by": "dpo@example.com"},
     )
     assert bad.status_code == 422
 
@@ -305,7 +312,7 @@ async def test_tenant_isolation_and_reads(seeded_db, monkeypatch):
         "POST",
         f"/api/v1/admin/risk-mappings/{a_risks[RECRUITMENT].id}/review",
         key=KEY_B,
-        json={"status": "rejected"},
+        json={"status": "rejected", "reviewed_by": "dpo@example.com"},
     )
     assert other.status_code == 404
     leak = await _call("GET", f"/api/v1/registry/assets/{hiring_a}/risks", key=KEY_B)
@@ -314,7 +321,7 @@ async def test_tenant_isolation_and_reads(seeded_db, monkeypatch):
     await _call(
         "POST",
         f"/api/v1/admin/risk-mappings/{a_risks[ISO_A5].id}/review",
-        json={"status": "rejected"},
+        json={"status": "rejected", "reviewed_by": "dpo@example.com"},
     )
     reg = await _call("GET", f"/api/v1/registry/assets/{hiring_a}/risks")
     rows = {r["rule_id"]: r for r in reg.json()["data"]}
@@ -356,12 +363,20 @@ async def test_tenant_isolation_and_reads(seeded_db, monkeypatch):
             f"/partner/v1/assets/{hiring_a}/risks?status=suggested",
             headers={"Authorization": f"Bearer {token}"},
         )
+        default = await c.get(
+            f"/partner/v1/assets/{hiring_a}/risks",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         bom = await c.get(
             "/partner/v1/export?format=cyclonedx",
             headers={"Authorization": f"Bearer {token}"},
         )
     assert partner.status_code == 200, partner.text
     assert {r["rule_id"] for r in partner.json()["data"]} == HIRING_RULES - {ISO_A5}
+    # By default the Partner API returns only confirmed mappings, so existing
+    # integrations do not start receiving unreviewed suggestions.
+    assert default.status_code == 200, default.text
+    assert default.json()["data"] == []
     assert bom.status_code == 200, bom.text
     props = {
         p["name"]: p["value"]
@@ -378,6 +393,50 @@ async def test_review_unknown_mapping_is_404(seeded_db):
     r = await _call(
         "POST",
         "/api/v1/admin/risk-mappings/00000000-0000-0000-0000-000000000000/review",
-        json={"status": "confirmed"},
+        json={"status": "confirmed", "reviewed_by": "dpo@example.com"},
     )
     assert r.status_code == 404
+
+
+
+@pytest.mark.asyncio
+async def test_review_during_a_run_is_not_overwritten(seeded_db):
+    """A human review that commits while a run is in flight wins: the run's
+    refresh only applies to rows still `suggested`."""
+    tenant = await _tenant_id(seeded_db)
+    await _ingest([HIRING_EVENT])
+    await _suggest(seeded_db, tenant)
+    async with _session(seeded_db) as db:
+        await db.execute(
+            RiskMapping.__table__.update()
+            .where(RiskMapping.rule_id.in_([ISO_A7, NIST_SENSITIVE]))
+            .values(risk_level="critical")
+        )
+        await db.commit()
+
+    async with _session(seeded_db) as run_db:
+        # The run's session already holds the rows as `suggested` (the
+        # identity map keeps them on the run's own select) ...
+        # (held here: the identity map only keeps referenced objects).
+        held = (
+            await run_db.execute(
+                select(RiskMapping).where(RiskMapping.tenant_id == tenant)
+            )
+        ).scalars().all()
+        assert {r.status for r in held} == {"suggested"}
+        # ... when a reviewer confirms one in another transaction.
+        async with _session(seeded_db) as review_db:
+            await review_db.execute(
+                RiskMapping.__table__.update()
+                .where(RiskMapping.rule_id == ISO_A7)
+                .values(status="confirmed", reviewed_by="dpo@example.com")
+            )
+            await review_db.commit()
+        result = await suggest_risks(run_db, tenant)
+        await run_db.commit()
+
+    risks = await _risks(seeded_db, tenant)
+    assert risks[ISO_A7].status == "confirmed"
+    assert risks[ISO_A7].risk_level == "critical"  # not refreshed after the review
+    assert risks[NIST_SENSITIVE].risk_level == "high"  # still suggested: refreshed
+    assert result.updated == 1

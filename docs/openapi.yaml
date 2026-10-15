@@ -283,6 +283,11 @@ components:
           type: string
           format: date-time
           nullable: true
+        reviewed_by:
+          type: string
+          nullable: true
+          description: The person who confirmed or rejected the mapping
+          example: "dpo@example.com"
       required:
         - id
         - risk_category
@@ -784,9 +789,11 @@ paths:
       summary: Get risk mappings
       description: |
         Returns risk assessments for an AI asset, mapped to governance
-        frameworks (NIST AI RMF, ISO 42001, EU AI Act). Rule-based
-        suggestions are included with `status: suggested`; rejected
-        mappings are left out unless asked for with `status=rejected`.
+        frameworks (NIST AI RMF, ISO 42001, EU AI Act). By default only
+        `confirmed` mappings are returned (hand-entered ones and rule-based
+        suggestions a person has confirmed), as before suggestions existed.
+        Pass `status=suggested` for unreviewed rule-based suggestions, which
+        are not determinations, or `status=rejected`.
       parameters:
         - name: asset_id
           in: path
@@ -797,7 +804,7 @@ paths:
         - name: status
           in: query
           required: false
-          description: Only mappings with this status. Default is all but rejected.
+          description: Only mappings with this status. Default is `confirmed`.
           schema:
             type: string
             enum: [suggested, confirmed, rejected]
@@ -824,10 +831,10 @@ paths:
                     risk_category: "employment"
                     risk_level: "high"
                     framework: "EU_AI_ACT"
-                    status: "suggested"
+                    status: "confirmed"
                     source: "rules"
                     rule_id: "eu_ai_act.annex_iii.4a.recruitment"
-                    ruleset_version: "1.0.0"
+                    ruleset_version: "1.1.0"
                     framework_ref: "Annex III, point 4(a)"
                     confidence: "high"
                     evidence:
@@ -843,7 +850,8 @@ paths:
                           value: "HR"
                           matched: ["hr"]
                           role: "supporting"
-                    reviewed_at: null
+                    reviewed_at: "2026-10-15T09:30:00Z"
+                    reviewed_by: "dpo@example.com"
                   - id: "019e1a2b-0000-7000-8000-000000000021"
                     risk_category: "operational"
                     risk_level: "medium"
@@ -856,6 +864,7 @@ paths:
                     confidence: null
                     evidence: null
                     reviewed_at: null
+                    reviewed_by: null
         '404':
           description: Asset not found
 

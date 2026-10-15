@@ -104,7 +104,7 @@ PII category it matched, plus a one-line `summary`:
   "status": "suggested",
   "source": "rules",
   "rule_id": "eu_ai_act.annex_iii.4a.recruitment",
-  "ruleset_version": "1.0.0",
+  "ruleset_version": "1.1.0",
   "framework_ref": "Annex III, point 4(a)",
   "confidence": "high",
   "evidence": {
@@ -124,19 +124,23 @@ PII category it matched, plus a one-line `summary`:
 are idempotent.
 
 **Reviewing.** `POST /api/v1/admin/risk-mappings/{risk_id}/review` with
-`{"status": "confirmed"}` or `{"status": "rejected"}`. The engine only creates,
+`{"status": "confirmed", "reviewed_by": "dpo@example.com"}` or
+`"status": "rejected"`. `reviewed_by` is required: a tenant API key is a
+machine credential, so the review names the person deciding, and the key
+prefix is stored next to it. The engine only creates,
 refreshes or withdraws rows that are still `suggested`: it never changes a
 confirmed or rejected row, never re-suggests a reviewed rule, and does not
 suggest a framework and category that already has a hand-entered mapping on
 the asset. Suggestions whose rule stops firing are withdrawn.
 
-**Reading.** `GET /api/v1/registry/assets/{id}/risks` and
-`GET /partner/v1/assets/{id}/risks` return every mapping except rejected ones,
-each with `status` and `source`; pass `?status=suggested|confirmed|rejected`
-to filter. The CycloneDX export lists unconfirmed suggestions as
+**Reading.** `GET /api/v1/registry/assets/{id}/risks` returns every mapping
+except rejected ones, each with `status` and `source`.
+`GET /partner/v1/assets/{id}/risks` returns only `confirmed` mappings by
+default, so existing integrations keep receiving human-set classifications
+only. Both accept `?status=suggested|confirmed|rejected` to filter. The CycloneDX export lists unconfirmed suggestions as
 `promptshields:risk-suggestion:<framework>:<category>` properties, separate
 from `promptshields:risk:*`, and leaves rejected ones out.
 
 ## How Risks Map to Ardoq
 
-In Ardoq's metamodel, each risk mapping becomes a **Risk component** linked to the AI Use Case via a `has_risk` reference. This allows CISOs to filter the Ardoq landscape by risk level or framework. Integrations that should only carry reviewed classifications can request `?status=confirmed`.
+In Ardoq's metamodel, each risk mapping becomes a **Risk component** linked to the AI Use Case via a `has_risk` reference. This allows CISOs to filter the Ardoq landscape by risk level or framework. The Partner API returns only confirmed classifications by default; request `?status=suggested` to also show unreviewed suggestions, labelled as such.

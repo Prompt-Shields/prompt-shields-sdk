@@ -1,6 +1,6 @@
 {
   "ruleset": "eu_ai_act_annex_iii",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "framework": "EU_AI_ACT",
   "title": "EU AI Act Annex III high-risk use cases",
   "description": "Suggests the Annex III area an AI asset may fall under, from its use case, business unit, calling service, data sources, output destinations and detected PII. Annex III systems are high-risk under Article 6(2) unless the Article 6(3) derogation applies; the engine does not assess that derogation, so every match is a suggestion for a human to confirm or reject.",
@@ -13,7 +13,8 @@
     "public_sector_units": ["social services", "welfare", "public health"],
     "health_pii": ["health", "medical", "medical_record", "diagnosis", "health_insurance_id"],
     "financial_pii": ["credit_card", "bank_account", "iban", "income", "salary", "credit_score", "tax_id"],
-    "identity_pii": ["national_id", "ssn", "passport", "date_of_birth", "drivers_license"]
+    "identity_pii": ["national_id", "ssn", "passport", "date_of_birth", "drivers_license"],
+    "biometric_verification": ["biometric verification", "identity verification", "face verification", "facial verification", "voice verification", "speaker verification", "liveness*", "face unlock", "biometric login", "biometric authentication"]
   },
   "rules": [
     {
@@ -27,6 +28,10 @@
           {"signal": "text", "keywords": ["biometric identification", "remote biometric*", "facial recognition", "face recognition", "face identification", "face search", "face matching", "speaker identification", "voice identification", "gait recognition"]}
         ]
       },
+      "unless": [
+        {"signal": "use_case", "keywords": "@biometric_verification"},
+        {"signal": "calling_service", "keywords": "@biometric_verification"}
+      ],
       "supporting": [
         {"signal": "pii_types", "any_of": "@biometric_pii"}
       ]
@@ -200,7 +205,8 @@
         ]
       },
       "unless": [
-        {"signal": "text", "keywords": ["fraud*"]}
+        {"signal": "use_case", "keywords": ["fraud*"]},
+        {"signal": "calling_service", "keywords": ["fraud*"]}
       ],
       "supporting": [
         {"signal": "pii_types", "any_of": "@financial_pii"}

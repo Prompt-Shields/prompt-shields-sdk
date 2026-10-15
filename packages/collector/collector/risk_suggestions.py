@@ -52,11 +52,12 @@ from uuid import UUID
 
 from db.models import AIAsset, DataFlow, RiskMapping, Tenant, uuid7
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector.audit import bearer_key_prefix, record_read
 from collector.auth import resolve_tenant
 from collector.dedup import CLASSIFICATION_ORDER
 
@@ -509,17 +510,29 @@ async def suggest_risks(
                 )
                 result.created += 1
             elif any(getattr(row, k) != v for k, v in values.items()):
-                for k, v in values.items():
-                    setattr(row, k, v)
-                row.updated_at = now
-                result.updated += 1
+                # Guarded on status so a review that lands while this run is
+                # in flight is never overwritten.
+                res = await db.execute(
+                    update(RiskMapping)
+                    .where(RiskMapping.id == row.id, RiskMapping.status == SUGGESTED)
+                    .values(**values, updated_at=now)
+                    .execution_options(synchronize_session=False)
+                )
+                if res.rowcount:
+                    result.updated += 1
+                else:
+                    result.skipped_human_set += 1
             else:
                 result.unchanged += 1
 
         for row in existing:
             if row.rule_id and row.status == SUGGESTED and row.rule_id not in fired:
-                await db.delete(row)
-                result.withdrawn += 1
+                res = await db.execute(
+                    delete(RiskMapping)
+                    .where(RiskMapping.id == row.id, RiskMapping.status == SUGGESTED)
+                    .execution_options(synchronize_session=False)
+                )
+                result.withdrawn += res.rowcount or 0
 
     if inserts:
         for row in inserts:
@@ -535,9 +548,12 @@ async def suggest_risks(
     return result
 
 
-def risk_status_filter(status: str | None):
+def risk_status_filter(status: str | None, *, default: str | None = None):
     """WHERE clause for the ``status`` query parameter of the risk read
-    endpoints: one status, or by default everything but rejected rows."""
+    endpoints: one status, else ``default`` (one status), else everything but
+    rejected rows. The Partner API defaults to ``confirmed`` so existing
+    integrations keep receiving only human-set classifications."""
+    status = status or default
     if status:
         return RiskMapping.status == status
     return RiskMapping.status != REJECTED
@@ -558,6 +574,7 @@ def risk_dict(r: RiskMapping) -> dict:
         "confidence": r.confidence,
         "evidence": r.evidence,
         "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+        "reviewed_by": r.reviewed_by,
     }
 
 
@@ -594,6 +611,11 @@ async def run_suggestions(request: Request) -> dict:
 
 class ReviewBody(BaseModel):
     status: Literal["confirmed", "rejected"]
+    # A tenant API key is a machine credential, so the human who decided is
+    # named here (as for attestations); the key prefix is stored next to it.
+    reviewed_by: str = Field(
+        ..., min_length=1, max_length=320, description="The person deciding, e.g. an email"
+    )
 
 
 @router.post(
@@ -611,13 +633,17 @@ async def review_risk(risk_id: UUID, body: ReviewBody, request: Request) -> dict
         )
     ).scalar_one_or_none()
     if row is None:
+        await record_read(request, tenant_id=tenant_id, status_code=404, response_count=0)
         raise _not_found("Risk mapping not found")
     now = datetime.now(UTC)
     row.status = body.status
     row.reviewed_at = now
+    row.reviewed_by = body.reviewed_by.strip()
+    row.reviewed_key_prefix = bearer_key_prefix(request)
     row.updated_at = now
     out = risk_dict(row)
     await db.commit()
+    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=1)
     return out
 
 

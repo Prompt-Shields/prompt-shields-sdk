@@ -324,7 +324,7 @@ async def get_risks(
     principal: PartnerPrincipal = Depends(require_scope("risks:read")),
     status: RiskStatus | None = Query(
         default=None,
-        description="Only mappings with this status. Default: all but rejected.",
+        description="Only mappings with this status. Default: confirmed.",
     ),
 ):
     await _enforce_rate_limit(request, response, principal)
@@ -335,7 +335,7 @@ async def get_risks(
             .where(
                 RiskMapping.asset_id == asset_id,
                 RiskMapping.tenant_id == principal.tenant_id,
-                risk_status_filter(status),
+                risk_status_filter(status, default="confirmed"),
             )
             .order_by(RiskMapping.framework, RiskMapping.risk_category, RiskMapping.id)
         )

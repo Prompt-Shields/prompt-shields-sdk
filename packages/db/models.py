@@ -169,6 +169,9 @@ class RiskMapping(Base):
     created_at = Column(TIMESTAMP(timezone=True), default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True), default=utcnow)
     reviewed_at = Column(TIMESTAMP(timezone=True))
+    # Who reviewed (a person, e.g. an email) and the tenant key prefix used.
+    reviewed_by = Column(Text)
+    reviewed_key_prefix = Column(Text)
 
     asset = relationship("AIAsset", back_populates="risk_mappings")
 
