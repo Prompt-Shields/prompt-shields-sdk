@@ -1,4 +1,4 @@
-import { cheapestUnderBudget, pickCheapestIn } from './policy';
+import { cheapestUnderBudget, groupTiers, pickCheapestIn } from './policy';
 import {
   RouteDecision,
   RoutePolicy,
@@ -40,12 +40,12 @@ export class HeuristicStrategy implements RouterStrategy {
       demandsJsonSchema(req.messages);
 
     const group = complex ? 'frontier' : 'cheap';
-    const picked = pickCheapestIn(policy.groups[group] || [], req);
+    const picked = pickCheapestIn(groupTiers(policy, group) || [], req);
 
     if (!picked) {
       // Misconfigured group — fall back to the policy default group.
       const fallback = pickCheapestIn(
-        policy.groups[policy.defaultGroup] || [],
+        groupTiers(policy, policy.defaultGroup) || [],
         req
       );
       return {

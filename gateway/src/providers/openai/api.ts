@@ -37,7 +37,10 @@ const OpenAIAPIConfig: ProviderAPIConfig = {
     return headersObj;
   },
   getEndpoint: ({ fn, gatewayRequestURL }) => {
-    const basePath = gatewayRequestURL.split('/v1')?.[1];
+    // PS fork (#73): everything after the first `/v1`. Splitting and taking
+    // [1] cut the path at any later `/v1` (e.g. an id starting `v1`), which
+    // turned `POST /v1/responses/v1x/cancel` into `POST /v1/responses`.
+    const basePath = gatewayRequestURL.split('/v1').slice(1).join('/v1');
     switch (fn) {
       case 'complete':
         return '/completions';
@@ -90,6 +93,10 @@ const OpenAIAPIConfig: ProviderAPIConfig = {
       case 'deleteModelResponse':
         return basePath;
       case 'listResponseInputItems':
+        return basePath;
+      case 'cancelModelResponse':
+        return basePath;
+      case 'countResponseInputTokens':
         return basePath;
       default:
         return '';

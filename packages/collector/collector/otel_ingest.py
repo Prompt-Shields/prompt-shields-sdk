@@ -25,6 +25,17 @@ from collector.webhooks import AssetChanges
 router = APIRouter()
 
 OTEL_SOURCE = "otel"
+# Same limit as /ingest/events (ingest.MAX_MODEL_NAME_LENGTH): a longer
+# requested/served model attribute is stored as null, not truncated.
+_MAX_MODEL_NAME_LENGTH = 256
+
+
+def _bounded_model(value: str | None) -> str | None:
+    if value is None or len(value) > _MAX_MODEL_NAME_LENGTH:
+        return None
+    return value
+
+
 MAX_BODY_BYTES = 4 * 1024 * 1024
 MAX_SPANS = 2000
 
@@ -104,6 +115,8 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
             latency_ms=span.latency_ms,
             source=OTEL_SOURCE,
             session_id=span.session_id,
+            requested_model=_bounded_model(span.requested_model),
+            served_model=_bounded_model(span.served_model),
         )
         db.add(usage_event)
         await record_event_flows(

@@ -331,6 +331,43 @@ async def test_tenant_and_partner_routes_work_under_rls(rls_db):
     assert stats == 1
 
 
+async def test_extended_usage_fields_ingest_under_rls(rls_db):
+    a = rls_db["a"]
+    event = {
+        "vendor": "deepgram",
+        "model": "nova-3",
+        "source": "gateway",
+        "modality": "audio",
+        "usage_units": 30,
+        "usage_unit_type": "seconds",
+        "requested_model": "nova-3",
+        "served_model": "nova-3-general",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
+            json={"events": [event]},
+        )
+        assert resp.status_code == 200, resp.text
+        resp = await c.get(
+            "/api/v1/registry/assets", headers={"Authorization": f"Bearer {KEY_A}"}
+        )
+        assert {x["vendor"]: x["modality"] for x in resp.json()["data"]}["deepgram"] == "audio"
+        resp = await c.get(
+            "/api/v1/registry/assets", headers={"Authorization": f"Bearer {KEY_B}"}
+        )
+        assert "deepgram" not in {x["vendor"] for x in resp.json()["data"]}
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        ev = (
+            await s.execute(select(AIUsageEvent).where(AIUsageEvent.served_model.is_not(None)))
+        ).scalar_one()
+    assert (ev.modality, ev.usage_unit_type, ev.served_model) == (
+        "audio", "seconds", "nova-3-general"
+    )
+
+
 async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, caplog):
     monkeypatch.setattr(settings, "admin_token", TOKEN)
     a, b = rls_db["a"], rls_db["b"]

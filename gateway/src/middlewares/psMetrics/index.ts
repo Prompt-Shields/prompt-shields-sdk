@@ -1,6 +1,6 @@
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
-import { providerFromHeaders } from '../ps-telemetry';
+import { providerFromHeaders, reportsOwnUsage } from '../ps-telemetry';
 import { inputTokensOf, observeStream } from '../psStreamObserver';
 import {
   Counter,
@@ -165,6 +165,7 @@ export function psMetrics() {
           })
           .catch(() => {});
       } else if (
+        reportsOwnUsage(c.req.path) &&
         (c.res.headers.get('content-type') ?? '').includes('application/json')
       ) {
         const body: any = await c.res

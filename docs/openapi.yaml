@@ -116,6 +116,11 @@ components:
           description: Cloud region the asset is deployed in, from the cloud inventory platform signal
           example: "swedencentral"
           nullable: true
+        modality:
+          type: string
+          description: What the asset works on, from the first telemetry event that reported it (the gateway sets it from the endpoint). Null when no event reported one.
+          example: "audio"
+          nullable: true
         status:
           type: string
           description: Governance status
@@ -308,6 +313,18 @@ components:
         total_tokens_out:
           type: integer
           example: 6100000
+        total_tokens_cached:
+          type: integer
+          description: Prompt tokens read from the provider's prompt cache (part of total_tokens_in). 0 when no event reported them.
+          example: 1200000
+        total_tokens_cache_write:
+          type: integer
+          description: Prompt tokens written to the provider's prompt cache (part of total_tokens_in). 0 when no event reported them.
+          example: 80000
+        total_tokens_reasoning:
+          type: integer
+          description: Reasoning tokens (part of total_tokens_out). 0 when no event reported them.
+          example: 900000
         estimated_cost_usd:
           type: number
           format: float

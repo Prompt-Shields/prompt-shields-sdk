@@ -179,6 +179,101 @@ describe('resolveRoute precedence', () => {
     expect(dec.group).toBe('balanced');
   });
 
+  // Regression: group names are client-controlled (X-PS-Route) and must not
+  // resolve to Object.prototype members.
+  const PROTO_NAMES = [
+    'constructor',
+    '__proto__',
+    'toString',
+    'hasOwnProperty',
+  ];
+
+  test.each(PROTO_NAMES)(
+    'explicit group %p behaves like any unknown group',
+    async (name) => {
+      const req = {
+        messages: simple,
+        requestedModel: 'auto',
+        approxInputTokens: 10,
+      };
+      const unknown = await resolveRoute(
+        { ...req, explicitGroup: 'nope' },
+        policy,
+        strat
+      );
+      const dec = await resolveRoute(
+        { ...req, explicitGroup: name },
+        policy,
+        strat
+      );
+      expect(dec).toEqual(unknown);
+      expect(dec).toMatchObject({
+        model: 'mid',
+        group: 'balanced',
+        reason: 'override:unknown-group-default',
+      });
+    }
+  );
+
+  test.each(PROTO_NAMES)(
+    'X-PS-Route: %s through parseRouteHeaders falls back to the default group',
+    async (name) => {
+      const hints = parseRouteHeaders({ 'X-PS-Route': name });
+      const dec = await resolveRoute(
+        {
+          messages: simple,
+          requestedModel: 'auto',
+          approxInputTokens: 10,
+          explicitGroup: hints.explicitGroup,
+        },
+        policy,
+        strat
+      );
+      expect(dec.group).toBe('balanced');
+      expect(dec.reason).toBe('override:unknown-group-default');
+    }
+  );
+
+  test.each(PROTO_NAMES)(
+    'quality %p is not mapped through Object.prototype',
+    async (name) => {
+      expect(parseRouteHeaders({ 'X-PS-Quality': name }).quality).toBe(
+        undefined
+      );
+      // Even if an unvalidated quality reaches resolveRoute directly, it must
+      // not pick up a prototype member as its group name.
+      const dec = await resolveRoute(
+        {
+          messages: simple,
+          requestedModel: 'auto',
+          approxInputTokens: 10,
+          quality: name as any,
+        },
+        policy,
+        strat
+      );
+      expect(dec.group).toBe('balanced');
+      expect(dec.model).toBe('mid');
+    }
+  );
+
+  test('a default group named like a prototype member must be own', async () => {
+    const dec = await new HeuristicStrategy().route(
+      { messages: simple, requestedModel: 'auto', approxInputTokens: 10 },
+      {
+        defaultGroup: 'constructor',
+        qualityToGroup: policy.qualityToGroup,
+        groups: { balanced: policy.groups.balanced },
+      }
+    );
+    expect(dec).toMatchObject({
+      model: 'auto',
+      group: 'constructor',
+      reason: 'heuristic:empty-group-fallback',
+      estCost: 0,
+    });
+  });
+
   test('quality hint maps to its group regardless of difficulty', async () => {
     const dec = await resolveRoute(
       {

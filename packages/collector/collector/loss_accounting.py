@@ -104,6 +104,22 @@ def ignored_fields(raw_events, known: set[str]) -> dict[str, int]:
     return counts
 
 
+def invalid_fields(raw_events, parsed_events, fields) -> dict[str, int]:
+    """Count lenient fields that were sent with a value but parsed to None
+    (wrong type, out of range, too long), keyed "<field>:invalid"."""
+    counts: dict[str, int] = {}
+    if not isinstance(raw_events, list):
+        return counts
+    for raw, parsed in zip(raw_events, parsed_events):
+        if not isinstance(raw, dict):
+            continue
+        for name in fields:
+            if raw.get(name) is not None and getattr(parsed, name, None) is None:
+                key = f"{name}:invalid"
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _merge(base: dict | None, extra: dict[str, int]) -> dict[str, int]:
     merged = dict(base or {})
     for key, n in extra.items():
