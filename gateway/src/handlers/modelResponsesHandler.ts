@@ -12,7 +12,11 @@ function modelResponsesHandler(
   async function handler(c: Context): Promise<Response> {
     try {
       let requestHeaders = Object.fromEntries(c.req.raw.headers);
-      let request = method === 'POST' ? await c.req.json() : {};
+      // PS fork (#73): cancel takes no body.
+      let request =
+        method === 'POST' && endpoint !== 'cancelModelResponse'
+          ? await c.req.json()
+          : {};
       const camelCaseConfig = constructConfigFromRequestHeaders(requestHeaders);
       const tryTargetsResponse = await tryTargetsRecursively(
         c,
