@@ -149,9 +149,9 @@ def test_cheapest_in_group_tie_keeps_first_listed():
     "name", ["constructor", "__proto__", "hasOwnProperty", "toString", "valueOf"]
 )
 def test_prototype_named_group_is_unknown(name):
-    # The gateway throws for some of these (groups["constructor"] resolves to
-    # Object.prototype members); that is a gateway bug, not the contract. The
-    # reference router treats every one as an unknown group.
+    # Group names are client-controlled and must never resolve to
+    # Object.prototype members in the gateway; both routers treat every one as
+    # an unknown group.
     _, d = _route(_hi(), {"X-PS-Route": name})
     assert (d.model, d.group, d.reason) == (
         "mid",
