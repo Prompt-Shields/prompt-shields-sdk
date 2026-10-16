@@ -106,9 +106,11 @@ def _js_number(text: str) -> float:
         return 0.0
     m = _JS_RADIX.fullmatch(s)
     if m:
-        return float(
-            int(m.group(1)[1:], {"x": 16, "o": 8, "b": 2}[m.group(1)[0].lower()])
-        )
+        value = int(m.group(1)[1:], {"x": 16, "o": 8, "b": 2}[m.group(1)[0].lower()])
+        try:
+            return float(value)
+        except OverflowError:  # JS gives Infinity past the double range
+            return math.inf
     if _JS_DECIMAL.fullmatch(s):
         return float(s.replace("Infinity", "inf"))
     return math.nan

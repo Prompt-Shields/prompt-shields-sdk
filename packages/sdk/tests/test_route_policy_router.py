@@ -86,6 +86,16 @@ def test_token_estimate_counts_utf16_code_units():
         ("nan", None),
         ("abc", None),
         ("-0x1", None),
+        ("+0x1", None),
+        ("0x", None),
+        ("0b11", 3.0),
+        ("1.", 1.0),
+        (".", None),
+        ("1e", None),
+        ("1e400", math.inf),
+        ("-Infinity", -math.inf),
+        ("-1", -1.0),
+        ("0x" + "f" * 300, math.inf),  # past the double range: JS gives Infinity
         ("١", None),  # Arabic-Indic digit one: float() accepts it, JS does not
     ],
 )
@@ -135,11 +145,30 @@ def test_cheapest_in_group_tie_keeps_first_listed():
     assert d.model == "first"
 
 
-def test_prototype_named_group_is_unknown():
-    # The gateway throws here (groups["constructor"] is Object); the
-    # reference router treats it as any other unknown group.
-    _, d = _route(_hi(), {"X-PS-Route": "constructor"})
-    assert (d.group, d.reason) == ("balanced", "override:unknown-group-default")
+@pytest.mark.parametrize(
+    "name", ["constructor", "__proto__", "hasOwnProperty", "toString", "valueOf"]
+)
+def test_prototype_named_group_is_unknown(name):
+    # The gateway throws for some of these (groups["constructor"] resolves to
+    # Object.prototype members); that is a gateway bug, not the contract. The
+    # reference router treats every one as an unknown group.
+    _, d = _route(_hi(), {"X-PS-Route": name})
+    assert (d.model, d.group, d.reason) == (
+        "mid",
+        "balanced",
+        "override:unknown-group-default",
+    )
+
+
+def test_negative_budget_is_unsatisfiable_not_ignored():
+    _, d = _route(_hi(), {"X-PS-Max-Cost": "-1", "X-PS-Quality": "balanced"})
+    assert (d.model, d.group, d.reason) == (
+        "mini",
+        "cheap",
+        "quality:balanced+budget-unsatisfiable",
+    )
+    _, d = _route(_hi(), {"X-PS-Max-Cost": "Infinity", "X-PS-Quality": "critical"})
+    assert (d.model, d.reason) == ("big", "quality:critical")
 
 
 def test_heuristic_group_missing_falls_back_to_default():
