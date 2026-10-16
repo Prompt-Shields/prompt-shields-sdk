@@ -306,6 +306,17 @@ app.post(
   requestValidator,
   modelResponsesHandler('createModelResponse', 'POST')
 );
+// PS fork (#73): cancel and input-token counting (enterprise 2.25.1).
+app.post(
+  '/v1/responses/input_tokens',
+  requestValidator,
+  modelResponsesHandler('countResponseInputTokens', 'POST')
+);
+app.post(
+  '/v1/responses/:id/cancel',
+  requestValidator,
+  modelResponsesHandler('cancelModelResponse', 'POST')
+);
 app.get(
   '/v1/responses/:id',
   requestValidator,

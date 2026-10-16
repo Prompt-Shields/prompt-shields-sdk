@@ -492,6 +492,49 @@ export const OpenAIDeleteModelResponseTransformer = <
   return transformer;
 };
 
+/**
+ * PS fork (#73): `POST /v1/responses/input_tokens`. Not in OSS 2.0.0;
+ * re-implemented from the enterprise 2.25.1 changelog. The body is the
+ * subset of a create-response request that OpenAI counts.
+ */
+export const OpenAIResponseInputTokensConfig: ProviderConfig =
+  Object.fromEntries(
+    [
+      'conversation',
+      'input',
+      'instructions',
+      'model',
+      'parallel_tool_calls',
+      'previous_response_id',
+      'reasoning',
+      'text',
+      'tool_choice',
+      'tools',
+      'truncation',
+    ].map((key) => [key, { param: key, required: false }])
+  );
+
+export interface ResponseInputTokens {
+  object: 'response.input_tokens';
+  input_tokens: number;
+}
+
+export const OpenAIResponseInputTokensTransformer = (provider: string) => {
+  return (
+    response: ResponseInputTokens | ErrorResponse,
+    responseStatus: number
+  ): ResponseInputTokens | ErrorResponse => {
+    if (responseStatus !== 200 && 'error' in response) {
+      return OpenAIErrorResponseTransform(response, provider ?? OPEN_AI);
+    }
+    Object.defineProperty(response, 'provider', {
+      value: provider,
+      enumerable: true,
+    });
+    return response;
+  };
+};
+
 export const OpenAIListInputItemsResponseTransformer = <
   T extends ResponseItemList | ErrorResponse,
 >(

@@ -72,6 +72,7 @@ const AzureOpenAIConfig: ProviderConfigs = {
   ),
   getModelResponse: {},
   deleteModelResponse: {},
+  cancelModelResponse: {},
   listModelsResponse: {},
   requestHandlers: {
     getBatchOutput: AzureOpenAIGetBatchOutputRequestHandler,
@@ -99,6 +100,7 @@ const AzureOpenAIConfig: ProviderConfigs = {
     createModelResponse: OpenAICreateModelResponseTransformer(AZURE_OPEN_AI),
     getModelResponse: OpenAIGetModelResponseTransformer(AZURE_OPEN_AI),
     deleteModelResponse: OpenAIDeleteModelResponseTransformer(AZURE_OPEN_AI),
+    cancelModelResponse: OpenAIGetModelResponseTransformer(AZURE_OPEN_AI),
     listModelsResponse: OpenAIListInputItemsResponseTransformer(AZURE_OPEN_AI),
   },
   requestTransforms: {

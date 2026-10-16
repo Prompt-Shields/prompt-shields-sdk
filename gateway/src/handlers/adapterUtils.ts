@@ -48,6 +48,23 @@ export interface AdapterRequestResult {
   fn: endpointStrings;
 }
 
+/**
+ * PS fork (#73): Responses operations that pass through only to providers
+ * whose upstream API implements them (enterprise 2.25.1 behaviour).
+ */
+export const RESPONSES_PROVIDER_OPERATIONS: Partial<
+  Record<endpointStrings, { route: string; providers: string[] }>
+> = {
+  cancelModelResponse: {
+    route: '/v1/responses/{id}/cancel',
+    providers: ['openai', 'azure-openai'],
+  },
+  countResponseInputTokens: {
+    route: '/v1/responses/input_tokens',
+    providers: ['openai'],
+  },
+};
+
 // ── Request Transform ───────────────────────────────────────────────────────
 
 /**
@@ -133,6 +150,22 @@ export function applyAdapterRequestTransform(
         error: {
           message: `${method} /v1/responses is only supported for native Responses API providers`,
           type: 'invalid_request_error',
+        },
+      }),
+      { status: 400, headers: { 'content-type': 'application/json' } }
+    );
+  }
+
+  // PS fork (#73): cancel and input-token counting have no Chat Completions
+  // equivalent, so they reach only providers whose own Responses API has them.
+  const supportedBy = RESPONSES_PROVIDER_OPERATIONS[fn];
+  if (supportedBy && provider && !supportedBy.providers.includes(provider)) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: `${method} ${supportedBy.route} is not supported by provider ${provider}`,
+          type: 'invalid_request_error',
+          code: 'unsupported_operation',
         },
       }),
       { status: 400, headers: { 'content-type': 'application/json' } }

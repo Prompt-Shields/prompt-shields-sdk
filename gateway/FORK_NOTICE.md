@@ -62,6 +62,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/handlers/createTranscriptionHandler.ts`
 - `src/handlers/createTranslationHandler.ts`
 - `src/handlers/handlerUtils.ts`
+- `src/handlers/modelResponsesHandler.ts`
 - `src/handlers/proxyHandler.ts`
 - `src/handlers/retryHandler.ts`
 - `src/handlers/services/cacheService.ts`
@@ -147,6 +148,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/openai/chatComplete.ts`
 - `src/providers/openai/getBatchOutput.ts`
 - `src/providers/openai/imageGenerate.ts`
+- `src/providers/openai/index.ts`
 - `src/providers/sagemaker/api.ts`
 - `src/providers/types.ts`
 - `src/providers/voyage/api.ts`
@@ -222,6 +224,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 11. **Added** (first slice of #74, written from the vendors' public OpenAI-compatible API docs, no enterprise code): `minimax`, `byteplus`, `lightning-ai` from the Portkey enterprise changelog 2.9-2.16, and the EU-hosted `berget`, `scaleway`, `regolo`, `ionos` and `stackit` for sovereignty routing. Each reuses the `open-ai-base` chat (and, where the vendor offers it, embeddings) transforms on a fixed vendor base URL.
     Second slice: `meta` (Meta Llama API via its OpenAI compatibility endpoint `https://api.llama.com/compat/v1`, enterprise 2.25.1, chat only) and `scx-ai` (SCX.ai, Australian sovereign inference, `https://api.scx.ai/v1`, enterprise 2.21, chat only), same pattern.
 12. **Hardened** the response cache key (`src/middlewares/cache/index.ts`, `src/handlers/services/cacheService.ts`): upstream keys on request body + endpoint only, so callers with different credentials shared cached responses. The key now includes `computeCacheScope`, a SHA-256 of the provider, the caller's credential/identity provider options and incoming headers, the values of headers forwarded upstream (proxy and `forward_headers`, minus tracing headers), and the upstream URL. The write-back in `memoryCache` reuses the scope the read recorded per target (`psCacheScopes` on the Hono context) instead of recomputing it from the logged options; a read or write without a scope is skipped.
+13. **Added** (re-implemented from the Portkey enterprise changelog 2.25.1, #73; not in OSS 2.0.0): `POST /v1/responses/{id}/cancel` (endpoint `cancelModelResponse`; `openai`, `azure-openai`) and `POST /v1/responses/input_tokens` (endpoint `countResponseInputTokens`; `openai`, body limited to the fields OpenAI counts). Other providers get a 400 `unsupported_operation` from `applyAdapterRequestTransform` before any upstream call (`RESPONSES_PROVIDER_OPERATIONS` in `src/handlers/adapterUtils.ts`). Cancel is not cached, and its returned usage is not counted again by `ps-telemetry`, `/metrics` or `psOtel` (`reportsOwnUsage`), since the create call already reported it.
 
 ## Original License
 

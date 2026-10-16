@@ -9,13 +9,27 @@ from collector.lifecycle import reactivate
 CLASSIFICATION_ORDER = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
 
 
+# Single-source confidence. Runtime observation of real LLM calls is "high":
+# the SDK and gateway see them directly, and ``otel`` GenAI spans are the same
+# evidence emitted by third-party instrumentation (#92). Signals that show AI
+# is reachable or configured, but not that a given call happened, are
+# "medium": endpoint and platform signals, and ``code_scan`` (#95), which
+# proves the code references a provider/model but not that it runs in
+# production. Self-reported sources (``survey``) and anything unknown are "low".
+# Two or more distinct sources corroborate each other: "verified".
+HIGH_CONFIDENCE_SOURCES = frozenset({"sdk", "gateway", "otel"})
+MEDIUM_CONFIDENCE_SOURCES = frozenset(
+    {"browser_extension", "macos_app", "platform_signal", "code_scan"}
+)
+
+
 def compute_confidence(sources: list[str]) -> str:
-    if len(sources) >= 2:
+    if len(set(sources)) >= 2:
         return "verified"
     source = sources[0] if sources else ""
-    if source in ("sdk", "gateway"):
+    if source in HIGH_CONFIDENCE_SOURCES:
         return "high"
-    if source in ("browser_extension", "macos_app", "platform_signal"):
+    if source in MEDIUM_CONFIDENCE_SOURCES:
         return "medium"
     return "low"
 

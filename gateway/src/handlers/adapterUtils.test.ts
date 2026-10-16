@@ -98,4 +98,29 @@ describe('applyAdapterRequestTransform', () => {
     expect(out).toBeInstanceOf(Response);
     expect((out as Response).status).toBe(400);
   });
+
+  test('Responses cancel and input_tokens reach only providers that have them (#73)', () => {
+    const run = (fn: any, provider: string) =>
+      applyAdapterRequestTransform(
+        fn,
+        provider,
+        {} as any,
+        {} as any,
+        false,
+        'POST'
+      );
+    expect(run('cancelModelResponse', 'openai')).toBeNull();
+    expect(run('cancelModelResponse', 'azure-openai')).toBeNull();
+    expect(run('countResponseInputTokens', 'openai')).toBeNull();
+    for (const [fn, p] of [
+      ['cancelModelResponse', 'groq'],
+      ['cancelModelResponse', 'anthropic'],
+      ['countResponseInputTokens', 'azure-openai'],
+      ['countResponseInputTokens', 'bedrock'],
+    ]) {
+      const out = run(fn, p);
+      expect(out).toBeInstanceOf(Response);
+      expect((out as Response).status).toBe(400);
+    }
+  });
 });
