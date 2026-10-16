@@ -186,10 +186,24 @@ async def test_malformed_extended_fields_are_dropped_not_rejected(seeded_db):
         "usage_units": -5,  # non-finite values: see the unit test below
         "usage_unit_type": None,
     }
-    good = {"vendor": "openai", "model": "gpt-4o", "tokens_reasoning": 7.0,
-            "modality": " Image ", "usage_units": 3}
-    resp, _ = await _ingest([bad, good])
+    good = {
+        "vendor": "openai",
+        "model": "gpt-4o",
+        "tokens_reasoning": 7.0,
+        "modality": " Image ",
+        "usage_units": 3,
+    }
+    resp, loss = await _ingest([bad, good])
     assert resp.status_code == 200, resp.text
+
+    # Dropped values are reported, not lost silently.
+    (stats,) = loss["clients"]
+    invalid = {
+        k: v for k, v in stats["ignored_fields"].items() if k.endswith(":invalid")
+    }
+    assert invalid == {
+        f"{f}:invalid": 1 for f in EXTENDED_FIELDS if f != "usage_unit_type"
+    }
 
     events, assets = await _rows(seeded_db)
     by_reasoning = {e.tokens_reasoning: e for e in events}
@@ -205,7 +219,7 @@ async def test_malformed_extended_fields_are_dropped_not_rejected(seeded_db):
 def test_lenient_usage_units_rejects_non_finite():
     from collector.ingest import IngestEvent
 
-    for value in (float("inf"), float("nan"), -1, 1e13, "3", True):
+    for value in (float("inf"), float("nan"), -1, 1e13, 10**400, "3", True):
         assert IngestEvent(vendor="v", usage_units=value).usage_units is None
     assert IngestEvent(vendor="v", usage_units=0).usage_units == 0
 
@@ -218,7 +232,9 @@ async def test_existing_asset_gains_modality_once(seeded_db):
     _, assets = await _rows(seeded_db)
     assert [a.modality for a in assets.values()] == [None]
 
-    resp, _ = await _ingest([{**first, "modality": "audio"}, {**first, "modality": "text"}])
+    resp, _ = await _ingest(
+        [{**first, "modality": "audio"}, {**first, "modality": "text"}]
+    )
     assert resp.status_code == 200
     _, assets = await _rows(seeded_db)
     assert [a.modality for a in assets.values()] == ["audio"]
@@ -287,3 +303,12 @@ async def test_migration_downgrade_and_upgrade(seeded_db):
     # The upgraded schema takes both event shapes.
     resp, _ = await _ingest([SDK_EVENT, GATEWAY_EVENT])
     assert resp.status_code == 200, resp.text
+
+
+def test_otel_model_names_are_bounded():
+    from collector.otel_ingest import _bounded_model
+
+    assert _bounded_model("gpt-4o") == "gpt-4o"
+    assert _bounded_model("m" * 256) == "m" * 256
+    assert _bounded_model("m" * 257) is None
+    assert _bounded_model(None) is None

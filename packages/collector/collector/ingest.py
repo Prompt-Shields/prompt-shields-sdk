@@ -93,6 +93,10 @@ class IngestEvent(BaseModel):
     def _usage_units(cls, value: Any) -> float | None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
+        # Check ints before float(): a huge JSON integer overflows float()
+        # with OverflowError, which pydantic does not catch (500, batch lost).
+        if isinstance(value, int) and not 0 <= value <= MAX_USAGE_UNITS:
+            return None
         value = float(value)
         if not math.isfinite(value) or value < 0 or value > MAX_USAGE_UNITS:
             return None
@@ -105,6 +109,24 @@ MAX_MODEL_NAME_LENGTH = 256
 MAX_LABEL_LENGTH = 64
 MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
+
+# Lenient fields whose dropped values are reported in ignored_fields as
+# "<field>:invalid", so a client sending bad values shows up in
+# /telemetry/loss instead of losing the data silently.
+LENIENT_FIELDS = (
+    "requested_model",
+    "served_model",
+    "tokens_cached",
+    "tokens_cache_write",
+    "tokens_cache_write_1h",
+    "tokens_reasoning",
+    "cost_source",
+    "service_tier",
+    "framework",
+    "modality",
+    "usage_units",
+    "usage_unit_type",
+)
 
 
 def _lenient_str(value: Any, max_length: int) -> str | None:
@@ -182,9 +204,14 @@ async def ingest_events(
     try:
         assets_created = await _store_events(db, tenant_id, body.events)
         if body.events:
+            raw_events = (await request.json()).get("events")
             ignored = loss_accounting.ignored_fields(
-                (await request.json()).get("events"), set(IngestEvent.model_fields)
+                raw_events, set(IngestEvent.model_fields)
             )
+            for key, n in loss_accounting.invalid_fields(
+                raw_events, body.events, LENIENT_FIELDS
+            ).items():
+                ignored[key] = ignored.get(key, 0) + n
             await loss_accounting.record_received(
                 db, tenant_id, meta, len(body.events), ignored
             )
