@@ -18,6 +18,7 @@ before `instrument()`. Interpreters started with `-I` or `-E` ignore
 `PYTHONPATH` and are not instrumented.
 """
 
+import contextlib
 import logging
 import os
 import subprocess
@@ -87,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             sys.stderr.write(f"prompt-shields-instrument: {command[0]}: {exc}\n")
             return 127
+    # exec replaces the process without flushing Python's buffers: anything
+    # already written (e.g. by a chained sitecustomize) would be lost when
+    # stdout is a pipe or file.
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            stream.flush()  # None, closed or broken streams are fine
     try:
         os.execvp(command[0], command)
     except OSError as exc:

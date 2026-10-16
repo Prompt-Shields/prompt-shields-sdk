@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk:
+    name: SDK (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # packages/sdk/pyproject.toml: requires-python = ">=3.11"
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: packages/sdk/pyproject.toml
+      - name: Install SDK and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # pyyaml: test_scan.py's action.yml check skips without it.
+          python -m pip install -e "packages/sdk[dev]" "ruff==0.17.0" "pyyaml>=6.0"
+      - name: Ruff
+        # Gating on syntax errors and undefined names only for now. The wider
+        # default rule set still reports pre-existing findings in packages/sdk;
+        # widen --select once those are cleaned up.
+        run: ruff check --select E9,F63,F7,F82 packages/sdk
+      - name: Pytest
+        run: python -m pytest packages/sdk/tests -p no:cacheprovider
+
+  collector:
+    name: Collector + DB migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          # Matches packages/collector/Dockerfile (python:3.11-slim).
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: packages/collector/pyproject.toml
+      - name: Install collector + db dependencies
+        # packages/db has no pyproject of its own: its runtime deps come from
+        # the collector's, and alembic is only needed to run migrations.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "packages/collector[dev]" "alembic>=1.13"
+      - name: Create databases
+        # ps_user is deliberately NOT a superuser: superusers bypass row-level
+        # security, and test_rls_db.py needs the policies to bind.
+        run: |
+          psql -v ON_ERROR_STOP=1 -c "CREATE ROLE ps_user LOGIN PASSWORD 'ps_local_dev'"
+          for db in ps_migrate ps_test; do
+            createdb -O ps_user "$db"
+            psql -v ON_ERROR_STOP=1 -d "$db" \
+              -c 'CREATE EXTENSION IF NOT EXISTS vector' \
+              -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'
+          done
+      - name: Alembic upgrade head
+        working-directory: packages/db
+        env:
+          PYTHONPATH: ${{ github.workspace }}/packages
+          PS_DATABASE_URL: postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/ps_migrate
+        run: |
+          heads="$(python -m alembic heads)"
+          echo "$heads"
+          if [ "$(printf '%s\n' "$heads" | grep -c .)" -ne 1 ]; then
+            echo "::error::Expected exactly one alembic head"
+            exit 1
+          fi
+          python -m alembic upgrade head
+          current="$(python -m alembic current)"
+          echo "$current"
+          [ "$(echo "$current" | awk '{print $1}')" = "$(echo "$heads" | awk '{print $1}')" ]
+      - name: Pytest
+        env:
+          PYTHONPATH: packages:packages/collector
+          PS_TEST_DATABASE_URL: postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/ps_test
+        run: python -m pytest packages/collector/tests -p no:cacheprovider
+
+  gateway:
+    name: Gateway
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: gateway
+    env:
+      # The `prepare` script runs husky outside production; skip git hooks in CI.
+      HUSKY: "0"
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4.4.0
+        with:
+          # gateway/package.json has no engines field and there is no .nvmrc;
+          # this matches gateway/Dockerfile (node:20-alpine).
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: gateway/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        # plugins/build.ts imports ../conf.json, which is a local, untracked
+        # file; use the checked-in example so tsc can resolve it.
+        run: |
+          cp conf.example.json conf.json
+          npx tsc --noEmit -p .
+      - name: Jest (default offline suite)
+        # Passing --testPathIgnorePatterns on the CLI REPLACES the list in
+        # jest.config.js, so the config's own ignores (node_modules and the
+        # live-credential suites in tests/jest/integrationSuites.js) are
+        # re-added here before the known failures.
+        #
+        # Known failing (TRACKING: #69): three stale upstream guardrail suites,
+        # plugins/default, plugins/qualifire and plugins/javelin, fail on main
+        # independent of CI. They are excluded here only, not edited or
+        # deleted. Remove each entry once its suite is fixed.
+        run: |
+          known_failing=(
+            '/plugins/default/default\.test\.ts$'
+            '/plugins/qualifire/qualifire\.test\.ts$'
+            '/plugins/javelin/javelin\.test\.ts$'
+          )
+          mapfile -t config_ignores < <(node --input-type=module -e \
+            "const { integrationTests } = await import('./tests/jest/integrationSuites.js'); for (const p of integrationTests) console.log(p);")
+          npx jest --ci --testPathIgnorePatterns '/node_modules/' "${config_ignores[@]}" "${known_failing[@]}"
+      - run: npm run build
+
+  partner-ts:
+    name: Partner TS SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/partner-ts
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4.4.0
+        with:
+          # packages/partner-ts/package.json: engines.node ">=18"
+          node-version: "20"
+          cache: npm
+          # No lockfile is committed for this package yet.
+          cache-dependency-path: packages/partner-ts/package.json
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npx jest --ci
+      - run: npm run build
