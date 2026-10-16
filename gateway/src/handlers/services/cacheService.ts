@@ -40,6 +40,7 @@ export class CacheService {
       'retrieveFinetune',
       'cancelFinetune',
       'imageEdit',
+      'cancelModelResponse',
     ];
     return !nonCacheEndpoints.includes(endpoint);
   }

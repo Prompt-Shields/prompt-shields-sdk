@@ -148,6 +148,15 @@ export async function requestBodyForTelemetry(c: any): Promise<any> {
   }
 }
 
+/**
+ * Cancelling a response (#73) returns the Response object with the usage of
+ * the generation it stopped; that usage was already reported by the create
+ * call, so it is not counted again.
+ */
+export function reportsOwnUsage(path: string): boolean {
+  return !/^\/v1\/responses\/[^/]+\/cancel\/?$/.test(path);
+}
+
 /** Token usage from Chat Completions or Messages/Responses-style usage. */
 export function usageTokens(body: any): {
   tokens_in?: number;
@@ -398,7 +407,7 @@ export function psTelemetry() {
         vendor,
         model,
         source: 'gateway',
-        ...usageTokens(responseBody),
+        ...(reportsOwnUsage(path) ? usageTokens(responseBody) : {}),
         api_surface: apiSurfaceOf(path),
         modality: modalityOf(path),
         ...usageUnits(path, responseBody, requestBody),

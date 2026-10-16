@@ -91,6 +91,10 @@ const OpenAIAPIConfig: ProviderAPIConfig = {
         return basePath;
       case 'listResponseInputItems':
         return basePath;
+      case 'cancelModelResponse':
+        return basePath;
+      case 'countResponseInputTokens':
+        return basePath;
       default:
         return '';
     }

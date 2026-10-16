@@ -23,6 +23,7 @@ import {
   apiSurfaceOf,
   extractPSHeaders,
   providerFromHeaders,
+  reportsOwnUsage,
   requestBodyForTelemetry,
 } from './ps-telemetry';
 import {
@@ -614,6 +615,8 @@ export function psOtel(
     try {
       const url = new URL(c.req.url);
       if (!semconvOperationName(apiSurfaceOf(url.pathname))) return;
+      // A cancel (#73) is not a model call; its create call has the span.
+      if (!reportsOwnUsage(url.pathname)) return;
       const headers = Object.fromEntries(c.req.raw.headers) as Record<
         string,
         string

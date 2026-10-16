@@ -195,6 +195,9 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
       case 'listResponseInputItems': {
         return `${pathname}?${searchParams.toString()}`;
       }
+      case 'cancelModelResponse': {
+        return `${pathname}?${searchParams.toString()}`;
+      }
       case 'uploadFile':
       case 'retrieveFile':
       case 'listFiles':

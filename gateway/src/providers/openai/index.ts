@@ -43,6 +43,8 @@ import {
   OpenAICreateModelResponseTransformer,
   OpenAIGetModelResponseTransformer,
   OpenAIDeleteModelResponseTransformer,
+  OpenAIResponseInputTokensConfig,
+  OpenAIResponseInputTokensTransformer,
   OpenAIListInputItemsResponseTransformer,
 } from '../open-ai-base';
 import { OPEN_AI } from '../../globals';
@@ -65,6 +67,8 @@ const OpenAIConfig: ProviderConfigs = {
   createModelResponse: createModelResponseParams([]),
   getModelResponse: {},
   deleteModelResponse: {},
+  cancelModelResponse: {},
+  countResponseInputTokens: OpenAIResponseInputTokensConfig,
   listModelsResponse: {},
   requestHandlers: {
     getBatchOutput: OpenAIGetBatchOutputRequestHandler,
@@ -96,6 +100,8 @@ const OpenAIConfig: ProviderConfigs = {
     createModelResponse: OpenAICreateModelResponseTransformer(OPEN_AI),
     getModelResponse: OpenAIGetModelResponseTransformer(OPEN_AI),
     deleteModelResponse: OpenAIDeleteModelResponseTransformer(OPEN_AI),
+    cancelModelResponse: OpenAIGetModelResponseTransformer(OPEN_AI),
+    countResponseInputTokens: OpenAIResponseInputTokensTransformer(OPEN_AI),
     listModelsResponse: OpenAIListInputItemsResponseTransformer(OPEN_AI),
   },
 };
