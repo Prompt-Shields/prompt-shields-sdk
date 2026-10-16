@@ -117,6 +117,8 @@ export type endpointStrings =
   | 'getModelResponse'
   | 'deleteModelResponse'
   | 'listResponseInputItems'
+  | 'cancelModelResponse'
+  | 'countResponseInputTokens'
   | 'messages'
   | 'messagesCountTokens'
   | 'ocr';
