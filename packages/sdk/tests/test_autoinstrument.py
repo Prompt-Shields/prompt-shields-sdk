@@ -137,6 +137,28 @@ def test_a_failing_sitecustomize_does_not_stop_the_app(collector, app, tmp_path)
     assert len(_Collector.received) == 1
 
 
+def test_two_bootstrap_copies_do_not_chain_to_each_other(collector, app, tmp_path):
+    # Nested entry points from two installs of the SDK put two different
+    # bootstrap directories on PYTHONPATH: each must skip the other (no
+    # mutual recursion) and still chain to the real sitecustomize after them.
+    import shutil
+
+    copy = tmp_path / "other_install"
+    copy.mkdir()
+    shutil.copy(os.path.join(autoinstrument.BOOTSTRAP_DIR, "sitecustomize.py"),
+                copy / "sitecustomize.py")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text("print('chained sitecustomize')\n")
+    env = _env(collector)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [autoinstrument.BOOTSTRAP_DIR, str(copy), str(site), SDK_DIR])
+    result = _run([sys.executable, app], env)
+    assert result.stdout.splitlines() == ["chained sitecustomize", "app: hi"]
+    assert "not instrumenting" not in result.stderr
+    assert len(_Collector.received) == 1
+
+
 def test_an_unimportable_sdk_does_not_stop_the_app(tmp_path):
     # The child interpreter finds a prompt_shields that fails to import: the
     # app runs, with a warning.

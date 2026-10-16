@@ -16,25 +16,33 @@ def _ps_chain_sitecustomize() -> None:
     import sys
 
     here = os.path.dirname(os.path.abspath(__file__))
+    # Every bootstrap directory seen in this process (two installs of the SDK
+    # can both be on PYTHONPATH, e.g. nested entry points from different
+    # environments): each is skipped, so copies never chain to each other.
+    ours = sys.__dict__.setdefault("_prompt_shields_bootstrap_dirs", [])
+    ours.append(here)
 
     def other(entry):
-        try:
-            return not os.path.samefile(entry or os.curdir, here)
-        except OSError:
-            return True
+        for skip in ours:
+            try:
+                if os.path.samefile(entry or os.curdir, skip):
+                    return False
+            except OSError:
+                pass
+        return True
 
     spec = importlib.machinery.PathFinder.find_spec(
         "sitecustomize", [p for p in sys.path if other(p)])
     if spec is None or spec.loader is None:
         return
     module = importlib.util.module_from_spec(spec)
-    ours = sys.modules.get("sitecustomize")
+    current = sys.modules.get("sitecustomize")
     sys.modules["sitecustomize"] = module
     try:
         spec.loader.exec_module(module)
     except Exception:
-        if ours is not None:
-            sys.modules["sitecustomize"] = ours
+        if current is not None:
+            sys.modules["sitecustomize"] = current
         import logging
 
         logging.getLogger("prompt_shields.autoinstrument").warning(
