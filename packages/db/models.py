@@ -56,6 +56,9 @@ class AIAsset(Base):
     # Cloud region of the deployment (e.g. "swedencentral"), for sovereignty
     # reporting. Set by the cloud inventory platform signal.
     region = Column(Text)
+    # What the asset works on (text, audio, image, document), from the first
+    # telemetry event that reported one (#75).
+    modality = Column(Text)
     status = Column(Text, default="active")
     # Telemetry-driven lifecycle: active -> stale -> retired, back to active
     # when telemetry resumes. Independent of the governance `status` above.
@@ -107,6 +110,30 @@ class AIUsageEvent(Base):
     # Flow-relevant event metadata (data sources, output destination, PII
     # categories, ...) kept so data flows can be rebuilt. See collector/data_flows.py.
     flow_context = Column(JSONB)
+    # Extended usage (#9, #90, #75), all optional; null when not reported.
+    # requested_model is what the caller asked for (may be "auto"),
+    # served_model what actually ran (dated snapshot, routed model).
+    requested_model = Column(Text)
+    served_model = Column(Text)
+    # Token subsets: tokens_cached (cache reads) and tokens_cache_write are
+    # part of tokens_in; tokens_cache_write_1h is part of tokens_cache_write;
+    # tokens_reasoning is part of tokens_out.
+    tokens_cached = Column(Integer)
+    tokens_cache_write = Column(Integer)
+    tokens_cache_write_1h = Column(Integer)
+    tokens_reasoning = Column(Integer)
+    # How `cost` was produced: pricing_table, pricing_table_estimated_tokens,
+    # provider_reported, or a framework name when the framework's own cost
+    # was used.
+    cost_source = Column(Text)
+    service_tier = Column(Text)
+    # SDK framework integration that reported the call (langchain, ...).
+    framework = Column(Text)
+    # text, audio, image or document (gateway, from the endpoint).
+    modality = Column(Text)
+    # Non-token usage: audio seconds, OCR pages, speech characters, ...
+    usage_units = Column(Numeric(20, 6))
+    usage_unit_type = Column(Text)
 
     asset = relationship("AIAsset", back_populates="usage_events")
 

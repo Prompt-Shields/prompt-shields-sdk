@@ -141,6 +141,7 @@ def _asset_dict(a: AIAsset) -> dict:
         "owner_email": a.owner_email,
         "environment": a.environment,
         "region": a.region,
+        "modality": a.modality,
         "status": a.status,
         "data_classification": a.data_classification,
         "discovery_source": a.discovery_source,
@@ -409,6 +410,13 @@ async def get_usage_summary(
                     func.count(AIUsageEvent.id).label("total_requests"),
                     func.sum(AIUsageEvent.tokens_in).label("total_tokens_in"),
                     func.sum(AIUsageEvent.tokens_out).label("total_tokens_out"),
+                    func.sum(AIUsageEvent.tokens_cached).label("total_tokens_cached"),
+                    func.sum(AIUsageEvent.tokens_cache_write).label(
+                        "total_tokens_cache_write"
+                    ),
+                    func.sum(AIUsageEvent.tokens_reasoning).label(
+                        "total_tokens_reasoning"
+                    ),
                     func.sum(AIUsageEvent.cost).label("estimated_cost_usd"),
                     func.count(func.distinct(AIUsageEvent.session_id)).label(
                         "unique_sessions"
@@ -442,6 +450,9 @@ def _usage_summary_dict(row, period: str) -> dict:
         "total_requests": int(row["total_requests"] or 0),
         "total_tokens_in": int(row["total_tokens_in"] or 0),
         "total_tokens_out": int(row["total_tokens_out"] or 0),
+        "total_tokens_cached": int(row["total_tokens_cached"] or 0),
+        "total_tokens_cache_write": int(row["total_tokens_cache_write"] or 0),
+        "total_tokens_reasoning": int(row["total_tokens_reasoning"] or 0),
         "estimated_cost_usd": round(float(cost), 6) if cost is not None else None,
         "unique_sessions": int(row["unique_sessions"] or 0),
         "avg_latency_ms": round(float(latency)) if latency is not None else None,
