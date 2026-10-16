@@ -32,7 +32,8 @@ jobs:
       - name: Install SDK and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e "packages/sdk[dev]" "ruff==0.17.0"
+          # pyyaml: test_scan.py's action.yml check skips without it.
+          python -m pip install -e "packages/sdk[dev]" "ruff==0.17.0" "pyyaml>=6.0"
       - name: Ruff
         # Gating on syntax errors and undefined names only for now. The wider
         # default rule set still reports pre-existing findings in packages/sdk;

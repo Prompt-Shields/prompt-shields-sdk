@@ -5,6 +5,7 @@ ID/secret/key generators, JWT issue+verify, and the rate limiter.
 """
 from __future__ import annotations
 
+import base64
 import time
 import uuid
 
@@ -114,8 +115,15 @@ class TestJWT:
 
     def test_tampered_token_raises_401(self):
         token, _ = issue_access_token(*self._principal())
-        # Corrupt the signature by changing the last char
-        tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+        # Corrupt the signature by flipping a bit in its first decoded byte.
+        # (Changing the last base64url char is flaky: its low bits are padding
+        # and may decode to the same signature bytes.)
+        header, payload, sig = token.split(".")
+        raw = bytearray(base64.urlsafe_b64decode(sig + "=" * (-len(sig) % 4)))
+        raw[0] ^= 0x01
+        bad_sig = base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode()
+        assert bad_sig != sig
+        tampered = f"{header}.{payload}.{bad_sig}"
         with pytest.raises(HTTPException) as excinfo:
             verify_access_token(tampered)
         assert excinfo.value.status_code == 401
