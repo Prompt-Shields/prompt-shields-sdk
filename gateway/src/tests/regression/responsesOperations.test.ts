@@ -84,6 +84,20 @@ describe('POST /v1/responses/:id/cancel (#73)', () => {
     );
   });
 
+  test('openai: an id containing `/v1` keeps the full upstream path', async () => {
+    upstream(/api\.openai\.com\/v1\/responses\/v1abc\/cancel$/, () =>
+      json({ ...cancelled, id: 'v1abc' })
+    );
+    const res = await app.request('/v1/responses/v1abc/cancel', {
+      method: 'POST',
+      headers: OPENAI,
+    });
+    expect(res.status).toBe(200);
+    expect(upstreamCalls[0].url).toBe(
+      'https://api.openai.com/v1/responses/v1abc/cancel'
+    );
+  });
+
   test('openai: an upstream error keeps its status', async () => {
     upstream(/api\.openai\.com\/v1\/responses\/resp_x\/cancel$/, () =>
       json(
