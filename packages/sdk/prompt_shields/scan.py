@@ -18,6 +18,13 @@ Safety rules:
 Usage::
 
     ps-scan [PATH] [--format summary|json|events|sarif] [--output FILE]
+            [--exclude GLOB ...] [--fail-on any|KIND|VENDOR[,...]]
+
+``--exclude`` skips files or directories whose repo-relative path or name
+matches a glob (repeatable). ``--fail-on`` exits 1 when any finding's kind
+(``import``, ``client``, ``model``, ``endpoint``, ``env_var``) or vendor
+matches one of the given tokens; ``any`` matches every finding. Without it
+ps-scan always exits 0 after a successful scan.
 
 ``--format events`` prints an ``{"events": [...]}`` body that the collector's
 ``POST /ingest/events`` accepts, with ``source="code_scan"``. ps-scan itself
@@ -28,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import json
 import os
 import re
@@ -537,18 +545,35 @@ def _is_secret_file(name: str) -> bool:
     return lower == ".env" or lower.startswith(".env.") or lower.endswith(".env")
 
 
-def iter_files(root: Path) -> Iterator[Path]:
-    """Yield candidate source files, pruning skipped dirs and virtualenvs."""
+def is_excluded(rel: str, patterns: Iterable[str]) -> bool:
+    """True when ``rel`` (posix, relative to the scan root) or its last
+    component matches any glob in ``patterns``. A trailing ``/`` is ignored,
+    so ``tests/`` and ``tests`` both exclude a ``tests`` directory."""
+    name = rel.rsplit("/", 1)[-1]
+    for pattern in patterns:
+        pat = pattern.strip().rstrip("/").removeprefix("./")
+        if pat and (fnmatch.fnmatchcase(rel, pat) or fnmatch.fnmatchcase(name, pat)):
+            return True
+    return False
+
+
+def iter_files(root: Path, exclude: Iterable[str] = ()) -> Iterator[Path]:
+    """Yield candidate source files, pruning skipped dirs, virtualenvs and
+    anything matching an ``exclude`` glob."""
+    exclude = tuple(exclude)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        prefix = "" if rel_dir == "." else rel_dir + "/"
         dirnames[:] = sorted(
             d
             for d in dirnames
             if d not in SKIP_DIRS
             and not d.endswith(".egg-info")
             and not os.path.exists(os.path.join(dirpath, d, "pyvenv.cfg"))
+            and not is_excluded(prefix + d, exclude)
         )
         for name in sorted(filenames):
-            if _is_secret_file(name):
+            if _is_secret_file(name) or is_excluded(prefix + name, exclude):
                 continue
             path = Path(dirpath) / name
             if path.suffix.lower() in LANG_BY_EXT and not path.is_symlink():
@@ -591,13 +616,20 @@ def _read_text(path: Path, max_bytes: int) -> str | None:
 
 
 def scan_path(
-    root: str | os.PathLike[str], *, max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
+    root: str | os.PathLike[str],
+    *,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+    exclude: Iterable[str] = (),
 ) -> dict:
-    """Scan a directory (or single file) and return the JSON report dict."""
+    """Scan a directory (or single file) and return the JSON report dict.
+
+    ``exclude`` holds globs matched against each path relative to the scan
+    root and against its name; matching directories are not descended into.
+    """
     root_path = Path(root).resolve()
     findings: list[Finding] = []
     scanned = skipped = 0
-    files = [root_path] if root_path.is_file() else iter_files(root_path)
+    files = [root_path] if root_path.is_file() else iter_files(root_path, exclude)
     base = root_path.parent if root_path.is_file() else root_path
     for path in files:
         if _is_secret_file(path.name):
@@ -753,6 +785,24 @@ def to_sarif(report: dict) -> dict:
     }
 
 
+FINDING_KINDS = tuple(_SARIF_RULES)
+
+
+def matches_fail_on(findings: Iterable[dict], tokens: Iterable[str]) -> list[dict]:
+    """Return the findings whose kind or vendor is in ``tokens``
+    (``any`` matches everything)."""
+    wanted = {t.strip().lower() for t in tokens if t.strip()}
+    if not wanted:
+        return []
+    if "any" in wanted:
+        return list(findings)
+    return [f for f in findings if f["kind"] in wanted or f["vendor"] in wanted]
+
+
+def _split_csv(values: list[str] | None) -> list[str]:
+    return [t for v in values or () for t in v.split(",") if t.strip()]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ps-scan", description="Statically scan a repository for AI usage."
@@ -773,12 +823,35 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAX_FILE_BYTES,
         help="skip files larger than this",
     )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        metavar="GLOB",
+        help=(
+            "skip files/directories whose relative path or name matches GLOB "
+            "(repeatable or comma-separated, e.g. 'tests,docs/*')"
+        ),
+    )
+    parser.add_argument(
+        "--fail-on",
+        action="append",
+        metavar="TOKENS",
+        help=(
+            "exit 1 if any finding's kind ("
+            + ", ".join(FINDING_KINDS)
+            + ") or vendor matches; 'any' matches all (repeatable or comma-separated)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not os.path.exists(args.path):
         parser.error(f"path not found: {args.path}")
 
-    report = scan_path(args.path, max_file_bytes=args.max_file_bytes)
+    report = scan_path(
+        args.path,
+        max_file_bytes=args.max_file_bytes,
+        exclude=_split_csv(args.exclude),
+    )
     if args.format == "summary":
         out = format_summary(report)
     elif args.format == "json":
@@ -794,6 +867,11 @@ def main(argv: list[str] | None = None) -> int:
             print(format_summary(report), file=sys.stderr)
     else:
         print(out)
+
+    failed = matches_fail_on(report["findings"], _split_csv(args.fail_on))
+    if failed:
+        print(f"ps-scan: {len(failed)} finding(s) matched --fail-on", file=sys.stderr)
+        return 1
     return 0
 
 
