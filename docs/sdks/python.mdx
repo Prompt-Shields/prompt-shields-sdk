@@ -182,6 +182,38 @@ instrument Azure without plain OpenAI.
 - `.with_raw_response` calls, and positional-argument calls, are not instrumented.
 - MCP tools the provider calls for you (OpenAI Responses `mcp` tool, Anthropic MCP connector) appear in `tool_calls_used` as `{"name": ..., "type": "mcp", "server": ...}`. Tool arguments, results and server URLs are never recorded. Tools your own code calls through an MCP client library are not captured.
 
+### Without a code change: `prompt-shields-instrument`
+
+To instrument an app you cannot or do not want to edit, start it under the
+`prompt-shields-instrument` command (installed with the SDK), as you would
+with `opentelemetry-instrument`:
+
+```bash
+export PS_API_KEY=ps-... PS_COLLECTOR_URL=https://collector.example.com
+export PS_USE_CASE=support-bot          # any of the PS_* variables above
+
+prompt-shields-instrument python app.py --port 8080
+prompt-shields-instrument app.py --port 8080      # a .py file runs with the SDK's Python
+prompt-shields-instrument gunicorn app:wsgi       # any command that starts Python
+python -m prompt_shields.autoinstrument python app.py   # same, without the script
+```
+
+It puts a bootstrap directory holding a `sitecustomize.py` first on
+`PYTHONPATH` and runs the command in place of itself. Every Python interpreter
+started under it (the app, worker processes, Python subprocesses) calls
+`instrument()` at startup, configured by the `PS_*` variables. Set
+`PS_INSTRUMENT_VENDORS=openai,anthropic` to limit the vendors.
+
+- The app always runs: a missing `PS_API_KEY`, an SDK that fails to import, or
+  any other bootstrap error is logged as a warning and the app runs
+  uninstrumented.
+- A `sitecustomize` that was already on the path (a distribution's or a
+  virtualenv's) still runs, before `instrument()`.
+- The command's interpreter must be able to import `prompt_shields`; install
+  the SDK in the same environment as the app.
+- Interpreters started with `-I` or `-E` ignore `PYTHONPATH` and are not
+  instrumented.
+
 ## Cost-Aware Routing
 
 Attach a `RouteHint` to a call to express *intent*. The SDK emits `X-PS-*`
