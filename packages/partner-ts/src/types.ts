@@ -15,7 +15,14 @@ export type Environment = OpenString<'production' | 'staging' | 'dev'>;
 export type AssetStatus = OpenString<'active' | 'deprecated' | 'under_review'>;
 export type DataClassification = OpenString<'public' | 'internal' | 'confidential' | 'restricted'>;
 export type DiscoverySource = OpenString<
-  'sdk' | 'gateway' | 'browser_extension' | 'macos_app' | 'platform_signal' | 'survey'
+  | 'sdk'
+  | 'gateway'
+  | 'browser_extension'
+  | 'macos_app'
+  | 'platform_signal'
+  | 'survey'
+  | 'otel'
+  | 'code_scan'
 >;
 export type Confidence = OpenString<'low' | 'medium' | 'high' | 'verified'>;
 export type ChangeType = OpenString<'created' | 'updated' | 'deactivated'>;

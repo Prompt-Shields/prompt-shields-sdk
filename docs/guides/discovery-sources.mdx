@@ -16,6 +16,8 @@ Prompt Shields uses multiple independent channels to discover AI usage. When the
 | **SDK** | Developer API calls with rich business context | Drop-in OpenAI wrapper captures metadata |
 | **Gateway** | All LLM API traffic (zero code change) | Proxy intercepts and logs requests |
 | **Platform Signal** | Enterprise platform audit logs | Pulls from Microsoft Purview, Defender, Azure |
+| **OTel** (`otel`) | Apps already instrumented with OpenTelemetry GenAI | Collector OTLP/HTTP receiver maps `gen_ai.*` spans to usage events |
+| **Code Scan** (`code_scan`) | AI SDKs, models and endpoints referenced in source, before they run | `ps-scan` CLI or GitHub Action scans the repository locally |
 | **Survey** | Self-reported AI usage | Human Input Agent conducts interviews |
 
 ## Coverage Matrix
@@ -42,6 +44,52 @@ graph LR
 ```
 
 The `discovery_source` field is an array showing all channels that detected this asset.
+
+## Code Scan (`ps-scan`)
+
+`ps-scan` is a console script of the Python SDK (`prompt-shields` package, `packages/sdk`). It reads a repository locally and reports LLM SDK imports, client constructors, model names, provider endpoints and API-key environment variable *names* in Python, TypeScript/JavaScript, Java/Kotlin, Go and config files. No source leaves the machine: findings carry only the matched identifier, a path and a line. `.env` files are never opened.
+
+```bash
+ps-scan .                                   # human summary
+ps-scan . --format sarif -o ps-scan.sarif   # for code scanning
+ps-scan . --format events > events.json     # body for POST /ingest/events (source="code_scan")
+ps-scan . --exclude tests --exclude 'docs/*' --fail-on openai,env_var
+```
+
+`--exclude GLOB` (repeatable or comma-separated) skips files and directories whose path relative to the scan root, or whose name, matches. `--fail-on` takes finding kinds (`import`, `client`, `model`, `endpoint`, `env_var`), vendors, or `any`, and makes ps-scan exit `1` when a finding matches; the report is written first. ps-scan never uploads anything itself. Assets reported with `source: "code_scan"` get `medium` confidence until a runtime source (SDK, gateway, OTel) corroborates them.
+
+### GitHub Action
+
+The repository root is a composite action. It installs the SDK from the same ref, runs `ps-scan`, writes the summary to the job summary and, optionally, uploads SARIF to GitHub code scanning:
+
+```yaml
+jobs:
+  ps-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # only needed with upload-sarif: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Prompt-Shields/prompt-shields-sdk@main   # pin a tag or commit SHA
+        with:
+          exclude: |
+            tests
+            docs/*
+          upload-sarif: true
+          fail-on: ""            # e.g. "any" or "openai,env_var" to fail the job
+```
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `path` | `.` | Directory to scan. SARIF paths are relative to it, so keep `.` when uploading SARIF and narrow with `exclude`. |
+| `exclude` | | Globs, one per line or comma-separated. |
+| `fail-on` | | Kinds, vendors or `any`; the job fails after the SARIF upload when one matches. |
+| `sarif-file` | `ps-scan.sarif` | Where the SARIF report is written. |
+| `upload-sarif` | `false` | Upload to code scanning (category `ps-scan`). |
+| `python-version` | `3.12` | Python used to run ps-scan. |
+
+Outputs: `sarif-file`, `findings` (count) and `failed` (`true` when `fail-on` matched).
 
 ## Cloud AI Inventory (Platform Signal)
 
