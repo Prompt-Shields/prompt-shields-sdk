@@ -53,6 +53,32 @@ with `npm run test:integration`. `gateway/src/tests/regression/` drives the
 whole gateway app with a fake `fetch`; add a case there when you port a
 provider or endpoint.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`,
+with read-only repository permissions; a newer push to the same branch or PR
+cancels the run in progress. Its jobs:
+
+| Job | What it runs |
+|---|---|
+| SDK | Python 3.11, 3.12 and 3.13: `pip install -e "packages/sdk[dev]"`, `ruff check --select E9,F63,F7,F82 packages/sdk` (syntax errors and undefined names only, until the existing findings of the wider rule set are cleaned up), `pytest packages/sdk/tests` |
+| Collector + DB migrations | Python 3.11 against a `pgvector/pgvector:pg16` service: checks there is exactly one alembic head and that `alembic upgrade head` reaches it on an empty database, then runs `pytest packages/collector/tests` with `PS_TEST_DATABASE_URL`. The test role `ps_user` is not a superuser, so the row-level security tests bind as they do in production |
+| Gateway | Node 20 (as in `gateway/Dockerfile`): `npm ci`, `tsc --noEmit` (with `conf.example.json` copied to `conf.json`), the default offline jest suite, `npm run build` |
+| Partner TS SDK | Node 20: typecheck, jest, build in `packages/partner-ts` |
+
+The gateway job leaves out three stale upstream guardrail suites that fail on
+`main` (`plugins/default`, `plugins/qualifire`, `plugins/javelin`; tracked in
+#69) with `--testPathIgnorePatterns` in the workflow. The tests themselves are
+untouched; when you fix one, delete its entry from the workflow's
+`known_failing` list. Do not add to that list to get a PR green. The flag
+replaces jest.config.js's ignore list rather than adding to it, so the workflow
+re-adds `/node_modules/` and the live-credential suites from
+`gateway/tests/jest/integrationSuites.js`.
+
+To reproduce the collector job locally, point `PS_TEST_DATABASE_URL` at a
+database owned by a non-superuser role with the `vector` and `uuid-ossp`
+extensions created.
+
 ## Two licenses live in this repository
 
 | Path | License |
