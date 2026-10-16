@@ -104,6 +104,8 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
             latency_ms=span.latency_ms,
             source=OTEL_SOURCE,
             session_id=span.session_id,
+            requested_model=span.requested_model,
+            served_model=span.served_model,
         )
         db.add(usage_event)
         await record_event_flows(

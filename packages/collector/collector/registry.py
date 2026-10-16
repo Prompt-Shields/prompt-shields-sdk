@@ -256,6 +256,7 @@ def _serialize_asset(a: AIAsset) -> dict:
         "owner_email": a.owner_email,
         "environment": a.environment,
         "region": a.region,
+        "modality": a.modality,
         "status": a.status,
         "data_classification": a.data_classification,
         "discovery_source": a.discovery_source,

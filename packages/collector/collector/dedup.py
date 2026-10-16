@@ -32,6 +32,7 @@ async def find_or_create_asset(
     owner_email: str | None = None,
     environment: str | None = None,
     data_classification: str | None = None,
+    modality: str | None = None,
 ) -> tuple[AIAsset, bool]:
     """Find existing asset by merge key, or create new one. Returns (asset, is_new)."""
     now = datetime.now(timezone.utc)
@@ -66,6 +67,9 @@ async def find_or_create_asset(
             incoming = CLASSIFICATION_ORDER.get(data_classification, -1)
             if incoming > existing:
                 asset.data_classification = data_classification
+        # First reported modality wins; an asset is one model on one surface.
+        if modality and not asset.modality:
+            asset.modality = modality
         return asset, False
 
     asset = AIAsset(
@@ -77,6 +81,7 @@ async def find_or_create_asset(
         owner_email=owner_email,
         environment=environment,
         data_classification=data_classification,
+        modality=modality,
         discovery_source=[source],
         confidence=compute_confidence([source]),
         calling_service=calling_service,
