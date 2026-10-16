@@ -1,0 +1,126 @@
+name: Prompt Shields ps-scan
+description: >-
+  Statically scan a repository for AI usage (LLM SDK imports, clients, model
+  names, provider endpoints, API-key env var names) with ps-scan. Source code
+  never leaves the runner; SARIF upload to GitHub code scanning is optional.
+author: Prompt Shields
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  path:
+    description: >-
+      Directory to scan, relative to the workspace. SARIF locations are
+      relative to this directory, so keep the default (repository root) when
+      uploading SARIF and narrow the scan with `exclude` instead.
+    required: false
+    default: "."
+  exclude:
+    description: >-
+      Globs to skip, one per line or comma-separated. Each is matched against
+      the path relative to `path` and against the file or directory name.
+    required: false
+    default: ""
+  fail-on:
+    description: >-
+      Fail the step when any finding's kind (import, client, model, endpoint,
+      env_var) or vendor (openai, anthropic, ...) matches; `any` matches every
+      finding. Comma-separated. Empty (default) never fails on findings.
+    required: false
+    default: ""
+  sarif-file:
+    description: Where to write the SARIF report.
+    required: false
+    default: ps-scan.sarif
+  upload-sarif:
+    description: >-
+      Upload the SARIF report to GitHub code scanning (needs
+      `security-events: write`). `true` or `false`.
+    required: false
+    default: "false"
+  python-version:
+    description: Python used to run ps-scan (3.11 or newer).
+    required: false
+    default: "3.12"
+
+outputs:
+  sarif-file:
+    description: Path of the SARIF report.
+    value: ${{ steps.scan.outputs.sarif-file }}
+  findings:
+    description: Number of findings.
+    value: ${{ steps.scan.outputs.findings }}
+  failed:
+    description: "`true` when a finding matched `fail-on`."
+    value: ${{ steps.scan.outputs.failed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install the Prompt Shields SDK
+      shell: bash
+      env:
+        SDK_DIR: ${{ github.action_path }}/packages/sdk
+      run: python -m pip install --disable-pip-version-check --quiet "$SDK_DIR"
+
+    - name: Run ps-scan
+      id: scan
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+      run: |
+        args=("$INPUT_PATH" --format sarif --output "$INPUT_SARIF_FILE")
+        while IFS= read -r glob; do
+          glob="${glob#"${glob%%[![:space:]]*}"}"
+          glob="${glob%"${glob##*[![:space:]]}"}"
+          [ -n "$glob" ] && args+=(--exclude "$glob")
+        done < <(printf '%s\n' "$INPUT_EXCLUDE" | tr ',' '\n')
+        [ -n "$INPUT_FAIL_ON" ] && args+=(--fail-on "$INPUT_FAIL_ON")
+
+        set +e
+        ps-scan "${args[@]}" 2> ps-scan.log
+        code=$?
+        set -e
+        cat ps-scan.log >&2
+        if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
+          exit "$code"
+        fi
+
+        findings=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["runs"][0]["results"]))' "$INPUT_SARIF_FILE")
+        {
+          echo "sarif-file=$INPUT_SARIF_FILE"
+          echo "findings=$findings"
+          if [ "$code" -eq 1 ]; then echo "failed=true"; else echo "failed=false"; fi
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo '### ps-scan'
+          echo '```'
+          cat ps-scan.log
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        rm -f ps-scan.log
+
+    - name: Upload SARIF to code scanning
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: ps-scan
+
+    - name: Fail on matching findings
+      if: steps.scan.outputs.failed == 'true'
+      shell: bash
+      env:
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        echo "::error title=ps-scan::findings matched fail-on ($INPUT_FAIL_ON)"
+        exit 1

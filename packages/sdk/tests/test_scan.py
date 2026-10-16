@@ -196,3 +196,146 @@ def test_cli_formats(repo, capsys, tmp_path):
 def test_cli_missing_path(tmp_path):
     with pytest.raises(SystemExit):
         main([str(tmp_path / "nope")])
+
+
+# --------------------------------------------------------------------------
+# --exclude / --fail-on
+# --------------------------------------------------------------------------
+
+
+def _paths(report):
+    return {f["path"] for f in report["findings"]}
+
+
+def test_exclude_directory_by_name_and_path(repo):
+    assert any(p.startswith("go/") for p in _paths(scan_path(repo)))
+    by_name = _paths(scan_path(repo, exclude=["go"]))
+    assert by_name and not any(p.startswith("go/") for p in by_name)
+    by_path = _paths(scan_path(repo, exclude=["web/src/", "./java"]))
+    assert not any(p.startswith(("web/", "java/")) for p in by_path)
+    assert any(p.startswith("py/") for p in by_path)
+
+
+def test_exclude_file_glob(repo):
+    paths = _paths(scan_path(repo, exclude=["*.yaml", "py/app.py"]))
+    assert "config.yaml" not in paths and "py/app.py" not in paths
+    assert "py/frameworks.py" in paths
+
+
+def test_exclude_does_not_match_partial_names(repo):
+    # "py" excludes the py/ directory but not files that merely contain "py".
+    paths = _paths(scan_path(repo, exclude=["py"]))
+    assert not any(p.startswith("py/") for p in paths)
+    assert "config.yaml" in paths
+
+
+def test_cli_exclude_repeatable_and_csv(repo, capsys):
+    argv = [str(repo), "--format", "json", "--exclude", "go,java", "--exclude", "web"]
+    assert main(argv) == 0
+    paths = _paths(json.loads(capsys.readouterr().out))
+    assert paths and all(p.startswith("py/") or p == "config.yaml" for p in paths)
+
+
+def test_cli_fail_on_any(repo, capsys):
+    assert main([str(repo), "--fail-on", "any"]) == 1
+    assert "matched --fail-on" in capsys.readouterr().err
+
+
+def test_cli_fail_on_vendor_and_kind(repo, capsys, tmp_path):
+    assert main([str(repo), "--fail-on", "anthropic"]) == 1
+    assert main([str(repo), "--fail-on", "nonexistent-vendor"]) == 0
+    assert main([str(repo), "--fail-on", "env_var,nonexistent"]) == 1
+    # The report is still written before the non-zero exit.
+    dest = tmp_path / "out.sarif"
+    argv = [str(repo), "--format", "sarif", "-o", str(dest), "--fail-on", "model"]
+    assert main(argv) == 1
+    assert json.loads(dest.read_text())["runs"][0]["results"]
+    capsys.readouterr()
+
+
+def test_cli_fail_on_no_findings(tmp_path):
+    (tmp_path / "plain.py").write_text("print('hello')\n")
+    assert main([str(tmp_path), "--fail-on", "any"]) == 0
+
+
+# --------------------------------------------------------------------------
+# Self-scan: this repository (#95 "Done when")
+# --------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture(scope="module")
+def self_report():
+    if not (REPO_ROOT / "packages" / "sdk" / "prompt_shields").is_dir():
+        pytest.fail(f"repository root not found at {REPO_ROOT}")
+    return scan_path(REPO_ROOT, exclude=["packages/sdk/tests/fixtures"])
+
+
+def _under(report, prefix):
+    return [f for f in report["findings"] if f["path"].startswith(prefix)]
+
+
+def test_self_scan_finds_sdk_usage(self_report):
+    sdk = _under(self_report, "packages/sdk/prompt_shields/")
+    import_vendors = {f["vendor"] for f in sdk if f["kind"] == "import"}
+    # The SDK wraps the provider SDKs it instruments.
+    assert {"openai", "anthropic"} <= import_vendors
+    assert any(f["kind"] == "client" and f["vendor"] == "openai" for f in sdk)
+
+
+def test_self_scan_finds_gateway_usage(self_report):
+    gw = _under(self_report, "gateway/src/")
+    endpoints = {(f["vendor"], f["value"]) for f in gw if f["kind"] == "endpoint"}
+    assert any(v == "openai" and "api.openai.com" in u for v, u in endpoints)
+    assert any(v == "anthropic" for v, _ in endpoints)
+    assert any(f["kind"] == "model" for f in gw)
+
+
+def test_self_scan_finds_demo_usage(self_report):
+    demo = _under(self_report, "demo/")
+    assert any(f["kind"] == "import" and f["vendor"] == "prompt_shields" for f in demo)
+    assert any(f["kind"] == "model" for f in demo)
+
+
+def test_self_scan_events_and_hygiene(self_report):
+    assert self_report["source"] == "code_scan"
+    vendors = {e["vendor"] for e in self_report["events"]}
+    assert {"openai", "anthropic", "google"} <= vendors
+    paths = {f["path"] for f in self_report["findings"]}
+    assert not any("node_modules/" in p or p.startswith(".git/") for p in paths)
+    assert not any(p.startswith("packages/sdk/tests/fixtures/") for p in paths)
+
+
+# --------------------------------------------------------------------------
+# GitHub Action (action.yml at the repository root)
+# --------------------------------------------------------------------------
+
+
+def test_github_action_definition():
+    yaml = pytest.importorskip("yaml")
+    action = yaml.safe_load((REPO_ROOT / "action.yml").read_text())
+    assert action["runs"]["using"] == "composite"
+    assert {"path", "exclude", "fail-on", "sarif-file", "upload-sarif"} <= set(
+        action["inputs"]
+    )
+    assert action["inputs"]["upload-sarif"]["default"] == "false"
+    steps = action["runs"]["steps"]
+    upload = [s for s in steps if "upload-sarif" in s.get("uses", "")]
+    assert len(upload) == 1 and upload[0]["if"] == "inputs.upload-sarif == 'true'"
+    scan = next(s for s in steps if s.get("id") == "scan")
+    # Inputs reach the shell through env, never interpolated into the script.
+    assert "${{" not in scan["run"]
+    assert "ps-scan" in scan["run"] and "--format sarif" in scan["run"]
+    install = next(s for s in steps if "pip install" in s.get("run", ""))
+    assert install["env"]["SDK_DIR"].endswith("/packages/sdk")
+
+
+def test_discovery_source_includes_code_scan_and_otel():
+    from typing import get_args
+
+    from prompt_shields import DiscoverySource
+    from prompt_shields.scan import SOURCE
+
+    assert SOURCE in get_args(DiscoverySource)
+    assert "otel" in get_args(DiscoverySource)
