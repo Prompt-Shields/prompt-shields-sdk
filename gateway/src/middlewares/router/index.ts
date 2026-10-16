@@ -9,6 +9,7 @@ import {
   defaultPolicy,
   estimateInputTokens,
   estimateTierCost,
+  groupTiers,
   pickCheapestIn,
 } from './policy';
 import { HeuristicStrategy } from './heuristic';
@@ -72,10 +73,13 @@ function resolveInGroup(
   req: RouteRequest,
   reasonPrefix: string
 ): RouteDecision {
-  const tiers = policy.groups[group];
+  const tiers = groupTiers(policy, group);
   if (!tiers || tiers.length === 0) {
     // Unknown / empty group → transparent default group.
-    const fb = pickCheapestIn(policy.groups[policy.defaultGroup] || [], req);
+    const fb = pickCheapestIn(
+      groupTiers(policy, policy.defaultGroup) || [],
+      req
+    );
     return {
       model: fb?.tier.model ?? req.requestedModel,
       group: policy.defaultGroup,
@@ -123,7 +127,10 @@ export async function resolveRoute(
 
   // 2. Quality hint — maps to a group, strategy not consulted.
   if (req.quality) {
-    const group = policy.qualityToGroup[req.quality] ?? policy.defaultGroup;
+    const mapped = Object.hasOwn(policy.qualityToGroup, req.quality)
+      ? policy.qualityToGroup[req.quality]
+      : undefined;
+    const group = mapped ?? policy.defaultGroup;
     return resolveInGroup(policy, group, req, `quality:${req.quality}`);
   }
 

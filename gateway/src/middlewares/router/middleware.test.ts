@@ -49,6 +49,19 @@ describe('psRouterMiddleware', () => {
     expect(req._psRoute.reason).toContain('override');
   });
 
+  test.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])(
+    'X-PS-Route: %s routes to the default group like any unknown group',
+    async (name) => {
+      const req = await run(
+        { model: 'auto', messages: [{ role: 'user', content: 'hi' }] },
+        { 'X-PS-Route': name }
+      );
+      expect(req._psRoute.group).toBe('balanced');
+      expect(req._psRoute.reason).toBe('override:unknown-group-default');
+      expect(req.body.model).toBe('gpt-4o');
+    }
+  );
+
   test('never throws on a malformed body (fail-open passthrough)', async () => {
     const req = await run(undefined as any);
     expect(req).toBeDefined();

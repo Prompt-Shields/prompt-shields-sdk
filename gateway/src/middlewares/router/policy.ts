@@ -39,6 +39,18 @@ function outTokens(req: RouteRequest): number {
   return req.maxOutputTokens ?? DEFAULT_OUTPUT_TOKENS;
 }
 
+/**
+ * Tiers for a named group, or undefined when the policy does not define it.
+ * Own-property lookup: names such as `constructor` or `__proto__` (e.g. from a
+ * client-supplied X-PS-Route header) must not resolve to Object.prototype.
+ */
+export function groupTiers(
+  policy: RoutePolicy,
+  name: string
+): ModelTier[] | undefined {
+  return Object.hasOwn(policy.groups, name) ? policy.groups[name] : undefined;
+}
+
 /** Cheapest tier within a single group for this request. */
 export function pickCheapestIn(tiers: ModelTier[], req: RouteRequest) {
   const out = outTokens(req);
