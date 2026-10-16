@@ -69,6 +69,8 @@ DiscoverySource = Literal[
     "macos_app",
     "platform_signal",
     "survey",
+    "otel",
+    "code_scan",
 ]
 
 

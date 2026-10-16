@@ -17,6 +17,7 @@ Public surface:
 
     Auto-instrumentation:
         instrument / uninstrument — patch installed openai / anthropic SDKs
+        prompt-shields-instrument — console script: instrument an unmodified app
 
     Framework integrations (optional imports, see prompt_shields.integrations):
         prompt_shields.integrations.langchain  — LangChain callback handler
