@@ -5,11 +5,14 @@ The schema, the example policies and the golden decision vectors live in
 ``gateway/src/middlewares/router/vectors.test.ts``). Only data is shared;
 each implementation has its own runner.
 
-The SDK does not make routing decisions today: it only encodes intent as
-``X-PS-*`` headers (``RouteHint``). So this runner checks the schema, the
-examples, the vector files and the hint encoding, and reports every decision
-vector as skipped with a visible reason until the Python reference router
-lands (backlog items 8 and 17). Nothing is counted as passing that was not run.
+The SDK client does not route: it only encodes intent as ``X-PS-*`` headers
+(``RouteHint``). Decision vectors run through the Python reference router
+(``prompt_shields.route_policy``, used by policy replay, #13) along the same
+path as the gateway runner: hints -> ``X-PS-*`` headers ->
+``parse_route_headers`` -> ``build_route_request`` -> ``resolve_route``.
+Vectors with status ``pending`` (sensitivity, PII escalation, data policy,
+quality bar) are skipped with their pending_reason. Nothing is counted as
+passing that was not run.
 """
 
 from __future__ import annotations
@@ -22,6 +25,11 @@ import pytest
 jsonschema = pytest.importorskip("jsonschema")
 
 from prompt_shields import RouteHint
+from prompt_shields.route_policy import (
+    build_route_request,
+    parse_route_headers,
+    resolve_route,
+)
 
 SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schemas" / "route-policy"
 POLICY_SCHEMA = json.loads((SCHEMA_DIR / "route-policy.v1.schema.json").read_text())
@@ -36,10 +44,9 @@ HINT_HEADERS = {
     "model_group": "X-PS-Route",
 }
 
-NO_PYTHON_ROUTER = (
-    "No Python decision function yet: the SDK only emits route hints. "
-    "The Python reference router is backlog items 8 and 17."
-)
+# Expected fields the reference router decides today. An active vector that
+# expects anything else must be marked pending, not silently ignored.
+DECIDED_FIELDS = {"model", "group", "reason", "est_cost"}
 
 
 def _load(path: Path) -> dict:
@@ -176,4 +183,29 @@ def test_route_hint_encodes_vector_hints(policy_name, vector):
 def test_decision_vector(policy_name, vector):
     if vector.get("status") == "pending":
         pytest.skip(f"pending: {vector['pending_reason']}")
-    pytest.skip(NO_PYTHON_ROUTER)
+
+    expected = dict(vector["expected"])
+    assert set(expected) <= DECIDED_FIELDS, (
+        f"active vector expects undecided fields {set(expected) - DECIDED_FIELDS}"
+    )
+
+    policy = _load(SCHEMA_DIR / "examples" / f"{policy_name}.json")
+    request = vector["request"]
+    headers = RouteHint(**request.get("hints", {})).to_headers()
+    req = build_route_request(
+        {
+            "model": request.get("model", "auto"),
+            "messages": request["messages"],
+            "max_tokens": request.get("max_tokens"),
+        },
+        parse_route_headers(headers),
+    )
+    if request.get("approx_input_tokens") is not None:
+        req.approx_input_tokens = request["approx_input_tokens"]
+
+    decision = resolve_route(req, policy)
+
+    est_cost = expected.pop("est_cost", None)
+    assert {k: getattr(decision, k) for k in expected} == expected
+    if est_cost is not None:
+        assert abs(decision.est_cost - est_cost) <= 1e-9 * abs(est_cost) + 1e-15

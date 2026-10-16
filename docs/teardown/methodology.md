@@ -26,9 +26,9 @@ the tool lands must do these steps by hand and say so in the methodology record.
 | Price at `served_model`, not `requested_model` | #6 | **Pending.** See [§4.2](#42-served-model-vs-requested-model). |
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
-| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway runs the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. There is no Python reference router yet. |
+| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
 | `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | **Pending.** |
-| Policy replay and sensitivity mix | #13 | **Pending.** |
+| Policy replay and sensitivity mix | #13 | **Partly built.** Python reference router (`packages/sdk/prompt_shields/route_policy.py`) for precedence, heuristic strategy, budget clamp and unknown-group fallback. Sensitivity, data policy, quality bar, the replay itself and the sensitivity mix are pending. |
 | Eval harness and sample re-execution (quality parity) | #14 | **Pending.** |
 | Learning-tuple export | #42 | **Pending.** Out of scope for this appendix. |
 
@@ -289,9 +289,11 @@ is not a data classification audit ([§8](#8-what-a-teardown-does-not-claim)).
 
 **Pending #13.** Policy replay runs every logged call through a Python reference router
 that implements `route-policy.v1`, then prices the routed decision. The router must pass
-the golden vectors in `schemas/route-policy/vectors/` before a report can use it
-(today `packages/sdk/tests/test_route_policy_vectors.py` skips them, because there is
-no Python router yet).
+the golden vectors in `schemas/route-policy/vectors/` before a report can use it.
+The router (`prompt_shields.route_policy`) passes the active vectors
+(`packages/sdk/tests/test_route_policy_vectors.py`). It does not yet apply sensitivity,
+the data policy or the use-case quality bar ([§6.1](#61-per-call)); those vectors are
+`pending`, and until they pass a replay must not be presented as policy-compliant.
 
 ### 6.1 Per call
 
