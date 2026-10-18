@@ -36,6 +36,10 @@ import { RouterError } from '../errors/RouterError';
 import { GatewayError } from '../errors/GatewayError';
 import { HookType } from '../middlewares/hooks/types';
 import { responsesUnsupportedChecks } from '../middlewares/hooks/responsesSupport';
+import {
+  classifyProxyRequest,
+  proxyGuardrailsUnsupportedResponse,
+} from './proxyGuardrails';
 
 // Services
 import { CacheResponseObject, CacheService } from './services/cacheService';
@@ -339,6 +343,35 @@ export async function tryPost(
   const targetHasHooks = targetHooks.some(
     (h) => Array.isArray(h) && h.length > 0
   );
+  // PS fork (security): upstream skips every hook on proxied requests. Run
+  // them when the request is one the hooks understand; otherwise refuse.
+  if (fn === 'proxy' && targetHasHooks) {
+    const decision = classifyProxyRequest(
+      c,
+      method,
+      requestBody,
+      requestHeaders
+    );
+    if (decision.kind === 'unsupported') {
+      return proxyGuardrailsUnsupportedResponse(decision.reason);
+    }
+    if (decision.kind === 'hooks' && decision.fn === 'createModelResponse') {
+      const unsupported = responsesUnsupportedChecks(targetHooks);
+      if (unsupported.length) {
+        return responsesUnsupportedChecksResponse(decision.fn, unsupported);
+      }
+    }
+    return tryPostToProvider(
+      c,
+      providerOption,
+      requestBody,
+      requestHeaders,
+      fn,
+      currentIndex,
+      method,
+      decision.kind === 'hooks' ? decision.fn : undefined
+    );
+  }
   // PS fork (#73): route on the model the provider is actually sent, i.e.
   // after the target's override_params.
   const overrideModel = providerOption.overrideParams?.model;
@@ -451,7 +484,8 @@ async function tryPostToProvider(
   requestHeaders: Record<string, string>,
   fn: endpointStrings,
   currentIndex: number | string,
-  method: string = 'POST'
+  method: string = 'POST',
+  hooksEndpoint?: endpointStrings
 ): Promise<Response> {
   const requestContext = new RequestContext(
     c,
@@ -462,6 +496,8 @@ async function tryPostToProvider(
     method,
     currentIndex as number
   );
+  // PS fork (security): the endpoint type hooks run as on a proxied request.
+  requestContext.hooksEndpoint = hooksEndpoint;
   const hooksService = new HooksService(requestContext);
   const providerContext = new ProviderContext(requestContext.provider);
   const logsService = new LogsService(c);

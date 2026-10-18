@@ -31,7 +31,8 @@ export class HooksService {
       beforeRequestHooks,
       afterRequestHooks,
       null,
-      endpoint,
+      // PS fork (security): proxied requests run hooks as the API they call.
+      this.requestContext.hooksEndpoint ?? endpoint,
       requestHeaders
     );
     return hookSpan;
