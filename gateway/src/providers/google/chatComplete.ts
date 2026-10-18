@@ -24,6 +24,7 @@ import {
 import {
   ChatCompletionResponse,
   ErrorResponse,
+  FINISH_REASON,
   GroundingMetadata,
   Logprobs,
   ProviderConfig,
@@ -37,6 +38,43 @@ import {
   GOOGLE_GENERATE_CONTENT_FINISH_REASON,
   PortkeyGeminiParams,
 } from './types';
+
+/**
+ * PS fork (#72, re-implemented from Portkey enterprise 2.7 / 2.26): Gemini
+ * ends a turn that calls functions with `STOP`, which maps to `stop`. With
+ * strict OpenAI compliance a candidate that returned tool calls finishes with
+ * `tool_calls`, as OpenAI does, in both the JSON and the streamed response.
+ * Non-strict output keeps the provider's native reason.
+ */
+export const transformGeminiFinishReason = (
+  finishReason: GOOGLE_GENERATE_CONTENT_FINISH_REASON | string | undefined,
+  strictOpenAiCompliance: boolean,
+  hasToolCalls: boolean
+) => {
+  const mapped = transformFinishReason(
+    finishReason as GOOGLE_GENERATE_CONTENT_FINISH_REASON,
+    strictOpenAiCompliance
+  );
+  return strictOpenAiCompliance &&
+    hasToolCalls &&
+    (!finishReason || finishReason === 'STOP')
+    ? FINISH_REASON.tool_calls
+    : mapped;
+};
+
+/**
+ * Streams: whether an earlier chunk of this candidate carried tool calls, so
+ * the chunk that brings the finish reason can report `tool_calls`.
+ */
+export const geminiStreamToolCalls = (
+  streamState: any,
+  candidateIndex: number,
+  emitted: boolean
+): boolean => {
+  streamState.toolCallCandidates = streamState.toolCallCandidates ?? {};
+  if (emitted) streamState.toolCallCandidates[candidateIndex] = true;
+  return !!streamState.toolCallCandidates[candidateIndex];
+};
 
 const transformGenerationConfig = (params: PortkeyGeminiParams) => {
   const generationConfig: Record<string, any> = {};
@@ -750,9 +788,10 @@ export const GoogleChatCompleteResponseTransform: (
             message: message,
             logprobs,
             index: generation.index ?? idx,
-            finish_reason: transformFinishReason(
+            finish_reason: transformGeminiFinishReason(
               generation.finishReason,
-              strictOpenAiCompliance
+              strictOpenAiCompliance,
+              toolCalls.length > 0
             ),
             ...(!strictOpenAiCompliance && generation.groundingMetadata
               ? { groundingMetadata: generation.groundingMetadata }
@@ -842,12 +881,6 @@ export const GoogleChatCompleteStreamChunkTransform: (
       choices:
         parsedChunk.candidates?.map((generation, index) => {
           let message: any = { role: 'assistant', content: '' };
-          const finishReason = generation.finishReason
-            ? transformFinishReason(
-                generation.finishReason,
-                strictOpenAiCompliance
-              )
-            : null;
           if (generation.content?.parts?.[0]?.text) {
             const contentBlocks = [];
             let content = '';
@@ -917,9 +950,22 @@ export const GoogleChatCompleteStreamChunkTransform: (
               content: generation.finishMessage,
             };
           }
+          const candidateIndex = generation.index ?? index;
+          const hadToolCalls = geminiStreamToolCalls(
+            streamState,
+            candidateIndex,
+            !!message.tool_calls
+          );
+          const finishReason = generation.finishReason
+            ? transformGeminiFinishReason(
+                generation.finishReason,
+                strictOpenAiCompliance,
+                hadToolCalls
+              )
+            : null;
           return {
             delta: message,
-            index: generation.index ?? index,
+            index: candidateIndex,
             finish_reason: finishReason,
             ...(!strictOpenAiCompliance && generation.groundingMetadata
               ? { groundingMetadata: generation.groundingMetadata }
