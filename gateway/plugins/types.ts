@@ -1,6 +1,11 @@
 export interface PluginContext {
   [key: string]: any;
-  requestType?: 'complete' | 'chatComplete' | 'embed' | 'messages';
+  requestType?:
+    | 'complete'
+    | 'chatComplete'
+    | 'embed'
+    | 'messages'
+    | 'createModelResponse';
   provider?: string;
   metadata?: Record<string, any>;
 }

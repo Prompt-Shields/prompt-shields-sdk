@@ -103,9 +103,38 @@ export class HookSpan {
         : '';
       return concatenatedText || lastMessage.content;
     } else if (requestParams?.input) {
-      return Array.isArray(requestParams.input)
-        ? requestParams.input.join('\n')
-        : requestParams.input;
+      if (Array.isArray(requestParams.input)) {
+        // PS fork (#73): Responses API input items (ported from 2.0.0).
+        return requestParams.input
+          .map((item: any) =>
+            typeof item === 'string'
+              ? item
+              : this.extractResponsesApiInputText(item)
+          )
+          .filter(Boolean)
+          .join('\n');
+      }
+      return requestParams.input;
+    }
+    return '';
+  }
+
+  private extractResponsesApiInputText(item: any): string {
+    if (item?.type === 'message' || item?.role) {
+      if (typeof item.content === 'string') return item.content;
+      if (Array.isArray(item.content)) {
+        return item.content
+          .filter((c: any) => c?.type === 'input_text' || c?.type === 'text')
+          .map((c: any) => c.text || '')
+          .filter(Boolean)
+          .join('\n');
+      }
+    }
+    if (
+      item?.type === 'function_call_output' &&
+      typeof item.output === 'string'
+    ) {
+      return item.output;
     }
     return '';
   }
@@ -155,6 +184,21 @@ export class HookSpan {
       } else if (choice?.message?.content) {
         return choice.message.content.text || choice.message.content;
       }
+    }
+    // PS fork (#73): Responses API output (ported from 2.0.0).
+    if (Array.isArray(responseJSON?.output)) {
+      return responseJSON.output
+        .filter((item: any) => item?.type === 'message')
+        .flatMap((item: any) => item.content || [])
+        .map((c: any) =>
+          c?.type === 'output_text' || c?.type === 'text'
+            ? c.text
+            : c?.type === 'refusal'
+              ? c.refusal
+              : ''
+        )
+        .filter(Boolean)
+        .join('\n');
     }
     return '';
   }
@@ -449,9 +493,15 @@ export class HooksManager {
   private shouldSkipHook(span: HookSpan, hook: HookObject): boolean {
     const context = span.getContext();
     return (
-      !['chatComplete', 'complete', 'embed', 'messages'].includes(
-        context.requestType
-      ) ||
+      // PS fork (#73): createModelResponse as in 2.0.0, so guardrails also
+      // run on /v1/responses and on /v1/messages routed via Responses.
+      ![
+        'chatComplete',
+        'complete',
+        'embed',
+        'messages',
+        'createModelResponse',
+      ].includes(context.requestType) ||
       (context.requestType === 'embed' &&
         hook.eventType !== 'beforeRequestHook') ||
       (context.requestType === 'embed' && hook.type === HookType.MUTATOR) ||

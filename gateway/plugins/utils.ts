@@ -91,9 +91,44 @@ const getRequestContentPart = (json: any, requestType: string) => {
   } else if (requestType === 'embed') {
     content = json.input;
     textArray = Array.isArray(content) ? content : [content];
+  } else if (requestType === 'createModelResponse') {
+    // PS fork (#73): the string input, or the last input item, as the last
+    // message is for chatComplete and messages.
+    const input = json.input;
+    const last = Array.isArray(input) ? input[input.length - 1] : undefined;
+    if (typeof input === 'string') {
+      content = input;
+      textArray = [input];
+    } else if (
+      typeof last?.content === 'string' ||
+      Array.isArray(last?.content)
+    ) {
+      content = last.content;
+      textArray = Array.isArray(content)
+        ? content.map((item: any) => item?.text || '')
+        : [content as string];
+    } else if (
+      last?.type === 'function_call_output' &&
+      typeof last.output === 'string'
+    ) {
+      content = last.output;
+      textArray = [last.output];
+    }
   }
   return { content, textArray };
 };
+
+/** PS fork (#73): the text parts of a Responses API `output`, in order. */
+const responsesOutputTextParts = (output: any): Array<any> =>
+  (Array.isArray(output) ? output : [])
+    .filter((item: any) => item?.type === 'message')
+    .flatMap((item: any) => (Array.isArray(item.content) ? item.content : []))
+    .filter((part: any) =>
+      ['output_text', 'text', 'refusal'].includes(part?.type)
+    );
+
+const responsesPartText = (part: any): string =>
+  (part.type === 'refusal' ? part.refusal : part.text) || '';
 
 const getResponseContentPart = (json: any, requestType: string) => {
   let content: Array<any> | string | Record<string, any> | null = null;
@@ -113,6 +148,10 @@ const getResponseContentPart = (json: any, requestType: string) => {
   } else if (requestType === 'messages') {
     content = json.content;
     textArray = (content as Array<any>).map((item: any) => item.text || '');
+  } else if (requestType === 'createModelResponse') {
+    // PS fork (#73): every output_text / refusal part of the output messages.
+    content = json.output ?? null;
+    textArray = responsesOutputTextParts(json.output).map(responsesPartText);
   }
   return { content, textArray };
 };
@@ -173,6 +212,28 @@ function setRequestContentPart(
     updatedJson.prompt = Array.isArray(updatedJson.prompt)
       ? textArray.map((text, index) => text || updatedJson.prompt[index])
       : textArray[0];
+  } else if (requestType === 'createModelResponse') {
+    // PS fork (#73): mirrors getRequestContentPart.
+    if (typeof json.input === 'string') {
+      updatedJson.input = textArray[0] || json.input;
+    } else if (Array.isArray(json.input) && json.input.length) {
+      updatedJson.input = [...json.input];
+      const lastIndex = updatedJson.input.length - 1;
+      const last = { ...updatedJson.input[lastIndex] };
+      if (Array.isArray(last.content)) {
+        last.content = last.content.map((item: any, index: number) =>
+          textArray[index] ? { ...item, text: textArray[index] } : item
+        );
+      } else if (typeof last.content === 'string') {
+        last.content = textArray[0] || last.content;
+      } else if (
+        last.type === 'function_call_output' &&
+        typeof last.output === 'string'
+      ) {
+        last.output = textArray[0] || last.output;
+      }
+      updatedJson.input[lastIndex] = last;
+    }
   }
   transformedData.request.json = updatedJson;
 }
@@ -204,6 +265,32 @@ function setResponseContentPart(
     updatedJson.content = textArray.map(
       (text, index) => text || updatedJson.content[index]
     );
+  } else if (requestType === 'createModelResponse') {
+    // PS fork (#73): mirrors getResponseContentPart, part by part.
+    let index = 0;
+    const replace = (part: any) => {
+      if (!['output_text', 'text', 'refusal'].includes(part?.type)) {
+        return part;
+      }
+      const text = textArray[index++];
+      if (!text) return part;
+      return part.type === 'refusal'
+        ? { ...part, refusal: text }
+        : { ...part, text };
+    };
+    updatedJson.output = (Array.isArray(json.output) ? json.output : []).map(
+      (item: any) =>
+        item?.type === 'message' && Array.isArray(item.content)
+          ? { ...item, content: item.content.map(replace) }
+          : item
+    );
+    // Keep the SDK convenience field in step with the parts.
+    if (typeof json.output_text === 'string') {
+      updatedJson.output_text = responsesOutputTextParts(updatedJson.output)
+        .filter((part: any) => part.type !== 'refusal')
+        .map(responsesPartText)
+        .join('');
+    }
   }
   transformedData.response.json = updatedJson;
 }
