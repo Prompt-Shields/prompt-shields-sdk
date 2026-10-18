@@ -29,6 +29,7 @@ import type {
   RiskMapping,
   RisksParams,
   RotateWebhookSecretParams,
+  TelemetryCoverage,
   TokenResponse,
   UpdateWebhookSubscriptionParams,
   UsageSummary,
@@ -158,6 +159,7 @@ export class PartnerClient {
   readonly vendors: TaxonomyResource;
   readonly models: TaxonomyResource;
   readonly businessUnits: TaxonomyResource;
+  readonly telemetry: TelemetryResource;
   /**
    * Webhook subscriptions: the tenant admin API (`/api/v1/admin/webhooks`).
    * Needs a client built with the tenant's own API key (`apiKey`), not
@@ -209,6 +211,7 @@ export class PartnerClient {
     this.vendors = new TaxonomyResource(this, '/partner/v1/vendors');
     this.models = new TaxonomyResource(this, '/partner/v1/models');
     this.businessUnits = new TaxonomyResource(this, '/partner/v1/business-units');
+    this.telemetry = new TelemetryResource(this);
     this.webhooks = new WebhooksResource(this);
   }
 
@@ -504,6 +507,16 @@ export class TaxonomyResource {
   async list(): Promise<string[]> {
     const res = await this.client.get<{ data: string[] }>(this.path);
     return res.data;
+  }
+}
+
+/** `/partner/v1/telemetry/*`: how complete the registry's usage data is. */
+export class TelemetryResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** `GET /partner/v1/telemetry/coverage`: coverage overall and per source. Needs `usage:read`. */
+  coverage(): Promise<TelemetryCoverage> {
+    return this.client.get<TelemetryCoverage>('/partner/v1/telemetry/coverage');
   }
 }
 

@@ -21,6 +21,19 @@ it negative; it is clamped at zero.
 
 Accounting is fail-open: a broken metadata object is ignored, and a failure
 to record a rejection never changes the response the caller gets.
+
+Sources. Each client row belongs to one source, from the ``sdk`` name it
+reports: "gateway" (the AI gateway's ps-telemetry, which sends the same
+metadata as the SDK), "otel" (the OTLP GenAI receiver, one row per
+``service.name``, up to MAX_OTEL_CLIENTS per tenant), "sdk" for any other identified client, and
+"unidentified" for batches without metadata. OTLP exporters send no
+counters of their own, so for "otel" what the collector rejected (GenAI
+spans it could not map, oversized requests, failed writes) is the loss:
+OTLP/HTTP exporters do not retry those responses. For SDK and gateway
+clients a rejection is retried by the client and shows up later as
+received or as a client-reported drop, so it is not counted twice.
+GET /telemetry/loss, /api/v1/registry/telemetry/coverage and
+/partner/v1/telemetry/coverage report coverage per source.
 """
 
 from __future__ import annotations
@@ -33,7 +46,7 @@ from uuid import UUID
 
 from db.models import TelemetryClientStats
 from fastapi import APIRouter, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +57,16 @@ logger = logging.getLogger("collector.loss_accounting")
 router = APIRouter()
 
 UNIDENTIFIED_CLIENT = "unidentified"
+GATEWAY_SDK = "gateway"
+OTEL_SDK = "otel"
+OTEL_CLIENT_PREFIX = "otel:"
+# service.name is client-controlled: past this many distinct OTLP services per
+# tenant, new services are counted under the shared "otel" client instead of
+# growing the table without bound. A soft cap (concurrent requests may each
+# add one more).
+MAX_OTEL_CLIENTS = 200
+# Reporting order of the sources.
+SOURCES = ("sdk", "gateway", "otel", "unidentified")
 _MAX_ID_LEN = 128
 _MAX_KEY_LEN = 64
 _MAX_KEYS = 32  # per counter map, so a client cannot grow a row without bound
@@ -129,11 +152,11 @@ def _merge(base: dict | None, extra: dict[str, int]) -> dict[str, int]:
 
 
 async def _locked_row(
-    db: AsyncSession, tenant_id: UUID, client_id: str
+    db: AsyncSession, tenant_id: UUID, client_id: str, sdk: str | None = None
 ) -> TelemetryClientStats:
     await db.execute(
         pg_insert(TelemetryClientStats)
-        .values(tenant_id=tenant_id, client_id=client_id)
+        .values(tenant_id=tenant_id, client_id=client_id, sdk=sdk)
         .on_conflict_do_nothing(index_elements=["tenant_id", "client_id"])
     )
     stmt = (
@@ -186,7 +209,7 @@ async def record_rejected(
     if events <= 0:
         return
     try:
-        row = await _locked_row(db, tenant_id, meta.client_id)
+        row = await _locked_row(db, tenant_id, meta.client_id, meta.sdk)
         row.collector_rejected = _merge(row.collector_rejected, {reason: events})
         row.last_seen = datetime.now(UTC)
         await db.commit()
@@ -196,18 +219,145 @@ async def record_rejected(
             await db.rollback()
 
 
+# --- OTLP receiver -------------------------------------------------------------
+
+
+def otel_client_id(resource_attrs: dict) -> str:
+    """The loss-accounting client for an OTLP resource: one per service."""
+    name = resource_attrs.get("service.name")
+    if isinstance(name, str) and name.strip():
+        return f"{OTEL_CLIENT_PREFIX}{name.strip()}"[:_MAX_ID_LEN]
+    return OTEL_SDK
+
+
+@dataclass
+class OtelCounts:
+    """What one OTLP request did with one client's spans."""
+
+    received: int = 0
+    rejected: dict[str, int] = field(default_factory=dict)
+    ignored: dict[str, int] = field(default_factory=dict)
+
+    def reject(self, reason: str, n: int = 1) -> None:
+        if n > 0:
+            self.rejected[reason] = self.rejected.get(reason, 0) + n
+
+    def ignore(self, counts: dict[str, int]) -> None:
+        for key, n in counts.items():
+            self.ignored[key] = self.ignored.get(key, 0) + n
+
+
+async def record_otel(
+    db: AsyncSession, tenant_id: UUID, counts: dict[str, OtelCounts]
+) -> None:
+    """Add one OTLP request's outcome to its clients' counters, in its own
+    transaction (the spans are already committed or rolled back). Never
+    raises: accounting must not change the receiver's response."""
+    if not counts:
+        return
+    try:
+        counts = await _bound_otel_clients(db, tenant_id, counts)
+        now = datetime.now(UTC)
+        for client_id in sorted(counts):  # stable lock order across requests
+            c = counts[client_id]
+            row = await _locked_row(db, tenant_id, client_id, OTEL_SDK)
+            row.sdk = OTEL_SDK
+            if c.received:
+                row.received_events += c.received
+                row.received_batches += 1
+            if c.rejected:
+                row.collector_rejected = _merge(row.collector_rejected, c.rejected)
+            if c.ignored:
+                row.ignored_fields = _merge(row.ignored_fields, c.ignored)
+            row.last_seen = now
+        await db.commit()
+    except Exception:  # accounting must never mask the real response
+        logger.exception("could not record OTLP loss accounting")
+        with contextlib.suppress(Exception):
+            await db.rollback()
+
+
+async def _bound_otel_clients(
+    db: AsyncSession, tenant_id: UUID, counts: dict[str, OtelCounts]
+) -> dict[str, OtelCounts]:
+    """Fold services that would exceed MAX_OTEL_CLIENTS into the shared
+    "otel" client."""
+    new = [cid for cid in counts if cid != OTEL_SDK]
+    if not new:
+        return counts
+    existing = set(
+        (
+            await db.execute(
+                select(TelemetryClientStats.client_id).where(
+                    TelemetryClientStats.tenant_id == tenant_id,
+                    TelemetryClientStats.client_id.in_(new),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    new = sorted(cid for cid in new if cid not in existing)
+    if not new:
+        return counts
+    used = (
+        await db.execute(
+            select(func.count())
+            .select_from(TelemetryClientStats)
+            .where(
+                TelemetryClientStats.tenant_id == tenant_id,
+                TelemetryClientStats.client_id.startswith(OTEL_CLIENT_PREFIX),
+            )
+        )
+    ).scalar_one()
+    overflow = new[max(0, MAX_OTEL_CLIENTS - used) :]
+    if not overflow:
+        return counts
+    bounded = dict(counts)
+    shared = bounded.setdefault(OTEL_SDK, OtelCounts())
+    for cid in overflow:
+        c = bounded.pop(cid)
+        shared.received += c.received
+        for reason, n in c.rejected.items():
+            shared.reject(reason, n)
+        shared.ignore(c.ignored)
+    return bounded
+
+
+# --- reporting -----------------------------------------------------------------
+
+
+def source_of(client_id: str, sdk: str | None) -> str:
+    if client_id == UNIDENTIFIED_CLIENT:
+        return "unidentified"
+    if sdk == OTEL_SDK:
+        return "otel"
+    if sdk == GATEWAY_SDK:
+        return "gateway"
+    return "sdk"
+
+
+def _ratio(received: int, expected: int) -> float | None:
+    return round(received / expected, 4) if expected else None
+
+
 def _summary(row: TelemetryClientStats) -> dict:
     sdk_dropped = dict(row.sdk_dropped or {})
     dropped_total = sum(sdk_dropped.values())
+    source = source_of(row.client_id, row.sdk)
+    rejected = dict(row.collector_rejected or {})
+    # OTLP rejections are final (see the module docstring).
+    lost = dropped_total + (sum(rejected.values()) if source == "otel" else 0)
     identified = row.client_id != UNIDENTIFIED_CLIENT and row.last_seq > 0
     unaccounted = (
         max(0, row.sdk_enqueued_total - row.received_events - dropped_total)
         if identified
         else None
     )
-    expected = row.received_events + dropped_total + (unaccounted or 0)
+    expected = row.received_events + lost + (unaccounted or 0)
     return {
         "client_id": row.client_id,
+        "source": source,
         "sdk": row.sdk,
         "received_events": row.received_events,
         "received_batches": row.received_batches,
@@ -216,19 +366,49 @@ def _summary(row: TelemetryClientStats) -> dict:
         "sdk_dropped": sdk_dropped,
         "sdk_dropped_total": dropped_total,
         "unaccounted": unaccounted,
-        "collector_rejected": dict(row.collector_rejected or {}),
+        "collector_rejected": rejected,
+        "lost_events": lost,
         "ignored_fields": dict(row.ignored_fields or {}),
-        "coverage": round(row.received_events / expected, 4) if expected else None,
+        "coverage": _ratio(row.received_events, expected),
         "first_seen": row.first_seen.isoformat() if row.first_seen else None,
         "last_seen": row.last_seen.isoformat() if row.last_seen else None,
     }
 
 
-@router.get("/telemetry/loss")
-async def telemetry_loss(request: Request):
-    """Per-tenant delivery accounting: received vs dropped, per SDK client."""
-    tenant_id = await resolve_tenant(request)
-    db = request.state.db
+def coverage_by_source(clients: list[dict]) -> list[dict]:
+    """Per-source totals of client summaries, in SOURCES order.
+
+    dropped_events is what the clients reported dropped plus, for "otel",
+    what the collector rejected; unaccounted_events is the silent gap.
+    Coverage is null for "unidentified": without client counters the
+    collector cannot know what it did not receive.
+    """
+    out = []
+    for source in SOURCES:
+        rows = [c for c in clients if c["source"] == source]
+        if not rows:
+            continue
+        received = sum(c["received_events"] for c in rows)
+        dropped = sum(c["lost_events"] for c in rows)
+        unaccounted = sum(c["unaccounted"] or 0 for c in rows)
+        last_seen = max((c["last_seen"] for c in rows if c["last_seen"]), default=None)
+        out.append(
+            {
+                "source": source,
+                "clients": len(rows),
+                "received_events": received,
+                "dropped_events": dropped,
+                "unaccounted_events": unaccounted,
+                "coverage": None
+                if source == "unidentified"
+                else _ratio(received, received + dropped + unaccounted),
+                "last_seen": last_seen,
+            }
+        )
+    return out
+
+
+async def _client_summaries(db: AsyncSession, tenant_id: UUID) -> list[dict]:
     rows = (
         (
             await db.execute(
@@ -240,7 +420,31 @@ async def telemetry_loss(request: Request):
         .scalars()
         .all()
     )
-    clients = [_summary(row) for row in rows]
+    return [_summary(row) for row in rows]
+
+
+async def tenant_coverage(db: AsyncSession, tenant_id: UUID) -> dict:
+    """The tenant's telemetry coverage, overall and per source (the
+    registry and Partner API shape)."""
+    sources = coverage_by_source(await _client_summaries(db, tenant_id))
+    received = sum(s["received_events"] for s in sources)
+    dropped = sum(s["dropped_events"] for s in sources)
+    unaccounted = sum(s["unaccounted_events"] for s in sources)
+    return {
+        "coverage": _ratio(received, received + dropped + unaccounted),
+        "received_events": received,
+        "dropped_events": dropped,
+        "unaccounted_events": unaccounted,
+        "sources": sources,
+    }
+
+
+@router.get("/telemetry/loss")
+async def telemetry_loss(request: Request):
+    """Per-tenant delivery accounting: received vs dropped, per client and
+    per source (SDK, gateway, OTLP)."""
+    tenant_id = await resolve_tenant(request)
+    clients = await _client_summaries(request.state.db, tenant_id)
 
     sdk_dropped: dict[str, int] = {}
     rejected: dict[str, int] = {}
@@ -251,17 +455,19 @@ async def telemetry_loss(request: Request):
             rejected[k] = rejected.get(k, 0) + n
     received = sum(c["received_events"] for c in clients)
     dropped_total = sum(sdk_dropped.values())
+    lost = sum(c["lost_events"] for c in clients)
     unaccounted = sum(c["unaccounted"] or 0 for c in clients)
-    expected = received + dropped_total + unaccounted
     return {
         "totals": {
             "clients": len(clients),
             "received_events": received,
             "sdk_dropped": sdk_dropped,
             "sdk_dropped_total": dropped_total,
+            "lost_events": lost,
             "unaccounted": unaccounted,
             "collector_rejected": rejected,
-            "coverage": round(received / expected, 4) if expected else None,
+            "coverage": _ratio(received, received + lost + unaccounted),
         },
+        "sources": coverage_by_source(clients),
         "clients": clients,
     }
