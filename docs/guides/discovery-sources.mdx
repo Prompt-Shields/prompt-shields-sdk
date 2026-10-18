@@ -231,6 +231,15 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"gcp": {
 
 The OpenAI organization usage API and the Anthropic Admin usage report list usage per project or workspace, API key and model, including keys nobody instrumented. The collector pulls them and turns each (project/workspace, key, model) into an asset with `discovery_source: ["platform_signal"]` (`medium` confidence until another source corroborates it) and `calling_service` `openai:project=<id>:key=<key id>` or `anthropic:workspace=<id>:key=<key id>`, with one usage event per day. Run it with `python -m collector.provider_usage_admin --tenant <uuid> [--days 7]` or `POST /api/v1/admin/provider-usage/pull` (`Authorization: Bearer $PS_ADMIN_TOKEN`, `{"tenant_id": "<uuid>"}`).
 
+### Scheduling the pull
+
+To pull every tenant that has a stored credential or a `PS_PROVIDER_ADMIN_KEYS` entry, use one of these:
+
+- **In process.** Set `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS=86400` (daily) on **one** collector replica. Each run covers the last `PS_PROVIDER_USAGE_PULL_DAYS` days (default 3), so a bucket the provider finalises late, or a missed run, is picked up next time. The schedule is off by default (`0`). It calls the providers' admin APIs with tenants' keys, so an operator should opt in. Values under 3600 are refused, because usage is reported in daily buckets.
+- **Cron or a Kubernetes CronJob.** Run `python -m collector.provider_usage_admin --all-tenants [--days 3]` once a day, for example `15 2 * * *`. Add `--loop --interval 86400` to keep a single worker running instead.
+
+The collector lists the tenants through a logged row-level-security bypass (`provider-usage-schedule`). It then pulls each tenant in its own session, under that tenant's RLS context. A tenant that fails is reported and does not stop the others. Pulls are idempotent, so overlapping windows overwrite the same rows.
+
 ### Admin credentials (stored encrypted, write-only)
 
 Use an OpenAI admin key and an Anthropic Admin API key, the most restricted the provider lets you create (read-only where offered). The collector only sends `GET` requests to the usage endpoints, but it cannot limit what the key itself allows. A tenant admin (tenant API key, `/api/v1/admin/...`) or a partner granted `provider-credentials:manage` (`/partner/v1/...`) stores them:

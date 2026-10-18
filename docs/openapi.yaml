@@ -3,7 +3,10 @@ info:
   title: Prompt Shields Partner API
   version: 1.0.0
   description: |
-    The Prompt Shields Partner API provides read-only access to the AI Asset Registry.
+    The Prompt Shields Partner API provides read access to the AI Asset Registry.
+    A few write routes (attestations, provider credentials) need scopes that
+    are never granted by default. The tenant admin routes for webhooks and
+    provider credentials (`/api/v1/admin`) take the tenant API key instead.
 
     Enterprise Architecture tools (Ardoq, LeanIX, ServiceNow) use this API to pull
     discovered AI assets, data flows, risk mappings, and usage metadata into their
@@ -35,6 +38,18 @@ tags:
     description: Delta feeds and bulk export for EA tool integration
   - name: Auth
     description: OAuth 2.0 token management
+  - name: Provider Credentials
+    description: |
+      Write-only provider admin keys for the usage pull, and links from
+      provider key ids to SDK key fingerprints. The same routes are served
+      under `/partner/v1` (scope `provider-credentials:manage`) and under
+      `/api/v1/admin` (tenant API key). Every call is audited (path and
+      status, never the body).
+  - name: Webhooks
+    description: |
+      Tenant admin API (`/api/v1/admin/webhooks`, tenant API key) for
+      partner change webhooks: subscriptions, secret rotation and the
+      delivery (dead-letter) view.
 
 components:
   securitySchemes:
@@ -69,6 +84,13 @@ components:
         ```
         Authorization: Bearer ps-pk-your-key-here
         ```
+
+    TenantApiKey:
+      type: http
+      scheme: bearer
+      description: |
+        The tenant's own API key (the one the SDK ingests with), for the
+        tenant admin routes under `/api/v1/admin`. Partners never hold it.
 
   schemas:
     AIAsset:
@@ -183,6 +205,13 @@ components:
       required:
         - id
         - vendor
+        - model
+        - use_case_name
+        - business_unit
+        - owner_email
+        - environment
+        - status
+        - data_classification
         - discovery_source
         - confidence
         - first_seen
@@ -221,7 +250,9 @@ components:
         - id
         - source_system
         - destination_system
+        - data_classification
         - direction
+        - detected_pii_types
 
     RiskMapping:
       type: object
@@ -299,6 +330,7 @@ components:
         - id
         - risk_category
         - risk_level
+        - framework
         - status
         - source
 
@@ -330,17 +362,32 @@ components:
         estimated_cost_usd:
           type: number
           format: float
+          nullable: true
+          description: Null when no event in the period reported a cost (0 would claim a measurement)
           example: 482.50
         unique_sessions:
           type: integer
           example: 312
         avg_latency_ms:
           type: integer
+          nullable: true
+          description: Null when no event in the period reported a latency
           example: 380
         period:
           type: string
           description: Time period for this summary
           example: "30d"
+      required:
+        - total_requests
+        - total_tokens_in
+        - total_tokens_out
+        - total_tokens_cached
+        - total_tokens_cache_write
+        - total_tokens_reasoning
+        - estimated_cost_usd
+        - unique_sessions
+        - avg_latency_ms
+        - period
 
     ChangeEvent:
       type: object
@@ -373,6 +420,7 @@ components:
           description: Which fields changed (null for created)
           nullable: true
           example: ["confidence", "discovery_source", "last_seen"]
+      required: [change_type, asset, changed_at, changed_fields]
 
     AttestationStatus:
       type: object
@@ -395,6 +443,7 @@ components:
         value_changed:
           type: boolean
           description: The registry value differs from the value that was attested
+      required: [state, attested_by, attested_at, comment, value_changed]
 
     Attestation:
       type: object
@@ -432,6 +481,17 @@ components:
           type: string
           format: uuid
           nullable: true
+      required:
+        - id
+        - asset_id
+        - field
+        - state
+        - value
+        - comment
+        - attested_by
+        - attested_at
+        - actor_type
+        - partner_id
 
     AttestationRequest:
       type: object
@@ -484,6 +544,7 @@ components:
             /changes (not by the /assets list); /export and
             /assets/{asset_id}/data-flows return it in their meta too. Lets an
             integration check that its key belongs to the tenant it syncs.
+      required: [total, has_more, next_cursor]
 
     Error:
       type: object
@@ -518,6 +579,272 @@ components:
         scope:
           type: string
           example: "assets:read data-flows:read risks:read usage:read export:read changes:read"
+      required: [access_token, token_type, expires_in, scope]
+
+    WebhookSubscription:
+      type: object
+      description: A tenant's webhook subscription. The signing secret is never included.
+      properties:
+        id:
+          type: string
+          format: uuid
+        partner_id:
+          type: string
+          format: uuid
+          description: Partner credential that receives the events
+        url:
+          type: string
+          format: uri
+          example: "https://ea.example.com/hooks/prompt-shields"
+        event_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        description:
+          type: string
+          nullable: true
+        is_active:
+          type: boolean
+          description: false while the subscription is paused
+        rotation_grace_ends_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set while a rotated-out secret still signs deliveries
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - partner_id
+        - url
+        - event_types
+        - description
+        - is_active
+        - rotation_grace_ends_at
+        - created_at
+        - updated_at
+
+    WebhookSubscriptionWithSecret:
+      description: >-
+        Returned on create and on secret rotation, the only times the signing
+        secret is shown.
+      allOf:
+        - $ref: '#/components/schemas/WebhookSubscription'
+        - type: object
+          properties:
+            secret:
+              type: string
+              description: "`whsec_...`. Save it now; it is not shown again."
+            warning:
+              type: string
+              example: "Save the signing secret now. It will not be shown again."
+          required: [secret, warning]
+
+    WebhookEventType:
+      type: string
+      enum: [asset.created, asset.changed, asset.retired, asset.attested]
+
+    CreateWebhookSubscriptionRequest:
+      type: object
+      required: [partner_id, url]
+      properties:
+        partner_id:
+          type: string
+          format: uuid
+          description: >-
+            Partner credential (of this tenant) that receives the events. It
+            needs `changes:read`, plus `assets:read` for `asset.attested`.
+        url:
+          type: string
+          maxLength: 2048
+          description: "`https` URL with a public host"
+        event_types:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+          description: Defaults to every event type
+        description:
+          type: string
+          maxLength: 200
+          nullable: true
+
+    UpdateWebhookSubscriptionRequest:
+      type: object
+      description: Fields to change. Omitted fields keep their value; give at least one, and none as null.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          maxLength: 2048
+          description: New destination, checked like a new subscription's URL
+        event_types:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+          description: Replaces the event list. The partner needs each event's scope.
+        is_active:
+          type: boolean
+          description: >-
+            false pauses the subscription: no new events are queued for it and
+            queued deliveries are not sent. true resumes it.
+
+    RotateWebhookSecretRequest:
+      type: object
+      properties:
+        grace_period_seconds:
+          type: integer
+          minimum: 0
+          maximum: 604800
+          default: 0
+          description: >-
+            Keep signing with the old secret too for this long, so the receiver
+            can switch without dropping deliveries. 0 invalidates the old
+            secret at once.
+
+    WebhookDelivery:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        subscription_id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+        event_type:
+          $ref: '#/components/schemas/WebhookEventType'
+        asset_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+          enum: [pending, succeeded, dead]
+        attempts:
+          type: integer
+        last_status_code:
+          type: integer
+          nullable: true
+        last_error:
+          type: string
+          nullable: true
+        next_attempt_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set only while `status` is `pending`
+        last_attempt_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - subscription_id
+        - event_id
+        - event_type
+        - asset_id
+        - status
+        - attempts
+        - last_status_code
+        - last_error
+        - next_attempt_at
+        - last_attempt_at
+        - delivered_at
+        - created_at
+
+    ProviderCredential:
+      type: object
+      description: >-
+        A stored provider admin key, masked. The key itself and its ciphertext
+        are never returned.
+      properties:
+        provider:
+          type: string
+          enum: [openai, anthropic]
+        key_hint:
+          type: string
+          description: "`****` plus the key's last four characters"
+          example: "****a1b2"
+        key_id:
+          type: string
+          nullable: true
+          description: Id of the `PS_WEBHOOK_SECRET_KEYS` keyring key the admin key is encrypted under
+          example: "k2"
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        rotated_at:
+          type: string
+          format: date-time
+          nullable: true
+      required: [provider, key_hint, key_id, created_at, rotated_at]
+
+    AdminKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [admin_key]
+      properties:
+        admin_key:
+          type: string
+          writeOnly: true
+          description: >-
+            The provider's organization admin key (20 to 512 printable ASCII
+            characters, no whitespace). Write-only: never returned, logged or
+            audited, and a 400 or 422 about it never echoes the value.
+
+    ProviderKeyFingerprintLink:
+      type: object
+      description: Links a provider's opaque API key id to the SDK's `api_key_fingerprint`.
+      properties:
+        provider:
+          type: string
+          enum: [openai, anthropic]
+        api_key_id:
+          type: string
+          description: The key id the provider's usage API reports
+          example: "key_abc123"
+        api_key_fingerprint:
+          type: string
+          pattern: '^[0-9a-f]{16}$'
+          description: First 16 hex characters of sha256(api key), computed where the key lives
+          example: "3f9a1c0b7d2e4f60"
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+      required: [provider, api_key_id, api_key_fingerprint, created_at]
+
+    FingerprintRequest:
+      type: object
+      additionalProperties: false
+      required: [api_key_fingerprint]
+      properties:
+        api_key_fingerprint:
+          type: string
+          pattern: '^[0-9a-f]{16}$'
+          description: >-
+            First 16 hex characters of sha256(api key), as the SDK sends it.
+            Anything else (a raw key, for example) is refused with a 400.
 
   responses:
     Forbidden:
@@ -531,8 +858,145 @@ components:
             title: Forbidden
             status: 403
             detail: "Token lacks required scope: export:read"
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Not found in this tenant
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InvalidAdminKey:
+      description: The admin key is too short, too long or not printable ASCII. The message never echoes it.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    KeyringNotConfigured:
+      description: Credential storage needs `PS_WEBHOOK_SECRET_KEYS` on this collector
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ProviderCredential:
+      description: The stored credential, masked
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProviderCredential'
+    ProviderCredentialList:
+      description: Stored credentials, masked
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProviderCredential'
+              meta:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      type: string
+                    description: Providers a key can be stored for
+                    example: ["openai", "anthropic"]
+                  env_fallback:
+                    type: array
+                    items:
+                      type: string
+                    description: Providers with no stored key that the pull would take from `PS_PROVIDER_ADMIN_KEYS`
+                required: [providers, env_fallback]
+            required: [data, meta]
+    FingerprintLink:
+      description: The link, and how many platform_signal assets it corroborated
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                $ref: '#/components/schemas/ProviderKeyFingerprintLink'
+              meta:
+                type: object
+                properties:
+                  corroborated_assets:
+                    type: integer
+                    description: Platform_signal assets that gained a corroborating source
+                required: [corroborated_assets]
+            required: [data, meta]
+    FingerprintLinkList:
+      description: Fingerprint links
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProviderKeyFingerprintLink'
+            required: [data]
+    WebhookSubscription:
+      description: The subscription (without its secret)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/WebhookSubscription'
+    WebhookSubscriptionWithSecret:
+      description: The subscription and its new signing secret, shown only this once
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/WebhookSubscriptionWithSecret'
+
+  requestBodies:
+    AdminKey:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AdminKeyRequest'
+    Fingerprint:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FingerprintRequest'
 
   parameters:
+    ProviderPathParam:
+      name: provider
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [openai, anthropic]
+
+    ApiKeyIdPathParam:
+      name: api_key_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{1,128}$'
+      description: The key id the provider's usage API reports
+
+    SubscriptionIdPathParam:
+      name: subscription_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
     LimitParam:
       name: limit
       in: query
@@ -955,6 +1419,7 @@ paths:
                         type: object
                         additionalProperties:
                           $ref: '#/components/schemas/AttestationStatus'
+                    required: [total, confidence, current]
         '404':
           description: Asset not found
     post:
@@ -1240,6 +1705,7 @@ paths:
                         type: string
                         format: uuid
                         description: Tenant of the credential that made the request
+                    required: [total, exported_at, sync_token]
             application/vnd.cyclonedx+json:
               schema:
                 type: object
@@ -1266,3 +1732,523 @@ paths:
                   version:
                     type: string
                     example: "1.0.0"
+                required: [status, version]
+
+  # ── Provider admin credentials (#93) ──────────────────────────────────
+  # The same routes exist under /partner/v1 (scope provider-credentials:manage)
+  # and /api/v1/admin (tenant API key).
+
+  /partner/v1/provider-credentials:
+    get:
+      operationId: listProviderCredentials
+      tags: [Provider Credentials]
+      summary: List stored provider admin keys (masked)
+      description: |
+        The tenant's stored provider admin keys, masked. `meta.env_fallback`
+        lists providers that have no stored key but a `PS_PROVIDER_ADMIN_KEYS`
+        entry, which the usage pull falls back to. Requires
+        `provider-credentials:manage`.
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ProviderCredentialList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/provider-credentials/{provider}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderPathParam'
+    get:
+      operationId: getProviderCredential
+      tags: [Provider Credentials]
+      summary: Get a stored provider admin key (masked)
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ProviderCredential'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      operationId: createProviderCredential
+      tags: [Provider Credentials]
+      summary: Store a provider admin key (write-only)
+      description: |
+        Encrypts the key with the collector's `PS_WEBHOOK_SECRET_KEYS` keyring
+        (AES-256-GCM, bound to the row). The key is never returned; the
+        response is masked. 409 when a key is already stored: rotate it instead.
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminKey'
+      responses:
+        '201':
+          $ref: '#/components/responses/ProviderCredential'
+        '400':
+          $ref: '#/components/responses/InvalidAdminKey'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A key is already stored for this provider
+        '503':
+          $ref: '#/components/responses/KeyringNotConfigured'
+    delete:
+      operationId: deleteProviderCredential
+      tags: [Provider Credentials]
+      summary: Delete a stored provider admin key
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      responses:
+        '204':
+          description: Deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /partner/v1/provider-credentials/{provider}/rotate:
+    parameters:
+      - $ref: '#/components/parameters/ProviderPathParam'
+    post:
+      operationId: rotateProviderCredential
+      tags: [Provider Credentials]
+      summary: Replace a stored provider admin key
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminKey'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProviderCredential'
+        '400':
+          $ref: '#/components/responses/InvalidAdminKey'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/KeyringNotConfigured'
+
+  /partner/v1/provider-key-fingerprints:
+    get:
+      operationId: listProviderKeyFingerprints
+      tags: [Provider Credentials]
+      summary: List provider key id to api_key_fingerprint links
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          $ref: '#/components/responses/FingerprintLinkList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderPathParam'
+      - $ref: '#/components/parameters/ApiKeyIdPathParam'
+    put:
+      operationId: putProviderKeyFingerprint
+      tags: [Provider Credentials]
+      summary: Link a provider key id to the SDK api_key_fingerprint
+      description: |
+        The provider usage APIs report only opaque key ids, so the tenant
+        registers which SDK `api_key_fingerprint` (first 16 hex characters of
+        sha256(key), computed where the key lives) belongs to which key id.
+        Corroboration then runs at once: a platform_signal asset for this key
+        and an SDK asset that saw the same fingerprint and model both become
+        `verified`. 201 for a new link, 200 when it replaced one.
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      requestBody:
+        $ref: '#/components/requestBodies/Fingerprint'
+      responses:
+        '200':
+          $ref: '#/components/responses/FingerprintLink'
+        '201':
+          $ref: '#/components/responses/FingerprintLink'
+        '400':
+          description: Not a 16-hex-character fingerprint, or an invalid key id
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      operationId: deleteProviderKeyFingerprint
+      tags: [Provider Credentials]
+      summary: Delete a fingerprint link
+      security:
+        - OAuth2: [provider-credentials:manage]
+        - PartnerApiKey: []
+      responses:
+        '204':
+          description: Deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/provider-credentials:
+    get:
+      operationId: adminListProviderCredentials
+      tags: [Provider Credentials]
+      summary: List stored provider admin keys (masked, tenant admin)
+      description: Same as `GET /partner/v1/provider-credentials`, with the tenant API key.
+      security:
+        - TenantApiKey: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ProviderCredentialList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/provider-credentials/{provider}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderPathParam'
+    get:
+      operationId: adminGetProviderCredential
+      tags: [Provider Credentials]
+      summary: Get a stored provider admin key (masked, tenant admin)
+      security:
+        - TenantApiKey: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ProviderCredential'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      operationId: adminCreateProviderCredential
+      tags: [Provider Credentials]
+      summary: Store a provider admin key (write-only, tenant admin)
+      description: Same as `POST /partner/v1/provider-credentials/{provider}`, with the tenant API key.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminKey'
+      responses:
+        '201':
+          $ref: '#/components/responses/ProviderCredential'
+        '400':
+          $ref: '#/components/responses/InvalidAdminKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A key is already stored for this provider
+        '503':
+          $ref: '#/components/responses/KeyringNotConfigured'
+    delete:
+      operationId: adminDeleteProviderCredential
+      tags: [Provider Credentials]
+      summary: Delete a stored provider admin key (tenant admin)
+      security:
+        - TenantApiKey: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/provider-credentials/{provider}/rotate:
+    parameters:
+      - $ref: '#/components/parameters/ProviderPathParam'
+    post:
+      operationId: adminRotateProviderCredential
+      tags: [Provider Credentials]
+      summary: Replace a stored provider admin key (tenant admin)
+      security:
+        - TenantApiKey: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminKey'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProviderCredential'
+        '400':
+          $ref: '#/components/responses/InvalidAdminKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/KeyringNotConfigured'
+
+  /api/v1/admin/provider-key-fingerprints:
+    get:
+      operationId: adminListProviderKeyFingerprints
+      tags: [Provider Credentials]
+      summary: List provider key id to api_key_fingerprint links (tenant admin)
+      security:
+        - TenantApiKey: []
+      responses:
+        '200':
+          $ref: '#/components/responses/FingerprintLinkList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/provider-key-fingerprints/{provider}/{api_key_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderPathParam'
+      - $ref: '#/components/parameters/ApiKeyIdPathParam'
+    put:
+      operationId: adminPutProviderKeyFingerprint
+      tags: [Provider Credentials]
+      summary: Link a provider key id to the SDK api_key_fingerprint (tenant admin)
+      description: Same as `PUT /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}`, with the tenant API key.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        $ref: '#/components/requestBodies/Fingerprint'
+      responses:
+        '200':
+          $ref: '#/components/responses/FingerprintLink'
+        '201':
+          $ref: '#/components/responses/FingerprintLink'
+        '400':
+          description: Not a 16-hex-character fingerprint, or an invalid key id
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      operationId: adminDeleteProviderKeyFingerprint
+      tags: [Provider Credentials]
+      summary: Delete a fingerprint link (tenant admin)
+      security:
+        - TenantApiKey: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Webhook subscriptions (tenant admin, #103) ────────────────────────
+
+  /api/v1/admin/webhooks/subscriptions:
+    post:
+      operationId: createWebhookSubscription
+      tags: [Webhooks]
+      summary: Subscribe a partner to asset change events
+      description: |
+        The tenant, not the partner, decides where its registry data is
+        pushed. The URL must be `https` with a public host. The signing
+        secret is returned once, in this response.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookSubscriptionRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/WebhookSubscriptionWithSecret'
+        '400':
+          description: >-
+            Invalid URL, a partner that cannot receive these events (revoked,
+            expired or missing a scope), or the per-partner subscription limit
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Partner credential not found in this tenant
+        '503':
+          description: Webhooks are not configured on this collector (no `PS_WEBHOOK_SECRET_KEYS`)
+    get:
+      operationId: listWebhookSubscriptions
+      tags: [Webhooks]
+      summary: List webhook subscriptions
+      security:
+        - TenantApiKey: []
+      parameters:
+        - name: partner_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Only this partner's subscriptions
+      responses:
+        '200':
+          description: Subscriptions, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WebhookSubscription'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/webhooks/subscriptions/{subscription_id}:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdPathParam'
+    get:
+      operationId: getWebhookSubscription
+      tags: [Webhooks]
+      summary: Get a webhook subscription
+      security:
+        - TenantApiKey: []
+      responses:
+        '200':
+          $ref: '#/components/responses/WebhookSubscription'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: updateWebhookSubscription
+      tags: [Webhooks]
+      summary: Change a subscription's URL or event types, or pause and resume it
+      description: |
+        Changing the event types or resuming needs a partner that may receive
+        them, as on create; pausing never does, so a revoked partner's
+        subscription can still be paused. Audited with the names of the
+        changed fields (not their values).
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookSubscriptionRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/WebhookSubscription'
+        '400':
+          description: Invalid URL, or a partner that cannot receive these events
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Empty body, a null field or an unknown field
+    delete:
+      operationId: deleteWebhookSubscription
+      tags: [Webhooks]
+      summary: Delete a subscription and its queued and past deliveries
+      security:
+        - TenantApiKey: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/webhooks/subscriptions/{subscription_id}/rotate-secret:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdPathParam'
+    post:
+      operationId: rotateWebhookSecret
+      tags: [Webhooks]
+      summary: Replace the signing secret
+      description: |
+        Returns the new secret once. With `grace_period_seconds` the old
+        secret keeps signing too (a second `v1=` signature) until the grace
+        period ends, so the receiver can switch without dropping deliveries.
+        The body is optional.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateWebhookSecretRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/WebhookSubscriptionWithSecret'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A grace period was asked for but the current secret cannot be read; rotate without one
+        '503':
+          description: Webhooks are not configured on this collector
+
+  /api/v1/admin/webhooks/deliveries:
+    get:
+      operationId: listWebhookDeliveries
+      tags: [Webhooks]
+      summary: List webhook deliveries (dead letters by default)
+      security:
+        - TenantApiKey: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, succeeded, dead]
+            default: dead
+        - name: subscription_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Deliveries, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WebhookDelivery'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/webhooks/deliveries/{delivery_id}/redeliver:
+    parameters:
+      - name: delivery_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: redeliverWebhook
+      tags: [Webhooks]
+      summary: Queue a delivery again
+      description: Resets the attempt count and queues the delivery for the next worker run.
+      security:
+        - TenantApiKey: []
+      responses:
+        '200':
+          description: The delivery, now `pending`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDelivery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The delivery is already queued

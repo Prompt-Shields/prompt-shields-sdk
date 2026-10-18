@@ -93,13 +93,28 @@ function enumOf(prop: Json): string[] {
   return values.filter((v: unknown) => typeof v === 'string');
 }
 
-/** Compare one object schema with one interface, both ways. */
-function compareSchema(schema: Json, iface: string): string[] {
+/** An object schema's properties and required names, through `allOf`. */
+function flatten(schema: Json): { props: Record<string, Json>; required: Set<string> } {
   const s = deref(schema);
-  const members = membersOf(iface);
+  const props: Record<string, Json> = { ...(s.properties ?? {}) };
   const required = new Set<string>(s.required ?? []);
+  for (const part of s.allOf ?? []) {
+    const sub = flatten(part);
+    Object.assign(props, sub.props);
+    sub.required.forEach((r) => required.add(r));
+  }
+  return { props, required };
+}
+
+/**
+ * Compare one object schema with one interface, both ways: every property
+ * exists on both sides, a property is optional (`?`) exactly when the spec
+ * does not list it in `required`, and every enum value is in the type.
+ */
+function compareSchema(schema: Json, iface: string): string[] {
+  const members = membersOf(iface);
+  const { props, required } = flatten(schema);
   const problems: string[] = [];
-  const props: Record<string, Json> = s.properties ?? {};
   for (const [wire, prop] of Object.entries(props)) {
     const name = camelKey(wire);
     const m = members.get(name);
@@ -108,6 +123,7 @@ function compareSchema(schema: Json, iface: string): string[] {
       continue;
     }
     if (required.has(wire) && m.optional) problems.push(`${iface}.${name} is optional but required in the spec`);
+    if (!required.has(wire) && !m.optional) problems.push(`${iface}.${name} is required but optional in the spec`);
     for (const v of enumOf(prop)) {
       if (!m.literals.has(v)) problems.push(`${iface}.${name} does not list enum value '${v}'`);
     }
@@ -133,16 +149,37 @@ const SCHEMAS: Record<string, string> = {
   AttestationRequest: 'AttestationRequest',
   PaginationMeta: 'PaginationMeta',
   TokenResponse: 'TokenResponse',
+  // Tenant admin webhook API (client.webhooks).
+  WebhookSubscription: 'WebhookSubscription',
+  WebhookSubscriptionWithSecret: 'WebhookSubscriptionWithSecret',
+  WebhookDelivery: 'WebhookDelivery',
+  CreateWebhookSubscriptionRequest: 'CreateWebhookSubscriptionParams',
+  UpdateWebhookSubscriptionRequest: 'UpdateWebhookSubscriptionParams',
+  RotateWebhookSecretRequest: 'RotateWebhookSecretParams',
 };
 /** Schemas the SDK handles without a matching interface. */
-const UNMAPPED_SCHEMAS = new Set(['Error']); // parsed into APIError (src/errors.ts)
+const UNMAPPED_SCHEMAS = new Set([
+  'Error', // parsed into APIError (src/errors.ts)
+  'WebhookEventType', // a string enum; checked through the properties that use it
+  // Provider credentials (#93) are not wrapped by the SDK: a tenant stores
+  // its own provider admin keys. Call them with client.send() if needed.
+  'ProviderCredential',
+  'AdminKeyRequest',
+  'ProviderKeyFingerprintLink',
+  'FingerprintRequest',
+]);
 
 interface Operation {
   /** Client method(s) that call it, as paths from the client, e.g. `assets.get`. */
   methods: string[];
   /** Interface holding the query parameters, if the operation has any. */
   params?: string;
+  /** Interface the JSON request body is built from, if the operation takes one. */
+  body?: string;
 }
+
+/** Provider credential routes: in the spec, not wrapped by the client. */
+const NOT_WRAPPED: Operation = { methods: [] };
 
 /** Every operation in the spec, by `METHOD path`. */
 const OPERATIONS: Record<string, Operation> = {
@@ -155,7 +192,7 @@ const OPERATIONS: Record<string, Operation> = {
     methods: ['assets.attestations'],
     params: 'ListAttestationsParams',
   },
-  'POST /partner/v1/assets/{asset_id}/attestations': { methods: ['assets.attest'] },
+  'POST /partner/v1/assets/{asset_id}/attestations': { methods: ['assets.attest'], body: 'AttestationRequest' },
   'GET /partner/v1/assets/{asset_id}/usage-summary': { methods: ['assets.usageSummary'], params: 'UsageSummaryParams' },
   'GET /partner/v1/vendors': { methods: ['vendors.list'] },
   'GET /partner/v1/models': { methods: ['models.list'] },
@@ -163,6 +200,46 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/changes': { methods: ['changes.list', 'changes.listPage'], params: 'ListChangesParams' },
   'GET /partner/v1/export': { methods: ['export.get'], params: 'ExportParams' },
   'GET /partner/v1/health': { methods: ['health'] },
+  'GET /partner/v1/provider-credentials': NOT_WRAPPED,
+  'GET /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
+  'POST /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
+  'DELETE /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
+  'POST /partner/v1/provider-credentials/{provider}/rotate': NOT_WRAPPED,
+  'GET /partner/v1/provider-key-fingerprints': NOT_WRAPPED,
+  'PUT /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}': NOT_WRAPPED,
+  'DELETE /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}': NOT_WRAPPED,
+  'GET /api/v1/admin/provider-credentials': NOT_WRAPPED,
+  'GET /api/v1/admin/provider-credentials/{provider}': NOT_WRAPPED,
+  'POST /api/v1/admin/provider-credentials/{provider}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/provider-credentials/{provider}': NOT_WRAPPED,
+  'POST /api/v1/admin/provider-credentials/{provider}/rotate': NOT_WRAPPED,
+  'GET /api/v1/admin/provider-key-fingerprints': NOT_WRAPPED,
+  'PUT /api/v1/admin/provider-key-fingerprints/{provider}/{api_key_id}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/provider-key-fingerprints/{provider}/{api_key_id}': NOT_WRAPPED,
+  // Tenant admin webhook API: client.webhooks (needs the tenant API key).
+  'POST /api/v1/admin/webhooks/subscriptions': {
+    methods: ['webhooks.subscriptions.create'],
+    body: 'CreateWebhookSubscriptionParams',
+  },
+  'GET /api/v1/admin/webhooks/subscriptions': {
+    methods: ['webhooks.subscriptions.list'],
+    params: 'ListWebhookSubscriptionsParams',
+  },
+  'GET /api/v1/admin/webhooks/subscriptions/{subscription_id}': { methods: ['webhooks.subscriptions.get'] },
+  'PATCH /api/v1/admin/webhooks/subscriptions/{subscription_id}': {
+    methods: ['webhooks.subscriptions.update'],
+    body: 'UpdateWebhookSubscriptionParams',
+  },
+  'DELETE /api/v1/admin/webhooks/subscriptions/{subscription_id}': { methods: ['webhooks.subscriptions.delete'] },
+  'POST /api/v1/admin/webhooks/subscriptions/{subscription_id}/rotate-secret': {
+    methods: ['webhooks.subscriptions.rotateSecret'],
+    body: 'RotateWebhookSecretParams',
+  },
+  'GET /api/v1/admin/webhooks/deliveries': {
+    methods: ['webhooks.deliveries.list'],
+    params: 'ListWebhookDeliveriesParams',
+  },
+  'POST /api/v1/admin/webhooks/deliveries/{delivery_id}/redeliver': { methods: ['webhooks.deliveries.redeliver'] },
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];
@@ -205,6 +282,18 @@ describe('docs/openapi.yaml drift check', () => {
 
   it('lists exactly the documented operations', () => {
     expect(Object.keys(OPERATIONS).sort()).toEqual([...specOperations().keys()].sort());
+  });
+
+  it.each(Object.entries(OPERATIONS))('%s takes the documented request body', (key, op) => {
+    const operation = specOperations().get(key);
+    const content = deref(operation.requestBody)?.content?.['application/json'];
+    if (!content) {
+      expect([key, op.body]).toEqual([key, undefined]);
+      return;
+    }
+    if (op.methods.length === 0) return; // not wrapped by the client
+    expect([key, op.body]).toEqual([key, expect.any(String)]);
+    expect(compareSchema(content.schema, op.body as string)).toEqual([]);
   });
 
   it.each(Object.entries(OPERATIONS))('%s has a client method and every query parameter', (key, op) => {
@@ -254,7 +343,25 @@ describe('docs/openapi.yaml drift check', () => {
         'UsageSummary.brandNewField is missing (spec property brand_new_field)',
         "UsageSummary.period does not list enum value '1y'",
         'UsageSummary.totalTokensIn is not in the spec',
+        // In the type without `?`, but not in the spec's `required`.
+        'UsageSummary.period is required but optional in the spec',
       ]),
     );
+    expect(
+      compareSchema({ required: ['since'], properties: { since: {}, limit: {}, after: {} } }, 'ListChangesParams'),
+    ).toEqual([]);
+    expect(compareSchema({ properties: { since: {}, limit: {}, after: {} } }, 'ListChangesParams')).toEqual([
+      'ListChangesParams.since is required but optional in the spec',
+    ]);
+    expect(
+      compareSchema({ required: ['since', 'limit'], properties: { since: {}, limit: {}, after: {} } }, 'ListChangesParams'),
+    ).toEqual(['ListChangesParams.limit is optional but required in the spec']);
+  });
+
+  it('reads allOf schemas (self-test)', () => {
+    const withSecret = flatten(spec.components.schemas.WebhookSubscriptionWithSecret);
+    expect(Object.keys(withSecret.props)).toEqual(expect.arrayContaining(['id', 'url', 'secret', 'warning']));
+    expect(withSecret.required.has('secret')).toBe(true);
+    expect(withSecret.required.has('id')).toBe(true);
   });
 });
