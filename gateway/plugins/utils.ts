@@ -139,11 +139,14 @@ const getResponseContentPart = (json: any, requestType: string) => {
     return { content: null, textArray: [] };
   }
 
+  // PS fork (#69): read the last choice, as the setter writes it (the
+  // complete getter read choice 0 while its setter wrote the last choice, so
+  // a mutator could copy choice 0's text over the last one when n > 1).
   if (requestType === 'chatComplete') {
-    content = json.choices[0].message.content as string;
+    content = json.choices[json.choices.length - 1].message.content as string;
     textArray = [content];
   } else if (requestType === 'complete') {
-    content = json.choices[0].text as string;
+    content = json.choices[json.choices.length - 1].text as string;
     textArray = [content];
   } else if (requestType === 'messages') {
     content = json.content;
@@ -247,20 +250,26 @@ function setResponseContentPart(
   // Create a safe to use shallow copy of the json
   const updatedJson = { ...json };
 
+  // PS fork (#69): the last choice, mirroring getResponseContentPart; the
+  // choice is copied rather than edited in place.
   if (requestType === 'chatComplete') {
     updatedJson.choices = [...json.choices];
-    const firstChoice = {
-      ...updatedJson.choices[0],
+    const lastIndex = updatedJson.choices.length - 1;
+    const lastChoice = {
+      ...updatedJson.choices[lastIndex],
     };
-    firstChoice.message = {
-      ...firstChoice.message,
-      content: textArray[0] || firstChoice.message.content,
+    lastChoice.message = {
+      ...lastChoice.message,
+      content: textArray[0] || lastChoice.message.content,
     };
-    updatedJson.choices[0] = firstChoice;
+    updatedJson.choices[lastIndex] = lastChoice;
   } else if (requestType === 'complete') {
     updatedJson.choices = [...json.choices];
-    updatedJson.choices[json.choices.length - 1].text =
-      textArray[0] || json.choices[json.choices.length - 1].text;
+    const lastIndex = updatedJson.choices.length - 1;
+    updatedJson.choices[lastIndex] = {
+      ...updatedJson.choices[lastIndex],
+      text: textArray[0] || updatedJson.choices[lastIndex].text,
+    };
   } else if (requestType === 'messages') {
     updatedJson.content = textArray.map(
       (text, index) => text || updatedJson.content[index]

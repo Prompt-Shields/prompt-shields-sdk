@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from db.models import PartnerCredential
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -35,7 +36,6 @@ from collector.partner_scopes import (
     effective_rate_limit,
     unknown_scopes,
 )
-from db.models import PartnerCredential
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 

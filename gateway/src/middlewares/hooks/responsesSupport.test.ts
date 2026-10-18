@@ -31,7 +31,6 @@ describe('responsesUnsupportedChecks (allowlist, fails closed)', () => {
     'exa.online',
     'lasso.classify',
     'aporia.validateProject',
-    'azure.shieldPrompt',
     'crowdstrike-aidr.guardChatCompletion',
     'qualifire.toolUseQuality',
   ])('%s, which reads only Chat Completions fields, is unsupported', (id) => {

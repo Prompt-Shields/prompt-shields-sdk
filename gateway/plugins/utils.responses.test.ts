@@ -1,6 +1,7 @@
 /**
  * PS fork (#73): content-part getters/setters for Responses API requests.
- * Kept apart from utils.test.ts, whose describe.only would skip them.
+ * Kept apart from utils.test.ts (which an upstream describe.only used to
+ * truncate until #69).
  */
 import { PluginContext } from './types';
 import { getCurrentContentPart, setCurrentContentPart } from './utils';
