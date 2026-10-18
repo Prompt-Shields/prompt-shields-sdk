@@ -28,6 +28,9 @@ class _NoRows:
     def scalars(self):
         return iter(())
 
+    def all(self):
+        return []
+
 
 class FakeSession:
     """Just enough of AsyncSession for store_usage: get / add / flush / commit.
