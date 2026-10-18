@@ -16,6 +16,7 @@ import type {
   ChangeEvent,
   CreateWebhookSubscriptionParams,
   DataFlow,
+  CycloneDxBom,
   ExportParams,
   ExportResult,
   HealthStatus,
@@ -484,8 +485,12 @@ export class ChangesResource {
 export class ExportResource {
   constructor(private readonly client: PartnerClient) {}
 
-  get(params: ExportParams = {}): Promise<ExportResult> {
-    return this.client.get<ExportResult>('/partner/v1/export', { ...params });
+  get(params: ExportParams & { format: 'cyclonedx' }): Promise<CycloneDxBom>;
+  get(params?: ExportParams & { format?: 'json' }): Promise<ExportResult>;
+  get(params: ExportParams = {}): Promise<ExportResult | CycloneDxBom> {
+    // CycloneDX keys are camelCase or hyphenated, so the camelCasing of
+    // snake_case response keys leaves the BOM unchanged.
+    return this.client.get<ExportResult | CycloneDxBom>('/partner/v1/export', { ...params });
   }
 }
 

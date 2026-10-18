@@ -60,7 +60,8 @@ export interface AIAsset {
    * What the asset works on (e.g. `text`, `audio`, `image`), from the first
    * telemetry event that reported it. `null` when no event reported one.
    */
-  modality?: string | null;
+  /** Set from the first telemetry event that reports a known modality. */
+  modality?: Modality | null;
   status: AssetStatus;
   dataClassification: DataClassification | null;
   discoverySource: DiscoverySource[];
@@ -379,6 +380,21 @@ export interface ListWebhookDeliveriesParams {
   limit?: number;
 }
 
+/** What an asset works on (chat, embeddings and rerank are `text`; OCR is `document`). */
+export type Modality = 'text' | 'image' | 'audio' | 'document';
+
 export interface ExportParams {
-  format?: 'json';
+  /** `json` (default) is the registry envelope; `cyclonedx` is a CycloneDX 1.6 AI-BOM. */
+  format?: 'json' | 'cyclonedx';
+}
+
+/**
+ * A CycloneDX 1.6 BOM (`format: 'cyclonedx'`), returned as the server sent it.
+ * Prompt Shields data is in each component's `promptshields:<name>` properties.
+ */
+export interface CycloneDxBom {
+  bomFormat: 'CycloneDX';
+  specVersion: string;
+  components?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
 }
