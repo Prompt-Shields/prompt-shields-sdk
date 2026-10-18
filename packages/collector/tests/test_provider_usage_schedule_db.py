@@ -279,3 +279,38 @@ def test_cli_arguments(monkeypatch, capsys):
     ):
         with pytest.raises(SystemExit):
             pua.main(argv)
+
+
+async def test_concurrent_run_is_skipped_while_another_holds_the_lock(seeded_db):
+    """Two replicas starting a run at once: the second skips it, so tenants'
+    admin keys are not used twice and the upserts do not race."""
+    _, env_id, _ = await _tenants(seeded_db)
+    factory = async_sessionmaker(seeded_db, class_=AsyncSession, expire_on_commit=False)
+    seen: list[str] = []
+    async with factory() as other:
+        await other.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": pua.SCHEDULE_LOCK_KEY}
+        )
+        summary = await pua.pull_all_tenants(
+            factory,
+            days=1,
+            settings=_settings(env_id),
+            transport=httpx.MockTransport(_handler(seen)),
+            sleep=_no_sleep,
+            now=NOW,
+        )
+        assert summary["tenants"] == {}
+        assert "skipped" in summary
+        assert seen == []
+    # Released with the other transaction: the next run pulls.
+    summary = await pua.pull_all_tenants(
+        factory,
+        days=1,
+        settings=_settings(env_id),
+        transport=httpx.MockTransport(_handler(seen)),
+        sleep=_no_sleep,
+        now=NOW,
+    )
+    assert "skipped" not in summary
+    assert summary["tenants"][str(env_id)]["providers"]["openai"]["status"] == "ok"
+    assert seen

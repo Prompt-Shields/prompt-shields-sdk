@@ -15,8 +15,10 @@ Ways to run it:
     Off by default (see ``collector.config``).
 
 The all-tenants pull lists tenants through a logged RLS bypass, then pulls
-each one in its own session under that tenant's RLS context. Pulls are
-idempotent, so an overlapping window or a second replica only costs extra
+each one in its own session under that tenant's RLS context. A run holds a
+PostgreSQL advisory lock, so when several replicas (or a replica and the
+CLI) start one at the same time, only one pulls and the others skip that
+run. Pulls are idempotent, so runs that follow each other only cost extra
 vendor API calls; enable the in-process schedule on one replica.
 
 The HTTP route makes outbound calls with the tenant's admin keys (stored, or
@@ -43,7 +45,7 @@ from db.models import ProviderCredential, Tenant
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from collector import rls
 from collector.provider_usage import (
@@ -57,6 +59,9 @@ logger = logging.getLogger("prompt_shields.provider_usage")
 
 # Reason logged when the scheduled pull lists tenants across RLS.
 SCHEDULE_BYPASS_REASON = "provider-usage-schedule"
+# PostgreSQL advisory lock key held for an all-tenants run: any fixed bigint
+# no other code uses; this one is "PSPUSAGE" in ASCII.
+SCHEDULE_LOCK_KEY = 0x5053_5055_5341_4745
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
@@ -184,6 +189,44 @@ async def pull_all_tenants(
     list_factory = list_factory or list_session_factory(session_factory)
     end = now or datetime.now(UTC)
     start = end - timedelta(days=days)
+    summary = {"start": start.isoformat(), "end": end.isoformat(), "tenants": {}}
+    # The lock is transaction-scoped: it is released when lock_db closes,
+    # including on error or cancellation. It touches no table, so the
+    # session needs no tenant context.
+    async with session_factory() as lock_db:
+        locked = (
+            await lock_db.execute(
+                text("SELECT pg_try_advisory_xact_lock(:key)"),
+                {"key": SCHEDULE_LOCK_KEY},
+            )
+        ).scalar_one()
+        if not locked:
+            logger.info(
+                "scheduled provider usage pull skipped: another run holds the lock"
+            )
+            return {**summary, "skipped": "another provider usage pull is running"}
+        summary["tenants"] = await _pull_tenants(
+            session_factory,
+            list_factory=list_factory,
+            settings=settings,
+            start=start,
+            end=end,
+            transport=transport,
+            sleep=sleep,
+        )
+    return summary
+
+
+async def _pull_tenants(
+    session_factory,
+    *,
+    list_factory,
+    settings: ProviderUsageSettings,
+    start: datetime,
+    end: datetime,
+    transport: httpx.AsyncBaseTransport | None,
+    sleep: Callable[[float], Awaitable[None]],
+) -> dict[str, dict]:
     results: dict[str, dict] = {}
     for tenant_id in await tenants_to_pull(list_factory, settings):
         try:
@@ -209,7 +252,7 @@ async def pull_all_tenants(
                 "tenant_id": str(tenant_id),
                 "error": type(exc).__name__,
             }
-    return {"start": start.isoformat(), "end": end.isoformat(), "tenants": results}
+    return results
 
 
 async def run_schedule(
@@ -227,9 +270,11 @@ async def run_schedule(
             summary = await pull_all_tenants(
                 session_factory, days=days, list_factory=list_factory, **pull_kwargs
             )
-            logger.info(
-                "scheduled provider usage pull: %d tenant(s)", len(summary["tenants"])
-            )
+            if "skipped" not in summary:
+                logger.info(
+                    "scheduled provider usage pull: %d tenant(s)",
+                    len(summary["tenants"]),
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a failed run must not end the schedule

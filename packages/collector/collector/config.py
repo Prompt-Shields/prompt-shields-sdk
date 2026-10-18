@@ -68,8 +68,9 @@ class Settings(BaseSettings):
     # Seconds between in-process pulls of every tenant with a stored
     # credential or a PS_PROVIDER_ADMIN_KEYS entry; 0 (the default) disables
     # it. Off by default because it calls the providers' admin APIs with
-    # tenants' admin keys, which an operator should opt into, and because
-    # every replica that has it on pulls (idempotently, but each one spends
+    # tenants' admin keys, which an operator should opt into. Runs that
+    # overlap are serialised by an advisory lock (the later one skips), but
+    # replicas whose runs do not overlap each pull (idempotently, spending
     # vendor API calls): turn it on in one replica, or run
     # `python -m collector.provider_usage_admin --all-tenants` from cron.
     # 86400 (daily) matches the providers' daily usage buckets; anything

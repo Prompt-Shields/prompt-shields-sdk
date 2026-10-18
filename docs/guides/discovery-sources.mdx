@@ -238,7 +238,7 @@ To pull every tenant that has a stored credential or a `PS_PROVIDER_ADMIN_KEYS` 
 - **In process.** Set `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS=86400` (daily) on **one** collector replica. Each run covers the last `PS_PROVIDER_USAGE_PULL_DAYS` days (default 3), so a bucket the provider finalises late, or a missed run, is picked up next time. The schedule is off by default (`0`). It calls the providers' admin APIs with tenants' keys, so an operator should opt in. Values under 3600 are refused, because usage is reported in daily buckets.
 - **Cron or a Kubernetes CronJob.** Run `python -m collector.provider_usage_admin --all-tenants [--days 3]` once a day, for example `15 2 * * *`. Add `--loop --interval 86400` to keep a single worker running instead.
 
-The collector lists the tenants through a logged row-level-security bypass (`provider-usage-schedule`). It then pulls each tenant in its own session, under that tenant's RLS context. A tenant that fails is reported and does not stop the others. Pulls are idempotent, so overlapping windows overwrite the same rows.
+The collector lists the tenants through a logged row-level-security bypass (`provider-usage-schedule`). It then pulls each tenant in its own session, under that tenant's RLS context. A tenant that fails is reported and does not stop the others. Pulls are idempotent, so overlapping windows overwrite the same rows. A run holds a PostgreSQL advisory lock: a replica or CLI run that starts while another is in progress skips that run.
 
 ### Admin credentials (stored encrypted, write-only)
 
