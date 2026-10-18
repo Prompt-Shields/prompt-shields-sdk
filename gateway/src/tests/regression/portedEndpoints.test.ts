@@ -414,6 +414,14 @@ describe('multipart uploads report their model (#75)', () => {
     const res = await upload('/v1/images/edits', form, 'openai');
     expect(res.status).toBe(200);
     expect(upstreamCalls).toHaveLength(1);
+    // The cached form is still forwarded whole: file bytes, name and fields.
+    const sent = upstreamCalls[0].body as FormData;
+    expect(sent).toBeInstanceOf(FormData);
+    expect(sent.get('model')).toBe('gpt-image-1');
+    expect(sent.get('prompt')).toBe('secret prompt');
+    const file = sent.get('image') as unknown as Blob & { name: string };
+    expect(file.name).toBe('a.png');
+    expect(await file.text()).toBe('png');
     const event = await telemetryEvent();
     expect(event).toMatchObject({
       vendor: 'openai',
