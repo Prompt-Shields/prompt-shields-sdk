@@ -151,10 +151,10 @@ class ProviderCredential(Base):
     """A tenant's provider admin key for the org usage pull (#93).
 
     `secret_ciphertext` is the key sealed with the PS_WEBHOOK_SECRET_KEYS
-    keyring ("v2.<kid>.<data>", AES-GCM, bound to the row id and a provider
-    credential purpose label). The key is write-only: the API returns
-    `key_hint` (last four characters), the key id and timestamps, never the
-    key. One row per tenant and provider. See collector/provider_credentials.py.
+    keyring ("v2.<kid>.<data>", AES-GCM, bound to the tenant, provider and row
+    id and a provider credential purpose label). The key is write-only: the
+    API returns `key_hint` (last four characters), the key id and
+    timestamps, never the key. One row per tenant and provider. See collector/provider_credentials.py.
     """
 
     __tablename__ = "provider_credentials"

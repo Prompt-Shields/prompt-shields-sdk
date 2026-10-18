@@ -5,9 +5,9 @@ Credentials
 A tenant's OpenAI / Anthropic admin key for the org usage pull
 (collector.provider_usage) is stored in ``provider_credentials``, sealed
 with the PS_WEBHOOK_SECRET_KEYS keyring (collector.secret_keyring) under
-its own purpose label and bound to the row id. The key is write-only:
-nothing returns it. Reads show a masked hint (last four characters), the
-key id it is encrypted under and timestamps. ``PS_PROVIDER_ADMIN_KEYS``
+its own purpose label and bound to the tenant, provider and row id. The key
+is write-only: nothing returns it. Reads show a masked hint (last four
+characters), the key id it is encrypted under and timestamps. ``PS_PROVIDER_ADMIN_KEYS``
 (env) still works as a fallback for tenants with no stored credential.
 
 A stored credential under an older keyring key is re-encrypted with the
@@ -86,14 +86,25 @@ def key_hint(key: str) -> str:
     return "****" + key[-4:]
 
 
-def seal_credential(key: str, credential_id: UUID) -> str:
+def _binding(tenant_id: UUID, provider: str, credential_id: UUID) -> bytes:
+    # Authenticated with the ciphertext: a token copied to another row, or a
+    # row moved to another tenant or provider, fails to decrypt. UUIDs are
+    # fixed-length, so the concatenation is unambiguous.
+    return tenant_id.bytes + credential_id.bytes + provider.encode()
+
+
+def seal_credential(
+    key: str, tenant_id: UUID, provider: str, credential_id: UUID
+) -> str:
     """Raises CredentialsNotConfigured without a keyring."""
-    return secret_keyring.seal(key, credential_id.bytes, _INFO)
+    return secret_keyring.seal(key, _binding(tenant_id, provider, credential_id), _INFO)
 
 
 def open_credential(row: ProviderCredential) -> str:
     """Raises ValueError (SecretKeyMissing for an unknown key id)."""
-    return secret_keyring.unseal(row.secret_ciphertext, row.id.bytes, _INFO)
+    return secret_keyring.unseal(
+        row.secret_ciphertext, _binding(row.tenant_id, row.provider, row.id), _INFO
+    )
 
 
 def serialize_credential(row: ProviderCredential) -> dict:
@@ -149,7 +160,7 @@ async def create_credential(
         id=cred_id,
         tenant_id=tenant_id,
         provider=provider,
-        secret_ciphertext=seal_credential(key, cred_id),
+        secret_ciphertext=seal_credential(key, tenant_id, provider, cred_id),
         key_hint=key_hint(key),
         created_at=_utcnow(),
     )
@@ -160,7 +171,7 @@ async def create_credential(
 def rotate_credential(row: ProviderCredential, admin_key: str) -> None:
     """Replace the stored key (sealed under the active keyring key)."""
     key = validate_admin_key(admin_key)
-    row.secret_ciphertext = seal_credential(key, row.id)
+    row.secret_ciphertext = seal_credential(key, row.tenant_id, row.provider, row.id)
     row.key_hint = key_hint(key)
     row.rotated_at = _utcnow()
 
@@ -175,7 +186,7 @@ def rekey_if_needed(row: ProviderCredential, key: str) -> bool:
             return False
     except ValueError:
         return False
-    row.secret_ciphertext = seal_credential(key, row.id)
+    row.secret_ciphertext = seal_credential(key, row.tenant_id, row.provider, row.id)
     return True
 
 
@@ -303,6 +314,8 @@ async def corroborate_by_fingerprint(db: AsyncSession, tenant_id: UUID) -> int:
         return 0
 
     fingerprints = sorted(set(by_provider_key.values()))
+    # DISTINCT: one row per (key, source, models, asset), not one per event,
+    # so the cost does not grow with the tenant's event history.
     observed = (
         await db.execute(
             select(
@@ -310,21 +323,41 @@ async def corroborate_by_fingerprint(db: AsyncSession, tenant_id: UUID) -> int:
                 AIUsageEvent.source,
                 AIUsageEvent.requested_model,
                 AIUsageEvent.served_model,
-                AIAsset,
+                AIUsageEvent.asset_id,
             )
+            .distinct()
             .join(AIAsset, AIAsset.id == AIUsageEvent.asset_id)
             .where(
                 AIUsageEvent.tenant_id == tenant_id,
                 AIUsageEvent.api_key_fingerprint.in_(fingerprints),
                 AIUsageEvent.source != PLATFORM_SOURCE,
+                AIAsset.tenant_id == tenant_id,
                 AIAsset.vendor.in_(providers),
             )
         )
     ).all()
+    asset_ids = {row.asset_id for row in observed}
+    assets_by_id = (
+        {
+            a.id: a
+            for a in (
+                await db.execute(
+                    select(AIAsset).where(
+                        AIAsset.tenant_id == tenant_id, AIAsset.id.in_(asset_ids)
+                    )
+                )
+            ).scalars()
+        }
+        if asset_ids
+        else {}
+    )
 
     # (vendor, fingerprint, model) -> [(source, observed asset)]
     sightings: dict[tuple[str, str, str], list[tuple[str, AIAsset]]] = {}
-    for fp, source, requested, served, asset in observed:
+    for fp, source, requested, served, asset_id in observed:
+        asset = assets_by_id.get(asset_id)
+        if asset is None:
+            continue
         for model in {asset.model, requested, served} - {None}:
             seen = sightings.setdefault((asset.vendor, fp, model), [])
             if (source, asset) not in seen:

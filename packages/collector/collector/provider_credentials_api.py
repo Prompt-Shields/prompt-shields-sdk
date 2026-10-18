@@ -29,6 +29,8 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
 
 from collector import provider_credentials as pc
@@ -43,8 +45,60 @@ _SCOPE = Depends(require_scope(SCOPE))
 
 Provider = Literal["openai", "anthropic"]
 
-tenant_router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
-partner_router = APIRouter(prefix="/partner/v1", tags=["Partner API"])
+# Names a 422 may show in an error location; anything else (an unknown
+# body field's name could itself be a pasted key) is shown as "*".
+_SAFE_LOC = frozenset(
+    {
+        "body",
+        "path",
+        "query",
+        "header",
+        "admin_key",
+        "api_key_fingerprint",
+        "provider",
+        "api_key_id",
+    }
+)
+
+
+class _RedactedValidationRoute(APIRoute):
+    """Request validation errors without the submitted values.
+
+    FastAPI's 422 body echoes each failing ``input`` (pydantic's
+    ``hide_input_in_errors`` does not reach it), so a key sent with the
+    wrong type or under a misspelt field name would come back in the
+    response. Keep type, location and message; drop ``input`` and ``ctx``.
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def redacting_handler(request: Request):
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                errors = [
+                    {
+                        "type": err.get("type"),
+                        "loc": [
+                            part if part in _SAFE_LOC or isinstance(part, int) else "*"
+                            for part in err.get("loc", ())
+                        ],
+                        "msg": err.get("msg"),
+                    }
+                    for err in exc.errors()
+                ]
+                raise RequestValidationError(errors) from None
+
+        return redacting_handler
+
+
+tenant_router = APIRouter(
+    prefix="/api/v1/admin", tags=["Admin"], route_class=_RedactedValidationRoute
+)
+partner_router = APIRouter(
+    prefix="/partner/v1", tags=["Partner API"], route_class=_RedactedValidationRoute
+)
 
 
 class AdminKeyBody(BaseModel):

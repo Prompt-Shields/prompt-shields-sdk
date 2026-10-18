@@ -59,14 +59,22 @@ def _keyring(monkeypatch):
 # ── sealing (unit) ────────────────────────────────────────────────────
 
 
+UNIT_TENANT = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
+
+
 def _row(
-    token: str | None = None, cred_id: uuid.UUID | None = None
+    token: str | None = None,
+    cred_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID = UNIT_TENANT,
+    provider: str = "openai",
 ) -> ProviderCredential:
     cred_id = cred_id or uuid.uuid4()
     return ProviderCredential(
         id=cred_id,
-        provider="openai",
-        secret_ciphertext=token or pc.seal_credential(ADMIN_KEY, cred_id),
+        tenant_id=tenant_id,
+        provider=provider,
+        secret_ciphertext=token
+        or pc.seal_credential(ADMIN_KEY, tenant_id, provider, cred_id),
         key_hint=pc.key_hint(ADMIN_KEY),
     )
 
@@ -93,6 +101,49 @@ def test_token_is_bound_to_row_and_purpose():
         webhooks.decrypt_secret(row.secret_ciphertext, row.id)
 
 
+def test_token_is_bound_to_tenant_and_provider():
+    row = _row()
+    # Same row id and ciphertext, moved to another tenant: does not open.
+    moved = _row(row.secret_ciphertext, row.id, tenant_id=uuid.uuid4())
+    with pytest.raises(ValueError):
+        pc.open_credential(moved)
+    relabelled = _row(row.secret_ciphertext, row.id, provider="anthropic")
+    with pytest.raises(ValueError):
+        pc.open_credential(relabelled)
+    assert pc.open_credential(_row(row.secret_ciphertext, row.id)) == ADMIN_KEY
+
+
+def test_webhook_v2_tokens_from_before_the_keyring_refactor_still_open():
+    """A "v2." webhook token built exactly as webhooks.py built it before
+    the keyring moved to secret_keyring (HKDF info, AAD = sub id + "." +
+    kid) still decrypts, and new tokens still open with the old scheme."""
+    import base64
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    sub_id = uuid.UUID("11111111-2222-4333-8444-555555555555")
+    info = b"prompt-shields webhook signing secrets v2"
+
+    def old_aead() -> AESGCM:
+        derived = HKDF(
+            algorithm=hashes.SHA256(), length=32, salt=None, info=info
+        ).derive(K1.encode())
+        return AESGCM(derived)
+
+    nonce = bytes(range(12))
+    aad = sub_id.bytes + b".k1"
+    ct = old_aead().encrypt(nonce, b"whsec_legacy-secret", aad)
+    token = "v2.k1." + base64.urlsafe_b64encode(nonce + ct).decode()
+    assert webhooks.decrypt_secret(token, sub_id) == "whsec_legacy-secret"
+
+    new = webhooks.encrypt_secret("whsec_new-secret", sub_id)
+    raw = base64.urlsafe_b64decode(new.split(".", 2)[2])
+    assert new.startswith("v2.k1.")
+    assert old_aead().decrypt(raw[:12], raw[12:], aad) == b"whsec_new-secret"
+
+
 def test_keyring_rotation_old_tokens_open_and_rekey(monkeypatch):
     row = _row()
     monkeypatch.setattr(settings, "webhook_secret_keys", f"k2:{K2},k1:{K1}")
@@ -112,7 +163,7 @@ def test_no_keyring_is_not_configured(monkeypatch):
     # The legacy single webhook key is not used for provider credentials.
     monkeypatch.setattr(settings, "webhook_secret_key", K1)
     with pytest.raises(pc.CredentialsNotConfigured):
-        pc.seal_credential(ADMIN_KEY, uuid.uuid4())
+        pc.seal_credential(ADMIN_KEY, uuid.uuid4(), "openai", uuid.uuid4())
 
 
 @pytest.mark.parametrize(
@@ -241,6 +292,30 @@ async def test_tenant_credential_lifecycle_never_returns_the_key(seeded_db):
     async with env.factory() as s:
         audit = (await s.execute(select(PartnerAuditLog))).scalars().all()
         assert audit and all(ADMIN_KEY not in repr(a.query_params) for a in audit)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"admin_key": [ADMIN_KEY]},  # wrong type
+        {"api_key": ADMIN_KEY},  # misspelt field
+        {ADMIN_KEY: ADMIN_KEY},  # key pasted as the field name
+        {"admin_key": ADMIN_KEY, "note": ADMIN_KEY},
+        ADMIN_KEY,  # bare string body
+    ],
+)
+async def test_malformed_body_422_never_echoes_the_key(seeded_db, body):
+    env = await _env(seeded_db)
+    async with _client() as c:
+        for url, headers in (
+            ("/api/v1/admin/provider-credentials/openai", TENANT_KEY),
+            ("/api/v1/admin/provider-credentials/openai/rotate", TENANT_KEY),
+            ("/partner/v1/provider-credentials/openai", env.mgr),
+        ):
+            r = await c.post(url, headers=headers, json=body)
+            assert r.status_code == 422, r.text
+            assert ADMIN_KEY not in r.text and "0001" not in r.text
+            assert r.json()["detail"][0]["msg"]
 
 
 async def test_store_without_keyring_is_503(seeded_db, monkeypatch):
