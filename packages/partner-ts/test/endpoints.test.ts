@@ -334,6 +334,21 @@ describe('webhooks (tenant admin API)', () => {
     expect(() => c.webhooks.subscriptions.get('')).toThrow(/subscriptionId/);
     expect(() => c.webhooks.deliveries.redeliver(' ')).toThrow(/deliveryId/);
   });
+
+  it('never sends partner credentials to the admin API', async () => {
+    for (const creds of [{ clientId: 'cid', clientSecret: 'sec' }, { apiKey: 'ps-pk-acme-abc' }]) {
+      const m = mockFetch();
+      const c = new PartnerClient({ ...creds, fetch: m.fetch, sleep: noSleep });
+      expect(() => c.webhooks.subscriptions.create({ partnerId: 'p1', url: 'https://x' })).toThrow(/tenant/);
+      expect(() => c.webhooks.subscriptions.get('s1')).toThrow(PartnerError);
+      expect(() => c.webhooks.subscriptions.rotateSecret('s1')).toThrow(PartnerError);
+      expect(() => c.webhooks.deliveries.redeliver('d1')).toThrow(PartnerError);
+      await expect(c.webhooks.subscriptions.list()).rejects.toThrow(/tenant/);
+      await expect(c.webhooks.deliveries.list()).rejects.toThrow(/tenant/);
+      await expect(c.webhooks.subscriptions.delete('s1')).rejects.toThrow(/tenant/);
+      expect(m.calls).toHaveLength(0);
+    }
+  });
 });
 
 describe('client.send', () => {
@@ -347,5 +362,25 @@ describe('client.send', () => {
     expect(m.calls[0].method).toBe('PUT');
     expect(m.calls[0].url).toBe('https://api.promptshields.io/x?foo_bar=a');
     expect(JSON.parse(m.calls[0].body as string)).toEqual({ a_b: [{ c_d: '2026-01-01T00:00:00.000Z' }] });
+  });
+
+  it('refuses paths that would send the token to another host', async () => {
+    const m = mockFetch();
+    const c = client(m.fetch);
+    for (const path of [
+      'https://evil.example/x',
+      '//evil.example/x',
+      '@evil.example/x',
+      '.evil.example/x',
+      ':8443/x',
+      'x',
+      '',
+      '/\\evil.example/x',
+      '/ x',
+    ]) {
+      await expect(c.send('GET', path)).rejects.toBeInstanceOf(PartnerError);
+      await expect(c.get(path)).rejects.toBeInstanceOf(PartnerError);
+    }
+    expect(m.calls).toHaveLength(0);
   });
 });

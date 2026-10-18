@@ -240,6 +240,20 @@ export class PartnerClient {
     return this.request<T>(method.toUpperCase(), path, { query: opts.query, body: opts.body });
   }
 
+  /**
+   * @internal Throws unless the client holds a tenant API key. The webhook
+   * admin API takes the tenant's key; a partner OAuth token or partner API
+   * key (`ps-pk-...`) is never sent to it.
+   */
+  assertTenantKey(what: string): void {
+    if (this.clientId || !this.apiKey || this.apiKey.startsWith('ps-pk-')) {
+      throw new PartnerError(
+        `${what} uses the tenant admin API and needs a client built with the tenant's API key ` +
+          '(`apiKey`), not partner credentials',
+      );
+    }
+  }
+
   private async bearer(): Promise<string> {
     if (!this.clientId) return this.apiKey as string;
     if (this.token && Date.now() < this.token.refreshAt) return this.token.value;
@@ -279,7 +293,16 @@ export class PartnerClient {
   private async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
     const auth = opts.auth ?? true;
     const retrySafe = opts.retrySafe ?? method !== 'POST';
+    // `path` is relative to baseUrl. Anything that could change the host
+    // (`//evil.com`, `@evil.com`, `.evil.com`, an absolute URL) would send
+    // the bearer token elsewhere, so it is refused.
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || /[\\\s]/.test(path)) {
+      throw new PartnerError(`path must be relative to baseUrl and start with a single "/": ${String(path)}`);
+    }
     const url = `${this.baseUrl}${path}${buildQuery(opts.query)}`;
+    if (new URL(url).origin !== new URL(this.baseUrl).origin) {
+      throw new PartnerError(`path ${path} does not stay on ${this.baseUrl}`);
+    }
     let reauthed = false;
     let attempt = 0;
 
@@ -482,6 +505,23 @@ export class TaxonomyResource {
 const WEBHOOKS_PATH = '/api/v1/admin/webhooks';
 
 /**
+ * A view of `client` whose `get` and `send` first check that it holds a
+ * tenant API key, so partner credentials never reach the admin API.
+ */
+function guardTenantKey(client: PartnerClient, what: string): PartnerClient {
+  return {
+    get: <T>(path: string, query?: Query): Promise<T> => {
+      client.assertTenantKey(what);
+      return client.get<T>(path, query);
+    },
+    send: <T>(method: string, path: string, opts?: SendOptions): Promise<T> => {
+      client.assertTenantKey(what);
+      return client.send<T>(method, path, opts);
+    },
+  } as PartnerClient;
+}
+
+/**
  * Webhook subscriptions and deliveries: the tenant admin API under
  * `/api/v1/admin/webhooks`. The tenant, not the partner, manages these, so
  * build the client with the tenant's API key:
@@ -503,7 +543,11 @@ export class WebhooksResource {
 
 /** `/api/v1/admin/webhooks/subscriptions`. */
 export class WebhookSubscriptionsResource {
-  constructor(private readonly client: PartnerClient) {}
+  private readonly client: PartnerClient;
+
+  constructor(client: PartnerClient) {
+    this.client = guardTenantKey(client, 'webhooks.subscriptions');
+  }
 
   /** Create a subscription. The response's `secret` is shown only this once. */
   create(params: CreateWebhookSubscriptionParams): Promise<WebhookSubscriptionWithSecret> {
@@ -569,7 +613,11 @@ export class WebhookSubscriptionsResource {
 
 /** `/api/v1/admin/webhooks/deliveries`. */
 export class WebhookDeliveriesResource {
-  constructor(private readonly client: PartnerClient) {}
+  private readonly client: PartnerClient;
+
+  constructor(client: PartnerClient) {
+    this.client = guardTenantKey(client, 'webhooks.deliveries');
+  }
 
   /** Deliveries by status, newest first. The server default is `dead` (dead letters). */
   async list(params: ListWebhookDeliveriesParams = {}): Promise<WebhookDelivery[]> {
