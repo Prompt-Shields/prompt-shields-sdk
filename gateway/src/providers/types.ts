@@ -194,8 +194,16 @@ export interface CResponse extends BaseResponse {
      */
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    // PS fork (#9): Anthropic cache-write breakdown by TTL
+    cache_creation?: AnthropicCacheCreation;
     num_search_queries?: number;
   };
+}
+
+/** Anthropic cache writes by TTL (`usage.cache_creation`). */
+export interface AnthropicCacheCreation {
+  ephemeral_5m_input_tokens?: number;
+  ephemeral_1h_input_tokens?: number;
 }
 
 /**
