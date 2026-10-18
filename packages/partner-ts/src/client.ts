@@ -1,4 +1,4 @@
-import { camelizeKeys, snakeKey } from './casing';
+import { camelizeKeys, snakeKey, snakeizeKeys } from './casing';
 import {
   APIConnectionError,
   APIError,
@@ -10,18 +10,31 @@ import {
 import { PageIterator } from './pagination';
 import type {
   AIAsset,
+  AttestationList,
+  AttestationRequest,
+  AttestationResult,
   ChangeEvent,
+  CreateWebhookSubscriptionParams,
   DataFlow,
   ExportParams,
   ExportResult,
   HealthStatus,
   ListAssetsParams,
+  ListAttestationsParams,
   ListChangesParams,
+  ListWebhookDeliveriesParams,
+  ListWebhookSubscriptionsParams,
   Page,
   RiskMapping,
+  RisksParams,
+  RotateWebhookSecretParams,
   TokenResponse,
+  UpdateWebhookSubscriptionParams,
   UsageSummary,
   UsageSummaryParams,
+  WebhookDelivery,
+  WebhookSubscription,
+  WebhookSubscriptionWithSecret,
 } from './types';
 
 export const VERSION = '0.1.0';
@@ -58,12 +71,25 @@ export interface PartnerClientOptions {
 
 type Query = Record<string, unknown>;
 
-interface RequestOptions {
+export interface SendOptions {
+  /** Query parameters, camelCase keys (sent as snake_case). */
   query?: Query;
+  /** JSON request body, camelCase keys (sent as snake_case). */
+  body?: unknown;
+}
+
+interface RequestOptions extends SendOptions {
   /** Send `Authorization`. Default true. */
   auth?: boolean;
   /** URL-encoded form body (token endpoint). */
   form?: Record<string, string>;
+  /**
+   * Whether a request that may have reached the server can be sent again
+   * (network errors, timeouts, 502/503/504). Defaults to true for every
+   * method except POST, which can create a record or rotate a secret twice.
+   * 429 and 401 are retried either way: the server did nothing.
+   */
+  retrySafe?: boolean;
 }
 
 interface CachedToken {
@@ -131,6 +157,12 @@ export class PartnerClient {
   readonly vendors: TaxonomyResource;
   readonly models: TaxonomyResource;
   readonly businessUnits: TaxonomyResource;
+  /**
+   * Webhook subscriptions: the tenant admin API (`/api/v1/admin/webhooks`).
+   * Needs a client built with the tenant's own API key (`apiKey`), not
+   * partner credentials.
+   */
+  readonly webhooks: WebhooksResource;
 
   private readonly apiKey?: string;
   private readonly clientId?: string;
@@ -176,6 +208,7 @@ export class PartnerClient {
     this.vendors = new TaxonomyResource(this, '/partner/v1/vendors');
     this.models = new TaxonomyResource(this, '/partner/v1/models');
     this.businessUnits = new TaxonomyResource(this, '/partner/v1/business-units');
+    this.webhooks = new WebhooksResource(this);
   }
 
   /** `GET /partner/v1/health`. No authentication. */
@@ -198,6 +231,15 @@ export class PartnerClient {
     return this.request<T>('GET', path, { query });
   }
 
+  /**
+   * Make an authenticated request and return the camelCased JSON body
+   * (`undefined` for an empty response). For endpoints the SDK does not
+   * wrap yet.
+   */
+  send<T>(method: string, path: string, opts: SendOptions = {}): Promise<T> {
+    return this.request<T>(method.toUpperCase(), path, { query: opts.query, body: opts.body });
+  }
+
   private async bearer(): Promise<string> {
     if (!this.clientId) return this.apiKey as string;
     if (this.token && Date.now() < this.token.refreshAt) return this.token.value;
@@ -212,6 +254,7 @@ export class PartnerClient {
   private async fetchToken(): Promise<string> {
     const res = await this.request<TokenResponse>('POST', '/oauth/token', {
       auth: false,
+      retrySafe: true,
       form: {
         grant_type: 'client_credentials',
         client_id: this.clientId as string,
@@ -235,6 +278,7 @@ export class PartnerClient {
 
   private async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
     const auth = opts.auth ?? true;
+    const retrySafe = opts.retrySafe ?? method !== 'POST';
     const url = `${this.baseUrl}${path}${buildQuery(opts.query)}`;
     let reauthed = false;
     let attempt = 0;
@@ -249,6 +293,9 @@ export class PartnerClient {
       if (opts.form) {
         headers['Content-Type'] = 'application/x-www-form-urlencoded';
         body = new URLSearchParams(opts.form).toString();
+      } else if (opts.body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        body = JSON.stringify(snakeizeKeys(opts.body));
       }
 
       let status: number;
@@ -266,7 +313,7 @@ export class PartnerClient {
         const wrapped = timedOut
           ? new APITimeoutError(`Request to ${method} ${path} timed out after ${this.timeoutMs}ms`, { cause: err })
           : new APIConnectionError(`Request to ${method} ${path} failed: ${(err as Error)?.message ?? err}`, { cause: err });
-        if (attempt < this.maxRetries) {
+        if (retrySafe && attempt < this.maxRetries) {
           await this.sleep(this.backoffMs(attempt));
           attempt++;
           continue;
@@ -292,7 +339,8 @@ export class PartnerClient {
       }
 
       const error: APIError = makeAPIError(status, parsed, resHeaders);
-      if (attempt < this.maxRetries && RETRY_STATUSES.has(status)) {
+      const retryable = status === 429 || (retrySafe && RETRY_STATUSES.has(status));
+      if (attempt < this.maxRetries && retryable) {
         let delay = this.backoffMs(attempt);
         if (error instanceof RateLimitError && error.retryAfter !== null) {
           if (error.retryAfter > this.maxRetryAfterSeconds) throw error;
@@ -338,20 +386,44 @@ export class AssetsResource {
     return res.data;
   }
 
-  /** Risk mappings for an asset. */
-  async risks(assetId: string): Promise<RiskMapping[]> {
+  /**
+   * Risk mappings for an asset. By default the server returns `confirmed`
+   * mappings only; pass `{ status: 'suggested' }` for unreviewed rule-based
+   * suggestions, or `'rejected'`.
+   */
+  async risks(assetId: string, params: RisksParams = {}): Promise<RiskMapping[]> {
     const res = await this.client.get<{ data: RiskMapping[] }>(
       `/partner/v1/assets/${requireId(assetId, 'assetId')}/risks`,
+      { ...params },
     );
     return res.data;
   }
 
   /**
-   * Aggregated usage for an asset over `period` (default `30d`).
-   *
-   * Needs the collector endpoint from #99. Until that is deployed this
-   * throws `NotFoundError`.
+   * Attestation history for an asset, newest first, with the current state
+   * of every attestable field in `meta.current`. Needs `assets:read`.
    */
+  attestations(assetId: string, params: ListAttestationsParams = {}): Promise<AttestationList> {
+    return this.client.get<AttestationList>(
+      `/partner/v1/assets/${requireId(assetId, 'assetId')}/attestations`,
+      { ...params },
+    );
+  }
+
+  /**
+   * Record a human attestation for one field of an asset. Needs the
+   * `attestations:write` scope. Never changes `confidence`. Not retried on
+   * network errors or 5xx, since a retry could record it twice.
+   */
+  attest(assetId: string, attestation: AttestationRequest): Promise<AttestationResult> {
+    return this.client.send<AttestationResult>(
+      'POST',
+      `/partner/v1/assets/${requireId(assetId, 'assetId')}/attestations`,
+      { body: attestation },
+    );
+  }
+
+  /** Aggregated usage for an asset over `period` (default `30d`). */
   usageSummary(assetId: string, params: UsageSummaryParams = {}): Promise<UsageSummary> {
     return this.client.get<UsageSummary>(
       `/partner/v1/assets/${requireId(assetId, 'assetId')}/usage-summary`,
@@ -404,5 +476,114 @@ export class TaxonomyResource {
   async list(): Promise<string[]> {
     const res = await this.client.get<{ data: string[] }>(this.path);
     return res.data;
+  }
+}
+
+const WEBHOOKS_PATH = '/api/v1/admin/webhooks';
+
+/**
+ * Webhook subscriptions and deliveries: the tenant admin API under
+ * `/api/v1/admin/webhooks`. The tenant, not the partner, manages these, so
+ * build the client with the tenant's API key:
+ *
+ * ```ts
+ * const admin = new PartnerClient({ apiKey: process.env.PS_API_KEY, baseUrl: collectorUrl });
+ * const sub = await admin.webhooks.subscriptions.create({ partnerId, url });
+ * ```
+ */
+export class WebhooksResource {
+  readonly subscriptions: WebhookSubscriptionsResource;
+  readonly deliveries: WebhookDeliveriesResource;
+
+  constructor(client: PartnerClient) {
+    this.subscriptions = new WebhookSubscriptionsResource(client);
+    this.deliveries = new WebhookDeliveriesResource(client);
+  }
+}
+
+/** `/api/v1/admin/webhooks/subscriptions`. */
+export class WebhookSubscriptionsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** Create a subscription. The response's `secret` is shown only this once. */
+  create(params: CreateWebhookSubscriptionParams): Promise<WebhookSubscriptionWithSecret> {
+    return this.client.send<WebhookSubscriptionWithSecret>('POST', `${WEBHOOKS_PATH}/subscriptions`, {
+      body: params,
+    });
+  }
+
+  /** Every subscription of the tenant, optionally for one partner credential. */
+  async list(params: ListWebhookSubscriptionsParams = {}): Promise<WebhookSubscription[]> {
+    const res = await this.client.get<{ data: WebhookSubscription[] }>(`${WEBHOOKS_PATH}/subscriptions`, {
+      ...params,
+    });
+    return res.data;
+  }
+
+  get(subscriptionId: string): Promise<WebhookSubscription> {
+    return this.client.get<WebhookSubscription>(
+      `${WEBHOOKS_PATH}/subscriptions/${requireId(subscriptionId, 'subscriptionId')}`,
+    );
+  }
+
+  /**
+   * Change `url` or `eventTypes`, or pause (`isActive: false`) and resume
+   * (`isActive: true`). Omitted fields keep their value.
+   */
+  update(subscriptionId: string, params: UpdateWebhookSubscriptionParams): Promise<WebhookSubscription> {
+    const defined = Object.entries(params ?? {}).filter(([, v]) => v !== undefined);
+    if (defined.length === 0) {
+      throw new PartnerError('webhooks.subscriptions.update needs at least one of url, eventTypes, isActive');
+    }
+    return this.client.send<WebhookSubscription>(
+      'PATCH',
+      `${WEBHOOKS_PATH}/subscriptions/${requireId(subscriptionId, 'subscriptionId')}`,
+      { body: Object.fromEntries(defined) },
+    );
+  }
+
+  /** Delete a subscription and its queued and past deliveries. */
+  async delete(subscriptionId: string): Promise<void> {
+    await this.client.send<void>(
+      'DELETE',
+      `${WEBHOOKS_PATH}/subscriptions/${requireId(subscriptionId, 'subscriptionId')}`,
+    );
+  }
+
+  /**
+   * Issue a new signing secret, returned only this once. With
+   * `gracePeriodSeconds` (up to 7 days) the old secret keeps signing too
+   * until `rotationGraceEndsAt`. Not retried on network errors or 5xx.
+   */
+  rotateSecret(
+    subscriptionId: string,
+    params: RotateWebhookSecretParams = {},
+  ): Promise<WebhookSubscriptionWithSecret> {
+    return this.client.send<WebhookSubscriptionWithSecret>(
+      'POST',
+      `${WEBHOOKS_PATH}/subscriptions/${requireId(subscriptionId, 'subscriptionId')}/rotate-secret`,
+      { body: params },
+    );
+  }
+}
+
+/** `/api/v1/admin/webhooks/deliveries`. */
+export class WebhookDeliveriesResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** Deliveries by status, newest first. The server default is `dead` (dead letters). */
+  async list(params: ListWebhookDeliveriesParams = {}): Promise<WebhookDelivery[]> {
+    const res = await this.client.get<{ data: WebhookDelivery[] }>(`${WEBHOOKS_PATH}/deliveries`, {
+      ...params,
+    });
+    return res.data;
+  }
+
+  /** Queue a dead or succeeded delivery again. */
+  redeliver(deliveryId: string): Promise<WebhookDelivery> {
+    return this.client.send<WebhookDelivery>(
+      'POST',
+      `${WEBHOOKS_PATH}/deliveries/${requireId(deliveryId, 'deliveryId')}/redeliver`,
+    );
   }
 }
