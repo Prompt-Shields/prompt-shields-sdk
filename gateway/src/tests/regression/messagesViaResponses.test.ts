@@ -505,6 +505,24 @@ describe('Messages via Responses (#73)', () => {
     });
   });
 
+  test('streaming: an upstream that sends no events yields an error event', async () => {
+    upstream(RESPONSES_URL, () => sse(''));
+    const res = await post(
+      app,
+      '/v1/messages',
+      {
+        model: 'gpt-5-codex',
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: 'user', content: 'Hi' }],
+      },
+      OPENAI
+    );
+    const evs = messagesEvents(await res.text());
+    expect(evs.map((e) => e.type)).toEqual(['error']);
+    expect(evs[0].error.type).toBe('api_error');
+  });
+
   test('incomplete response maps to max_tokens; provider errors use the Anthropic envelope', async () => {
     upstream(RESPONSES_URL, () =>
       json({

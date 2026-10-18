@@ -155,7 +155,8 @@ export function transformResponsesStreamChunk(
 ): string | undefined {
   if (state.completed) return undefined;
   if (chunk === null) {
-    if (!state.started) return undefined;
+    // Also when nothing arrived at all: an empty 200 stream would otherwise
+    // reach the client with no events and no error.
     return errorEvent(
       state,
       'api_error',
