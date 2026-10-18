@@ -1,4 +1,4 @@
-from prompt_shields.pricing import estimate_cost, DEFAULT_PRICING
+from prompt_shields.pricing import DEFAULT_PRICING, estimate_cost
 
 
 def test_openai_gpt4o_cost():

@@ -23,7 +23,9 @@ Usage::
 ``--exclude`` skips files or directories whose repo-relative path or name
 matches a glob (repeatable). ``--fail-on`` exits 1 when any finding's kind
 (``import``, ``client``, ``model``, ``endpoint``, ``env_var``) or vendor
-matches one of the given tokens; ``any`` matches every finding. Without it
+matches one of the given tokens; ``any`` matches every finding. Unknown
+tokens are reported on stderr and ignored; if none of the tokens is known,
+ps-scan exits 2 (usage error) without scanning. Without ``--fail-on``
 ps-scan always exits 0 after a successful scan.
 
 ``--format events`` prints an ``{"events": [...]}`` body that the collector's
@@ -786,6 +788,18 @@ def to_sarif(report: dict) -> dict:
 
 
 FINDING_KINDS = tuple(_SARIF_RULES)
+# Every vendor a finding can carry; used to flag misspelled --fail-on tokens.
+KNOWN_VENDORS = frozenset(
+    {
+        *MODULE_VENDORS.values(),
+        *CLIENT_VENDORS.values(),
+        *QUALIFIED_CLIENTS.values(),
+        *ENV_VAR_VENDORS.values(),
+        *(v for v, _ in _MODEL_PATTERNS),
+        *(v for v, _ in _URL_HOSTS),
+        "unknown",  # _host_vendor fallback
+    }
+)
 
 
 def matches_fail_on(findings: Iterable[dict], tokens: Iterable[str]) -> list[dict]:
@@ -846,6 +860,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if not os.path.exists(args.path):
         parser.error(f"path not found: {args.path}")
+    fail_on = {t.strip().lower() for t in _split_csv(args.fail_on)}
+    unknown = sorted(fail_on - {"any", *FINDING_KINDS, *KNOWN_VENDORS})
+    if unknown:
+        hint = (
+            f"expected 'any', a kind ({', '.join(FINDING_KINDS)}) "
+            f"or a vendor ({', '.join(sorted(KNOWN_VENDORS))})"
+        )
+        if len(unknown) == len(fail_on):
+            parser.error(f"--fail-on: no known tokens in {', '.join(unknown)}; {hint}")
+        print(
+            f"ps-scan: warning: ignoring unknown --fail-on token(s): "
+            f"{', '.join(unknown)}; {hint}",
+            file=sys.stderr,
+        )
 
     report = scan_path(
         args.path,
@@ -868,7 +896,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(out)
 
-    failed = matches_fail_on(report["findings"], _split_csv(args.fail_on))
+    failed = matches_fail_on(report["findings"], fail_on)
     if failed:
         print(f"ps-scan: {len(failed)} finding(s) matched --fail-on", file=sys.stderr)
         return 1
