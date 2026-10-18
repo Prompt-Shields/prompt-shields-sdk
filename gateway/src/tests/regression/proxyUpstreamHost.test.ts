@@ -259,3 +259,36 @@ describe('central origin check', () => {
     }
   });
 });
+
+describe('non-proxy endpoints keep the base origin too', () => {
+  test('request fields in the endpoint path stay on the configured host', async () => {
+    const res = await post(
+      app,
+      '/v1/chat/completions',
+      { ...chatBody, model: 'x@evil.com/' },
+      AZURE
+    );
+    expect(res.status).toBe(200);
+    expect(upstreamCalls).toHaveLength(1);
+    expect(origin(upstreamCalls[0].url)).toBe('https://myres.openai.azure.com');
+  });
+
+  test('a buggy endpoint builder fails closed with no upstream call', async () => {
+    const api = Providers['together-ai'].api;
+    const original = api.getEndpoint;
+    api.getEndpoint = jest.fn(() => '.evil.com/v1/chat/completions');
+    try {
+      const res = await post(
+        app,
+        '/v1/chat/completions',
+        { ...chatBody, model: 'm' },
+        config({ provider: 'together-ai', api_key: 'tg-secret' })
+      );
+      expect(api.getEndpoint).toHaveBeenCalled();
+      expect(res.status).toBe(400);
+      expect(upstreamCalls).toHaveLength(0);
+    } finally {
+      api.getEndpoint = original;
+    }
+  });
+});

@@ -28,14 +28,18 @@ function proxyBaseHost(baseURL: string): string {
  * provider's configured base URL (or custom host), so a request path can
  * never choose the host, scheme or port the provider credentials are sent to.
  */
-export function assertProxyURLOrigin(proxyURL: string, baseURL: string) {
+export function assertProxyURLOrigin(
+  proxyURL: string,
+  baseURL: string,
+  message = 'Invalid proxy path'
+) {
   let target: URL;
   let base: URL;
   try {
     target = new URL(proxyURL);
     base = new URL(baseURL);
   } catch {
-    throw new GatewayError('Invalid proxy path', 400);
+    throw new GatewayError(message, 400);
   }
   if (
     !proxyBaseHost(baseURL) ||
@@ -43,7 +47,7 @@ export function assertProxyURLOrigin(proxyURL: string, baseURL: string) {
     target.password ||
     target.origin !== base.origin
   ) {
-    throw new GatewayError('Invalid proxy path', 400);
+    throw new GatewayError(message, 400);
   }
 }
 
@@ -155,6 +159,12 @@ export class ProviderContext {
     } else {
       const endpointPath = this.getEndpointPath(context);
       url = `${baseURL}${endpointPath}`;
+      // PS fork (security): endpoint paths carry request fields (model,
+      // deployment, file and batch ids), so they may not reach the authority
+      // either. Request handlers build and validate their own URLs.
+      if (baseURL && !this.hasRequestHandler(context)) {
+        assertProxyURLOrigin(url, baseURL, 'Invalid upstream URL');
+      }
     }
 
     return url;
