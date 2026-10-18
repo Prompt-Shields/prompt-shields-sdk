@@ -67,14 +67,18 @@ export function isValidAwsRegion(region?: string): boolean {
   return !!region && AWS_REGION_RE.test(region);
 }
 
-export function assertAwsUrl(url: string, env?: Record<string, any>): string {
+export function assertAwsUrl(
+  url: string,
+  env?: Record<string, any>,
+  endpointDomain?: string
+): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     throw new GatewayError('Invalid AWS region or resource name', 400);
   }
-  const domain = getAwsEndpointDomain(env).toLowerCase();
+  const domain = (endpointDomain || getAwsEndpointDomain(env)).toLowerCase();
   if (
     parsed.protocol !== 'https:' ||
     parsed.username ||
@@ -112,9 +116,12 @@ export const generateAWSHeaders = async (
   awsAccessKeyID: string,
   awsSecretAccessKey: string,
   awsSessionToken: string | undefined,
-  env?: Record<string, any>
+  env?: Record<string, any>,
+  // Prompt Shields: AWS services outside AWS_ENDPOINT_DOMAIN (Claude Platform
+  // on AWS is served from `*.api.aws`) pass their own fixed domain.
+  endpointDomain?: string
 ): Promise<Record<string, string>> => {
-  assertAwsUrl(url, env);
+  assertAwsUrl(url, env, endpointDomain);
   const signer = new SignatureV4({
     service: awsService,
     region: awsRegion || 'us-east-1',
