@@ -34,6 +34,7 @@ import { ConditionalRouter } from '../services/conditionalRouter';
 import { RouterError } from '../errors/RouterError';
 import { GatewayError } from '../errors/GatewayError';
 import { HookType } from '../middlewares/hooks/types';
+import { responsesUnsupportedChecks } from '../middlewares/hooks/responsesSupport';
 
 // Services
 import { CacheResponseObject, CacheService } from './services/cacheService';
@@ -328,16 +329,26 @@ export async function tryPost(
     requestBody instanceof ReadableStream ||
     requestBody instanceof ArrayBuffer;
   const params = (isRawBody ? {} : requestBody) as Params;
-  const targetHasHooks = [
+  const targetHooks = [
     providerOption.beforeRequestHooks,
     providerOption.afterRequestHooks,
     providerOption.defaultInputGuardrails,
     providerOption.defaultOutputGuardrails,
-  ].some((h) => Array.isArray(h) && h.length > 0);
+  ];
+  const targetHasHooks = targetHooks.some(
+    (h) => Array.isArray(h) && h.length > 0
+  );
+  // PS fork (#73): route on the model the provider is actually sent, i.e.
+  // after the target's override_params.
+  const overrideModel = providerOption.overrideParams?.model;
+  const routingParams =
+    !isRawBody && typeof overrideModel === 'string' && overrideModel
+      ? { ...params, model: overrideModel }
+      : params;
   const adapterResult = applyAdapterRequestTransform(
     fn,
     providerOption.provider ?? '',
-    params,
+    routingParams,
     requestBody,
     Boolean(params.stream),
     method,
@@ -349,6 +360,14 @@ export async function tryPost(
     )
   );
   if (adapterResult instanceof Response) return adapterResult;
+  // PS fork (#73): hooks run on Responses requests, except the few checks
+  // that only understand Chat Completions; never skip those silently.
+  if ((adapterResult ? adapterResult.fn : fn) === 'createModelResponse') {
+    const unsupported = responsesUnsupportedChecks(targetHooks);
+    if (unsupported.length) {
+      return responsesUnsupportedChecksResponse(fn, unsupported);
+    }
+  }
   if (!adapterResult) {
     return tryPostToProvider(
       c,
@@ -377,6 +396,34 @@ export async function tryPost(
     method
   );
   return adaptResponse(response, adapterResult.adapterCtx, c);
+}
+
+/**
+ * PS fork (#73): the 400 for a target whose hooks include checks that cannot
+ * run on a Responses API request, in the error shape of the caller's API.
+ */
+function responsesUnsupportedChecksResponse(
+  fn: endpointStrings,
+  checks: string[]
+): Response {
+  const message =
+    `The guardrail checks ${checks.join(', ')} cannot run on Responses API ` +
+    'requests, so this target cannot be called via the Responses API.';
+  const body =
+    fn === 'messages'
+      ? { type: 'error', error: { type: 'invalid_request_error', message } }
+      : {
+          error: {
+            message,
+            type: 'invalid_request_error',
+            param: null,
+            code: 'unsupported_guardrail',
+          },
+        };
+  return new Response(JSON.stringify(body), {
+    status: 400,
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 /**

@@ -46,10 +46,11 @@ export function routesMessagesViaResponses(
  * The explicit routing choice for one target: its config key wins over the
  * request header; anything but a boolean / `true` / `false` is no choice.
  *
- * Guardrails and mutators do not run on Responses-format requests, so the
- * header (which the caller, not the operator, controls) cannot force the
- * route onto a target with hooks: `true` is then ignored. `false` stays
- * honoured, as the Chat Completions route runs the hooks.
+ * The header (which the caller, not the operator, controls) cannot force
+ * the route onto a target with hooks: `true` is then ignored. Hooks run on
+ * the Responses route too, but a few checks only understand Chat
+ * Completions (`responsesUnsupportedChecks`), so the caller must not be
+ * able to move a hooked target onto it. `false` stays honoured.
  */
 export function messagesViaResponsesOverride(
   targetSetting: unknown,

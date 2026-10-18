@@ -313,26 +313,32 @@ async function adaptNonStreamingResponse(
     );
   }
 
+  // PS fork (#73): 246 is a successful response whose non-deny guardrails
+  // failed; translate it as one. Hook results (246, 446) are kept.
+  const status = response.status === 246 ? 200 : response.status;
   let transformedJson: any;
   if (adapterCtx.via === 'responses') {
     transformedJson = transformResponsesToMessages(
       json,
-      response.status,
+      status,
       adapterCtx.provider
     );
   } else if (adapterCtx.originalFn === 'messages') {
     transformedJson = transformChatCompletionsToMessages(
       json,
-      response.status,
+      status,
       adapterCtx.provider
     );
   } else {
     transformedJson = transformChatCompletionsToResponses(
       json,
-      response.status,
+      status,
       adapterCtx.provider,
       adapterCtx.originalRequest
     );
+  }
+  if (json?.hook_results) {
+    transformedJson = { ...transformedJson, hook_results: json.hook_results };
   }
 
   const headers = new Headers(response.headers);
