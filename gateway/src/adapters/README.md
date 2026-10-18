@@ -118,10 +118,12 @@ reasoning away from Azure and back (neither can decrypt the other's), e.g.
 in a fallback config; that reasoning is dropped instead. Two OpenAI targets
 in different organisations share the tag, so a load balance across them can
 still get a decryption error; keep such conversations on one organisation.
-These signatures mean nothing to Anthropic: a conversation that moves from
-this route to a native Anthropic target mid-way fails signature checks there,
-as conversations through the Chat Completions adapter (empty signatures)
-already do.
+These signatures mean nothing to Anthropic, so the gateway drops such
+thinking blocks before sending a conversation to a native Messages target
+(Anthropic, Bedrock, Vertex, ...), e.g. on a fallback from this route. The
+`x-portkey-messages-via-responses: true` header is ignored for a target with
+guardrails or mutators, which do not run on the Responses route; the config
+key still applies.
 
 **Web search.** Results carry the source URLs the provider returned
 (`include: ["web_search_call.action.sources"]`), with the URL as the title

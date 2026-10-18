@@ -45,18 +45,25 @@ export function routesMessagesViaResponses(
 /**
  * The explicit routing choice for one target: its config key wins over the
  * request header; anything but a boolean / `true` / `false` is no choice.
+ *
+ * Guardrails and mutators do not run on Responses-format requests, so the
+ * header (which the caller, not the operator, controls) cannot force the
+ * route onto a target with hooks: `true` is then ignored. `false` stays
+ * honoured, as the Chat Completions route runs the hooks.
  */
 export function messagesViaResponsesOverride(
   targetSetting: unknown,
-  headerValue: string | undefined
+  headerValue: string | undefined,
+  targetHasHooks: boolean = false
 ): boolean | undefined {
   if (typeof targetSetting === 'boolean') return targetSetting;
   const h = (headerValue || '').trim().toLowerCase();
-  if (h === 'true') return true;
+  if (h === 'true') return targetHasHooks ? undefined : true;
   if (h === 'false') return false;
   return undefined;
 }
 
+export { stripIssuedReasoning } from './reasoningSignature';
 export {
   transformMessagesToResponses,
   MessagesViaResponsesRequestError,

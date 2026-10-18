@@ -811,6 +811,43 @@ describe('explicit routing opt-in / opt-out', () => {
     expect(upstreamCalls[0].url).toMatch(CHAT_URL);
   });
 
+  test('the header cannot force the route onto a target with guardrails', async () => {
+    // Guardrails do not run on Responses-format requests: a caller must not
+    // be able to switch them off with a header.
+    expect(
+      messagesViaResponsesOverride(undefined, 'true', true)
+    ).toBeUndefined();
+    expect(messagesViaResponsesOverride(undefined, 'false', true)).toBe(false);
+    expect(messagesViaResponsesOverride(true, undefined, true)).toBe(true);
+    upstream(CHAT_URL, chatOk);
+    upstream(RESPONSES_URL, () => okResponse());
+    const config = {
+      provider: 'openai',
+      api_key: 'sk-regression',
+      input_guardrails: [
+        {
+          'default.contains': { words: ['SECRET'], operator: 'none' },
+          deny: true,
+        },
+      ],
+    };
+    const res = await post(
+      app,
+      '/v1/messages',
+      {
+        model: 'gpt-5',
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'SECRET' }],
+      },
+      {
+        'x-portkey-config': JSON.stringify(config),
+        'x-portkey-messages-via-responses': 'true',
+      }
+    );
+    expect(res.status).toBe(446);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
   test('a non-boolean config value is rejected by config validation', async () => {
     const config = {
       provider: 'openai',
@@ -1010,6 +1047,80 @@ describe('thinking round trip via encrypted reasoning', () => {
         data: 'ps-rsn1:openai:enc-2',
       },
     });
+  });
+});
+
+describe('gateway-issued reasoning and native Messages targets', () => {
+  const history = {
+    model: 'claude-sonnet-4-5',
+    max_tokens: 64,
+    messages: [
+      { role: 'user', content: 'Go' },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'Plan',
+            signature: 'ps-rsn1:openai:enc-1',
+          },
+          { type: 'redacted_thinking', data: 'ps-rsn1:openai:enc-2' },
+          { type: 'thinking', thinking: 'a', signature: 'EqQBCkgIARABGAI=' },
+          { type: 'text', text: 'Done' },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'redacted_thinking', data: 'ps-rsn1:openai:x' }],
+      },
+      { role: 'user', content: 'Again' },
+    ],
+  };
+
+  test('blocks signed by this route are not sent to a native target; other targets keep them', async () => {
+    upstream(/api\.anthropic\.com\/v1\/messages$/, () =>
+      json({ type: 'error', error: { type: 'overloaded_error' } }, 529)
+    );
+    upstream(RESPONSES_URL, () => okResponse('gpt-5-codex'));
+    const config = {
+      strategy: { mode: 'fallback' },
+      targets: [
+        { provider: 'anthropic', api_key: 'sk-ant-regression' },
+        {
+          provider: 'openai',
+          api_key: 'sk-regression',
+          override_params: { model: 'gpt-5-codex' },
+          messages_via_responses: true,
+        },
+      ],
+    };
+    const res = await post(app, '/v1/messages', history, {
+      'x-portkey-config': JSON.stringify(config),
+    });
+    expect(res.status).toBe(200);
+    expect(upstreamCalls).toHaveLength(2);
+    expect(upstreamCalls[0].body.messages).toEqual([
+      { role: 'user', content: 'Go' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'a', signature: 'EqQBCkgIARABGAI=' },
+          { type: 'text', text: 'Done' },
+        ],
+      },
+      { role: 'user', content: 'Again' },
+    ]);
+    expect(
+      upstreamCalls[1].body.input.filter((i: any) => i.type === 'reasoning')
+    ).toEqual([
+      {
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: 'Plan' }],
+        encrypted_content: 'enc-1',
+      },
+      { type: 'reasoning', summary: [], encrypted_content: 'enc-2' },
+      { type: 'reasoning', summary: [], encrypted_content: 'x' },
+    ]);
   });
 });
 

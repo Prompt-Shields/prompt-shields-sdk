@@ -45,3 +45,41 @@ export function decodeReasoningSignature(
   const payload = rest.slice(sep + 1);
   return payload || undefined;
 }
+
+const isIssued = (v: unknown) => typeof v === 'string' && v.startsWith(PREFIX);
+
+/**
+ * The Messages body without the thinking blocks this adapter issued, for
+ * targets that speak Messages natively (Anthropic, Bedrock, Vertex, ...).
+ * Their signatures are not Anthropic's, so such a target would reject the
+ * request when a conversation moves there from this route (e.g. a fallback
+ * from OpenAI to Anthropic). An assistant turn left empty is dropped.
+ * Returns the body unchanged (same object) when there is nothing to strip;
+ * otherwise a copy, so other targets of the same request keep the blocks.
+ */
+export function stripIssuedReasoning<T>(body: T): T {
+  const messages = (body as any)?.messages;
+  if (!Array.isArray(messages)) return body;
+  let changed = false;
+  const out: any[] = [];
+  for (const m of messages) {
+    if (m?.role !== 'assistant' || !Array.isArray(m.content)) {
+      out.push(m);
+      continue;
+    }
+    const content = m.content.filter(
+      (b: any) =>
+        !(
+          (b?.type === 'thinking' && isIssued(b.signature)) ||
+          (b?.type === 'redacted_thinking' && isIssued(b.data))
+        )
+    );
+    if (content.length === m.content.length) {
+      out.push(m);
+      continue;
+    }
+    changed = true;
+    if (content.length) out.push({ ...m, content });
+  }
+  return changed ? ({ ...(body as any), messages: out } as T) : body;
+}

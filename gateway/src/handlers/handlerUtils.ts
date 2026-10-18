@@ -49,6 +49,7 @@ import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
 import {
   MESSAGES_VIA_RESPONSES_HEADER,
   messagesViaResponsesOverride,
+  stripIssuedReasoning,
 } from '../adapters/messagesViaResponses';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 
@@ -326,6 +327,12 @@ export async function tryPost(
     requestBody instanceof ReadableStream ||
     requestBody instanceof ArrayBuffer;
   const params = (isRawBody ? {} : requestBody) as Params;
+  const targetHasHooks = [
+    providerOption.beforeRequestHooks,
+    providerOption.afterRequestHooks,
+    providerOption.defaultInputGuardrails,
+    providerOption.defaultOutputGuardrails,
+  ].some((h) => Array.isArray(h) && h.length > 0);
   const adapterResult = applyAdapterRequestTransform(
     fn,
     providerOption.provider ?? '',
@@ -336,7 +343,8 @@ export async function tryPost(
     // PS fork (#73): explicit Messages → Responses routing choice.
     messagesViaResponsesOverride(
       providerOption.messagesViaResponses,
-      requestHeaders[MESSAGES_VIA_RESPONSES_HEADER]
+      requestHeaders[MESSAGES_VIA_RESPONSES_HEADER],
+      targetHasHooks
     )
   );
   if (adapterResult instanceof Response) return adapterResult;
@@ -344,7 +352,11 @@ export async function tryPost(
     return tryPostToProvider(
       c,
       providerOption,
-      requestBody,
+      // PS fork (#73): thinking signed by the Messages → Responses route
+      // means nothing to a native Messages target; drop it there.
+      !isRawBody && (fn === 'messages' || fn === 'messagesCountTokens')
+        ? stripIssuedReasoning(requestBody)
+        : requestBody,
       requestHeaders,
       fn,
       currentIndex,
