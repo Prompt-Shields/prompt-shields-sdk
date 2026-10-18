@@ -8,6 +8,7 @@ import {
   ToolChoiceObject,
 } from '../../types/requestBody';
 import {
+  AnthropicCacheCreation,
   ChatCompletionResponse,
   ErrorResponse,
   ProviderConfig,
@@ -551,6 +552,7 @@ export interface AnthropicChatCompleteResponse {
     output_tokens: number;
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
+    cache_creation?: AnthropicCacheCreation;
   };
 }
 
@@ -575,6 +577,7 @@ export interface AnthropicChatCompleteStreamResponse {
     input_tokens?: number;
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
+    cache_creation?: AnthropicCacheCreation;
   };
   message?: {
     model?: string;
@@ -583,6 +586,7 @@ export interface AnthropicChatCompleteStreamResponse {
       input_tokens?: number;
       cache_creation_input_tokens?: number;
       cache_read_input_tokens?: number;
+      cache_creation?: AnthropicCacheCreation;
     };
   };
   error?: AnthropicErrorObject;
@@ -610,6 +614,7 @@ export const getAnthropicChatCompleteResponseTransform = (provider: string) => {
         output_tokens = 0,
         cache_creation_input_tokens,
         cache_read_input_tokens,
+        cache_creation,
       } = response?.usage ?? {};
 
       const shouldSendCacheUsage =
@@ -678,6 +683,10 @@ export const getAnthropicChatCompleteResponseTransform = (provider: string) => {
           ...(shouldSendCacheUsage && {
             cache_read_input_tokens: cache_read_input_tokens,
             cache_creation_input_tokens: cache_creation_input_tokens,
+            // PS fork (#9): 1-hour cache writes are priced separately
+            ...(cache_creation_input_tokens && cache_creation
+              ? { cache_creation }
+              : {}),
           }),
         },
       };
@@ -759,6 +768,7 @@ export const getAnthropicStreamChunkTransform = (
           parsedChunk.message?.usage?.cache_read_input_tokens,
         cache_creation_input_tokens:
           parsedChunk.message?.usage?.cache_creation_input_tokens,
+        cache_creation: parsedChunk.message?.usage?.cache_creation,
       };
       return (
         `data: ${JSON.stringify({
@@ -791,6 +801,7 @@ export const getAnthropicStreamChunkTransform = (
           ?.cache_creation_input_tokens ?? 0,
         cache_read_input_tokens = streamState.usage?.cache_read_input_tokens ??
           0,
+        cache_creation = streamState.usage?.cache_creation,
       } = parsedChunk.usage;
       const promptTokens =
         input_tokens +
@@ -826,6 +837,10 @@ export const getAnthropicStreamChunkTransform = (
             ...(shouldSendCacheUsage && {
               cache_read_input_tokens: cache_read_input_tokens,
               cache_creation_input_tokens: cache_creation_input_tokens,
+              // PS fork (#9): 1-hour cache writes are priced separately
+              ...(cache_creation_input_tokens && cache_creation
+                ? { cache_creation }
+                : {}),
             }),
           },
         })}` + '\n\n'

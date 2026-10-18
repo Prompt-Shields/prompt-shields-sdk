@@ -3,7 +3,15 @@
  * Code inside each block is copied from the docs; keep them in step.
  */
 import { PartnerClient, APIError, RateLimitError } from '../src';
-import type { AIAsset, DataFlow, RiskMapping, ChangeEvent, UsageSummary } from '../src';
+import type {
+  AIAsset,
+  DataFlow,
+  RiskMapping,
+  ChangeEvent,
+  UsageSummary,
+  Attestation,
+  WebhookSubscription,
+} from '../src';
 import { asset, json, token } from './helpers';
 
 type Handler = (url: URL) => Response;
@@ -149,6 +157,124 @@ describe('docs/sdks/typescript.mdx', () => {
     expect(actions).toEqual(['create 2', 'update 1 confidence', 'deactivate 3']);
   });
 
+  it('Risks, Attestations and Usage', async () => {
+    const status = { state: 'attested', attested_by: 'ciso@acme.com', attested_at: null, comment: null, value_changed: false };
+    const posted: unknown[] = [];
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/oauth/token') return token('docs.jwt.token');
+      if (url.pathname.endsWith('/risks')) {
+        const suggested = url.searchParams.get('status') === 'suggested';
+        return json({
+          data: suggested
+            ? [{ id: 'r1', risk_category: 'employment', risk_level: 'high', framework: 'EU_AI_ACT', status: 'suggested', source: 'rules', framework_ref: 'Annex III, point 4(a)', evidence: { summary: 'use_case matched resume*' } }]
+            : [],
+        });
+      }
+      if (url.pathname.endsWith('/attestations') && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+        return json({ data: {}, meta: { confidence: 'high', current: {} } }, 201);
+      }
+      if (url.pathname.endsWith('/attestations')) {
+        expect(url.searchParams.get('field')).toBe('owner');
+        return json({ data: [], meta: { total: 0, confidence: 'high', current: { owner: status } } });
+      }
+      if (url.pathname.endsWith('/usage-summary')) {
+        return json({ total_requests: 1, total_tokens_in: 1000, total_tokens_out: 50, total_tokens_cached: 600, total_tokens_cache_write: 0, total_tokens_reasoning: 20, estimated_cost_usd: 0.1, unique_sessions: 1, avg_latency_ms: 10, period: '7d' });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const client = new PartnerClient({ clientId: 'id', clientSecret: 'secret' });
+
+    // ---- begin docs ----
+    const assetId = '019e1a2b-3c4d-7000-8000-000000000001';
+
+    // Confirmed risk mappings (the default), or rule-based suggestions awaiting review
+    const confirmed = await client.assets.risks(assetId);
+    const suggested = await client.assets.risks(assetId, { status: 'suggested' });
+    for (const risk of suggested) {
+      console.log(`${risk.framework} ${risk.frameworkRef}: ${risk.evidence?.summary}`);
+    }
+
+    // Attestation history, and the current state of each field
+    const history = await client.assets.attestations(assetId, { field: 'owner' });
+    console.log(`owner: ${history.meta.current.owner?.state}`);
+
+    // Record an attestation (needs the attestations:write scope)
+    await client.assets.attest(assetId, {
+      field: 'owner',
+      state: 'attested',
+      attestedBy: 'ciso@acme.com',
+    });
+
+    // Usage, including prompt-cache and reasoning tokens
+    const usage = await client.assets.usageSummary(assetId, { period: '7d' });
+    console.log(`${usage.totalTokensIn} in (${usage.totalTokensCached} cached), ${usage.totalTokensReasoning} reasoning`);
+    // ---- end docs ----
+
+    expect(confirmed).toEqual([]);
+    expect(logs).toEqual([
+      'EU_AI_ACT Annex III, point 4(a): use_case matched resume*',
+      'owner: attested',
+      '1000 in (600 cached), 20 reasoning',
+    ]);
+    expect(posted).toEqual([{ field: 'owner', state: 'attested', attested_by: 'ciso@acme.com' }]);
+  });
+
+  it('Webhook Subscriptions', async () => {
+    const sub = { id: 's1', partner_id: 'p1', url: 'https://ea-tool.example.com/hooks/prompt-shields', event_types: [], description: null, is_active: true, rotation_grace_ends_at: null, created_at: null, updated_at: null };
+    const calls: string[] = [];
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe('https://collector.example.com');
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer ps-tenant-key');
+      calls.push(`${init?.method} ${url.pathname} ${init?.body ?? ''}`.trim());
+      if (url.pathname.endsWith('/deliveries')) return json({ data: [{ id: 'd1', status: 'dead' }] });
+      return json({ ...sub, secret: 'whsec_abc', warning: 'w' });
+    });
+    const saved = process.env.PS_API_KEY;
+    process.env.PS_API_KEY = 'ps-tenant-key';
+    try {
+      // ---- begin docs ----
+      const admin = new PartnerClient({ apiKey: process.env.PS_API_KEY, baseUrl: 'https://collector.example.com' });
+
+      const sub = await admin.webhooks.subscriptions.create({
+        partnerId: '<partner credential id>',
+        url: 'https://ea-tool.example.com/hooks/prompt-shields',
+        eventTypes: ['asset.created', 'asset.changed', 'asset.retired'],
+      });
+      console.log(`Give the partner ${sub.secret} over a secure channel`);
+
+      // Pause, resume, or change the URL or events
+      await admin.webhooks.subscriptions.update(sub.id, { isActive: false });
+      await admin.webhooks.subscriptions.update(sub.id, { isActive: true, url: 'https://ea-tool.example.com/hooks/v2' });
+
+      // New signing secret; the old one keeps signing for a day
+      const rotated = await admin.webhooks.subscriptions.rotateSecret(sub.id, { gracePeriodSeconds: 86400 });
+
+      // Dead letters, and sending one again
+      for (const delivery of await admin.webhooks.deliveries.list({ status: 'dead' })) {
+        await admin.webhooks.deliveries.redeliver(delivery.id);
+      }
+      // ---- end docs ----
+      expect(rotated.secret).toBe('whsec_abc');
+    } finally {
+      if (saved === undefined) delete process.env.PS_API_KEY;
+      else process.env.PS_API_KEY = saved;
+    }
+
+    expect(logs).toEqual(['Give the partner whsec_abc over a secure channel']);
+    const S = '/api/v1/admin/webhooks/subscriptions';
+    expect(calls).toEqual([
+      `POST ${S} {"partner_id":"<partner credential id>","url":"https://ea-tool.example.com/hooks/prompt-shields","event_types":["asset.created","asset.changed","asset.retired"]}`,
+      `PATCH ${S}/s1 {"is_active":false}`,
+      `PATCH ${S}/s1 {"is_active":true,"url":"https://ea-tool.example.com/hooks/v2"}`,
+      `POST ${S}/s1/rotate-secret {"grace_period_seconds":86400}`,
+      'GET /api/v1/admin/webhooks/deliveries',
+      'POST /api/v1/admin/webhooks/deliveries/d1/redeliver',
+    ]);
+  });
+
   it('Error Handling', async () => {
     routeFetch(() =>
       json(
@@ -176,7 +302,7 @@ describe('docs/sdks/typescript.mdx', () => {
   });
 
   it('exports the documented types', () => {
-    const t: [AIAsset?, DataFlow?, RiskMapping?, ChangeEvent?, UsageSummary?] = [];
+    const t: [AIAsset?, DataFlow?, RiskMapping?, ChangeEvent?, UsageSummary?, Attestation?, WebhookSubscription?] = [];
     expect(t).toEqual([]);
   });
 });

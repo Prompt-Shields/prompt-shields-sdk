@@ -32,6 +32,7 @@ interface StreamState {
   createdAt: number;
   /** PS fork (#73): cached input tokens (input_tokens_details) */
   cachedTokens: number;
+  cacheCreationTokens: number;
   /** PS fork (#73): reasoning output tokens (output_tokens_details) */
   reasoningTokens: number;
   totalTokens: number;
@@ -118,7 +119,13 @@ function buildResponseSnapshot(
     reasoning: null,
     usage: {
       input_tokens: state.inputTokens,
-      input_tokens_details: { cached_tokens: state.cachedTokens },
+      input_tokens_details: {
+        cached_tokens: state.cachedTokens,
+        // PS fork (#9): cache writes, only when there are any
+        ...(state.cacheCreationTokens
+          ? { cache_creation_tokens: state.cacheCreationTokens }
+          : {}),
+      },
       output_tokens: state.outputTokens,
       output_tokens_details: { reasoning_tokens: state.reasoningTokens },
       total_tokens: state.totalTokens || state.inputTokens + state.outputTokens,
@@ -351,6 +358,8 @@ export function transformStreamChunk(
     state.inputTokens = u.input_tokens;
     state.outputTokens = u.output_tokens;
     state.cachedTokens = u.input_tokens_details.cached_tokens;
+    state.cacheCreationTokens =
+      u.input_tokens_details.cache_creation_tokens ?? 0;
     state.reasoningTokens = u.output_tokens_details.reasoning_tokens;
     state.totalTokens = u.total_tokens;
   }
@@ -381,6 +390,7 @@ export function createStreamState(): StreamState {
     accumulatedText: '',
     createdAt: 0,
     cachedTokens: 0,
+    cacheCreationTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
     functionCalls: [],
