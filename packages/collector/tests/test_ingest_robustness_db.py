@@ -192,6 +192,35 @@ async def test_concurrent_batches_in_different_orders_do_not_deadlock(
     assert len(events) == 6 * 4 * len(keys)
 
 
+@pytest.mark.asyncio
+async def test_batch_of_many_new_keys_holds_bounded_advisory_locks(seeded_db):
+    # One advisory lock per new key would let a single large batch fill
+    # Postgres's shared lock table for every tenant. Locks are per bucket.
+    from collector.dedup import ASSET_LOCK_BUCKETS, AssetKey, lock_asset_keys
+    from sqlalchemy import text
+
+    tenant_id = await _tenant_id(seeded_db)
+    keys = [AssetKey("openai", f"m{i}") for i in range(500)]
+    async with _factory(seeded_db)() as db:
+        await lock_asset_keys(db, tenant_id, keys)
+        held = (
+            await db.execute(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
+                    " AND pid = pg_backend_pid()"
+                )
+            )
+        ).scalar_one()
+        await db.rollback()
+    assert 1 < held <= ASSET_LOCK_BUCKETS
+
+    resp, _ = await _ingest(
+        [{"vendor": "openai", "model": f"m{i}", "source": "sdk"} for i in range(500)]
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["assets_created"] == 500
+
+
 # --- cost and count bounds -------------------------------------------------
 
 

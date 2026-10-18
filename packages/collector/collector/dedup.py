@@ -81,19 +81,31 @@ async def _lookup(db: AsyncSession, tenant_id: UUID, key: AssetKey) -> AIAsset |
     return result.scalar_one_or_none()
 
 
+# Creation locks are taken per bucket of keys, not per key, so a batch with
+# many new keys holds at most this many advisory locks. Each one uses a slot
+# in Postgres's shared lock table (sized max_locks_per_transaction (64) x
+# connections, shared by every tenant), so one lock per key would let a
+# single large batch of new keys exhaust it ("out of shared memory") for
+# the whole database. Keys sharing a bucket only serialise their creation.
+ASSET_LOCK_BUCKETS = 64
+
+
 def _lock_id(tenant_id: UUID, key: AssetKey) -> int:
-    parts = [str(tenant_id), key.vendor] + [p or None for p in key[1:]]
-    digest = hashlib.sha256(json.dumps(["ai_asset", *parts]).encode()).digest()
+    parts = [key.vendor] + [p or None for p in key[1:]]
+    bucket = int.from_bytes(
+        hashlib.sha256(json.dumps(parts).encode()).digest()[:8], "big"
+    ) % ASSET_LOCK_BUCKETS
+    digest = hashlib.sha256(
+        json.dumps(["ai_asset", str(tenant_id), bucket]).encode()
+    ).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
-async def _lock(db: AsyncSession, tenant_id: UUID, key: AssetKey) -> None:
+async def _lock(db: AsyncSession, lock_id: int) -> None:
     # Transaction-scoped: released on commit/rollback. ai_assets has no unique
     # constraint on the merge key (it can't: see _lookup), so this is what
     # stops two concurrent ingests from both creating the same new asset.
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(:id)"), {"id": _lock_id(tenant_id, key)}
-    )
+    await db.execute(text("SELECT pg_advisory_xact_lock(:id)"), {"id": lock_id})
 
 
 async def lock_asset_keys(
@@ -101,8 +113,8 @@ async def lock_asset_keys(
 ) -> None:
     """Take every lock a batch will need, in a fixed order, before it calls
     ``find_or_create_asset`` per event: the creation lock of each key that
-    has no asset yet (sorted by lock id), then the rows of the assets the
-    keys resolve to (sorted by id).
+    has no asset yet (sorted by lock id; at most ``ASSET_LOCK_BUCKETS``),
+    then the rows of the assets the keys resolve to (sorted by id).
 
     ``find_or_create_asset`` locks a missing key on its own, and updates
     each matched asset's row, in event order. Two batches doing that for
@@ -111,17 +123,17 @@ async def lock_asset_keys(
     """
     keys = set(keys)
     asset_ids = set()
-    missing = {}
+    missing = []
     for key in keys:
         asset = await _lookup(db, tenant_id, key)
         if asset is None:
-            missing[_lock_id(tenant_id, key)] = key
+            missing.append(key)
         else:
             asset_ids.add(asset.id)
-    for lock_id in sorted(missing):
-        await _lock(db, tenant_id, missing[lock_id])
+    for lock_id in sorted({_lock_id(tenant_id, key) for key in missing}):
+        await _lock(db, lock_id)
     # A transaction we waited on may have just created some of them.
-    for key in missing.values():
+    for key in missing:
         asset = await _lookup(db, tenant_id, key)
         if asset is not None:
             asset_ids.add(asset.id)
@@ -163,7 +175,7 @@ async def find_or_create_asset(
     if asset is None:
         # Serialise creation of this key with concurrent ingests, then look
         # again: the transaction we waited on may have just created it.
-        await _lock(db, tenant_id, key)
+        await _lock(db, _lock_id(tenant_id, key))
         asset = await _lookup(db, tenant_id, key)
 
     if asset is not None:
