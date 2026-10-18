@@ -354,13 +354,19 @@ class TestSourceThresholds:
         assert t.for_sources([]) == (30, 90)
         assert t.for_sources(None) == (30, 90)
 
-    def test_defaults_cover_every_known_source(self):
-        from collector.dedup import HIGH_CONFIDENCE_SOURCES, MEDIUM_CONFIDENCE_SOURCES
-
-        known = HIGH_CONFIDENCE_SOURCES | MEDIUM_CONFIDENCE_SOURCES | {"survey"}
-        assert set(lifecycle.DEFAULT_SOURCE_THRESHOLDS) == known
+    def test_defaults_only_for_sources_with_their_own_cadence(self):
+        # Runtime and endpoint sources keep the global settings (30 / 90 by
+        # default, as before #100), so upgrading does not flip them stale.
+        assert set(lifecycle.DEFAULT_SOURCE_THRESHOLDS) == {
+            "platform_signal",
+            "code_scan",
+            "survey",
+        }
         for stale, retire in lifecycle.DEFAULT_SOURCE_THRESHOLDS.values():
             assert 1 <= stale < retire
+        t = lifecycle.resolve_source_thresholds()
+        for source in ("sdk", "gateway", "otel", "browser_extension", "macos_app"):
+            assert t.for_sources([source]) == (30, 90)
 
     def test_settings_override_single_sources(self, monkeypatch):
         monkeypatch.setattr(

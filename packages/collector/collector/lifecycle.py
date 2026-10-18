@@ -11,16 +11,18 @@ Thresholds per discovery source
   Sources report on different cadences, so N and M are set per source
   (DEFAULT_SOURCE_THRESHOLDS, stale / retire days):
 
-    sdk, gateway, otel            14 / 60   observe live calls continuously
     platform_signal                7 / 30   cloud inventory and provider
                                             usage refresh daily
-    browser_extension, macos_app  30 / 90   endpoints are offline at times
     code_scan                     90 / 180  only runs on CI; repos can sit
                                             unchanged for months
     survey                       180 / 365  self-reported, rarely repeated
 
-  Any other source uses PS_ASSET_STALE_AFTER_DAYS / PS_ASSET_RETIRE_AFTER_DAYS
-  (30 / 90). PS_ASSET_LIFECYCLE_SOURCE_THRESHOLDS ("code_scan=60:120,...")
+  Every other source, including sdk, gateway, otel, browser_extension and
+  macos_app, uses PS_ASSET_STALE_AFTER_DAYS / PS_ASSET_RETIRE_AFTER_DAYS
+  (30 / 90), as before per-source thresholds existed: a deployment upgrading
+  sees no wave of runtime assets going stale on its first sweep, and an
+  operator who tuned those two settings keeps them for runtime sources.
+  PS_ASSET_LIFECYCLE_SOURCE_THRESHOLDS ("code_scan=60:120,sdk=14:60,...")
   overrides single sources. Explicit `stale_after_days`/`retire_after_days`
   on the sweep (endpoint or CLI) apply one threshold to every source.
 
@@ -49,8 +51,14 @@ Owner-initiated retirement
   not raise it again. The owner then either retires the asset again
   (acknowledging the use; this clears `retired_in_use_at`, so the next
   sighting raises it again) or un-retires it with any other `asset`
-  attestation state, which clears `retired_by` and puts the asset back in
-  the state its `last_seen` calls for.
+  attestation in state `attested` or `unreviewed`, which clears
+  `retired_by` and puts the asset back in the state its `last_seen` calls
+  for. `disputed` (the record is wrong) leaves the retirement in place, as
+  do attestations of other fields.
+
+  Two concurrent sightings of an owner-retired asset raise the signal once:
+  `lock_for_sighting` takes the row lock first, so the second sees the
+  first's `retired_in_use_at`.
 
 The collector has no scheduler, so the sweep is exposed three ways:
 
@@ -94,12 +102,7 @@ LifecycleState = Literal["active", "stale", "retired"]
 
 # Stale / retire days per discovery source; see the module docstring.
 DEFAULT_SOURCE_THRESHOLDS: dict[str, tuple[int, int]] = {
-    "sdk": (14, 60),
-    "gateway": (14, 60),
-    "otel": (14, 60),
     "platform_signal": (7, 30),
-    "browser_extension": (30, 90),
-    "macos_app": (30, 90),
     "code_scan": (90, 180),
     "survey": (180, 365),
 }
@@ -205,6 +208,25 @@ def reactivate(asset: AIAsset, now: datetime) -> bool:
     asset.lifecycle_state = ACTIVE
     asset.lifecycle_changed_at = now
     return True
+
+
+async def lock_for_sighting(db: AsyncSession, asset: AIAsset) -> None:
+    """Before recording a sighting of a loaded asset: if it is owner-retired
+    and the "still in use" signal is not raised yet, lock its row and reload
+    its lifecycle columns, so concurrent sightings raise it once (the second
+    waits, then sees `retired_in_use_at` set). Other assets take no lock."""
+    if asset.retired_by is None or asset.retired_in_use_at is not None:
+        return
+    await db.refresh(
+        asset,
+        attribute_names=[
+            "lifecycle_state",
+            "lifecycle_changed_at",
+            "retired_by",
+            "retired_in_use_at",
+        ],
+        with_for_update=True,
+    )
 
 
 def owner_retire(asset: AIAsset, retired_by: str, now: datetime) -> bool:

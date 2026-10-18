@@ -161,8 +161,8 @@ components:
           description: >
             Telemetry-driven lifecycle. `stale` and then `retired` after no
             sighting for a number of days that depends on the asset's
-            discovery sources (e.g. sdk/gateway/otel 14 and 60,
-            platform_signal 7 and 30, code_scan 90 and 180; the most
+            discovery sources (e.g. platform_signal 7 and 30, code_scan 90
+            and 180, sdk/gateway/otel and others 30 and 90; the most
             lenient of the asset's sources applies). New telemetry makes the
             asset `active` again, unless its owner retired it (`retired_by`).
             Independent of the governance `status`.

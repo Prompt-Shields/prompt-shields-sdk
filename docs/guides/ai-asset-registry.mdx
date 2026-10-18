@@ -55,15 +55,13 @@ set per source:
 
 | Source | Stale after | Retired after | Why |
 |--------|-------------|---------------|-----|
-| `sdk`, `gateway`, `otel` | 14 | 60 | Observe live calls continuously |
 | `platform_signal` | 7 | 30 | Cloud inventory and provider usage pulls refresh daily |
-| `browser_extension`, `macos_app` | 30 | 90 | Endpoints are offline at times |
 | `code_scan` | 90 | 180 | Runs only on CI; repositories can sit unchanged for months |
 | `survey` | 180 | 365 | Self-reported, rarely repeated |
-| any other | `PS_ASSET_STALE_AFTER_DAYS` (30) | `PS_ASSET_RETIRE_AFTER_DAYS` (90) | |
+| any other, including `sdk`, `gateway`, `otel`, `browser_extension`, `macos_app` | `PS_ASSET_STALE_AFTER_DAYS` (30) | `PS_ASSET_RETIRE_AFTER_DAYS` (90) | Same as before per-source thresholds; a batch job that runs monthly stays active |
 
 Override single sources with `PS_ASSET_LIFECYCLE_SOURCE_THRESHOLDS`, e.g.
-`code_scan=60:120,sdk=7:30` (stale:retire days; the collector refuses to
+`code_scan=60:120,sdk=14:60` (stale:retire days; the collector refuses to
 start on a malformed value).
 
 An asset seen by several sources is judged by its most recent sighting from
@@ -92,11 +90,14 @@ raise it again until the owner acts:
 
 - retire it again (another `retired` attestation) to acknowledge the use;
   this clears `retired_in_use_at`, so the next sighting raises it again;
-- or un-retire it with any other `asset` attestation state (`attested`,
-  `disputed`, `unreviewed`): `retired_by` is cleared and the asset goes to
-  the state its `last_seen` calls for (`asset.changed` if that differs).
+- or un-retire it with an `asset` attestation in state `attested` or
+  `unreviewed`: `retired_by` is cleared and the asset goes to the state its
+  `last_seen` calls for (`asset.changed` if that differs).
 
-Retiring a single field (for example `owner`) does not retire the asset.
+`disputed` (the asset record is wrong) does not un-retire it, and retiring
+or attesting a single field (for example `owner`) neither retires nor
+un-retires the asset. Two sightings at the same moment raise "still in use"
+once.
 
 The collector does not schedule the lifecycle sweep itself. Run it periodically,
 for example daily from cron or a Kubernetes CronJob:

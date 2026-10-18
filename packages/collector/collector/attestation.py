@@ -32,10 +32,11 @@ the Partner API delta feed (`/partner/v1/changes`) and queues an
 
 The `asset` field drives owner-initiated retirement (#100,
 collector.lifecycle): state `retired` retires the asset (`lifecycle_state`
-retired, `retired_by`, and an `asset.retired` webhook the first time); any
-other state on an owner-retired asset un-retires it (`asset.changed` when
-its lifecycle state moves). Retiring a single field such as `owner` does
-not retire the asset.
+retired, `retired_by`, and an `asset.retired` webhook the first time);
+`attested` or `unreviewed` on an owner-retired asset un-retires it
+(`asset.changed` when its lifecycle state moves). `disputed` (the record is
+wrong) does not un-retire, and attestations of other fields such as `owner`
+neither retire nor un-retire the asset.
 """
 
 from __future__ import annotations
@@ -175,7 +176,7 @@ def _owner_lifecycle(
         if lifecycle.owner_retire(asset, attested_by, now):
             return (webhooks.ASSET_RETIRED, asset, None)
         return None
-    if lifecycle.owner_unretire(asset, now):
+    if state in (ATTESTED, UNREVIEWED) and lifecycle.owner_unretire(asset, now):
         return (webhooks.ASSET_CHANGED, asset, ["lifecycle_state"])
     return None
 
