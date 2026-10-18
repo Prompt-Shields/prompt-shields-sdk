@@ -76,6 +76,87 @@ export const geminiStreamToolCalls = (
   return !!streamState.toolCallCandidates[candidateIndex];
 };
 
+interface GeminiStreamPart {
+  text?: string;
+  thought?: string | boolean;
+  functionCall?: { name: string; args: Record<string, any> };
+  inlineData?: { mimeType: string; data: string };
+  thoughtSignature?: string;
+}
+
+/**
+ * PS fork (#72): builds the OpenAI stream delta for one Gemini candidate from
+ * all of its parts. Upstream branched on `parts[0]` only, so a chunk with text
+ * followed by a `functionCall` dropped the call (and a call followed by text
+ * dropped the text), and tool-call `index` was the part's position in that
+ * chunk, restarting at 0 in every chunk. Here every part is kept in order and
+ * tool calls are numbered per candidate across the whole stream
+ * (`streamState.toolCallIndexes`), as OpenAI does. Returns `undefined` when
+ * the parts carry nothing to emit.
+ */
+export const transformGeminiStreamParts = (
+  parts: GeminiStreamPart[] | undefined,
+  streamState: any,
+  candidateIndex: number,
+  strictOpenAiCompliance: boolean
+): Record<string, any> | undefined => {
+  if (!parts?.length) return undefined;
+  const hasText = parts.some((part) => part.text);
+  const contentBlocks: Record<string, any>[] = [];
+  const toolCalls: Record<string, any>[] = [];
+  let content = '';
+  for (const part of parts) {
+    if (part.functionCall) {
+      streamState.toolCallIndexes = streamState.toolCallIndexes ?? {};
+      const toolCallIndex = streamState.toolCallIndexes[candidateIndex] ?? 0;
+      streamState.toolCallIndexes[candidateIndex] = toolCallIndex + 1;
+      toolCalls.push({
+        index: toolCallIndex,
+        id: getOrGenerateId(undefined, 'toolCall'),
+        type: 'function',
+        function: {
+          name: part.functionCall.name,
+          arguments: JSON.stringify(part.functionCall.args),
+          ...(!strictOpenAiCompliance &&
+            part.thoughtSignature && {
+              thought_signature: part.thoughtSignature,
+            }),
+        },
+      });
+    } else if (part.inlineData) {
+      contentBlocks.push({
+        index: streamState.containsChainOfThoughtMessage ? 1 : 0,
+        delta: {
+          type: 'image_url',
+          image_url: {
+            url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+          },
+        },
+      });
+    } else if (hasText && typeof part.text === 'string') {
+      if (part.thought) {
+        if (!strictOpenAiCompliance)
+          contentBlocks.push({ index: 0, delta: { thinking: part.text } });
+        streamState.containsChainOfThoughtMessage = true;
+      } else {
+        content += part.text;
+        if (!strictOpenAiCompliance)
+          contentBlocks.push({
+            index: streamState.containsChainOfThoughtMessage ? 1 : 0,
+            delta: { text: part.text },
+          });
+      }
+    }
+  }
+  if (!hasText && !toolCalls.length && !contentBlocks.length) return undefined;
+  return {
+    role: 'assistant',
+    ...(hasText && { content }),
+    ...(contentBlocks.length && { content_blocks: contentBlocks }),
+    ...(toolCalls.length && { tool_calls: toolCalls }),
+  };
+};
+
 const transformGenerationConfig = (params: PortkeyGeminiParams) => {
   const generationConfig: Record<string, any> = {};
   if (params['temperature'] != null && params['temperature'] != undefined) {
@@ -881,68 +962,14 @@ export const GoogleChatCompleteStreamChunkTransform: (
       choices:
         parsedChunk.candidates?.map((generation, index) => {
           let message: any = { role: 'assistant', content: '' };
-          if (generation.content?.parts?.[0]?.text) {
-            const contentBlocks = [];
-            let content = '';
-            for (const part of generation.content.parts) {
-              if (part.thought) {
-                contentBlocks.push({
-                  index: 0,
-                  delta: { thinking: part.text },
-                });
-                streamState.containsChainOfThoughtMessage = true;
-              } else {
-                content += part.text ?? '';
-                contentBlocks.push({
-                  index: streamState.containsChainOfThoughtMessage ? 1 : 0,
-                  delta: { text: part.text },
-                });
-              }
-            }
-            message = {
-              role: 'assistant',
-              content,
-              ...(!strictOpenAiCompliance &&
-                contentBlocks.length && { content_blocks: contentBlocks }),
-            };
-          } else if (generation.content?.parts?.[0]?.functionCall) {
-            message = {
-              role: 'assistant',
-              tool_calls: generation.content.parts.map((part, idx) => {
-                if (part.functionCall) {
-                  return {
-                    index: idx,
-                    id: getOrGenerateId(undefined, 'toolCall'),
-                    type: 'function',
-                    function: {
-                      name: part.functionCall.name,
-                      arguments: JSON.stringify(part.functionCall.args),
-                      ...(!strictOpenAiCompliance &&
-                        part.thoughtSignature && {
-                          thought_signature: part.thoughtSignature,
-                        }),
-                    },
-                  };
-                }
-              }),
-            };
-          } else if (generation.content?.parts?.[0]?.inlineData) {
-            const part = generation.content.parts[0];
-            const contentBlocks = [
-              {
-                index: streamState.containsChainOfThoughtMessage ? 1 : 0,
-                delta: {
-                  type: 'image_url',
-                  image_url: {
-                    url: `data:${part.inlineData?.mimeType};base64,${part.inlineData?.data}`,
-                  },
-                },
-              },
-            ];
-            message = {
-              role: 'assistant',
-              content_blocks: contentBlocks,
-            };
+          const partsMessage = transformGeminiStreamParts(
+            generation.content?.parts,
+            streamState,
+            generation.index ?? index,
+            strictOpenAiCompliance
+          );
+          if (partsMessage) {
+            message = partsMessage;
           } else if (generation.finishMessage) {
             // Handle cases where content is empty (e.g., MALFORMED_FUNCTION_CALL)
             message = {

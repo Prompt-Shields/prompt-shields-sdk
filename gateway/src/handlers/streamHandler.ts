@@ -58,6 +58,26 @@ function concatenateUint8Arrays(a: Uint8Array, b: Uint8Array): Uint8Array {
   return result;
 }
 
+// Smallest valid event-stream message: 12-byte prelude, no headers, no
+// payload, 4-byte message CRC.
+const AWS_EVENT_STREAM_MIN_MESSAGE_LENGTH = 16;
+// Largest message the AWS event-stream format allows (16 MiB, as in
+// aws-c-event-stream). A larger length means the body is not an event stream
+// (or is corrupt); erroring stops the reader buffering the rest of it.
+const AWS_EVENT_STREAM_MAX_MESSAGE_LENGTH = 16 * 1024 * 1024;
+
+/**
+ * PS fork (#72, re-implemented from Portkey enterprise 2.25.1): reads AWS
+ * event-stream messages, which network reads split at arbitrary byte offsets.
+ * Upstream read the next message length as soon as any bytes were left over,
+ * so a read that ended inside the 4-byte length prefix produced a bogus
+ * length (often 0): the stream then threw on an empty message, or took the
+ * length from the next read instead of the buffered bytes, and the response
+ * was cut off mid-stream. Long extended-thinking streams (many small
+ * reasoning deltas plus a large signature) hit this most. The length is now
+ * read only once 4 bytes are buffered, and a message is decoded only once it
+ * is complete; an incomplete message left when the stream ends is dropped.
+ */
 export async function* readAWSStream(
   reader: ReadableStreamDefaultReader,
   transformFunction: Function | undefined,
@@ -66,52 +86,26 @@ export async function* readAWSStream(
   gatewayRequest: Params
 ) {
   let buffer = new Uint8Array();
-  let expectedLength = 0;
   const streamState = {};
   while (true) {
     const { done, value } = await reader.read();
-    if (done) {
-      if (buffer.length) {
-        expectedLength = readUInt32BE(buffer, 0);
-        while (buffer.length >= expectedLength && buffer.length !== 0) {
-          const data = buffer.subarray(0, expectedLength);
-          buffer = buffer.subarray(expectedLength);
-          expectedLength = readUInt32BE(buffer, 0);
-          const payload = getPayloadFromAWSChunk(data);
-          if (transformFunction) {
-            const transformedChunk = transformFunction(
-              payload,
-              fallbackChunkId,
-              streamState,
-              strictOpenAiCompliance,
-              gatewayRequest
-            );
-            if (Array.isArray(transformedChunk)) {
-              for (const item of transformedChunk) {
-                yield item;
-              }
-            } else {
-              yield transformedChunk;
-            }
-          } else {
-            yield data;
-          }
-        }
+    if (value?.length) {
+      buffer = concatenateUint8Arrays(buffer, value);
+    }
+
+    while (buffer.length >= 4) {
+      const expectedLength = readUInt32BE(buffer, 0);
+      if (
+        expectedLength < AWS_EVENT_STREAM_MIN_MESSAGE_LENGTH ||
+        expectedLength > AWS_EVENT_STREAM_MAX_MESSAGE_LENGTH
+      ) {
+        throw new Error(
+          `Invalid AWS event stream message length: ${expectedLength}`
+        );
       }
-      break;
-    }
-
-    if (expectedLength === 0) {
-      expectedLength = readUInt32BE(value, 0);
-    }
-
-    buffer = concatenateUint8Arrays(buffer, value);
-
-    while (buffer.length >= expectedLength && buffer.length !== 0) {
+      if (buffer.length < expectedLength) break;
       const data = buffer.subarray(0, expectedLength);
       buffer = buffer.subarray(expectedLength);
-
-      expectedLength = readUInt32BE(buffer, 0);
       const payload = getPayloadFromAWSChunk(data);
 
       if (transformFunction) {
@@ -133,6 +127,8 @@ export async function* readAWSStream(
         yield data;
       }
     }
+
+    if (done) break;
   }
 }
 
