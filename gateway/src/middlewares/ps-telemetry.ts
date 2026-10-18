@@ -18,6 +18,7 @@ import {
   attemptsOf,
   traceIdOf,
 } from './psAttempts';
+import { PSTelemetrySender } from './psTelemetrySender';
 
 interface PSConfig {
   collectorUrl: string;
@@ -245,9 +246,11 @@ export function usageDetailFields(
   return out;
 }
 
-const PS_COLLECTOR_URL =
-  process.env.PS_COLLECTOR_URL || 'http://localhost:8000';
-const PS_API_KEY = process.env.PS_API_KEY || '';
+/**
+ * One sender per process: its client id, batch seq and drop counters are
+ * what the collector reconciles in /telemetry/loss (#87).
+ */
+export const psTelemetrySender = PSTelemetrySender.fromEnv(process.env);
 
 /**
  * Extract vendor from the request URL or provider config
@@ -301,24 +304,12 @@ function extractPSHeaders(
 }
 
 /**
- * Send telemetry event to PS collector (fire-and-forget, fail-open)
+ * Send telemetry event to PS collector (fire-and-forget, fail-open). Retries
+ * and loss accounting are in psTelemetrySender; this never rejects.
  */
 async function sendTelemetry(event: TelemetryEvent): Promise<void> {
-  if (!PS_API_KEY) return; // Skip if no API key configured
-
-  try {
-    await fetch(`${PS_COLLECTOR_URL}/ingest/events`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${PS_API_KEY}`,
-      },
-      body: JSON.stringify({ events: [event] }),
-    });
-  } catch (err) {
-    // Fail-open: never block LLM requests due to telemetry issues
-    console.warn('[PS Telemetry] Failed to send event:', err);
-  }
+  // Fail-open: never block LLM requests due to telemetry issues
+  await psTelemetrySender.send(event);
 }
 
 export function buildCacheEvent(

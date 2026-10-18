@@ -13,6 +13,7 @@ from collector.audit import record_read
 from collector.auth import resolve_tenant
 from collector.embeddings import get_embedding, mock_embedding
 from collector.lifecycle import LifecycleState
+from collector.loss_accounting import tenant_coverage
 from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 
 router = APIRouter(prefix="/api/v1/registry")
@@ -150,6 +151,18 @@ async def list_models(request: Request):
     models = [row[0] for row in result.all()]
     await record_read(request, tenant_id=tenant_id, status_code=200, response_count=len(models))
     return {"data": models}
+
+
+@router.get("/telemetry/coverage")
+async def telemetry_coverage(request: Request):
+    """Telemetry coverage overall and per source (sdk, gateway, otel), from
+    the loss accounting behind /telemetry/loss (#87)."""
+    tenant_id = await resolve_tenant(request)
+    data = await tenant_coverage(request.state.db, tenant_id)
+    await record_read(
+        request, tenant_id=tenant_id, status_code=200, response_count=len(data["sources"])
+    )
+    return data
 
 
 @router.get("/search")
