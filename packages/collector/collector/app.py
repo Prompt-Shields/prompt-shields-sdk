@@ -94,6 +94,17 @@ from collector.provider_usage_admin import router as provider_usage_router  # no
 
 app.include_router(provider_usage_router)
 
+# Provider admin credentials and key fingerprint links (#93)
+from collector.provider_credentials_api import (  # noqa: E402
+    partner_router as provider_credentials_partner_router,
+)
+from collector.provider_credentials_api import (  # noqa: E402
+    tenant_router as provider_credentials_tenant_router,
+)
+
+app.include_router(provider_credentials_tenant_router)
+app.include_router(provider_credentials_partner_router)
+
 # Platform signal: cloud AI inventory (admin trigger)
 from collector.cloud_inventory import router as cloud_inventory_router  # noqa: E402
 

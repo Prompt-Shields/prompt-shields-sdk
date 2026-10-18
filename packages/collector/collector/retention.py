@@ -48,6 +48,8 @@ from db.models import (
     DataFlow,
     PartnerAuditLog,
     PartnerCredential,
+    ProviderCredential,
+    ProviderKeyFingerprint,
     RetentionAuditLog,
     RiskMapping,
     TelemetryClientStats,
@@ -81,6 +83,8 @@ ERASE_ORDER: tuple[type, ...] = (
     PartnerCredential,
     AIAsset,
     TelemetryClientStats,
+    ProviderKeyFingerprint,
+    ProviderCredential,
 )
 
 # Tables with a tenant_id that erasure keeps on purpose.

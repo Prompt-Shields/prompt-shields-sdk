@@ -31,6 +31,8 @@ from db.models import (
     DataFlow,
     PartnerAuditLog,
     PartnerCredential,
+    ProviderCredential,
+    ProviderKeyFingerprint,
     RetentionAuditLog,
     RiskMapping,
     TelemetryClientStats,
@@ -105,6 +107,18 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     state="attested",
                     attested_by=f"owner@{name}.example",
                     actor_type="tenant",
+                ),
+                ProviderCredential(
+                    tenant_id=tenant_id,
+                    provider="openai",
+                    secret_ciphertext="unused",
+                    key_hint="****seed",
+                ),
+                ProviderKeyFingerprint(
+                    tenant_id=tenant_id,
+                    provider="openai",
+                    api_key_id=f"key_{name}",
+                    api_key_fingerprint="0123456789abcdef",
                 ),
             ]
         )

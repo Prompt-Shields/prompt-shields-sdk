@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Text, ARRAY, TIMESTAMP, Boolean, Integer, BigInteger, Numeric, ForeignKey, Index,
-    DDL, event,
+    DDL, UniqueConstraint, event,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -134,12 +134,66 @@ class AIUsageEvent(Base):
     # Non-token usage: audio seconds, OCR pages, speech characters, ...
     usage_units = Column(Numeric(20, 6))
     usage_unit_type = Column(Text)
+    # SDK's sha256(api key)[:16] (#93), never the key. Matches a provider
+    # key id through ProviderKeyFingerprint to corroborate platform_signal.
+    api_key_fingerprint = Column(Text)
 
     asset = relationship("AIAsset", back_populates="usage_events")
 
     __table_args__ = (
         Index("ix_usage_events_tenant_ts", "tenant_id", "timestamp"),
         Index("ix_usage_events_asset_ts", "asset_id", "timestamp"),
+        Index("ix_usage_events_tenant_key_fp", "tenant_id", "api_key_fingerprint"),
+    )
+
+
+class ProviderCredential(Base):
+    """A tenant's provider admin key for the org usage pull (#93).
+
+    `secret_ciphertext` is the key sealed with the PS_WEBHOOK_SECRET_KEYS
+    keyring ("v2.<kid>.<data>", AES-GCM, bound to the row id and a provider
+    credential purpose label). The key is write-only: the API returns
+    `key_hint` (last four characters), the key id and timestamps, never the
+    key. One row per tenant and provider. See collector/provider_credentials.py.
+    """
+
+    __tablename__ = "provider_credentials"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    provider = Column(Text, nullable=False)  # openai | anthropic
+    secret_ciphertext = Column(Text, nullable=False)
+    key_hint = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    rotated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", name="uq_provider_credentials_tenant_provider"),
+    )
+
+
+class ProviderKeyFingerprint(Base):
+    """Links a provider-reported API key id to the SDK's api_key_fingerprint.
+
+    Provider usage APIs report key ids (OpenAI ``key_...``, Anthropic
+    ``apikey_...``) and never the key or a hash of it, so the collector
+    cannot compute the fingerprint itself; the tenant registers the pair.
+    """
+
+    __tablename__ = "provider_key_fingerprints"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    provider = Column(Text, nullable=False)
+    api_key_id = Column(Text, nullable=False)
+    api_key_fingerprint = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "provider", "api_key_id", name="uq_provider_key_fingerprints_key"
+        ),
+        Index("ix_provider_key_fingerprints_tenant_fp", "tenant_id", "api_key_fingerprint"),
     )
 
 

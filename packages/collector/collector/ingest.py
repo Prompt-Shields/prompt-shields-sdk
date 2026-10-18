@@ -1,5 +1,6 @@
 import hashlib
 import math
+import re
 from typing import Annotated, Any
 
 from db.models import AIUsageEvent
@@ -58,6 +59,16 @@ class IngestEvent(BaseModel):
     modality: str | None = None
     usage_units: float | None = None
     usage_unit_type: str | None = None
+    # SDK's sha256(api key)[:16] (#93). Anything else (a raw or redacted
+    # key) is dropped, so a key can never be stored here.
+    api_key_fingerprint: str | None = None
+
+    @field_validator("api_key_fingerprint", mode="before")
+    @classmethod
+    def _fingerprint(cls, value: Any) -> str | None:
+        if isinstance(value, str) and FINGERPRINT_RE.fullmatch(value):
+            return value
+        return None
 
     @field_validator("requested_model", "served_model", mode="before")
     @classmethod
@@ -109,6 +120,7 @@ MAX_MODEL_NAME_LENGTH = 256
 MAX_LABEL_LENGTH = 64
 MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
+FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
 
 # Lenient fields whose dropped values are reported in ignored_fields as
 # "<field>:invalid", so a client sending bad values shows up in
@@ -126,6 +138,7 @@ LENIENT_FIELDS = (
     "modality",
     "usage_units",
     "usage_unit_type",
+    "api_key_fingerprint",
 )
 
 
@@ -289,6 +302,7 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             modality=event.modality,
             usage_units=event.usage_units,
             usage_unit_type=event.usage_unit_type,
+            api_key_fingerprint=event.api_key_fingerprint,
         )
         db.add(usage_event)
         await record_event_flows(

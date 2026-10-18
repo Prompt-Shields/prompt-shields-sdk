@@ -226,3 +226,51 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"gcp": {
 ```
 
 `service_account` may also be the key file as a JSON string. Leave `project_ids` empty to inventory the service account's own project. The collector signs a JWT with the key and exchanges it at the fixed `oauth2.googleapis.com` (the key file's `token_uri` is ignored), then calls only `<region>-aiplatform.googleapis.com`. Region names are validated strictly (`us-central1`, `europe-west4`, …; not `global`). A project/region that fails, for example because the Vertex AI API is not enabled there, is reported under `region_errors` and does not stop the others.
+
+## Provider Org Usage (Platform Signal)
+
+The OpenAI organization usage API and the Anthropic Admin usage report list usage per project or workspace, API key and model, including keys nobody instrumented. The collector pulls them and turns each (project/workspace, key, model) into an asset with `discovery_source: ["platform_signal"]` (`medium` confidence until another source corroborates it) and `calling_service` `openai:project=<id>:key=<key id>` or `anthropic:workspace=<id>:key=<key id>`, with one usage event per day. Run it with `python -m collector.provider_usage_admin --tenant <uuid> [--days 7]` or `POST /api/v1/admin/provider-usage/pull` (`Authorization: Bearer $PS_ADMIN_TOKEN`, `{"tenant_id": "<uuid>"}`).
+
+### Admin credentials (stored encrypted, write-only)
+
+Use an OpenAI admin key and an Anthropic Admin API key, the most restricted the provider lets you create (read-only where offered). The collector only sends `GET` requests to the usage endpoints, but it cannot limit what the key itself allows. A tenant admin (tenant API key, `/api/v1/admin/...`) or a partner granted `provider-credentials:manage` (`/partner/v1/...`) stores them:
+
+```bash
+curl -X POST "$COLLECTOR/api/v1/admin/provider-credentials/openai" \
+  -H "Authorization: Bearer $PS_TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"admin_key": "sk-admin-..."}'
+# 201 {"provider": "openai", "key_hint": "****wxyz", "key_id": "2026a",
+#      "created_at": "...", "rotated_at": null}
+```
+
+| Route | |
+|-------|---|
+| `GET /provider-credentials` | Stored credentials (masked), and `meta.env_fallback`: providers still using `PS_PROVIDER_ADMIN_KEYS` |
+| `GET /provider-credentials/{provider}` | One credential (masked) |
+| `POST /provider-credentials/{provider}` | Store `{"admin_key": ...}` (`409` if one is stored) |
+| `POST /provider-credentials/{provider}/rotate` | Replace the stored key |
+| `DELETE /provider-credentials/{provider}` | Delete it |
+
+`provider` is `openai` or `anthropic`. No response, log line or audit row returns the key: reads show the last four characters, the encryption key id and timestamps. The key is sealed with AES-256-GCM using the same `PS_WEBHOOK_SECRET_KEYS` keyring as webhook signing secrets, with its own derived key and bound to its row. Storing needs that keyring (`503` without it; the legacy single `PS_WEBHOOK_SECRET_KEY` is not used). After the active keyring key changes, a stored credential is re-encrypted with the new key the next time a pull uses it. Keep the old key in the keyring until every tenant has been pulled once. Credentials are tenant-scoped (row-level security) and deleted with the tenant on erasure.
+
+`PS_PROVIDER_ADMIN_KEYS='{"<tenant uuid>": {"openai": "...", "anthropic": "..."}}'` in the collector's environment still works as a fallback for a provider with no stored credential. A stored credential that cannot be decrypted (its keyring key is missing) is reported as an error for that provider. The pull does not fall back to the environment in that case.
+
+### Corroborating SDK sightings by key
+
+The SDK sends `api_key_fingerprint`, the first 16 hex characters of `sha256(api key)`, never the key. The usage APIs report only an opaque key id (`key_...`, `apikey_...`). The providers' key-listing APIs add a redacted preview, but never the key or a hash of it. So the collector cannot compute the fingerprint from what the providers return, and it does not guess from previews. Register the link yourself, computing the fingerprint where the key already lives:
+
+```bash
+printf %s "$OPENAI_API_KEY" | sha256sum | cut -c1-16
+curl -X PUT "$COLLECTOR/api/v1/admin/provider-key-fingerprints/openai/key_abc123" \
+  -H "Authorization: Bearer $PS_TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"api_key_fingerprint": "<16 hex>"}'
+```
+
+When an SDK event carried that fingerprint for the same vendor and model (the asset's model, or the event's requested or served model), the platform_signal asset for that key gains the SDK's source and the SDK asset gains `platform_signal`. Both become `verified`. This runs when a link is saved (`meta.corroborated_assets`) and after every usage pull (`corroborated_assets`). `GET /provider-key-fingerprints` lists links and `DELETE /provider-key-fingerprints/{provider}/{api_key_id}` removes one. Removing a link does not remove a source already recorded.
+
+Limits:
+
+- A fingerprint is only matched through a link you registered. A key with no link stays a `medium` shadow key even if the SDK uses it.
+- Gateway events do not carry a fingerprint, so gateway sightings are not matched by key.
+- Model names must match exactly. OpenAI often reports a dated snapshot (`gpt-4o-2024-08-06`), which the SDK's `served_model` usually matches.
+- Bedrock and other AWS-credential calls have no API key to fingerprint.
