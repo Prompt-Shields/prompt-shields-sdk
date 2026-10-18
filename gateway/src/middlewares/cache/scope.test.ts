@@ -377,7 +377,9 @@ describe('cache key is scoped to the caller', () => {
         cacheMode: 'simple',
         transformedRequest: { body },
         providerOptions: { rubeusURL: 'chatComplete' },
-        response: { clone: () => ({ json: async () => ({ from: 'A' }) }) },
+        response: new Response(JSON.stringify({ from: 'A' }), {
+          headers: { 'content-type': 'application/json' },
+        }),
       },
     ]);
     await memoryCache()(c, async () => {});
