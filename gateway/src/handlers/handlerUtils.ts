@@ -17,6 +17,7 @@ import {
   CORTEX,
   ORACLE,
   DATABRICKS,
+  CLAUDE_PLATFORM_AWS,
 } from '../globals';
 import { endpointStrings } from '../providers/types';
 import { Options, Params, StrategyModes, Targets } from '../types/requestBody';
@@ -1010,6 +1011,14 @@ export function constructConfigFromRequestHeaders(
       requestHeaders[`anthropic-version`],
   };
 
+  // Claude Platform on AWS: AWS credentials plus the Anthropic headers (#74).
+  const claudePlatformAwsConfig = {
+    ...awsConfig,
+    anthropicAwsWorkspaceId:
+      requestHeaders[`x-${POWERED_BY}-anthropic-aws-workspace-id`] ||
+      requestHeaders[`anthropic-workspace-id`],
+  };
+
   const sagemakerConfig = {
     amznSagemakerCustomAttributes:
       requestHeaders[`x-${POWERED_BY}-amzn-sagemaker-custom-attributes`],
@@ -1162,6 +1171,13 @@ export function constructConfigFromRequestHeaders(
         };
       }
 
+      if (parsedConfigJson.provider === CLAUDE_PLATFORM_AWS) {
+        parsedConfigJson = {
+          ...parsedConfigJson,
+          ...claudePlatformAwsConfig,
+        };
+      }
+
       if (parsedConfigJson.provider === SAGEMAKER) {
         parsedConfigJson = {
           ...parsedConfigJson,
@@ -1272,6 +1288,8 @@ export function constructConfigFromRequestHeaders(
     ) && awsConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === SAGEMAKER &&
       sagemakerConfig),
+    ...(requestHeaders[`x-${POWERED_BY}-provider`] === CLAUDE_PLATFORM_AWS &&
+      claudePlatformAwsConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === WORKERS_AI &&
       workersAiConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === GOOGLE_VERTEX_AI &&
