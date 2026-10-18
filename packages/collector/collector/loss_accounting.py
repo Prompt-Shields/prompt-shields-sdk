@@ -25,7 +25,7 @@ to record a rejection never changes the response the caller gets.
 Sources. Each client row belongs to one source, from the ``sdk`` name it
 reports: "gateway" (the AI gateway's ps-telemetry, which sends the same
 metadata as the SDK), "otel" (the OTLP GenAI receiver, one row per
-``service.name``), "sdk" for any other identified client, and
+``service.name``, up to MAX_OTEL_CLIENTS per tenant), "sdk" for any other identified client, and
 "unidentified" for batches without metadata. OTLP exporters send no
 counters of their own, so for "otel" what the collector rejected (GenAI
 spans it could not map, oversized requests, failed writes) is the loss:
@@ -46,7 +46,7 @@ from uuid import UUID
 
 from db.models import TelemetryClientStats
 from fastapi import APIRouter, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +60,11 @@ UNIDENTIFIED_CLIENT = "unidentified"
 GATEWAY_SDK = "gateway"
 OTEL_SDK = "otel"
 OTEL_CLIENT_PREFIX = "otel:"
+# service.name is client-controlled: past this many distinct OTLP services per
+# tenant, new services are counted under the shared "otel" client instead of
+# growing the table without bound. A soft cap (concurrent requests may each
+# add one more).
+MAX_OTEL_CLIENTS = 200
 # Reporting order of the sources.
 SOURCES = ("sdk", "gateway", "otel", "unidentified")
 _MAX_ID_LEN = 128
@@ -251,6 +256,7 @@ async def record_otel(
     if not counts:
         return
     try:
+        counts = await _bound_otel_clients(db, tenant_id, counts)
         now = datetime.now(UTC)
         for client_id in sorted(counts):  # stable lock order across requests
             c = counts[client_id]
@@ -269,6 +275,53 @@ async def record_otel(
         logger.exception("could not record OTLP loss accounting")
         with contextlib.suppress(Exception):
             await db.rollback()
+
+
+async def _bound_otel_clients(
+    db: AsyncSession, tenant_id: UUID, counts: dict[str, OtelCounts]
+) -> dict[str, OtelCounts]:
+    """Fold services that would exceed MAX_OTEL_CLIENTS into the shared
+    "otel" client."""
+    new = [cid for cid in counts if cid != OTEL_SDK]
+    if not new:
+        return counts
+    existing = set(
+        (
+            await db.execute(
+                select(TelemetryClientStats.client_id).where(
+                    TelemetryClientStats.tenant_id == tenant_id,
+                    TelemetryClientStats.client_id.in_(new),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    new = sorted(cid for cid in new if cid not in existing)
+    if not new:
+        return counts
+    used = (
+        await db.execute(
+            select(func.count())
+            .select_from(TelemetryClientStats)
+            .where(
+                TelemetryClientStats.tenant_id == tenant_id,
+                TelemetryClientStats.client_id.startswith(OTEL_CLIENT_PREFIX),
+            )
+        )
+    ).scalar_one()
+    overflow = new[max(0, MAX_OTEL_CLIENTS - used) :]
+    if not overflow:
+        return counts
+    bounded = dict(counts)
+    shared = bounded.setdefault(OTEL_SDK, OtelCounts())
+    for cid in overflow:
+        c = bounded.pop(cid)
+        shared.received += c.received
+        for reason, n in c.rejected.items():
+            shared.reject(reason, n)
+        shared.ignore(c.ignored)
+    return bounded
 
 
 # --- reporting -----------------------------------------------------------------

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from collector import otel_ingest
+from collector import loss_accounting, otel_ingest
 from collector.app import app
 from collector.loss_accounting import coverage_by_source, otel_client_id
 from collector.otel_ingest import classify_spans
@@ -282,3 +282,23 @@ async def test_otlp_rejections_are_counted(seeded_db, monkeypatch):
     }
     assert otel["lost_events"] == 4
     assert otel["coverage"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_otlp_services_per_tenant_are_bounded(seeded_db, monkeypatch):
+    """service.name is client-controlled: services past the cap share the
+    "otel" client rather than adding rows."""
+    monkeypatch.setattr(loss_accounting, "MAX_OTEL_CLIENTS", 2)
+    async with _client() as c:
+        for service in ("a", "b", "c", "a", "d"):
+            r = await c.post(OTLP, headers=OTLP_HEADERS, content=json.dumps(
+                _payload(_span(GENAI), _span(NO_VENDOR), service=service)
+            ))
+            assert r.status_code == 200, r.text
+        loss = (await c.get("/telemetry/loss", headers=HEADERS)).json()
+
+    by_client = {cl["client_id"]: cl for cl in loss["clients"]}
+    assert set(by_client) == {"otel:a", "otel:b", "otel"}
+    assert by_client["otel:a"]["received_events"] == 2
+    assert by_client["otel"]["received_events"] == 2
+    assert by_client["otel"]["collector_rejected"] == {"no_vendor": 2}
