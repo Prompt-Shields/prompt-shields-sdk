@@ -155,6 +155,12 @@ export interface Options {
   /** The parameter to determine if extra non-openai compliant fields should be returned in response */
   strictOpenAiCompliance?: boolean;
 
+  /**
+   * PS fork (#73): route `/v1/messages` to this OpenAI / Azure OpenAI target
+   * via the Responses API (true) or never (false); unset decides by model.
+   */
+  messagesViaResponses?: boolean;
+
   /** Parameter to determine if fim/completions endpoint is to be used */
   mistralFimCompletion?: string;
 
@@ -162,6 +168,8 @@ export interface Options {
   anthropicBeta?: string;
   anthropicVersion?: string;
   anthropicApiKey?: string;
+  /** Claude Platform on AWS workspace (`anthropic-workspace-id`) */
+  anthropicAwsWorkspaceId?: string;
 
   /** Fireworks finetune required fields */
   fireworksAccountId?: string;

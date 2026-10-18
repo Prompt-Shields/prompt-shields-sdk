@@ -21,6 +21,8 @@ process.env.PS_ROUTER_ENABLED = 'true';
 process.env.PS_OTEL_ENDPOINT = OTEL;
 process.env.PS_OTEL_MAX_BATCH = '1';
 process.env.PS_METRICS_ENABLED = 'true';
+// Collector retries (#87) back off for 1 ms here, not 200 ms.
+process.env.PS_TELEMETRY_RETRY_BASE_MS = '1';
 
 export interface UpstreamCall {
   url: string;
@@ -35,6 +37,15 @@ const routes: { match: RegExp; respond: Responder }[] = [];
 export const upstreamCalls: UpstreamCall[] = [];
 export const events: any[] = [];
 export const otelPayloads: any[] = [];
+/** The loss-accounting `metadata` of every collector request (#87). */
+export const collectorMetadata: any[] = [];
+/** Collector response override; a 200 `{}` (event stored) when unset. */
+let collectorResponder: (() => Response | Promise<Response>) | undefined;
+
+/** Answer collector requests with `respond` until the next resetHarness(). */
+export function collector(respond: () => Response | Promise<Response>) {
+  collectorResponder = respond;
+}
 
 function headersOf(init: any): Record<string, string> {
   const out: Record<string, string> = {};
@@ -55,7 +66,10 @@ function bodyOf(init: any): any {
 global.fetch = jest.fn(async (input: any, init: any = {}) => {
   const url = typeof input === 'string' ? input : input.url;
   if (url.startsWith(COLLECTOR)) {
-    events.push(...JSON.parse(init.body).events);
+    const sent = JSON.parse(init.body);
+    collectorMetadata.push(sent.metadata);
+    if (collectorResponder) return collectorResponder();
+    events.push(...sent.events);
     return new Response('{}', { status: 200 });
   }
   if (url.startsWith(OTEL)) {
@@ -90,6 +104,8 @@ export function resetHarness() {
   upstreamCalls.length = 0;
   events.length = 0;
   otelPayloads.length = 0;
+  collectorMetadata.length = 0;
+  collectorResponder = undefined;
 }
 
 export const json = (body: unknown, status = 200) =>

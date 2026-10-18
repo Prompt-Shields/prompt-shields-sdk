@@ -23,8 +23,9 @@ import {
   SYSTEM_INSTRUCTION_DISABLED_MODELS,
   transformOpenAIRoleToGoogleRole,
   transformToolChoiceForGemini,
+  transformGeminiFinishReason,
+  geminiStreamToolCalls,
 } from '../google/chatComplete';
-import { GOOGLE_GENERATE_CONTENT_FINISH_REASON } from '../google/types';
 import {
   ChatCompletionResponse,
   ErrorResponse,
@@ -34,7 +35,6 @@ import {
 import {
   generateErrorResponse,
   generateInvalidProviderResponseError,
-  transformFinishReason,
 } from '../utils';
 import { transformGenerationConfig } from './transformGenerationConfig';
 import {
@@ -597,9 +597,10 @@ export const GoogleChatCompleteResponseTransform: (
           return {
             message: message,
             index: index,
-            finish_reason: transformFinishReason(
-              generation.finishReason as GOOGLE_GENERATE_CONTENT_FINISH_REASON,
-              strictOpenAiCompliance
+            finish_reason: transformGeminiFinishReason(
+              generation.finishReason,
+              strictOpenAiCompliance,
+              toolCalls.length > 0
             ),
             logprobs,
             ...(!strictOpenAiCompliance && {
@@ -736,13 +737,6 @@ export const GoogleChatCompleteStreamChunkTransform: (
     provider: GOOGLE_VERTEX_AI,
     choices:
       parsedChunk.candidates?.map((generation, index) => {
-        const finishReason = generation.finishReason
-          ? transformFinishReason(
-              parsedChunk.candidates[0]
-                .finishReason as GOOGLE_GENERATE_CONTENT_FINISH_REASON,
-              strictOpenAiCompliance
-            )
-          : null;
         let message: any = { role: 'assistant', content: '' };
         if (generation.content?.parts?.[0]?.text) {
           const contentBlocks = [];
@@ -813,6 +807,18 @@ export const GoogleChatCompleteStreamChunkTransform: (
             content: generation.finishMessage,
           };
         }
+        const hadToolCalls = geminiStreamToolCalls(
+          streamState,
+          index,
+          !!message.tool_calls
+        );
+        const finishReason = generation.finishReason
+          ? transformGeminiFinishReason(
+              generation.finishReason,
+              strictOpenAiCompliance,
+              hadToolCalls
+            )
+          : null;
         return {
           delta: message,
           index: index,

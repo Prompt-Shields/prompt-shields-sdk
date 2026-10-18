@@ -3,6 +3,8 @@ import {
   putInCache,
   __resetCacheForTests,
   memoryCache,
+  isCacheableResponse,
+  isCompleteResponseBody,
 } from './index';
 
 const scope = 'scope-a';
@@ -133,5 +135,34 @@ describe('memoryCache middleware (fail-open write-back)', () => {
     const next = async () => {};
 
     await expect(mw(c, next)).resolves.toBeUndefined();
+  });
+});
+
+describe('write-back eligibility (#72)', () => {
+  const res = (status: number, type: string) =>
+    new Response('{}', { status, headers: { 'content-type': type } });
+
+  it('only a 200 JSON response is cacheable', () => {
+    expect(isCacheableResponse(res(200, 'application/json'))).toBe(true);
+    expect(
+      isCacheableResponse(res(200, 'application/json; charset=UTF-8'))
+    ).toBe(true);
+    expect(isCacheableResponse(res(500, 'application/json'))).toBe(false);
+    expect(isCacheableResponse(res(429, 'application/json'))).toBe(false);
+    // after-request hooks failed
+    expect(isCacheableResponse(res(246, 'application/json'))).toBe(false);
+    expect(isCacheableResponse(res(200, 'text/event-stream'))).toBe(false);
+    expect(isCacheableResponse(undefined)).toBe(false);
+  });
+
+  it('a body that reports an error or an unfinished response is not', () => {
+    expect(isCompleteResponseBody({ choices: [] })).toBe(true);
+    expect(isCompleteResponseBody({ status: 'completed' })).toBe(true);
+    expect(isCompleteResponseBody({ error: { message: 'x' } })).toBe(false);
+    expect(isCompleteResponseBody({ type: 'error' })).toBe(false);
+    for (const status of ['incomplete', 'failed', 'cancelled', 'in_progress'])
+      expect(isCompleteResponseBody({ status })).toBe(false);
+    expect(isCompleteResponseBody(null)).toBe(false);
+    expect(isCompleteResponseBody([])).toBe(false);
   });
 });

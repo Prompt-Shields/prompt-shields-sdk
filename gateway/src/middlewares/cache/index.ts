@@ -262,30 +262,75 @@ export const putInCache = async (
   });
 };
 
+// PS fork (#72): Responses API objects that did not finish. A background
+// response is also not final while queued or in progress.
+const UNFINISHED_STATUSES = new Set([
+  'incomplete',
+  'failed',
+  'cancelled',
+  'queued',
+  'in_progress',
+]);
+
+/**
+ * PS fork (#72): whether an upstream response may be written to the cache,
+ * judged before reading its body. Only a complete, successful JSON response
+ * is: never an error status (upstream used to cache error bodies, which a
+ * later HIT then served as 200), the 246 "hooks failed" status, or a
+ * streamed (SSE or other non-JSON) body, which may have been cut off.
+ */
+export const isCacheableResponse = (
+  response: Response | undefined | null
+): boolean =>
+  !!response &&
+  response.status === 200 &&
+  (response.headers.get('content-type') ?? '').includes('application/json');
+
+/**
+ * PS fork (#72): whether a parsed response body is a finished result. A 200
+ * can still carry an `error`, an Anthropic `{type: "error"}`, or a Responses
+ * object whose `status` says it did not complete (`incomplete`, `failed`).
+ */
+export const isCompleteResponseBody = (body: any): boolean => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (body.error) return false;
+  if (body.type === 'error') return false;
+  if (typeof body.status === 'string' && UNFINISHED_STATUSES.has(body.status))
+    return false;
+  return true;
+};
+
 export const memoryCache = () => {
   return async (c: Context, next: any) => {
     c.set('getFromCache', getFromCache);
 
     await next();
 
-    let requestOptions = c.get('requestOptions');
+    const requestLogs = c.get('requestOptions');
+    // PS fork (#72): the last attempt is the response the client got.
+    // Upstream wrote back the first one, which after a retry or fallback is
+    // a failed attempt.
+    const requestOptions =
+      Array.isArray(requestLogs) && requestLogs.length > 0
+        ? requestLogs[requestLogs.length - 1]
+        : undefined;
 
     if (
       requestOptions &&
-      Array.isArray(requestOptions) &&
-      requestOptions.length > 0 &&
-      requestOptions[0].requestParams.stream !== true
+      requestOptions.requestParams?.stream !== true &&
+      requestOptions.cacheMode === 'simple' &&
+      isCacheableResponse(requestOptions.response)
     ) {
-      requestOptions = requestOptions[0];
       // Reuse the scope the read computed for this target: the logged
       // provider options are a snapshot taken before credentials resolve.
       const cacheScope = getCacheScopeForTarget(
         c,
         requestOptions.lastUsedOptionIndex
       );
-      if (requestOptions.cacheMode === 'simple' && cacheScope) {
+      if (cacheScope) {
         try {
           const parsed = await requestOptions.response.clone().json();
+          if (!isCompleteResponseBody(parsed)) return;
           await putInCache(
             null,
             null,

@@ -478,6 +478,91 @@ components:
           description: Required when `state` is `disputed`
           nullable: true
 
+    SourceCoverage:
+      type: object
+      description: |
+        Telemetry delivery for one source. `sdk` is the Prompt Shields SDKs,
+        `gateway` the AI gateway, `otel` the OTLP GenAI receiver (one client
+        per `service.name`) and `unidentified` events sent without delivery
+        metadata (older clients).
+      properties:
+        source:
+          type: string
+          enum: [sdk, gateway, otel, unidentified]
+        clients:
+          type: integer
+          description: Distinct clients (SDK processes, gateway processes, OTel services) seen
+          example: 4
+        received_events:
+          type: integer
+          description: Events the collector stored
+          example: 15420
+        dropped_events:
+          type: integer
+          description: >-
+            Events known to be lost: dropped by the client (buffer overflow,
+            failed sends, unserialisable events) as it reported, and for
+            `otel` the GenAI spans the collector rejected (no vendor,
+            oversized request, failed write).
+          example: 12
+        unaccounted_events:
+          type: integer
+          description: >-
+            Events a client reported queueing that neither arrived nor were
+            reported dropped (in flight, or lost silently). Always 0 for
+            `otel` and `unidentified`, which report no counters.
+          example: 3
+        coverage:
+          type: number
+          format: float
+          description: >-
+            received / (received + dropped + unaccounted), 0 to 1. Null when
+            nothing was expected, and always null for `unidentified`.
+          nullable: true
+          example: 0.999
+        last_seen:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - source
+        - clients
+        - received_events
+        - dropped_events
+        - unaccounted_events
+        - coverage
+        - last_seen
+
+    TelemetryCoverage:
+      type: object
+      description: How complete the tenant's usage telemetry is, overall and per source
+      properties:
+        coverage:
+          type: number
+          format: float
+          description: Coverage over every source, 0 to 1; null when nothing was expected
+          nullable: true
+          example: 0.998
+        received_events:
+          type: integer
+          example: 20410
+        dropped_events:
+          type: integer
+          example: 30
+        unaccounted_events:
+          type: integer
+          example: 5
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceCoverage'
+      required:
+        - coverage
+        - received_events
+        - dropped_events
+        - unaccounted_events
+        - sources
+
     PaginationMeta:
       type: object
       properties:
@@ -1047,6 +1132,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UsageSummary'
+
+  /partner/v1/telemetry/coverage:
+    get:
+      operationId: getTelemetryCoverage
+      tags: [Assets]
+      summary: Get telemetry coverage
+      description: |
+        How complete the registry's usage data is: events the collector
+        received against events its sources reported or were seen to drop,
+        overall and per source (SDK, gateway, OpenTelemetry). Counts only;
+        no event data.
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Telemetry coverage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelemetryCoverage'
 
   /partner/v1/vendors:
     get:
