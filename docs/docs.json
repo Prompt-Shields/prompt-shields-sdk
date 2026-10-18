@@ -88,7 +88,8 @@
         "api-reference/assets/get-asset",
         "api-reference/assets/get-data-flows",
         "api-reference/assets/get-risks",
-        "api-reference/assets/get-usage-summary"
+        "api-reference/assets/get-usage-summary",
+        "api-reference/assets/get-telemetry-coverage"
       ]
     },
     {
