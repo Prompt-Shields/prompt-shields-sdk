@@ -23,9 +23,11 @@ jobs:
         # `jest --ci` does not fail on a focused test: a stray describe.only
         # silently skips the rest of its file (refs #69). Covers every tracked
         # JS/TS test file (gateway, packages/partner-ts, ...) and pytest
-        # focus markers.
+        # focus markers. Also catches `.only.each`, `test.concurrent.only` and
+        # `fit.each`; `fit(` must not follow `.` or an identifier character,
+        # so `model.fit(` or `outfit(` are not flagged.
         run: |
-          if git grep -nE '\b(describe|it|test)\.only\(|\b(fdescribe|fit|ftest)\(|pytest\.mark\.(only|focus)\b' \
+          if git grep -nE '\b(describe|it|test)(\.concurrent)?\.only[[:space:]]*[(.`]|(^|[^.[:alnum:]_$])(fdescribe|fit|ftest)(\.each)?[[:space:]]*[(`]|pytest\.mark\.(only|focus)\b' \
               -- '*.test.*' '*.spec.*' '*/tests/*' '*/test/*' 'tests/*' 'test/*' '*conftest.py'; then
             echo "::error::Focused tests found above; remove .only / fit / fdescribe."
             exit 1
