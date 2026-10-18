@@ -192,12 +192,38 @@ export const COST_SOURCE_PROVIDER_REPORTED = 'provider_reported';
  * `nativeTier` is false when the body was built by the Responses adapter,
  * which echoes the requested tier (or `default`) rather than a served one.
  */
-export function usageDetails(body: any, nativeTier = true): UsageDetails {
+export function usageDetails(
+  body: any,
+  nativeTier = true,
+  zeroFilled = false
+): UsageDetails {
   const details = usageDetailsOf(body?.usage);
   const tier = body?.service_tier;
   if (typeof tier === 'string' && tier) details.service_tier = tier;
   if (!nativeTier) delete details.service_tier;
-  return details;
+  return zeroFilled ? withoutFilledZeros(details) : details;
+}
+
+/**
+ * Providers whose usage the gateway rebuilds in Chat Completions shape and
+ * fills a count the provider left out with 0: Gemini and Vertex
+ * (`thoughtsTokenCount`, `cachedContentTokenCount`) and Bedrock Converse
+ * (`cacheReadInputTokens`). The Responses adapter does the same for any
+ * provider. The SDK omits a count the provider did not report.
+ */
+const ZERO_FILLED_VENDORS = new Set(['google', 'vertex-ai', 'bedrock']);
+
+/** Whether a zero cached or reasoning count may be a filled-in default. */
+export function usageZeroFilled(vendor: string, adapted: boolean): boolean {
+  return adapted || ZERO_FILLED_VENDORS.has(vendor);
+}
+
+/** `details` without zero cached and reasoning counts. */
+export function withoutFilledZeros(details: UsageDetails): UsageDetails {
+  const out = { ...details };
+  if (out.tokens_cached === 0) delete out.tokens_cached;
+  if (out.tokens_reasoning === 0) delete out.tokens_reasoning;
+  return out;
 }
 
 /**
@@ -365,7 +391,9 @@ export function psTelemetryMiddleware() {
         model,
         source: 'gateway',
         ...usageTokens(response.body),
-        ...usageDetailFields(usageDetails(response.body)),
+        ...usageDetailFields(
+          usageDetails(response.body, true, usageZeroFilled(vendor, false))
+        ),
         latency_ms: latencyMs,
         ...psHeaders,
       };
@@ -393,13 +421,15 @@ export function withStreamSummary(
   event: TelemetryEvent,
   summary: StreamSummary,
   routed = false,
-  nativeTier = true
+  nativeTier = true,
+  zeroFilled = false
 ): TelemetryEvent {
   const out: TelemetryEvent = { ...event, stream: true };
   if (summary.tokens_in !== undefined) out.tokens_in = summary.tokens_in;
   if (summary.tokens_out !== undefined) out.tokens_out = summary.tokens_out;
-  const details = summary.details && { ...summary.details };
+  let details = summary.details && { ...summary.details };
   if (details && !nativeTier) delete details.service_tier;
+  if (details && zeroFilled) details = withoutFilledZeros(details);
   Object.assign(out, usageDetailFields(details));
   if (routed && summary.model) out.served_model = summary.model;
   if (summary.truncated) out.stream_truncated = true;
@@ -461,6 +491,7 @@ export function psTelemetry() {
       // The Responses adapter (#59) reports no served tier of its own.
       const adapted =
         surface === 'responses' && !supportsResponsesApiNatively(vendor);
+      const zeroFilled = usageZeroFilled(vendor, adapted);
       const event: TelemetryEvent = {
         vendor,
         model,
@@ -468,7 +499,9 @@ export function psTelemetry() {
         ...(reportsOwnUsage(path)
           ? {
               ...usageTokens(responseBody),
-              ...usageDetailFields(usageDetails(responseBody, !adapted)),
+              ...usageDetailFields(
+                usageDetails(responseBody, !adapted, zeroFilled)
+              ),
             }
           : {}),
         api_surface: surface,
@@ -503,7 +536,9 @@ export function psTelemetry() {
       }
       stream
         .then((summary) =>
-          sendTelemetry(withStreamSummary(event, summary, !!route, !adapted))
+          sendTelemetry(
+            withStreamSummary(event, summary, !!route, !adapted, zeroFilled)
+          )
         )
         .catch(() => {});
     } catch (err) {

@@ -69,6 +69,9 @@ export interface UsageDetails {
   provider_cost?: number;
 }
 
+/** Costs at or above this (USD) do not fit the collector's cost column. */
+export const MAX_PROVIDER_COST = 10_000;
+
 const count = (v: unknown) =>
   typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined;
 
@@ -91,7 +94,8 @@ export function usageDetailsOf(u: any): UsageDetails {
       count(u.cache_read_input_tokens),
     tokens_cache_write:
       count(u.cache_creation_input_tokens) ??
-      count(u.prompt_tokens_details?.cache_creation_tokens),
+      count(u.prompt_tokens_details?.cache_creation_tokens) ??
+      count(u.input_tokens_details?.cache_creation_tokens),
     // As in the SDK, a zero 1-hour count is not reported.
     tokens_cache_write_1h:
       count(u.cache_creation?.ephemeral_1h_input_tokens) || undefined,
@@ -102,8 +106,13 @@ export function usageDetailsOf(u: any): UsageDetails {
       typeof u.service_tier === 'string' && u.service_tier
         ? u.service_tier
         : undefined,
+    // Bounded by the collector's cost column (Numeric(10, 6)): a larger
+    // value would fail the insert and lose the whole event.
     provider_cost:
-      typeof u.cost === 'number' && Number.isFinite(u.cost) && u.cost >= 0
+      typeof u.cost === 'number' &&
+      Number.isFinite(u.cost) &&
+      u.cost >= 0 &&
+      u.cost < MAX_PROVIDER_COST
         ? u.cost
         : undefined,
   };

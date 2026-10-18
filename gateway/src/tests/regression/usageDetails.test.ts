@@ -293,6 +293,37 @@ describe('OpenRouter', () => {
       cost_source: 'provider_reported',
     });
   });
+
+  test('a cost too large for the collector is not sent', async () => {
+    upstream(/openrouter\.ai\/api\/v1\/chat\/completions$/, () =>
+      json({
+        id: 'gen-2',
+        object: 'chat.completion',
+        created: 1,
+        model: 'openai/gpt-4o',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Hi' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 100, completion_tokens: 10, cost: 1e9 },
+      })
+    );
+    await post(
+      app,
+      '/v1/chat/completions',
+      chatBody({ model: 'openai/gpt-4o' }),
+      {
+        'x-portkey-provider': 'openrouter',
+        authorization: 'Bearer sk-or-regression',
+      }
+    );
+    const ev = await telemetryEvent();
+    expect(ev).toMatchObject({ vendor: 'openrouter', tokens_in: 100 });
+    expect(details(ev)).toEqual({});
+  });
 });
 
 describe('Anthropic', () => {
@@ -462,7 +493,7 @@ describe('Anthropic', () => {
     });
   });
 
-  test('Responses adapter: cached tokens kept, echoed tier not reported', async () => {
+  test('Responses adapter: cache reads and writes kept, echoed tier and filled-in reasoning not reported', async () => {
     upstream(/api\.anthropic\.com\/v1\/messages$/, () => json(message(usage)));
     const res = await post(
       app,
@@ -473,13 +504,45 @@ describe('Anthropic', () => {
     const out: any = await res.json();
     // The adapter echoes the requested tier; Anthropic never served "flex".
     expect(out.service_tier).toBe('flex');
+    expect(out.usage.input_tokens_details).toEqual({
+      cached_tokens: 1000,
+      cache_creation_tokens: 600,
+    });
     const ev = await telemetryEvent();
     expect(ev).toMatchObject({
       api_surface: 'responses',
       tokens_in: TOKENS_IN,
       tokens_out: 20,
     });
-    expect(details(ev)).toEqual({ tokens_cached: 1000, tokens_reasoning: 0 });
+    // Anthropic reports no reasoning count; the adapter's 0 is not sent.
+    expect(details(ev)).toEqual({
+      tokens_cached: 1000,
+      tokens_cache_write: 600,
+    });
+  });
+
+  test('streaming Responses adapter: cache writes kept', async () => {
+    upstream(/api\.anthropic\.com\/v1\/messages$/, () =>
+      stream({ output_tokens: 20 })
+    );
+    const res = await post(
+      app,
+      '/v1/responses',
+      { model: MODEL, input: 'Hi', stream: true },
+      { 'x-portkey-provider': 'anthropic', 'x-api-key': 'sk-ant-regression' }
+    );
+    await res.text();
+    const ev = await telemetryEvent();
+    expect(ev).toMatchObject({
+      api_surface: 'responses',
+      stream: true,
+      tokens_in: TOKENS_IN,
+      tokens_out: 20,
+    });
+    expect(details(ev)).toEqual({
+      tokens_cached: 1000,
+      tokens_cache_write: 600,
+    });
   });
 });
 
@@ -516,6 +579,20 @@ describe('Bedrock', () => {
       tokens_cached: 500,
       tokens_cache_write: 300,
     });
+  });
+
+  test('chat (Converse) without caching: no cached count, as in the SDK', async () => {
+    upstream(/\/converse$/, () =>
+      json({
+        output: { message: { role: 'assistant', content: [{ text: 'Hi' }] } },
+        stopReason: 'end_turn',
+        usage: { inputTokens: 30, outputTokens: 5, totalTokens: 35 },
+      })
+    );
+    await post(app, '/v1/chat/completions', chatBody(), headers);
+    const ev = await telemetryEvent();
+    expect(ev).toMatchObject({ tokens_in: 30, tokens_out: 5 });
+    expect(details(ev)).toEqual({});
   });
 });
 
@@ -580,5 +657,22 @@ describe('Vertex AI (Gemini)', () => {
     const ev = await telemetryEvent();
     expect(ev).toMatchObject({ stream: true, ...expected });
     expect(details(ev)).toEqual(expectedDetails);
+  });
+
+  test("no thinking or cache: the transform's zeros are not sent", async () => {
+    upstream(/:generateContent$/, () =>
+      json({
+        ...gemini('Hi', false),
+        usageMetadata: {
+          promptTokenCount: 900,
+          candidatesTokenCount: 40,
+          totalTokenCount: 940,
+        },
+      })
+    );
+    await post(app, '/v1/chat/completions', chatBody(), headers);
+    const ev = await telemetryEvent();
+    expect(ev).toMatchObject({ tokens_in: 900, tokens_out: 40 });
+    expect(details(ev)).toEqual({});
   });
 });

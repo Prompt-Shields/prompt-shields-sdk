@@ -136,7 +136,7 @@ describe('usage and cached tokens', () => {
     });
   });
 
-  test('Responses JSON reads cached tokens from Anthropic-style usage', () => {
+  test('Responses JSON reads cached and cache-write tokens from Anthropic-style usage', () => {
     const out: any = transformChatCompletionsToResponses(
       chatResponse(
         { role: 'assistant', content: 'hi' },
@@ -148,7 +148,8 @@ describe('usage and cached tokens', () => {
     );
     expect(out.usage).toEqual({
       input_tokens: 100,
-      input_tokens_details: { cached_tokens: 50 },
+      // cache writes (PS fork, #9) are only added when there are any
+      input_tokens_details: { cached_tokens: 50, cache_creation_tokens: 30 },
       output_tokens: 20,
       output_tokens_details: { reasoning_tokens: 0 },
       total_tokens: 120,
