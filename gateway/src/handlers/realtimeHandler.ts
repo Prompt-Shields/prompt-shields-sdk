@@ -9,6 +9,7 @@ import {
   getURLForOutgoingConnection,
 } from './websocketUtils';
 import { RealtimeLlmEventParser } from '../services/realtimeLlmEventParser';
+import { GatewayError } from '../errors/GatewayError';
 
 const getOutgoingWebSocket = async (url: string, options: RequestInit) => {
   let outgoingWebSocket: WebSocket | null = null;
@@ -36,7 +37,7 @@ export async function realTimeHandler(c: Context): Promise<Response> {
     ) as Options;
     const provider = providerOptions.provider ?? '';
     const apiConfig: ProviderAPIConfig = Providers[provider].api;
-    const url = getURLForOutgoingConnection(
+    const url = await getURLForOutgoingConnection(
       apiConfig,
       providerOptions,
       c.req.url,
@@ -76,6 +77,13 @@ export async function realTimeHandler(c: Context): Promise<Response> {
     });
   } catch (err: any) {
     console.error('realtimeHandler error: ', err.message);
+    // PS fork (security): a refused upstream URL is the caller's error.
+    if (err instanceof GatewayError) {
+      return new Response(
+        JSON.stringify({ status: 'failure', message: err.message }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
     return new Response(
       JSON.stringify({
         status: 'failure',

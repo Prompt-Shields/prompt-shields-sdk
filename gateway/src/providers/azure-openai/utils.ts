@@ -4,6 +4,7 @@ import { OpenAIErrorResponseTransform } from '../openai/utils';
 import { ErrorResponse } from '../types';
 import { Environment } from '../../utils/env';
 import { GatewayError } from '../../errors/GatewayError';
+import { upstreamFetch } from '../../utils/fetch';
 
 // Prompt Shields: callers pick `x-portkey-azure-auth-mode` per request, and
 // `managed` / `workload` authenticate as the gateway host's own Azure
@@ -191,7 +192,7 @@ export async function getAccessTokenFromEntraId(
       grant_type: 'client_credentials',
     });
 
-    const response = await fetch(url, {
+    const response = await upstreamFetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -218,7 +219,7 @@ export async function getAzureManagedIdentityToken(
   clientId?: string
 ) {
   try {
-    const response = await fetch(
+    const response = await upstreamFetch(
       `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encodeURIComponent(resource)}${clientId ? `&client_id=${encodeURIComponent(clientId)}` : ''}`,
       {
         method: 'GET',
@@ -259,7 +260,7 @@ export async function getAzureWorkloadIdentityToken(
       grant_type: 'client_credentials',
     });
 
-    const response = await fetch(url, {
+    const response = await upstreamFetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',

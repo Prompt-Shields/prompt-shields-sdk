@@ -16,6 +16,7 @@ import {
 import BedrockAPIConfig from './api';
 import { ProviderConfig, RequestHandler } from '../../providers/types';
 import { Options } from '../../types/requestBody';
+import { upstreamFetch } from '../../utils/fetch';
 
 class AwsMultipartUploadHandler {
   private bucket: string;
@@ -58,7 +59,10 @@ class AwsMultipartUploadHandler {
     });
 
     // Step 5: Send Request
-    const response = await fetch(this.url.toString(), { method, headers });
+    const response = await upstreamFetch(this.url.toString(), {
+      method,
+      headers,
+    });
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error(
@@ -184,7 +188,7 @@ class AwsMultipartUploadHandler {
       transformedRequestUrl: partUrl.toString(),
     });
 
-    const response = await fetch(partUrl.toString(), {
+    const response = await upstreamFetch(partUrl.toString(), {
       method,
       headers,
       body: partData,
@@ -230,7 +234,7 @@ class AwsMultipartUploadHandler {
       transformedRequestUrl: completeUrl.toString(),
     });
 
-    const response = await fetch(completeUrl.toString(), {
+    const response = await upstreamFetch(completeUrl.toString(), {
       method,
       headers,
       body: payload,

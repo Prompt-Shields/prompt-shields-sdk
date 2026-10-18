@@ -3,6 +3,7 @@ import { ErrorResponse, RequestHandler } from '../types';
 import { generateErrorResponse } from '../utils';
 import { DEEPGRAM_BASE_URL } from './api';
 import { DeepgramErrorResponseTransform } from './utils';
+import { upstreamFetch } from '../../utils/fetch';
 
 const DEFAULT_MODEL = 'nova-3';
 
@@ -66,7 +67,7 @@ export const DeepgramCreateTranscriptionRequestHandler: RequestHandler<
   if (!(file instanceof Blob)) {
     return errorResponse('`file` is required', 400);
   }
-  return fetch(
+  return upstreamFetch(
     `${DEEPGRAM_BASE_URL}/listen?${getDeepgramListenQuery(requestBody)}`,
     {
       method: 'POST',

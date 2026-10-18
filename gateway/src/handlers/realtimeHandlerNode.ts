@@ -6,6 +6,7 @@ import Providers from '../providers';
 import { Options } from '../types/requestBody';
 import { RealtimeLlmEventParser } from '../services/realtimeLlmEventParser';
 import { WSContext, WSEvents } from 'hono/ws';
+import { getURLForOutgoingConnection, toWebSocketURL } from './websocketUtils';
 
 export async function realTimeHandlerNode(
   c: Context
@@ -18,20 +19,16 @@ export async function realTimeHandlerNode(
     const provider = camelCaseConfig?.provider ?? '';
     const apiConfig: ProviderAPIConfig = Providers[provider].api;
     const providerOptions = camelCaseConfig as Options;
-    const baseUrl = apiConfig.getBaseURL({
-      providerOptions,
-      c,
-      gatewayRequestURL: c.req.url,
-    });
-    const endpoint = apiConfig.getEndpoint({
-      c,
-      providerOptions,
-      fn: 'realtime',
-      gatewayRequestBodyJSON: {},
-      gatewayRequestURL: c.req.url,
-    });
-    let url = `${baseUrl}${endpoint}`;
-    url = url.replace('https://', 'wss://');
+    // PS fork (security): getBaseURL may be async, and the URL now passes
+    // isSafeUpstreamURL and the base-origin check before any connection.
+    const url = toWebSocketURL(
+      await getURLForOutgoingConnection(
+        apiConfig,
+        providerOptions,
+        c.req.url,
+        c
+      )
+    );
     const headers = await apiConfig.headers({
       c,
       providerOptions,
@@ -53,6 +50,8 @@ export async function realTimeHandlerNode(
 
     const outgoingWebSocket = new WebSocket(url, {
       headers,
+      // PS fork (security): ws's default, stated: never follow a redirect.
+      followRedirects: false,
     });
     const eventParser = new RealtimeLlmEventParser();
 
