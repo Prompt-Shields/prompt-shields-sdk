@@ -232,7 +232,9 @@ class PartnerCredential(Base):
     __tablename__ = "partner_credentials"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
-    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    tenant_id = Column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     partner_name = Column(Text, nullable=False)
     client_id = Column(Text, nullable=False, unique=True)
     client_secret_hash = Column(Text, nullable=False)
@@ -266,9 +268,15 @@ class PartnerAuditLog(Base):
     __tablename__ = "partner_audit_log"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
-    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    tenant_id = Column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     # NULL for tenant registry reads (no partner involved).
-    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True)
+    partner_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("partner_credentials.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     # SHA-256 lookup prefix of the caller's API key, never the key itself.
     api_key_prefix = Column(Text)
     endpoint = Column(Text, nullable=False)

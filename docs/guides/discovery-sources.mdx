@@ -70,7 +70,7 @@ jobs:
       contents: read
       security-events: write   # only needed with upload-sarif: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Prompt-Shields/prompt-shields-sdk@main   # pin a tag or commit SHA
         with:
           exclude: |
@@ -87,7 +87,7 @@ jobs:
 | `fail-on` | | Kinds, vendors or `any`; the job fails after the SARIF upload when one matches. |
 | `sarif-file` | `ps-scan.sarif` | Where the SARIF report is written. |
 | `upload-sarif` | `false` | Upload to code scanning (category `ps-scan`). |
-| `python-version` | `3.12` | Python used to run ps-scan. |
+| `python-version` | `3.12` | Python used to run ps-scan. The action runs `actions/setup-python`, so later steps in the job see this interpreter as `python`. |
 
 Outputs: `sarif-file`, `findings` (count) and `failed` (`true` when `fail-on` matched).
 

@@ -6,13 +6,11 @@ Upstream provider clients are constructed but never invoked.
 from unittest.mock import MagicMock
 
 import pytest
-
 from prompt_shields import (
     ShieldsAnthropic,
     ShieldsClient,
     ShieldsOpenAI,
 )
-
 
 # --- construction ---------------------------------------------------------
 

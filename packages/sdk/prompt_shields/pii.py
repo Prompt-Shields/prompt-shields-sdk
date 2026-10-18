@@ -9,7 +9,7 @@ governance. Best-effort — designed as a signal, not a guarantee.
 """
 
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 from prompt_shields.national_ids import contains_nordic_national_id
 

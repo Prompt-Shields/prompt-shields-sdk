@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from typing import TypedDict, NotRequired, Literal
-
+from typing import Literal, NotRequired, TypedDict
 
 # Requested quality intent — an *intent*, never a model name. The gateway
 # maps intent to a concrete model group; the SDK only expresses the hint.

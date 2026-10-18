@@ -40,7 +40,11 @@ inputs:
     required: false
     default: "false"
   python-version:
-    description: Python used to run ps-scan (3.11 or newer).
+    description: >-
+      Python used to run ps-scan (3.11 or newer). The action runs
+      actions/setup-python, which leaves this interpreter as `python` on PATH
+      for the rest of the job; steps after this action that rely on a
+      different Python should run their own setup-python.
     required: false
     default: "3.12"
 
@@ -59,7 +63,7 @@ runs:
   using: composite
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ inputs.python-version }}
 
