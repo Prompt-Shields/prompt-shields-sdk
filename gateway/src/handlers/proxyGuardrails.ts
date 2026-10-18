@@ -38,6 +38,10 @@ const HOOK_FIELDS = [
   'output_guardrails',
   'default_input_guardrails',
   'default_output_guardrails',
+  'inputMutators',
+  'outputMutators',
+  'input_mutators',
+  'output_mutators',
 ];
 
 const MAX_CONFIG_DEPTH = 32;
@@ -60,14 +64,24 @@ export function configHasHooks(config: any, depth = 0): boolean {
     : false;
 }
 
+/**
+ * The request path with the proxy route prefix removed. Shared with
+ * `ProviderContext.getProxyPath` so the path classified here is exactly the
+ * path the provider is sent (a `/v1/proxy` anywhere in the path is cut, as
+ * upstream does: `/v1/chat/v1/proxy/completions` reaches `/v1/chat/completions`).
+ */
+export function stripProxyEndpointPath(pathname: string): string {
+  const proxyEndpointPath =
+    pathname.indexOf('/v1/proxy') > -1 ? '/v1/proxy' : '/v1';
+  return pathname.replace(proxyEndpointPath, '');
+}
+
 /** The path the provider receives, as `ProviderContext.getProxyPath` cuts it. */
 export function proxiedPath(requestURL: string): string {
-  const pathname = new URL(requestURL).pathname;
-  const prefix = /^\/v1\/proxy(?=\/|$)/.test(pathname) ? '/v1/proxy' : '/v1';
-  const rest = pathname.startsWith(prefix)
-    ? pathname.slice(prefix.length)
-    : pathname;
-  return rest.replace(/\/+$/, '');
+  return stripProxyEndpointPath(new URL(requestURL).pathname).replace(
+    /\/+$/,
+    ''
+  );
 }
 
 const isPlainObject = (v: unknown): v is Record<string, any> =>
@@ -102,7 +116,8 @@ const PROXY_HOOK_ROUTES: {
     body: (b) => isTextOrList(b.prompt),
   },
   {
-    path: /(^|\/)messages$/,
+    // Not the Assistants `threads/{id}/messages`, which reads `content`.
+    path: /^(?!.*\/threads\/).*(^|\/)messages$/,
     fn: 'messages',
     body: (b) => Array.isArray(b.messages) && b.messages.length > 0,
   },

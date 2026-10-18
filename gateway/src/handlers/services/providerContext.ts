@@ -9,6 +9,7 @@ import Providers from '../../providers';
 import { RequestContext } from './requestContext';
 import { ANTHROPIC, AZURE_OPEN_AI } from '../../globals';
 import { GatewayError } from '../../errors/GatewayError';
+import { stripProxyEndpointPath } from '../proxyGuardrails';
 
 export class ProviderContext {
   constructor(private provider: string) {
@@ -65,9 +66,8 @@ export class ProviderContext {
     let reqURL = new URL(context.honoContext.req.url);
     let reqPath = reqURL.pathname;
     const reqQuery = reqURL.search;
-    const proxyEndpointPath =
-      reqURL.pathname.indexOf('/v1/proxy') > -1 ? '/v1/proxy' : '/v1';
-    reqPath = reqPath.replace(proxyEndpointPath, '');
+    // PS fork (security): the same cut the proxy guardrails classify on.
+    reqPath = stripProxyEndpointPath(reqPath);
     // PS fork: `/v1/proxy.evil.com/x` would leave `.evil.com/x`, which
     // appended to a bare-host base URL (`https://fal.run`) changes the host
     // the provider's credentials are sent to.

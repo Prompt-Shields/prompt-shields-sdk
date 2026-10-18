@@ -298,6 +298,73 @@ describe('proxied requests the guardrails cannot inspect fail closed', () => {
     );
   });
 
+  test('a /v1/proxy spliced into the path is classified as sent', async () => {
+    // Upstream cuts the first `/v1/proxy` anywhere in the path, so this
+    // reaches Anthropic's /v1/chat/completions, not a Completions endpoint.
+    upstream(/.*/, () => chatOk());
+    const res = await post(
+      app,
+      '/v1/chat/v1/proxy/completions',
+      {
+        model: 'claude-sonnet-4-5',
+        prompt: 'hello',
+        messages: [{ role: 'user', content: 'the SECRET' }],
+      },
+      config({
+        provider: 'anthropic',
+        api_key: 'sk-ant-regression',
+        input_guardrails: blockWord('SECRET'),
+      })
+    );
+    expect(res.status).toBe(446);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('an Assistants thread message with a messages field is a 400', async () => {
+    upstream(/.*/, () => json({}));
+    await expect400(
+      await post(
+        app,
+        '/v1/proxy/threads/t1/messages',
+        {
+          role: 'user',
+          content: 'the SECRET',
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+        INPUT_GUARD
+      )
+    );
+  });
+
+  test('mutators alone keep a fallback from proxying an unknown path', async () => {
+    upstream(/.*/, () => json({}));
+    await expect400(
+      await post(
+        app,
+        '/v1/proxy/assistants',
+        { name: 'call 555-1234' },
+        config({
+          strategy: { mode: 'fallback' },
+          targets: [
+            { provider: 'openai', api_key: 'sk-a' },
+            {
+              provider: 'openai',
+              api_key: 'sk-b',
+              input_mutators: [
+                {
+                  'default.regexReplace': {
+                    rule: '\\d{3}-\\d{4}',
+                    redactText: '[N]',
+                  },
+                },
+              ],
+            },
+          ],
+        })
+      )
+    );
+  });
+
   test('a fallback cannot reach an unguarded target first', async () => {
     upstream(/.*/, () => json({}));
     await expect400(
