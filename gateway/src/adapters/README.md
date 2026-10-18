@@ -91,6 +91,46 @@ For them a Messages request is translated straight to a Responses request,
 sent to the provider's native `/responses`, and the Responses JSON or SSE is
 translated back to Messages. `routesMessagesViaResponses` decides per target.
 
+Routing is decided per target: by model name, unless the target sets
+`messages_via_responses` (boolean, in the config) or the request sends
+`x-portkey-messages-via-responses: true|false`. `true` forces the route,
+e.g. for an Azure deployment named `prod-coder` that serves a codex model;
+`false` keeps a target on the Chat Completions adapter. The config key wins
+over the header; only `openai` and `azure-openai` targets are ever routed.
+
+| Messages                                           | Responses                                                                                           |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `thinking` enabled                                 | `reasoning.summary: auto` + `include: ["reasoning.encrypted_content"]`                              |
+| `thinking` / `redacted_thinking` from this adapter | `reasoning` item (`encrypted_content`), same provider only                                          |
+| `thinking` signed by Anthropic                     | dropped (never sent to OpenAI)                                                                      |
+| `web_search_*` tool                                | `web_search` tool (`allowed_domains`, `user_location`; `max_uses` dropped; `blocked_domains` → 400) |
+| other server tools, Anthropic-defined client tools | dropped; `tool_choice` naming one → 400                                                             |
+| `tool_result` with images / PDFs                   | `function_call_output` with `input_text` / `input_image` / `input_file` parts                       |
+
+**Thinking round-trip.** With `store: false` the provider keeps no
+reasoning between turns, so the encrypted reasoning travels in the thinking
+block: `signature` (or `redacted_thinking.data` when there is no summary) is
+`ps-rsn1:<provider>:<encrypted_content>`. Messages clients return it
+verbatim, and the next request turns it back into a `reasoning` item. The
+prefix contains `:`, which a base64 Anthropic signature never does, so an
+Anthropic signature is never sent to OpenAI. The provider tag keeps OpenAI
+reasoning away from Azure and back (neither can decrypt the other's), e.g.
+in a fallback config; that reasoning is dropped instead. Two OpenAI targets
+in different organisations share the tag, so a load balance across them can
+still get a decryption error; keep such conversations on one organisation.
+These signatures mean nothing to Anthropic, so the gateway drops such
+thinking blocks before sending a conversation to a native Messages target
+(Anthropic, Bedrock, Vertex, ...), e.g. on a fallback from this route. The
+`x-portkey-messages-via-responses: true` header is ignored for a target with
+guardrails or mutators, which do not run on the Responses route; the config
+key still applies.
+
+**Web search.** Results carry the source URLs the provider returned
+(`include: ["web_search_call.action.sources"]`), with the URL as the title
+and an empty `encrypted_content`; text citations are not mapped. Past
+`server_tool_use` / `web_search_tool_result` blocks in the history are not
+sent back (their findings are in the assistant text).
+
 ## Adding a New Adapter
 
 1. Create a folder: `src/adapters/{api-name}/`

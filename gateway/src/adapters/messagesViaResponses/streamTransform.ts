@@ -4,18 +4,22 @@
  * `response.created` opens the message; reasoning summary, output text and
  * function-call items each become one content block (thinking, text,
  * tool_use), opened on their first content and closed when the item is
- * done. `response.completed` / `response.incomplete` close the message with
- * usage and the stop reason. A failed response or an `error` event becomes
+ * done. A finished reasoning item's encrypted content becomes the thinking
+ * block's `signature_delta` (or a `redacted_thinking` block when it had no
+ * summary), and a finished `web_search_call` a `server_tool_use` +
+ * `web_search_tool_result` pair. `response.completed` /
+ * `response.incomplete` close the message with usage and the stop reason. A failed response or an `error` event becomes
  * an Anthropic `error` event, and so does an upstream that ends without a
  * terminal event, so the truncation stays visible to the client and to
  * telemetry (no message_stop is invented).
  */
 
 import { randomUUID } from 'crypto';
-import { toMessagesUsage } from '../shared';
 import {
-  normalizeResponsesUsage,
+  messagesUsage,
+  reasoningBlock,
   responsesStopReason,
+  webSearchBlocks,
 } from './responseTransform';
 
 type BlockType = 'thinking' | 'text' | 'tool_use';
@@ -35,10 +39,17 @@ export interface ResponsesToMessagesStreamState {
     sentArgs?: boolean;
   } | null;
   hasToolUse: boolean;
+  /** Provider that issued the encrypted reasoning (bound into signatures) */
+  provider: string;
+  webSearches: number;
 }
 
-export function createResponsesToMessagesStreamState(): ResponsesToMessagesStreamState {
+export function createResponsesToMessagesStreamState(
+  provider: string = ''
+): ResponsesToMessagesStreamState {
   return {
+    provider,
+    webSearches: 0,
     started: false,
     completed: false,
     messageId: '',
@@ -134,6 +145,36 @@ function blockFor(
       ? { type: 'thinking', thinking: '', signature: '' }
       : { type: 'text', text: '' }
   );
+}
+
+/** A whole content block (start, optional input delta, stop). */
+function emitBlock(
+  state: ResponsesToMessagesStreamState,
+  events: string[],
+  block: Record<string, any>
+) {
+  close(state, events);
+  const index = state.nextIndex++;
+  const { input, ...rest } = block;
+  const hasInput = block.type === 'server_tool_use';
+  events.push(
+    sse('content_block_start', {
+      index,
+      content_block: hasInput ? { ...rest, input: {} } : block,
+    })
+  );
+  if (hasInput) {
+    events.push(
+      sse('content_block_delta', {
+        index,
+        delta: {
+          type: 'input_json_delta',
+          partial_json: JSON.stringify(input),
+        },
+      })
+    );
+  }
+  events.push(sse('content_block_stop', { index }));
 }
 
 function errorEvent(
@@ -256,6 +297,33 @@ export function transformResponsesStreamChunk(
           })
         );
       }
+      if (item?.type === 'reasoning') {
+        start(state, events);
+        const block = reasoningBlock(item, state.provider);
+        const signature = block?.signature || block?.data;
+        if (
+          state.open?.type === 'thinking' &&
+          state.open.itemId === (item.id ?? state.open.itemId)
+        ) {
+          if (signature) {
+            events.push(
+              sse('content_block_delta', {
+                index: state.open.index,
+                delta: { type: 'signature_delta', signature },
+              })
+            );
+          }
+        } else if (block) {
+          // No summary was streamed: the whole block at once (redacted when
+          // the reasoning has no summary at all).
+          emitBlock(state, events, block);
+        }
+      } else if (item?.type === 'web_search_call') {
+        start(state, events);
+        const blocks = webSearchBlocks(item);
+        if (blocks.length) state.webSearches++;
+        for (const block of blocks) emitBlock(state, events, block);
+      }
       if (!item?.id || state.open?.itemId === item.id) close(state, events);
       break;
     }
@@ -265,9 +333,7 @@ export function transformResponsesStreamChunk(
       start(state, events, ev.response);
       close(state, events);
       state.completed = true;
-      const usage = toMessagesUsage(
-        normalizeResponsesUsage(ev.response?.usage)
-      );
+      const usage = messagesUsage(ev.response?.usage, state.webSearches);
       events.push(
         sse('message_delta', {
           delta: {

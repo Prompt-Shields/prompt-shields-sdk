@@ -208,6 +208,35 @@ export interface UsageSummary {
   period: UsagePeriod;
 }
 
+/** A telemetry source. `unidentified`: events sent without delivery metadata. */
+export type TelemetrySource = OpenString<'sdk' | 'gateway' | 'otel' | 'unidentified'>;
+
+/** Telemetry delivery for one source. */
+export interface SourceCoverage {
+  source: TelemetrySource;
+  /** Distinct clients seen (SDK or gateway processes, OTel services). */
+  clients: number;
+  /** Events the collector stored. */
+  receivedEvents: number;
+  /** Events known lost: client-reported drops, and for `otel` spans the collector rejected. */
+  droppedEvents: number;
+  /** Events a client queued that neither arrived nor were reported dropped. */
+  unaccountedEvents: number;
+  /** received / (received + dropped + unaccounted), 0 to 1; `null` when unknown. */
+  coverage: number | null;
+  /** ISO 8601 timestamp. */
+  lastSeen: string | null;
+}
+
+/** How complete the tenant's usage telemetry is, overall and per source. */
+export interface TelemetryCoverage {
+  coverage: number | null;
+  receivedEvents: number;
+  droppedEvents: number;
+  unaccountedEvents: number;
+  sources: SourceCoverage[];
+}
+
 /** One entry in the delta feed. */
 export interface ChangeEvent {
   changeType: ChangeType;

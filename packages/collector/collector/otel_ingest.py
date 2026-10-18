@@ -8,6 +8,7 @@ for now; protobuf requests get 415.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from uuid import UUID
 
@@ -19,7 +20,16 @@ from collector.auth import resolve_tenant
 from collector.data_flows import record_event_flows
 from collector.dedup import find_or_create_asset
 from collector.embeddings import build_asset_text, get_embedding
-from collector.otel_mapping import GenAISpan, count_spans, iter_spans, map_span
+from collector.loss_accounting import OtelCounts, otel_client_id, record_otel
+from collector.otel_mapping import (
+    GenAISpan,
+    count_spans,
+    invalid_attributes,
+    is_genai_span,
+    iter_spans,
+    map_span,
+    safe_attributes,
+)
 from collector.webhooks import AssetChanges
 
 router = APIRouter()
@@ -149,20 +159,79 @@ async def ingest_otel_traces(request: Request):
             400, "Bad Request", "Expected an ExportTraceServiceRequest object"
         )
 
+    db = request.state.db
     if count_spans(payload) > MAX_SPANS:
+        # Exporters do not retry a 413: the GenAI spans in it are lost.
+        counts: dict[str, OtelCounts] = {}
+        for span, resource_attrs in iter_spans(payload):
+            if is_genai_span(safe_attributes(span.get("attributes"))):
+                counts.setdefault(otel_client_id(resource_attrs), OtelCounts()).reject(
+                    "too_large"
+                )
+        await record_otel(db, tenant_id, counts)
         raise _problem(
             413, "Payload Too Large", f"More than {MAX_SPANS} spans in one request"
         )
 
-    mapped: list[GenAISpan] = []
-    for span, resource_attrs in iter_spans(payload):
-        result = map_span(span, resource_attrs)
-        if result is not None:
-            mapped.append(result)
-
+    mapped, counts = classify_spans(payload)
     if mapped:
-        await write_spans(request.state.db, tenant_id, mapped)
+        try:
+            await write_spans(db, tenant_id, mapped)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            for c in counts.values():
+                c.reject("write_failed", c.received)
+                c.received = 0
+            await record_otel(db, tenant_id, counts)
+            raise
+    await record_otel(db, tenant_id, counts)
 
     # ExportTraceServiceResponse: an empty object means full success. Non-GenAI
-    # spans are ignored, not rejected.
+    # spans are ignored, not rejected; GenAI spans that cannot be mapped are
+    # rejected and reported in partialSuccess (OTLP/HTTP spec).
+    rejected = sum(c.rejected.get(NO_VENDOR, 0) for c in counts.values())
+    if rejected:
+        return {
+            "partialSuccess": {
+                "rejectedSpans": rejected,
+                "errorMessage": (
+                    "GenAI spans without gen_ai.provider.name or gen_ai.system"
+                ),
+            }
+        }
     return {}
+
+
+NO_VENDOR = "no_vendor"
+
+
+def classify_spans(
+    payload: dict,
+) -> tuple[list[GenAISpan], dict[str, OtelCounts]]:
+    """Map every span and count, per OTLP client (service), what is stored,
+    rejected (GenAI span without a vendor), ignored (non-GenAI span) and
+    which values were dropped as invalid (#87)."""
+    mapped: list[GenAISpan] = []
+    counts: dict[str, OtelCounts] = {}
+    for span, resource_attrs in iter_spans(payload):
+        client_id = otel_client_id(resource_attrs)
+        c = counts.setdefault(client_id, OtelCounts())
+        if not is_genai_span(safe_attributes(span.get("attributes"))):
+            c.ignore({"span:non_genai": 1})
+            continue
+        result = map_span(span, resource_attrs)
+        if result is None:
+            c.reject(NO_VENDOR)
+            continue
+        invalid = invalid_attributes(span)
+        for key, value in (
+            ("gen_ai.request.model", result.requested_model),
+            ("gen_ai.response.model", result.served_model),
+        ):
+            if value is not None and _bounded_model(value) is None:
+                invalid[f"{key}:invalid"] = 1
+        c.ignore(invalid)
+        c.received += 1
+        mapped.append(result)
+    return mapped, counts

@@ -30,6 +30,7 @@ from collector import aibom
 from collector.attestation import add_attestation_summaries, attestation_changes_since
 from collector.audit import record_read
 from collector.lifecycle import LifecycleState, lifecycle_change_for
+from collector.loss_accounting import tenant_coverage
 from collector.partner_auth import (
     PartnerPrincipal,
     require_scope,
@@ -458,6 +459,28 @@ def _usage_summary_dict(row, period: str) -> dict:
         "avg_latency_ms": round(float(latency)) if latency is not None else None,
         "period": period,
     }
+
+
+@router.get("/telemetry/coverage", summary="Telemetry coverage per source")
+async def get_telemetry_coverage(
+    request: Request,
+    response: Response,
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),
+):
+    """How complete the tenant's usage telemetry is (#87): events received
+    against events the SDK, gateway and OTLP sources report or were seen to
+    drop, overall and per source. Counts only; no event data."""
+    await _enforce_rate_limit(request, response, principal)
+    data = await tenant_coverage(request.state.db, principal.tenant_id)
+    await _audit(
+        request,
+        principal,
+        "/partner/v1/telemetry/coverage",
+        "GET",
+        200,
+        len(data["sources"]),
+    )
+    return data
 
 
 # ──────────────────────────────────────────────────────────────────────

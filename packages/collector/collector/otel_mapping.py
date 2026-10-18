@@ -179,6 +179,33 @@ def map_span(span: dict, resource_attrs: dict[str, Any]) -> GenAISpan | None:
     )
 
 
+_COUNT_ATTRIBUTES = (
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.prompt_tokens",
+    "gen_ai.usage.output_tokens",
+    "gen_ai.usage.completion_tokens",
+)
+
+
+def invalid_attributes(span: dict) -> dict[str, int]:
+    """Values map_span drops as unusable (stored as null), keyed
+    "<attribute>:invalid" like /ingest/events reports invalid fields (#87):
+    token counts that are not a non-negative INTEGER, and start/end times
+    that give no duration."""
+    attrs = safe_attributes(span.get("attributes"))
+    out: dict[str, int] = {}
+    for key in _COUNT_ATTRIBUTES:
+        if key in attrs and _count(attrs[key]) is None:
+            out[f"{key}:invalid"] = 1
+    if (
+        span.get("startTimeUnixNano") is not None
+        and span.get("endTimeUnixNano") is not None
+        and _duration_ms(span) is None
+    ):
+        out["span.duration:invalid"] = 1
+    return out
+
+
 def _list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
