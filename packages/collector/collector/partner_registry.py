@@ -152,6 +152,10 @@ def _asset_dict(a: AIAsset) -> dict:
         "lifecycle_changed_at": (
             a.lifecycle_changed_at.isoformat() if a.lifecycle_changed_at else None
         ),
+        "retired_by": a.retired_by,
+        "retired_in_use_at": (
+            a.retired_in_use_at.isoformat() if a.retired_in_use_at else None
+        ),
     }
 
 
@@ -595,7 +599,8 @@ async def get_changes(
             "change_type": change_type,
             "asset": _asset_dict(a),
             "changed_at": a.updated_at.isoformat() if a.updated_at else None,
-            # Lifecycle transition since `since`: stale, retired, reactivated, or null.
+            # Lifecycle transition since `since`: stale, retired, reactivated,
+            # retired_in_use (owner-retired asset sighted again), or null.
             "lifecycle_change": lifecycle_change_for(a, since_dt),
             # `changed_fields` requires field-level audit; deferred to Phase 2.
             "changed_fields": None,
