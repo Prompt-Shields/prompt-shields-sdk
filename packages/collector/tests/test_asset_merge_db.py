@@ -23,6 +23,7 @@ from db.models import (
     AIUsageEvent,
     AssetAttestation,
     DataFlow,
+    PartnerAuditLog,
     PartnerCredential,
     RetentionAuditLog,
     RiskMapping,
@@ -362,6 +363,120 @@ def test_cli_parses_dry_run_by_default(monkeypatch, capsys):
     assert seen == {"tenants": None, "apply": True}
     with pytest.raises(SystemExit):
         dedup.main(["merge-duplicates", "--apply", "--dry-run"])
+
+
+# Every table with a foreign key to ai_assets.id, and what the merge does
+# with its rows. A new reference has to be handled in asset_merge (re-point
+# it, or fail the delete) before this list changes.
+ASSET_REFERENCES = {
+    "ai_usage_events": "re-pointed",
+    "data_flows": "folded",
+    "risk_mappings": "moved",
+    "asset_attestations": "survivor only (append-only)",
+}
+
+
+async def test_every_asset_reference_survives_a_merge(env):
+    """Rows in every table that references an asset, on both members of a
+    duplicate pair: after the merge each still exists, now on the survivor;
+    nothing pointed at the duplicate is lost or left dangling."""
+    a = env["a"]
+    async with env["admin"]() as s:
+        fks = (
+            await s.execute(
+                text(
+                    """
+                    SELECT tc.table_name, rc.delete_rule
+                    FROM information_schema.referential_constraints rc
+                    JOIN information_schema.table_constraints tc
+                      ON tc.constraint_name = rc.constraint_name
+                    JOIN information_schema.constraint_column_usage ccu
+                      ON ccu.constraint_name = rc.unique_constraint_name
+                    WHERE ccu.table_name = 'ai_assets' AND ccu.column_name = 'id'
+                    """
+                )
+            )
+        ).all()
+        # No cascade could delete a duplicate's rows behind the merge's back.
+        assert {t for t, _ in fks} == set(ASSET_REFERENCES)
+        assert {rule for _, rule in fks} == {"NO ACTION"}
+
+        survivor = _asset(a, age_days=3, use_case_name="refs")
+        dup = _asset(a, age_days=2, use_case_name="refs")
+        s.add_all([survivor, dup])
+        await s.flush()
+        partner = (await s.execute(select(PartnerCredential.id))).scalar_one()
+        for i, asset in enumerate((survivor, dup)):
+            s.add_all(
+                [
+                    AIUsageEvent(tenant_id=a, asset_id=asset.id, source="sdk", tokens_in=1),
+                    DataFlow(
+                        tenant_id=a, asset_id=asset.id, source_system=f"src{i}",
+                        destination_system="openai/gpt-4o", direction="input", event_count=1,
+                    ),
+                    RiskMapping(
+                        tenant_id=a, asset_id=asset.id, risk_category=f"c{i}",
+                        risk_level="low", rule_id=f"rule{i}", status="suggested",
+                        source="rules",
+                    ),
+                    RiskMapping(  # hand-entered, no rule id
+                        tenant_id=a, asset_id=asset.id, risk_category="manual",
+                        risk_level="high",
+                    ),
+                    WebhookDelivery(
+                        tenant_id=a, subscription_id=env["sub"], event_id=uuid.uuid4(),
+                        event_type="asset.created", asset_id=asset.id,
+                        payload={"data": {"asset": {"id": str(asset.id)}}},
+                    ),
+                    PartnerAuditLog(
+                        tenant_id=a, partner_id=partner, endpoint="/partner/v1/assets",
+                        method="GET", status_code=200, asset_ids=[asset.id],
+                    ),
+                ]
+            )
+        s.add(
+            AssetAttestation(
+                tenant_id=a, asset_id=survivor.id, field="owner", state="attested",
+                attested_by="x@test.com", actor_type="tenant",
+            )
+        )
+        await s.commit()
+        survivor, dup = survivor.id, dup.id
+
+    async def rows(s, model):
+        return (await s.execute(select(func.count()).select_from(model))).scalar_one()
+
+    tables = (AIUsageEvent, DataFlow, RiskMapping, AssetAttestation, PartnerAuditLog)
+    async with env["admin"]() as s:
+        before = {m.__tablename__: await rows(s, m) for m in tables}
+        before_deliveries = await rows(s, WebhookDelivery)
+
+    async with await _scoped(env, a) as s:
+        result = await asset_merge.merge_tenant_duplicates(s, a, apply=True)
+    assert [(g.survivor, g.merged) for g in result.groups] == [(survivor, [dup])]
+
+    async with env["admin"]() as s:
+        assert await s.get(AIAsset, dup) is None
+        assert {m.__tablename__: await rows(s, m) for m in tables} == before
+        # Plus the merge's own asset.changed.
+        assert await rows(s, WebhookDelivery) == before_deliveries + 1
+        for model in (AIUsageEvent, DataFlow, RiskMapping, AssetAttestation, WebhookDelivery):
+            on_dup = select(func.count()).where(model.asset_id == dup)
+            assert (await s.execute(on_dup)).scalar_one() == 0, model.__tablename__
+        assert (
+            await s.execute(
+                select(func.count()).where(AIUsageEvent.asset_id == survivor)
+            )
+        ).scalar_one() == 2
+        assert (
+            await s.execute(select(func.count()).where(DataFlow.asset_id == survivor))
+        ).scalar_one() == 2
+        assert (
+            await s.execute(select(func.count()).where(RiskMapping.asset_id == survivor))
+        ).scalar_one() == 4
+        # What partners read stays as it was read.
+        audit_ids = (await s.execute(select(PartnerAuditLog.asset_ids))).scalars().all()
+        assert sorted(audit_ids) == sorted([[survivor], [dup]])
 
 
 # ──────────────────────────────────────────────────────────────────────
