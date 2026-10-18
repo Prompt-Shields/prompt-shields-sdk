@@ -204,7 +204,7 @@ describe('utils', () => {
     });
   });
 
-  describe.only('setCurrentContentPart', () => {
+  describe('setCurrentContentPart', () => {
     test('chatComplete string request content: should set the current content part', () => {
       const transformedData: Record<string, any> = {
         request: {
@@ -744,5 +744,40 @@ describe('utils', () => {
         ],
       });
     });
+
+    // PS fork (#69): getter and setter address the same (last) choice, and
+    // the setter leaves the original response untouched.
+    test.each(['chatComplete', 'complete'])(
+      '%s response multiple choices: get then set round-trips on the last choice',
+      (requestType) => {
+        const choice = (text: string) =>
+          requestType === 'complete'
+            ? { text }
+            : { message: { role: 'assistant', content: text } };
+        const json = { choices: [choice('first'), choice('second')] };
+        const original = JSON.parse(JSON.stringify(json));
+        const context = { response: { json }, requestType };
+        const transformedData: Record<string, any> = {
+          request: { json: null },
+          response: { json: null },
+        };
+        const { textArray } = getCurrentContentPart(
+          context as PluginContext,
+          'afterRequestHook'
+        );
+        expect(textArray).toEqual(['second']);
+        setCurrentContentPart(
+          context as PluginContext,
+          'afterRequestHook',
+          transformedData,
+          textArray.map((t) => t.toUpperCase())
+        );
+        expect(transformedData.response.json.choices).toEqual([
+          choice('first'),
+          choice('SECOND'),
+        ]);
+        expect(json).toEqual(original);
+      }
+    );
   });
 });

@@ -16,7 +16,7 @@
  * - `default.webhook`: the endpoint receives the raw request body and may
  *   only understand Chat Completions.
  * - `default.addPrefix`, `exa.online`: rewrite `messages` only.
- * - `lasso.classify`, `aporia.validateProject`, `azure.shieldPrompt`,
+ * - `lasso.classify`, `aporia.validateProject`,
  *   `qualifire.toolUseQuality`: read `messages` / `choices` directly.
  * - `crowdstrike-aidr.guardChatCompletion`: sends the body to a Chat
  *   Completions guard API.
@@ -84,6 +84,7 @@ export const RESPONSES_SUPPORTED_CHECKS = new Set([
   'azure.pii',
   'azure.contentSafety',
   'azure.protectedMaterial',
+  'azure.shieldPrompt',
   'promptsecurity.protectPrompt',
   'promptsecurity.protectResponse',
   'panw-prisma-airs.intercept',

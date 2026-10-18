@@ -10,8 +10,6 @@ import time
 import uuid
 
 import pytest
-from fastapi import HTTPException
-
 from collector.partner_auth import (
     JWT_TTL_SECONDS,
     api_key_prefix_sha256,
@@ -24,7 +22,7 @@ from collector.partner_auth import (
     verify_secret,
 )
 from collector.partner_rate_limit import FixedWindowRateLimiter
-
+from fastapi import HTTPException
 
 # ──────────────────────────────────────────────────────────────────────
 # Bcrypt round-trip

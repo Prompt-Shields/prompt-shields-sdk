@@ -57,8 +57,10 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `deployment.yaml`
 - `jest.config.js`
 - `package.json`
+- `plugins/azure/shieldPrompt.ts`
 - `plugins/azure/utils.ts`
 - `plugins/types.ts`
+- `plugins/utils.test.ts`
 - `plugins/utils.ts`
 - `src/globals.ts`
 - `src/handlers/createTranscriptionHandler.ts`
@@ -170,6 +172,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/types/modelResponses.ts`
 - `src/types/requestBody.ts`
 - `src/utils/env.ts`
+- `tests/integration/src/handlers/tryPost.test.ts`
 
 ### How to sync upstream
 
@@ -234,6 +237,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 15. **Fixed** (re-implemented from the Portkey enterprise changelog 2.7, 2.20 and 2.26, #72; not in OSS `main` or 2.0.0): the `memoryCache` write-back (`src/middlewares/cache/index.ts`) only stores a complete result (`isCacheableResponse`: status 200 and `application/json`, so never an SSE or other streamed body, an error or the 246 hooks-failed status; `isCompleteResponseBody`: no `error`, no Anthropic `type: "error"`, no unfinished Responses `status`). It writes back the last attempt (the response the client got) rather than upstream's `requestOptions[0]`, which after a fallback is the failed attempt. Gemini on Google AI Studio and Vertex AI (`src/providers/google/chatComplete.ts`, `src/providers/google-vertex-ai/chatComplete.ts`): with strict OpenAI compliance a candidate that returned function calls finishes with `tool_calls` instead of `stop` (`transformGeminiFinishReason`), in JSON, batch output and streams, where `streamState` remembers per candidate that an earlier chunk carried the calls (`geminiStreamToolCalls`); Vertex streams read each candidate's own finish reason instead of the first candidate's. Anthropic keepalive `ping` events already pass through native `/v1/messages` streams unchanged (no stream transform on that path); a regression test pins it.
 16. **Changed** (#73 follow-ups to 14, fork behaviour; not in OSS 2.0.0): (a) the routing can be forced or disabled per target with the config key `messages_via_responses` (boolean; validated in `src/middlewares/requestValidator/schema/config.ts`, inherited by nested targets in `src/handlers/handlerUtils.ts` like `strict_open_ai_compliance`, `messagesViaResponses` on `Options` in `src/types/requestBody.ts`) or the request header `x-portkey-messages-via-responses: true|false`; the target key wins over the header, and only `openai` / `azure-openai` targets are ever routed. (b) With `thinking` enabled the request asks for `reasoning.encrypted_content`; the payload is returned in the thinking `signature` (or `redacted_thinking.data`) as `ps-rsn1:<provider>:<payload>` and sent back as a `reasoning` item only to the provider that issued it; Anthropic signatures are never forwarded. (c) `web_search_*` maps to the Responses `web_search` tool (`allowed_domains`, `user_location`; `max_uses` dropped; `blocked_domains` → 400), and `web_search_call` output to `server_tool_use` + `web_search_tool_result`; a `tool_choice` naming a dropped or unknown tool is a 400 `invalid_request_error` before any upstream call. (d) `tool_result` content with images or documents is sent as `function_call_output` input parts.
 17. **Fixed** (security, #73; ported from OSS 2.0.0 with additions): guardrails and mutators run on `createModelResponse` (`shouldSkipHook` in `src/middlewares/hooks/index.ts` skipped it, so `/v1/responses` and `/v1/messages` routed via Responses bypassed every hook and default guardrail). `HookSpan` extracts the Responses `input` / `output` text as 2.0.0 does; `plugins/utils.ts` (`getCurrentContentPart` / `setCurrentContentPart`, unchanged upstream) maps the string `input` or the last input item, and the output `output_text` / `refusal` parts, so text checks and redacting mutators work (`requestType` in `plugins/types.ts` gains `createModelResponse`). Fork behaviour: only checks verified on Responses requests (the allowlist `RESPONSES_SUPPORTED_CHECKS` in `src/middlewares/hooks/responsesSupport.ts`) may run there; a target with any other enabled check (`default.webhook`, custom ids, checks reading `messages` / `choices` directly) fails closed with a 400 in `tryPost` rather than the check being skipped; `adaptResponse` keeps `hook_results` and translates a 246 as a success; the Messages → Responses routing uses the target's `override_params.model` when set.
+18. **Fixed** (#69): upstream's `describe.only` in `plugins/utils.test.ts` and `it.only` in `tests/integration/src/handlers/tryPost.test.ts` hid the rest of those files; removed, and CI fails on focused tests. The un-hidden tests showed `getCurrentContentPart` reading `choices[0]` while `setCurrentContentPart` wrote the last choice for `complete` (in place), so with `n > 1` a mutator could copy choice 0's text over the last choice; both now read and write the last choice for `chatComplete` and `complete`, on a copied choice. `azure.shieldPrompt` reads system prompts without assuming `messages` (Responses: `instructions`, then `system` / `developer` input messages) and the user text through the shared getters, so it is on the Responses allowlist.
 
 ## Original License
 

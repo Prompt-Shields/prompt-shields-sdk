@@ -1,12 +1,24 @@
 import uuid
-from datetime import datetime, timezone
-from sqlalchemy import (
-    Column, Text, ARRAY, TIMESTAMP, Boolean, Integer, BigInteger, Numeric, ForeignKey, Index,
-    DDL, UniqueConstraint, event,
-)
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import DeclarativeBase, relationship
+from datetime import UTC, datetime
+
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    ARRAY,
+    DDL,
+    TIMESTAMP,
+    BigInteger,
+    Boolean,
+    Column,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    event,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 def uuid7():
@@ -15,7 +27,7 @@ def uuid7():
 
 
 def utcnow():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):

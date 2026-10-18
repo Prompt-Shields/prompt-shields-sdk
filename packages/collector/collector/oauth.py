@@ -8,18 +8,17 @@ Standards-compliant subset of RFC 6749 Section 4.4:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from db.models import PartnerCredential
 from fastapi import APIRouter, Form, HTTPException, Request
 from sqlalchemy import select
 
 from collector import rls
 from collector.partner_auth import (
-    JWT_TTL_SECONDS,
     issue_access_token,
     verify_secret,
 )
-from db.models import PartnerCredential
 
 router = APIRouter(tags=["Partner OAuth"])
 
@@ -60,7 +59,7 @@ async def token_endpoint(
             },
         )
 
-    if partner.expires_at and partner.expires_at < datetime.now(timezone.utc):
+    if partner.expires_at and partner.expires_at < datetime.now(UTC):
         raise HTTPException(
             status_code=401,
             detail={

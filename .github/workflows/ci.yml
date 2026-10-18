@@ -13,6 +13,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-hygiene:
+    name: No focused tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5.1.0
+      - name: Fail on .only / fit / fdescribe in tests
+        # `jest --ci` does not fail on a focused test: a stray describe.only
+        # silently skips the rest of its file (refs #69). Covers every tracked
+        # JS/TS test file (gateway, packages/partner-ts, ...) and pytest
+        # focus markers.
+        run: |
+          if git grep -nE '\b(describe|it|test)\.only\(|\b(fdescribe|fit|ftest)\(|pytest\.mark\.(only|focus)\b' \
+              -- '*.test.*' '*.spec.*' '*/tests/*' '*/test/*' 'tests/*' 'test/*' '*conftest.py'; then
+            echo "::error::Focused tests found above; remove .only / fit / fdescribe."
+            exit 1
+          fi
+
   sdk:
     name: SDK (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -74,7 +92,10 @@ jobs:
         # the collector's, and alembic is only needed to run migrations.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "packages/collector[dev]" "alembic>=1.13"
+          python -m pip install "packages/collector[dev]" "alembic>=1.13" "ruff==0.17.0"
+      - name: Ruff
+        # Same pinned version and default rule set as the SDK job.
+        run: ruff check packages/collector packages/db
       - name: Create databases
         # ps_user is deliberately NOT a superuser: superusers bypass row-level
         # security, and test_rls_db.py needs the policies to bind.
