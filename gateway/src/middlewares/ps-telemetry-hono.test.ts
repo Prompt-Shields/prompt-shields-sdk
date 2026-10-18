@@ -118,6 +118,24 @@ describe('psTelemetry (Hono adapter)', () => {
     });
     expect(res.status).toBe(200);
   });
+  test('hands the send to waitUntil when there is an execution context', async () => {
+    const app = makeApp((c) => c.json({ model: 'm' }));
+    const waitUntil = jest.fn();
+    await app.request(
+      '/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'm' }),
+      },
+      undefined,
+      { waitUntil, passThroughOnException: () => {}, props: {} } as any
+    );
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+    await waitUntil.mock.calls[0][0];
+    expect(sent.events[0]).toMatchObject({ model: 'm', source: 'gateway' });
+  });
+
   test('never includes provider credentials in the event', async () => {
     const app = makeApp((c) => c.json({ model: 'gpt-4o' }));
     await post(

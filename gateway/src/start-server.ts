@@ -15,6 +15,7 @@ import {
   adminAuthSessionStatusHandler,
   readAdminToken,
 } from './middlewares/adminAuth';
+import { psTelemetrySender } from './middlewares/ps-telemetry';
 
 // Extract the port number from the command line arguments
 const defaultPort = 8787;
@@ -203,6 +204,19 @@ if (!isHeadless) {
 
 // Single-line ready message
 console.log('\n\x1b[32m✨ Ready for connections!\x1b[0m');
+
+// Prompt Shields: on SIGTERM/SIGINT, flush pending ps-telemetry (bounded by
+// PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS; what is left is counted as `shutdown`),
+// then exit. A second signal exits at once.
+let shuttingDown = false;
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => {
+    if (shuttingDown) process.exit(1);
+    shuttingDown = true;
+    server.close();
+    psTelemetrySender.shutdown().finally(() => process.exit(0));
+  });
+}
 
 process.on('uncaughtException', (err) => {
   console.error('Unhandled exception', err);

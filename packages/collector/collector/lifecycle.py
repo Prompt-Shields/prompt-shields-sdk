@@ -37,8 +37,9 @@ Thresholds per discovery source
   later when only its fast source stops seeing it.
 
 Telemetry arriving again moves a stale or retired asset back to `active`
-(see `reactivate`, called from `dedup.find_or_create_asset` and the cloud
-inventory).
+(see `reactivate`, called from `dedup.find_or_create_asset`, the cloud
+inventory and, through `record_sighting`, the provider usage pull, which
+only counts usage from after the asset's last lifecycle change).
 
 Owner-initiated retirement
   An `asset` attestation with state `retired` (collector.attestation) sets
@@ -46,7 +47,8 @@ Owner-initiated retirement
   and `lifecycle_changed_at` (when). The sweep never touches an
   owner-retired asset and new telemetry does not reactivate it: the first
   sighting afterwards sets `retired_in_use_at` instead ("retired asset still
-  in use"), which emits an `asset.changed` webhook from ingest and shows in
+  in use"), which emits an `asset.changed` webhook (from ingest, OTel
+  ingest, the cloud inventory and the provider usage pull) and shows in
   the delta feed as `lifecycle_change: retired_in_use`. Later sightings do
   not raise it again. The owner then either retires the asset again
   (acknowledging the use; this clears `retired_in_use_at`, so the next
@@ -208,6 +210,48 @@ def reactivate(asset: AIAsset, now: datetime) -> bool:
     asset.lifecycle_state = ACTIVE
     asset.lifecycle_changed_at = now
     return True
+
+
+def record_sighting(asset: AIAsset, seen_at: datetime, now: datetime) -> bool:
+    """A source reports that `asset` was in use at `seen_at`. Ingest and the
+    cloud inventory see assets live (`seen_at` is now); the provider usage
+    pull reads past usage buckets, so `seen_at` can lie well before now and
+    a re-pull reports the same buckets again.
+
+    Applies `reactivate`'s rules, but only to use that happened after the
+    asset's last lifecycle change (`lifecycle_changed_at`): usage from
+    before an owner retired the asset is not "still in use", and usage
+    from before the sweep marked it stale or retired was already counted
+    by that sweep. Returns True if `lifecycle_state` changed. Does not
+    touch `last_seen`; the caller keeps that.
+    """
+    changed_at = asset.lifecycle_changed_at
+    if changed_at is not None and seen_at <= changed_at:
+        return False
+    return reactivate(asset, now)
+
+
+async def lock_assets(db: AsyncSession, asset_ids: Iterable[UUID]) -> None:
+    """Lock the rows of `asset_ids` in id order and reload them.
+
+    Id order is the one order every writer that updates several assets in
+    a transaction takes their row locks in (ingest via
+    `dedup.lock_asset_keys`, the cloud inventory and the provider usage
+    pull), so two of them touching the same assets wait for each other
+    instead of deadlocking. populate_existing: updates build on the locked
+    row, not on a version read before the lock (this also does what
+    `lock_for_sighting` does for each of them).
+    """
+    ids = sorted(set(asset_ids))
+    if not ids:
+        return
+    await db.execute(
+        select(AIAsset)
+        .where(AIAsset.id.in_(ids))
+        .order_by(AIAsset.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 async def lock_for_sighting(db: AsyncSession, asset: AIAsset) -> None:

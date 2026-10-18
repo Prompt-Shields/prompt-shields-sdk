@@ -6,10 +6,10 @@ from typing import NamedTuple
 from uuid import UUID
 
 from db.models import AIAsset
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector.lifecycle import lock_for_sighting, reactivate
+from collector.lifecycle import lock_assets, lock_for_sighting, reactivate
 
 CLASSIFICATION_ORDER = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
 
@@ -64,17 +64,31 @@ def _conditions(tenant_id: UUID, key: AssetKey) -> list:
     return conditions
 
 
+# "Oldest" means first created in the registry: `created_at`, then id.
+# Not `first_seen`, which is a claim about the outside world that sources
+# may backdate (the provider usage puller sets it to the start of the
+# earliest usage bucket, days before the pull). Ordering by it let a
+# platform_signal asset created today become the "oldest" match and take
+# over a key whose events had always landed on an existing asset. Creation
+# time only ever grows, so an asset created later can never steal a key's
+# match from an earlier one. Rows without `created_at` (only possible for
+# rows inserted outside the ORM) fall back to `first_seen`.
+OLDEST_FIRST = (
+    func.coalesce(AIAsset.created_at, AIAsset.first_seen).asc(),
+    AIAsset.id.asc(),
+)
+
+
 async def _lookup(db: AsyncSession, tenant_id: UUID, key: AssetKey) -> AIAsset | None:
     # Several assets can match one key, by design: the provider usage puller
     # keeps one platform_signal asset per (project, API key, model), and a
     # key that omits use case/BU/environment matches every asset that sets
-    # them. Pick one deterministically, the oldest, so repeated events for
-    # the key always land on the same asset (and never raise
-    # MultipleResultsFound).
+    # them. Pick one deterministically so repeated events for the key always
+    # land on the same asset (and never raise MultipleResultsFound).
     stmt = (
         select(AIAsset)
         .where(and_(*_conditions(tenant_id, key)))
-        .order_by(AIAsset.first_seen.asc().nulls_last(), AIAsset.id.asc())
+        .order_by(*OLDEST_FIRST)
         .limit(1)
     )
     result = await db.execute(stmt)
@@ -137,16 +151,8 @@ async def lock_asset_keys(
         asset = await _lookup(db, tenant_id, key)
         if asset is not None:
             asset_ids.add(asset.id)
-    if asset_ids:
-        # populate_existing: reload what the lookups cached, so updates
-        # build on the locked row, not on a version read before the lock.
-        await db.execute(
-            select(AIAsset)
-            .where(AIAsset.id.in_(asset_ids))
-            .order_by(AIAsset.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+    # Reloads what the lookups cached, so updates build on the locked row.
+    await lock_assets(db, asset_ids)
 
 
 async def find_or_create_asset(
@@ -215,3 +221,67 @@ async def find_or_create_asset(
     )
     db.add(asset)
     return asset, True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CLI: python -m collector.dedup merge-duplicates [--tenant ...] [--apply]
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def _run_merge(tenant_ids: list[UUID] | None, apply: bool, database_url: str) -> list:
+    from db.models import Tenant
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from collector import asset_merge, rls
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    results = []
+    try:
+        if tenant_ids is None:
+            async with session_factory() as db:
+                await rls.bypass(db, "asset-merge-cli:list-tenants", actor="cli")
+                tenant_ids = list((await db.execute(select(Tenant.id))).scalars())
+        for tenant_id in tenant_ids:
+            # One transaction per tenant, under that tenant's RLS context.
+            async with session_factory() as db:
+                await rls.set_tenant(db, tenant_id)
+                merge = await asset_merge.merge_tenant_duplicates(
+                    db, tenant_id, apply=apply, actor="cli"
+                )
+            results.append(merge.as_dict())
+    finally:
+        await engine.dispose()
+    return results
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(
+        prog="python -m collector.dedup",
+        description="Asset deduplication maintenance.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    merge = sub.add_parser(
+        "merge-duplicates",
+        help="merge duplicate assets left by past ingest races (dry run by default)",
+        description="Find assets with the same merge key in a tenant and merge "
+        "them into the oldest. See collector/asset_merge.py.",
+    )
+    merge.add_argument("--tenant", action="append", type=UUID, help="tenant id (repeatable); default every tenant")
+    mode = merge.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="report only (the default)")
+    mode.add_argument("--apply", action="store_true", help="merge and commit")
+    args = parser.parse_args(argv)
+
+    from collector.config import settings
+
+    results = asyncio.run(_run_merge(args.tenant, args.apply, settings.database_url))
+    print(json.dumps(results, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

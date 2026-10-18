@@ -10,7 +10,9 @@ Events
   asset.changed   discovery sources, confidence, owner, classification or
                   lifecycle state changed (including stale, reactivated and
                   an owner un-retiring), or an owner-retired asset was
-                  sighted again (`retired_in_use_at`)
+                  sighted again (`retired_in_use_at`), or duplicates were
+                  merged into the asset (`merged_asset_ids` lists the ids
+                  that no longer exist; collector.asset_merge)
   asset.retired   the lifecycle sweep or the owner (an `asset` attestation
                   with state `retired`) retired the asset
   asset.attested  a person recorded an attestation for one of the asset's
@@ -565,6 +567,25 @@ async def enqueue_asset_events(
         for etype, asset, fields in events
     ]
     return await _enqueue(db, tenant_id, extra, now or _utcnow())
+
+
+async def enqueue_asset_merged(
+    db: AsyncSession,
+    tenant_id: UUID,
+    survivor: AIAsset,
+    merged_ids: Iterable[UUID],
+    fields: Iterable[str] = (),
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Queue asset.changed for an asset that duplicates were merged into
+    (collector.asset_merge): `changed_fields` as usual plus
+    `merged_asset_ids`, the ids that no longer exist. Does not commit."""
+    extra = {
+        "changed_fields": sorted(fields),
+        "merged_asset_ids": [str(i) for i in merged_ids],
+    }
+    return await _enqueue(db, tenant_id, [(ASSET_CHANGED, survivor, extra)], now or _utcnow())
 
 
 async def enqueue_attestation_event(
