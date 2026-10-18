@@ -29,6 +29,14 @@ Recording an attestation bumps the asset's `updated_at` so it shows up in
 the Partner API delta feed (`/partner/v1/changes`) and queues an
 `asset.attested` partner webhook (collector.webhooks). HTTP routes live in
 `collector.attestation_api`.
+
+The `asset` field drives owner-initiated retirement (#100,
+collector.lifecycle): state `retired` retires the asset (`lifecycle_state`
+retired, `retired_by`, and an `asset.retired` webhook the first time);
+`attested` or `unreviewed` on an owner-retired asset un-retires it
+(`asset.changed` when its lifecycle state moves). `disputed` (the record is
+wrong) does not un-retire, and attestations of other fields such as `owner`
+neither retire nor un-retire the asset.
 """
 
 from __future__ import annotations
@@ -45,7 +53,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import webhooks
+from collector import lifecycle, webhooks
 
 UNREVIEWED = "unreviewed"
 ATTESTED = "attested"
@@ -147,10 +155,30 @@ async def record_attestation(
     db.add(row)
     # Surface the change in the delta feed. `confidence` is left untouched.
     asset.updated_at = now
+    lifecycle_event = (
+        _owner_lifecycle(asset, state, attested_by, now) if field == "asset" else None
+    )
     await db.flush()
-    # Partner webhooks: asset.attested, in this transaction (outbox).
+    # Partner webhooks: asset.attested (and the owner's lifecycle change),
+    # in this transaction (outbox).
     await webhooks.enqueue_attestation_event(db, tenant_id, asset, row, now=now)
+    if lifecycle_event is not None:
+        await webhooks.enqueue_asset_events(db, tenant_id, [lifecycle_event], now=now)
     return row
+
+
+def _owner_lifecycle(
+    asset: AIAsset, state: str, attested_by: str, now: datetime
+) -> tuple[str, AIAsset, list[str] | None] | None:
+    """Owner retire / un-retire from an `asset` attestation (see
+    collector.lifecycle). Returns the webhook event to queue, if any."""
+    if state == RETIRED:
+        if lifecycle.owner_retire(asset, attested_by, now):
+            return (webhooks.ASSET_RETIRED, asset, None)
+        return None
+    if state in (ATTESTED, UNREVIEWED) and lifecycle.owner_unretire(asset, now):
+        return (webhooks.ASSET_CHANGED, asset, ["lifecycle_state"])
+    return None
 
 
 async def latest_attestations(

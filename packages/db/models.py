@@ -64,6 +64,12 @@ class AIAsset(Base):
     # when telemetry resumes. Independent of the governance `status` above.
     lifecycle_state = Column(Text, nullable=False, default="active", server_default="active")
     lifecycle_changed_at = Column(TIMESTAMP(timezone=True))
+    # Owner-initiated retirement (an `asset` attestation with state
+    # `retired`): who retired it. Non-null means the sweep and new telemetry
+    # leave lifecycle_state alone. retired_in_use_at is the first sighting
+    # after that ("retired asset still in use"). See collector/lifecycle.py.
+    retired_by = Column(Text)
+    retired_in_use_at = Column(TIMESTAMP(timezone=True))
     data_classification = Column(Text)
     discovery_source = Column(ARRAY(Text), nullable=False)
     confidence = Column(Text, default="low")

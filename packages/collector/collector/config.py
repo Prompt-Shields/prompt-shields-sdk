@@ -9,6 +9,37 @@ WEBHOOK_CLAIM_LEASE_SECONDS = 300
 WEBHOOK_MAX_TIMEOUT_SECONDS = 60
 
 
+def parse_source_thresholds(value: str) -> dict[str, tuple[int, int]]:
+    """Parse "source=stale:retire,..." into {source: (stale, retire)}.
+
+    Raises ValueError on a malformed entry, a stale threshold under 1 day or
+    a retire threshold not above the stale one.
+    """
+    out: dict[str, tuple[int, int]] = {}
+    for raw in value.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        source, sep, days = entry.partition("=")
+        stale_s, sep2, retire_s = days.partition(":")
+        source = source.strip()
+        try:
+            if not (sep and sep2 and source):
+                raise ValueError
+            stale, retire = int(stale_s), int(retire_s)
+        except ValueError:
+            raise ValueError(
+                f"Bad lifecycle threshold {entry!r}; expected source=stale_days:retire_days"
+            ) from None
+        if stale < 1 or retire <= stale:
+            raise ValueError(
+                f"Bad lifecycle threshold {entry!r}: stale must be at least 1 "
+                "and retire greater than stale"
+            )
+        out[source] = (stale, retire)
+    return out
+
+
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields"
     # Per-tenant /ingest/events requests per minute; 0 or less disables it.
@@ -21,6 +52,11 @@ class Settings(BaseSettings):
     # (PS_ASSET_RETIRE_AFTER_DAYS). See collector/lifecycle.py.
     asset_stale_after_days: int = 30
     asset_retire_after_days: int = 90
+    # Per discovery source thresholds, "source=stale:retire,..." (e.g.
+    # "code_scan=60:120,sdk=7:30"), applied over the built-in per-source
+    # defaults (lifecycle.DEFAULT_SOURCE_THRESHOLDS). Sources in neither use
+    # the two settings above. PS_ASSET_LIFECYCLE_SOURCE_THRESHOLDS.
+    asset_lifecycle_source_thresholds: str = ""
     # Data retention (#85). A tenant's settings["retention_days"] overrides the
     # default. Nothing is purged until an operator runs the purge (CLI or the
     # /api/v1/operator endpoints).
@@ -63,6 +99,12 @@ class Settings(BaseSettings):
     webhook_delivery_retention_days: int = 30
 
     model_config = {"env_prefix": "PS_"}
+
+    @field_validator("asset_lifecycle_source_thresholds")
+    @classmethod
+    def _valid_source_thresholds(cls, value: str) -> str:
+        parse_source_thresholds(value)
+        return value
 
     @field_validator("webhook_timeout_seconds")
     @classmethod

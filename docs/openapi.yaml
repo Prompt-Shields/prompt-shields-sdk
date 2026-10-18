@@ -159,16 +159,36 @@ components:
         lifecycle_state:
           type: string
           description: >
-            Telemetry-driven lifecycle. `stale` after no telemetry for
-            PS_ASSET_STALE_AFTER_DAYS (default 30), `retired` after
-            PS_ASSET_RETIRE_AFTER_DAYS (default 90). New telemetry makes the
-            asset `active` again. Independent of the governance `status`.
+            Telemetry-driven lifecycle. `stale` and then `retired` after no
+            sighting for a number of days that depends on the asset's
+            discovery sources (e.g. platform_signal 7 and 30, code_scan 90
+            and 180, sdk/gateway/otel and others 30 and 90; the most
+            lenient of the asset's sources applies). New telemetry makes the
+            asset `active` again, unless its owner retired it (`retired_by`).
+            Independent of the governance `status`.
           enum: [active, stale, retired]
           example: "active"
         lifecycle_changed_at:
           type: string
           format: date-time
-          description: When `lifecycle_state` last changed
+          description: When `lifecycle_state` last changed (for an owner-retired asset, when the owner retired it)
+          nullable: true
+          example: null
+        retired_by:
+          type: string
+          description: >
+            Who retired the asset, from an `asset` attestation with state
+            `retired`; null unless its owner retired it. An owner-retired
+            asset stays `retired` when it is seen again.
+          nullable: true
+          example: null
+        retired_in_use_at:
+          type: string
+          format: date-time
+          description: >
+            First sighting of an owner-retired asset since it was retired
+            ("retired asset still in use"). Cleared when the owner retires
+            it again or un-retires it.
           nullable: true
           example: null
         attestation:
@@ -354,9 +374,11 @@ components:
           $ref: '#/components/schemas/AIAsset'
         lifecycle_change:
           type: string
-          enum: [stale, retired, reactivated]
+          enum: [stale, retired, reactivated, retired_in_use]
           nullable: true
-          description: Lifecycle transition since `since`, or null if none
+          description: >
+            Lifecycle transition since `since`, or null if none.
+            `retired_in_use`: an owner-retired asset was seen again.
         attestation_changes:
           type: array
           items:
