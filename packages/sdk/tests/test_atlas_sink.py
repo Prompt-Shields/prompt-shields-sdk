@@ -15,15 +15,13 @@ import re
 
 import httpx
 import pytest
-
 from prompt_shields.telemetry import (
     ATLAS_EVENTS_PATH,
     ATLAS_MAX_BATCH,
     AtlasTelemetrySender,
-    hash_messages,
     build_atlas_event,
+    hash_messages,
 )
-
 
 # --- helpers ----------------------------------------------------------------
 
@@ -229,7 +227,7 @@ def test_hash_messages_deterministic_lowercase_hex():
     h2 = hash_messages(messages)
     assert h1 == h2
     assert re.fullmatch(r"[0-9a-f]{64}", h1)  # exactly 64 LOWERCASE hex chars
-    assert h1 == hashlib.sha256("be briefhello world".encode("utf-8")).hexdigest()
+    assert h1 == hashlib.sha256(b"be briefhello world").hexdigest()
     # different text -> different hash
     assert hash_messages([{"role": "user", "content": "hello worlds"}]) != h1
 

@@ -23,8 +23,8 @@ jobs:
         # packages/sdk/pyproject.toml: requires-python = ">=3.11"
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/checkout@v5.1.0
+      - uses: actions/setup-python@v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -35,10 +35,8 @@ jobs:
           # pyyaml: test_scan.py's action.yml check skips without it.
           python -m pip install -e "packages/sdk[dev]" "ruff==0.17.0" "pyyaml>=6.0"
       - name: Ruff
-        # Gating on syntax errors and undefined names only for now. The wider
-        # default rule set still reports pre-existing findings in packages/sdk;
-        # widen --select once those are cleaned up.
-        run: ruff check --select E9,F63,F7,F82 packages/sdk
+        # Ruff's default rule set (no project config).
+        run: ruff check packages/sdk
       - name: Pytest
         run: python -m pytest packages/sdk/tests -p no:cacheprovider
 
@@ -64,8 +62,8 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/checkout@v5.1.0
+      - uses: actions/setup-python@v6.3.0
         with:
           # Matches packages/collector/Dockerfile (python:3.11-slim).
           python-version: "3.11"
@@ -104,6 +102,14 @@ jobs:
           current="$(python -m alembic current)"
           echo "$current"
           [ "$(echo "$current" | awk '{print $1}')" = "$(echo "$heads" | awk '{print $1}')" ]
+      - name: Alembic check (models match migrations)
+        # Fails when packages/db/models.py drifts from what the migrations
+        # create (autogenerate would emit new operations at head).
+        working-directory: packages/db
+        env:
+          PYTHONPATH: ${{ github.workspace }}/packages
+          PS_DATABASE_URL: postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/ps_migrate
+        run: python -m alembic check
       - name: Pytest
         env:
           PYTHONPATH: packages:packages/collector
@@ -121,8 +127,8 @@ jobs:
       # The `prepare` script runs husky outside production; skip git hooks in CI.
       HUSKY: "0"
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-node@v4.4.0
+      - uses: actions/checkout@v5.1.0
+      - uses: actions/setup-node@v5.0.0
         with:
           # gateway/package.json has no engines field and there is no .nvmrc;
           # this matches gateway/Dockerfile (node:20-alpine).
@@ -165,8 +171,8 @@ jobs:
       run:
         working-directory: packages/partner-ts
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-node@v4.4.0
+      - uses: actions/checkout@v5.1.0
+      - uses: actions/setup-node@v5.0.0
         with:
           # packages/partner-ts/package.json: engines.node ">=18"
           node-version: "20"

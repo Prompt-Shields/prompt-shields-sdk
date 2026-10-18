@@ -1,4 +1,3 @@
-import asyncio
 import atexit
 import contextlib
 import hashlib
@@ -10,7 +9,7 @@ import time
 import uuid
 import weakref
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
 import httpx
@@ -84,7 +83,7 @@ def build_atlas_event(collector_event: dict, messages: list) -> dict:
         "occurrences": 1,
         # Stamp at build time: events may sit in the buffer across retries,
         # so send time is not event time.
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
     }
     for src_key, wire_key in _ATLAS_FIELD_MAP.items():
         value = collector_event.get(src_key)
@@ -116,8 +115,8 @@ def parse_retry_after(value: str | None) -> float | None:
         except (TypeError, ValueError):
             return None
         if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
     if math.isnan(seconds):
         return None
     return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
@@ -326,7 +325,7 @@ class TelemetrySender:
                     json=self._payload(chunk),
                     headers=self._headers,
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - fail-open: telemetry never raises
                 self._handle_error(e, chunk)
                 continue
             if not self._handle_response(resp, chunk):
@@ -346,7 +345,7 @@ class TelemetrySender:
                     json=self._payload(chunk),
                     headers=self._headers,
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - fail-open: telemetry never raises
                 self._handle_error(e, chunk)
                 continue
             if not self._handle_response(resp, chunk):
