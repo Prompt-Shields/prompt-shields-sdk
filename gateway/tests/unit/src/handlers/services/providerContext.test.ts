@@ -199,14 +199,21 @@ describe('ProviderContext', () => {
       } as RequestContext;
 
       const context = new ProviderContext(AZURE_OPEN_AI);
+      // PS fork (security): the host in the path must be the configured one.
       const result = context.getProxyPath(
         mockContext,
-        'https://api.openai.com'
+        'https://myresource.openai.azure.com/openai'
       );
 
       expect(result).toBe(
         'https://myresource.openai.azure.com/openai/deployments/gpt-4/chat/completions'
       );
+      expect(() =>
+        context.getProxyPath(
+          mockContext,
+          'https://other.openai.azure.com/openai'
+        )
+      ).toThrow('Invalid proxy path');
     });
 
     it('should use provider-specific getProxyEndpoint when available', () => {

@@ -11,6 +11,46 @@ import { ANTHROPIC, AZURE_OPEN_AI } from '../../globals';
 import { GatewayError } from '../../errors/GatewayError';
 import { stripProxyEndpointPath } from '../proxyGuardrails';
 
+/** The lower-cased `host[:port]` of an http(s) base URL, or '' if none. */
+function proxyBaseHost(baseURL: string): string {
+  try {
+    const url = new URL(baseURL);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    if (url.username || url.password) return '';
+    return url.host.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * PS fork (security): a proxied request goes only to the origin of the
+ * provider's configured base URL (or custom host), so a request path can
+ * never choose the host, scheme or port the provider credentials are sent to.
+ */
+export function assertProxyURLOrigin(
+  proxyURL: string,
+  baseURL: string,
+  message = 'Invalid proxy path'
+) {
+  let target: URL;
+  let base: URL;
+  try {
+    target = new URL(proxyURL);
+    base = new URL(baseURL);
+  } catch {
+    throw new GatewayError(message, 400);
+  }
+  if (
+    !proxyBaseHost(baseURL) ||
+    target.username ||
+    target.password ||
+    target.origin !== base.origin
+  ) {
+    throw new GatewayError(message, 400);
+  }
+}
+
 export class ProviderContext {
   constructor(private provider: string) {
     if (!Providers[provider]) {
@@ -79,6 +119,15 @@ export class ProviderContext {
       this.provider === AZURE_OPEN_AI &&
       reqPath.includes('.openai.azure.com')
     ) {
+      // PS fork (security): upstream took the host from the request path
+      // (`https:/${reqPath}`), so `/v1/proxy/evil.com/.openai.azure.com/...`
+      // sent the Azure api-key or Entra token to evil.com. The full-URL form
+      // is kept only when its first segment is exactly the configured host.
+      const host = proxyBaseHost(baseURL);
+      const firstSegment = reqPath.slice(1).split('/')[0].toLowerCase();
+      if (!host || firstSegment !== host) {
+        throw new GatewayError('Invalid proxy path', 400);
+      }
       return `https:/${reqPath}${reqQuery}`;
     }
 
@@ -104,9 +153,18 @@ export class ProviderContext {
     let url: string;
     if (context.endpoint === 'proxy') {
       url = this.getProxyPath(context, baseURL);
+      // PS fork (security): the proxy path comes from the caller, so whatever
+      // a builder made of it must stay on the configured upstream.
+      assertProxyURLOrigin(url, baseURL);
     } else {
       const endpointPath = this.getEndpointPath(context);
       url = `${baseURL}${endpointPath}`;
+      // PS fork (security): endpoint paths carry request fields (model,
+      // deployment, file and batch ids), so they may not reach the authority
+      // either. Request handlers build and validate their own URLs.
+      if (baseURL && !this.hasRequestHandler(context)) {
+        assertProxyURLOrigin(url, baseURL, 'Invalid upstream URL');
+      }
     }
 
     return url;
