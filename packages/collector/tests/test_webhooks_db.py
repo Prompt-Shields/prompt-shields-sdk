@@ -12,6 +12,10 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from collector import webhooks
+from collector.app import app
+from collector.config import settings
+from collector.partner_auth import hash_secret
 from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import (
     AIAsset,
@@ -24,11 +28,6 @@ from db.models import (
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from collector import webhooks
-from collector.app import app
-from collector.config import settings
-from collector.partner_auth import hash_secret
 
 H_A = {"Authorization": "Bearer ps-test-key-12345"}  # tenant from seeded_db
 H_B = {"Authorization": "Bearer ps-test-key-tenant-b"}

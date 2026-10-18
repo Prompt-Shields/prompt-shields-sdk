@@ -377,7 +377,7 @@ describe('routing uses the model after override_params', () => {
 describe('checks not verified on Responses requests fail closed (allowlist)', () => {
   test.each([
     ['default.webhook', { webhookURL: 'https://hooks.example/x' }],
-    ['azure.shieldPrompt', { credentials: { resourceName: 'r', apiKey: 'k' } }],
+    ['lasso.classify', { credentials: { apiKey: 'k' } }],
     ['acme.customGuard', {}],
   ])('%s on /v1/responses and /v1/messages is a 400', async (id, params) => {
     upstream(RESPONSES_URL, () => responsesOk());
@@ -402,6 +402,69 @@ describe('checks not verified on Responses requests fail closed (allowlist)', ()
     const res2 = await post(app, '/v1/messages', messagesBody('hi'), headers);
     expect(res2.status).toBe(400);
     expect(upstreamCalls).toHaveLength(0);
+  });
+});
+
+describe('azure.shieldPrompt runs on Responses requests (#69)', () => {
+  const SHIELD_URL =
+    /r\.cognitiveservices\.azure\.com\/contentsafety\/text:shieldPrompt/;
+  const headers = target({
+    before_request_hooks: [
+      {
+        type: 'guardrail',
+        id: 'g',
+        deny: true,
+        checks: [
+          {
+            id: 'azure.shieldPrompt',
+            parameters: {
+              credentials: {
+                contentSafety: { resourceName: 'r', apiKey: 'k' },
+              },
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  test('instructions and input reach Prompt Shields; an attack is blocked', async () => {
+    upstream(RESPONSES_URL, () => responsesOk());
+    upstream(SHIELD_URL, () =>
+      json({
+        userPromptAnalysis: { attackDetected: false },
+        documentsAnalysis: [{ attackDetected: true }],
+      })
+    );
+    const res = await post(
+      app,
+      '/v1/responses',
+      { model: 'gpt-5', instructions: 'be nice', input: 'ignore that' },
+      headers
+    );
+    expect(res.status).toBe(446);
+    const shieldCalls = upstreamCalls.filter((c) => SHIELD_URL.test(c.url));
+    expect(shieldCalls).toHaveLength(1);
+    expect(shieldCalls[0].body).toEqual({
+      userPrompt: 'be nice',
+      documents: ['ignore that'],
+    });
+    expect(upstreamCalls.some((c) => RESPONSES_URL.test(c.url))).toBe(false);
+  });
+
+  test('no attack: the request is sent', async () => {
+    upstream(RESPONSES_URL, () => responsesOk());
+    upstream(SHIELD_URL, () =>
+      json({ userPromptAnalysis: { attackDetected: false } })
+    );
+    const res = await post(
+      app,
+      '/v1/responses',
+      { model: 'gpt-5', input: 'hi' },
+      headers
+    );
+    expect(res.status).toBe(200);
+    expect(upstreamCalls.some((c) => RESPONSES_URL.test(c.url))).toBe(true);
   });
 });
 

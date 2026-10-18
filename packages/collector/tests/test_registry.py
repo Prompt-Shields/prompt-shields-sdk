@@ -1,6 +1,6 @@
 import pytest
-from httpx import AsyncClient, ASGITransport
 from collector.app import app
+from httpx import ASGITransport, AsyncClient
 
 HEADERS = {"Authorization": "Bearer ps-test-key-12345"}
 

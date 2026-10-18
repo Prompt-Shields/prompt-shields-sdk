@@ -23,21 +23,19 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 import bcrypt
+from db.models import PartnerCredential
 from fastapi import HTTPException, Request
 from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import rls
 from collector.audit import record_read
 from collector.partner_scopes import SCOPES, effective_rate_limit, expand_scopes
-from db.models import PartnerCredential
-
-from collector import rls
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Constants and JWT config
@@ -223,7 +221,7 @@ async def resolve_partner(request: Request) -> PartnerPrincipal:
                     "detail": "Partner credential revoked",
                 },
             )
-        if partner.expires_at and partner.expires_at < datetime.now(timezone.utc):
+        if partner.expires_at and partner.expires_at < datetime.now(UTC):
             raise HTTPException(
                 status_code=401,
                 detail={
@@ -257,7 +255,7 @@ async def resolve_partner(request: Request) -> PartnerPrincipal:
                 "detail": "Invalid API key",
             },
         )
-    if partner.expires_at and partner.expires_at < datetime.now(timezone.utc):
+    if partner.expires_at and partner.expires_at < datetime.now(UTC):
         raise HTTPException(
             status_code=401,
             detail={

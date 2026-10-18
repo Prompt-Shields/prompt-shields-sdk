@@ -1,4 +1,5 @@
-from db.models import Tenant, AIAsset, AIUsageEvent, DataFlow, RiskMapping
+from db.models import AIAsset, AIUsageEvent, DataFlow, RiskMapping, Tenant
+
 
 def test_models_exist():
     assert Tenant.__tablename__ == "tenants"

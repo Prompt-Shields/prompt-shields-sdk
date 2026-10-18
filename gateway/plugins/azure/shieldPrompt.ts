@@ -3,6 +3,39 @@ import { post, getText, getCurrentContentPart } from '../utils';
 import { AzureCredentials } from './types';
 import { getAccessToken } from './utils';
 
+const contentText = (content: any): string =>
+  Array.isArray(content)
+    ? content.map((item: any) => item?.text).join('\n')
+    : content;
+
+/**
+ * PS fork (#69): the request's system prompts, in order. Chat Completions:
+ * the `system` messages. Responses (`createModelResponse`): `instructions`,
+ * then the `system` / `developer` input messages (Responses' system roles).
+ */
+const getSystemPrompts = (context: PluginContext): string[] => {
+  const json = context.request?.json;
+  if (context.requestType === 'createModelResponse') {
+    const prompts: string[] = [];
+    if (typeof json?.instructions === 'string' && json.instructions) {
+      prompts.push(json.instructions);
+    }
+    for (const item of Array.isArray(json?.input) ? json.input : []) {
+      if (
+        (item?.role === 'system' || item?.role === 'developer') &&
+        (item.type === undefined || item.type === 'message')
+      ) {
+        prompts.push(contentText(item.content));
+      }
+    }
+    return prompts;
+  }
+  const messages = Array.isArray(json?.messages) ? json.messages : [];
+  return messages
+    .filter((message: any) => message?.role === 'system')
+    .map((message: any) => contentText(message.content));
+};
+
 /**
  * Shield Prompt handler for detecting jailbreak and prompt injection attacks.
  * Uses Azure AI Content Safety Prompt Shields API.
@@ -56,22 +89,15 @@ export const handler = async (
     };
   }
 
-  const requests = context.request?.json?.messages;
-  const systemMessages = requests?.filter(
-    (message: any) => message.role === 'system'
-  );
+  // PS fork (#69): system prompts for Chat Completions and Responses, read
+  // without assuming `messages` exists (a Responses request has none).
+  const systemPrompts = getSystemPrompts(context);
 
   let userPrompt;
 
   // If system message, flatten them into a single string, if not, use the user prompt
-  if (Array.isArray(systemMessages) && systemMessages.length > 0) {
-    userPrompt = systemMessages
-      .map((message: any) =>
-        Array.isArray(message.content)
-          ? message.content.map((item: any) => item.text).join('\n')
-          : message.content
-      )
-      .join('\n');
+  if (systemPrompts.length > 0) {
+    userPrompt = systemPrompts.join('\n');
   } else {
     userPrompt = getText(context, eventType) || '';
   }
@@ -80,7 +106,7 @@ export const handler = async (
 
   const request = {
     userPrompt,
-    ...(systemMessages.length > 0 ? { documents: textArray } : {}), // If system message, add user prompt as documents
+    ...(systemPrompts.length > 0 ? { documents: textArray } : {}), // If system message, add user prompt as documents
   };
 
   const apiVersion = parameters.apiVersion || '2024-09-01';

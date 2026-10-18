@@ -22,9 +22,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
+from db.models import (
+    AIAsset,
+    AIUsageEvent,
+    DataFlow,
+    PartnerCredential,
+    RiskMapping,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, func, select
 
 from collector import aibom
 from collector.attestation import add_attestation_summaries, attestation_changes_since
@@ -39,13 +46,6 @@ from collector.partner_rate_limit import get_rate_limiter
 from collector.partner_scopes import DEFAULT_RATE_LIMIT
 from collector.retention import get_retention_cutoff
 from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
-from db.models import (
-    AIAsset,
-    AIUsageEvent,
-    DataFlow,
-    PartnerCredential,
-    RiskMapping,
-)
 
 router = APIRouter(prefix="/partner/v1", tags=["Partner API"])
 
@@ -190,7 +190,7 @@ async def health() -> dict:
 async def list_assets(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),  # noqa: B008 - FastAPI dependency marker, by design
     business_unit: str | None = None,
     status: str | None = None,
     lifecycle_state: LifecycleState | None = None,
@@ -270,7 +270,7 @@ async def get_asset(
     asset_id: UUID,
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -304,7 +304,7 @@ async def get_data_flows(
     asset_id: UUID,
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("data-flows:read")),
+    principal: PartnerPrincipal = Depends(require_scope("data-flows:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -330,8 +330,8 @@ async def get_risks(
     asset_id: UUID,
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("risks:read")),
-    status: RiskStatus | None = Query(
+    principal: PartnerPrincipal = Depends(require_scope("risks:read")),  # noqa: B008 - FastAPI dependency marker, by design
+    status: RiskStatus | None = Query(  # noqa: B008 - FastAPI query marker, by design
         default=None,
         description="Only mappings with this status. Default: confirmed.",
     ),
@@ -369,7 +369,7 @@ async def get_usage_summary(
     period: Literal["7d", "30d", "90d"] = Query(
         default="30d", description="Time period for aggregation"
     ),
-    principal: PartnerPrincipal = Depends(require_scope("usage:read")),
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     """Aggregated usage for one asset over the trailing `period`.
 
@@ -469,7 +469,7 @@ def _usage_summary_dict(row, period: str) -> dict:
 async def get_telemetry_coverage(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("usage:read")),
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     """How complete the tenant's usage telemetry is (#87): events received
     against events the SDK, gateway and OTLP sources report or were seen to
@@ -496,7 +496,7 @@ async def get_telemetry_coverage(
 async def list_vendors(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -516,7 +516,7 @@ async def list_vendors(
 async def list_models(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -539,7 +539,7 @@ async def list_models(
 async def list_business_units(
     request: Request,
     response: Response,
-    principal: PartnerPrincipal = Depends(require_scope("assets:read")),
+    principal: PartnerPrincipal = Depends(require_scope("assets:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -572,7 +572,7 @@ async def get_changes(
     since: str = Query(..., description="ISO 8601 timestamp"),
     after: str | None = None,
     limit: int = Query(default=50, le=200, ge=1),
-    principal: PartnerPrincipal = Depends(require_scope("changes:read")),
+    principal: PartnerPrincipal = Depends(require_scope("changes:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
@@ -672,7 +672,7 @@ async def export_registry(
         default="json",
         description="`json` (registry envelope) or `cyclonedx` (CycloneDX 1.6 AI-BOM)",
     ),
-    principal: PartnerPrincipal = Depends(require_scope("export:read")),
+    principal: PartnerPrincipal = Depends(require_scope("export:read")),  # noqa: B008 - FastAPI dependency marker, by design
 ):
     if format not in ("json", "cyclonedx"):
         raise HTTPException(
@@ -717,7 +717,7 @@ async def export_registry(
         )
     ).scalars().all()
 
-    now = datetime.utcnow()
+    now = datetime.utcnow()  # noqa: DTZ003 - naive on purpose: isoformat() + "Z" below
     data = [_asset_dict(a) for a in rows]
     await add_attestation_summaries(db, principal.tenant_id, rows, data)
     await _audit(

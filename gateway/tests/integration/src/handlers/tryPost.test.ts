@@ -179,7 +179,7 @@ describe.skip('tryPost-provider-specific', () => {
     // Verify custom handlers bypass normal transformation
   });
 
-  it.only('should handle invalid provider gracefully', async () => {
+  it('should handle invalid provider gracefully', async () => {
     // Verify error when provider not found
     const url = urlBuilder.chat();
     const options = requestBuilder
