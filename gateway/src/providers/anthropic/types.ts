@@ -1,3 +1,5 @@
+import { AnthropicCacheCreation } from '../types';
+
 export type AnthropicStreamState = {
   containsChainOfThoughtMessage?: boolean;
   toolIndex?: number;
@@ -9,6 +11,8 @@ export type AnthropicStreamState = {
     };
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    // PS fork (#9): cache writes by TTL, from message_start
+    cache_creation?: AnthropicCacheCreation;
   };
   model?: string;
 };

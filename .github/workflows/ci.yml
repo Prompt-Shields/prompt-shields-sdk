@@ -177,9 +177,11 @@ jobs:
           # packages/partner-ts/package.json: engines.node ">=18"
           node-version: "20"
           cache: npm
-          # No lockfile is committed for this package yet.
-          cache-dependency-path: packages/partner-ts/package.json
-      - run: npm install --no-audit --no-fund
+          cache-dependency-path: packages/partner-ts/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check:version
       - run: npm run typecheck
+      # Includes test/openapi.test.ts, which checks src/types.ts and the
+      # client against docs/openapi.yaml.
       - run: npx jest --ci
       - run: npm run build

@@ -184,7 +184,11 @@ const AzureOpenAIAPIConfig: ProviderAPIConfig = {
         return `${isAzureV1API ? prefix : ''}/realtime?${searchParams.toString()}`;
       }
       case 'createModelResponse': {
-        return `${pathname}?${searchParams.toString()}`;
+        // PS fork (#73): /v1/messages routed via Responses (codex models)
+        const responsesPath = /\/responses/.test(pathname)
+          ? pathname
+          : `${isAzureV1API ? '/v1' : ''}/responses`;
+        return `${responsesPath}?${searchParams.toString()}`;
       }
       case 'getModelResponse': {
         return `${pathname}?${searchParams.toString()}`;

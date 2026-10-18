@@ -27,6 +27,13 @@ import {
   createStreamState as responsesCreateStreamState,
   supportsResponsesApiNatively,
 } from '../adapters/responses';
+import {
+  routesMessagesViaResponses,
+  transformMessagesToResponses,
+  transformResponsesToMessages,
+  transformResponsesStreamChunk,
+  createResponsesToMessagesStreamState,
+} from '../adapters/messagesViaResponses';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -39,6 +46,11 @@ export interface AdapterContext {
   originalRequest: any;
   /** The resolved provider name */
   provider: string;
+  /**
+   * PS fork (#73): the API the provider was called with. Unset means Chat
+   * Completions; 'responses' is Messages routed via the Responses API.
+   */
+  via?: 'responses';
 }
 
 export interface AdapterRequestResult {
@@ -82,6 +94,28 @@ export function applyAdapterRequestTransform(
   isStreamingMode: boolean,
   method: string
 ): AdapterRequestResult | Response | null {
+  // PS fork (#73): models that only the Responses API serves (e.g. codex)
+  // are reached via Responses instead of Chat Completions.
+  if (
+    fn === 'messages' &&
+    provider &&
+    routesMessagesViaResponses(provider, params.model || '')
+  ) {
+    const transformedParams = transformMessagesToResponses(params);
+    return {
+      adapterCtx: {
+        isActive: true,
+        originalFn: fn,
+        originalRequest: {},
+        provider,
+        via: 'responses',
+      },
+      params: transformedParams,
+      requestBody: transformedParams as any,
+      fn: 'createModelResponse',
+    };
+  }
+
   if (
     fn === 'messages' &&
     provider &&
@@ -224,7 +258,7 @@ export async function adaptResponse(
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('text/event-stream')) {
-    return adaptStreamingResponse(response, adapterCtx.originalFn, c);
+    return adaptStreamingResponse(response, adapterCtx, c);
   }
 
   return adaptNonStreamingResponse(response, adapterCtx, c);
@@ -260,7 +294,13 @@ async function adaptNonStreamingResponse(
   }
 
   let transformedJson: any;
-  if (adapterCtx.originalFn === 'messages') {
+  if (adapterCtx.via === 'responses') {
+    transformedJson = transformResponsesToMessages(
+      json,
+      response.status,
+      adapterCtx.provider
+    );
+  } else if (adapterCtx.originalFn === 'messages') {
     transformedJson = transformChatCompletionsToMessages(
       json,
       response.status,
@@ -305,10 +345,11 @@ async function adaptNonStreamingResponse(
  */
 function adaptStreamingResponse(
   response: Response,
-  originalFn: endpointStrings,
+  adapterCtx: AdapterContext,
   c: Context
 ): Response {
   if (!response.body) return response;
+  const originalFn = adapterCtx.originalFn;
 
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -330,7 +371,29 @@ function adaptStreamingResponse(
     if (!isClientGone()) writer.close().catch(() => {});
   };
 
-  if (originalFn === 'messages') {
+  if (adapterCtx.via === 'responses') {
+    // PS fork (#73): Responses SSE → Messages SSE
+    const state = createResponsesToMessagesStreamState();
+
+    (async () => {
+      try {
+        for await (const chunk of readSSEStream(reader)) {
+          const transformed = transformResponsesStreamChunk(chunk, state);
+          if (transformed) {
+            await writer.write(encoder.encode(transformed));
+          }
+        }
+        const finalEvents = transformResponsesStreamChunk(null, state);
+        if (finalEvents) {
+          await writer.write(encoder.encode(finalEvents));
+        }
+      } catch (err) {
+        onError(err);
+      } finally {
+        close();
+      }
+    })();
+  } else if (originalFn === 'messages') {
     const state = messagesCreateStreamState();
 
     (async () => {

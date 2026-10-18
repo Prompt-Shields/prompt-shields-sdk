@@ -1,0 +1,74 @@
+name: Publish @prompt-shields/partner
+
+# Publishes packages/partner-ts to npm when a `partner-ts-v<version>` tag is
+# pushed, e.g. `partner-ts-v0.1.0`. The tag must match package.json's
+# version. Release steps: packages/partner-ts/RELEASING.md.
+#
+# Needs the NPM_TOKEN repository secret: an npm automation (or granular)
+# token with publish rights on the @prompt-shields scope.
+
+on:
+  push:
+    tags:
+      - "partner-ts-v*"
+
+permissions:
+  contents: read
+  # npm provenance: lets npm verify the package was built by this workflow.
+  id-token: write
+
+concurrency:
+  group: publish-partner-ts
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Test, build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/partner-ts
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          # Full history, to check that the tagged commit is on main.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: packages/partner-ts/package-lock.json
+
+      - name: Check the tag matches package.json and src/client.ts
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/check-version.js "$TAG"
+
+      - name: Check the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main. Tag a commit that has been merged."
+            exit 1
+          fi
+
+      - name: Check the npm token is configured
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::The NPM_TOKEN repository secret is not set. See packages/partner-ts/RELEASING.md."
+            exit 1
+          fi
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npx jest --ci
+      - run: npm run build
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

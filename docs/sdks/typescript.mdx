@@ -109,6 +109,65 @@ for (const change of changes) {
 }
 ```
 
+## Risks, Attestations and Usage
+
+```typescript
+const assetId = '019e1a2b-3c4d-7000-8000-000000000001';
+
+// Confirmed risk mappings (the default), or rule-based suggestions awaiting review
+const confirmed = await client.assets.risks(assetId);
+const suggested = await client.assets.risks(assetId, { status: 'suggested' });
+for (const risk of suggested) {
+  console.log(`${risk.framework} ${risk.frameworkRef}: ${risk.evidence?.summary}`);
+}
+
+// Attestation history, and the current state of each field
+const history = await client.assets.attestations(assetId, { field: 'owner' });
+console.log(`owner: ${history.meta.current.owner?.state}`);
+
+// Record an attestation (needs the attestations:write scope)
+await client.assets.attest(assetId, {
+  field: 'owner',
+  state: 'attested',
+  attestedBy: 'ciso@acme.com',
+});
+
+// Usage, including prompt-cache and reasoning tokens
+const usage = await client.assets.usageSummary(assetId, { period: '7d' });
+console.log(`${usage.totalTokensIn} in (${usage.totalTokensCached} cached), ${usage.totalTokensReasoning} reasoning`);
+```
+
+Attestation maps (`asset.attestation` and `meta.current`) keep the wire field names as keys (`asset`, `owner`, `data_classification`), so they match `attestation.field`.
+
+## Webhook Subscriptions
+
+Webhook subscriptions are managed by the tenant, not the partner, so these calls need a client built with the tenant's own API key. See [Change Webhooks](/api-reference/sync/webhooks).
+
+```typescript
+const admin = new PartnerClient({ apiKey: process.env.PS_API_KEY, baseUrl: 'https://collector.example.com' });
+
+const sub = await admin.webhooks.subscriptions.create({
+  partnerId: '<partner credential id>',
+  url: 'https://ea-tool.example.com/hooks/prompt-shields',
+  eventTypes: ['asset.created', 'asset.changed', 'asset.retired'],
+});
+console.log(`Give the partner ${sub.secret} over a secure channel`);
+
+// Pause, resume, or change the URL or events
+await admin.webhooks.subscriptions.update(sub.id, { isActive: false });
+await admin.webhooks.subscriptions.update(sub.id, { isActive: true, url: 'https://ea-tool.example.com/hooks/v2' });
+
+// New signing secret; the old one keeps signing for a day
+const rotated = await admin.webhooks.subscriptions.rotateSecret(sub.id, { gracePeriodSeconds: 86400 });
+
+// Dead letters, and sending one again
+for (const delivery of await admin.webhooks.deliveries.list({ status: 'dead' })) {
+  await admin.webhooks.deliveries.redeliver(delivery.id);
+}
+```
+
+POST calls (`attest`, `subscriptions.create`, `rotateSecret`, `redeliver`) are not retried after a network error or a 5xx, since the server may have acted. They are still retried after a 429.
+
 ## Error Handling
 
 ```typescript
@@ -132,5 +191,15 @@ try {
 The SDK exports full TypeScript types for all API objects:
 
 ```typescript
-import type { AIAsset, DataFlow, RiskMapping, ChangeEvent, UsageSummary } from '@prompt-shields/partner';
+import type {
+  AIAsset,
+  DataFlow,
+  RiskMapping,
+  ChangeEvent,
+  UsageSummary,
+  Attestation,
+  WebhookSubscription,
+} from '@prompt-shields/partner';
 ```
+
+The types are written by hand (the SDK returns camelCase, the API sends snake_case) and checked against `docs/openapi.yaml` in CI, so a field added to the API without the SDK fails the build.
