@@ -24,6 +24,8 @@ import {
   upstreamCalls,
 } from './harness';
 import app from '../../index';
+import { readAWSStream } from '../../handlers/streamHandler';
+import { transformGeminiStreamParts } from '../../providers/google/chatComplete';
 
 const enc = new TextEncoder();
 
@@ -355,5 +357,84 @@ describe('Gemini / Vertex: mixed parts and tool-call indexes in streams (#72)', 
       expect(new Set(calls.map((c: any) => c.id)).size).toBe(4);
       expect((await telemetryEvent()).stream_truncated).toBeUndefined();
     });
+  });
+});
+
+describe('readAWSStream framing edge cases (#72)', () => {
+  const read = async (bytes: Uint8Array, readSize: number) => {
+    const out: string[] = [];
+    for await (const chunk of readAWSStream(
+      splitStream(bytes, readSize).body!.getReader(),
+      undefined,
+      'fallback',
+      false,
+      {} as any
+    )) {
+      out.push(new TextDecoder().decode(chunk as Uint8Array));
+    }
+    return out;
+  };
+  const prelude = (length: number) => {
+    const b = new Uint8Array(16);
+    new DataView(b.buffer).setUint32(0, length);
+    return b;
+  };
+
+  test('several messages in one read, each exactly framed', async () => {
+    const bytes = awsFrames([{ a: 1 }, { b: 2 }, { c: 3 }]);
+    expect(await read(bytes, bytes.length)).toHaveLength(3);
+  });
+
+  test('an incomplete trailing message is dropped, earlier ones kept', async () => {
+    const whole = awsFrames([{ a: 1 }, { b: 2 }]);
+    expect(await read(whole.slice(0, whole.length - 3), 7)).toHaveLength(1);
+  });
+
+  test('a length below the 16-byte minimum errors', async () => {
+    await expect(read(prelude(8), 16)).rejects.toThrow(
+      'Invalid AWS event stream message length: 8'
+    );
+  });
+
+  test('a length above 16 MiB errors instead of buffering', async () => {
+    // e.g. a non-event-stream body whose first bytes read as a huge length.
+    await expect(read(enc.encode('<html><body>'), 4)).rejects.toThrow(
+      /Invalid AWS event stream message length/
+    );
+  });
+});
+
+describe('transformGeminiStreamParts (#72)', () => {
+  test('parallel calls, thought and text in one chunk', () => {
+    const state: any = {};
+    const msg = transformGeminiStreamParts(
+      [
+        { text: 'thinking...', thought: true },
+        { functionCall: { name: 'a', args: {} } },
+        { functionCall: { name: 'b', args: { x: 1 } } },
+        { text: 'done' },
+      ],
+      state,
+      0,
+      true
+    )!;
+    expect(msg.content).toBe('done');
+    expect(msg.content_blocks).toBeUndefined();
+    expect(msg.tool_calls.map((t: any) => [t.index, t.function.name])).toEqual([
+      [0, 'a'],
+      [1, 'b'],
+    ]);
+  });
+
+  test('tool-call indexes are per candidate', () => {
+    const state: any = {};
+    const call = [{ functionCall: { name: 'f', args: {} } }];
+    transformGeminiStreamParts(call, state, 0, true);
+    expect(
+      transformGeminiStreamParts(call, state, 1, true)!.tool_calls[0].index
+    ).toBe(0);
+    expect(
+      transformGeminiStreamParts(call, state, 0, true)!.tool_calls[0].index
+    ).toBe(1);
   });
 });

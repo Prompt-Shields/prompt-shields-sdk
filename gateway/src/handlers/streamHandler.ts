@@ -61,6 +61,10 @@ function concatenateUint8Arrays(a: Uint8Array, b: Uint8Array): Uint8Array {
 // Smallest valid event-stream message: 12-byte prelude, no headers, no
 // payload, 4-byte message CRC.
 const AWS_EVENT_STREAM_MIN_MESSAGE_LENGTH = 16;
+// Largest message the AWS event-stream format allows (16 MiB, as in
+// aws-c-event-stream). A larger length means the body is not an event stream
+// (or is corrupt); erroring stops the reader buffering the rest of it.
+const AWS_EVENT_STREAM_MAX_MESSAGE_LENGTH = 16 * 1024 * 1024;
 
 /**
  * PS fork (#72, re-implemented from Portkey enterprise 2.25.1): reads AWS
@@ -91,7 +95,10 @@ export async function* readAWSStream(
 
     while (buffer.length >= 4) {
       const expectedLength = readUInt32BE(buffer, 0);
-      if (expectedLength < AWS_EVENT_STREAM_MIN_MESSAGE_LENGTH) {
+      if (
+        expectedLength < AWS_EVENT_STREAM_MIN_MESSAGE_LENGTH ||
+        expectedLength > AWS_EVENT_STREAM_MAX_MESSAGE_LENGTH
+      ) {
         throw new Error(
           `Invalid AWS event stream message length: ${expectedLength}`
         );
