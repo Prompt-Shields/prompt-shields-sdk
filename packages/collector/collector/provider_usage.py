@@ -45,6 +45,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import provider_credentials
 from collector.dedup import compute_confidence
+from collector.lifecycle import lock_assets, record_sighting
+from collector.webhooks import AssetChanges
 
 logger = logging.getLogger("prompt_shields.provider_usage")
 
@@ -394,12 +396,29 @@ def aggregate(records: list[UsageRecord]) -> list[UsageRecord]:
 async def store_usage(
     db: AsyncSession, tenant_id: UUID, records: list[UsageRecord]
 ) -> dict:
-    """Upsert assets and usage events for ``records``. Does not commit."""
+    """Upsert assets and usage events for ``records``. Does not commit.
+
+    Each bucket is a sighting of its asset at the bucket's end
+    (``lifecycle.record_sighting``): it reactivates a stale or retired
+    asset, or raises "retired asset still in use" on an owner-retired one,
+    when the usage happened after the asset's last lifecycle change, and
+    queues the same ``asset.changed`` webhook ingest sends. New assets send
+    no ``asset.created`` (the pull is a bulk backfill).
+    """
     assets_created = events_created = events_updated = 0
-    for r in aggregate(records):
-        if r.tokens_in == 0 and r.tokens_out == 0 and r.requests == 0:
-            continue
-        aid = asset_id_for(tenant_id, r)
+    now = datetime.now(UTC)
+    changes = AssetChanges()
+    work = [
+        (asset_id_for(tenant_id, r), event_id_for(tenant_id, r), r)
+        for r in aggregate(records)
+        if r.tokens_in or r.tokens_out or r.requests
+    ]
+    # Lock the existing asset rows up front in id order, the order ingest
+    # and the cloud inventory take them in, and write events in a fixed
+    # order too, so overlapping pulls never deadlock.
+    work.sort(key=lambda w: (w[0], w[1]))
+    await lock_assets(db, {aid for aid, _, _ in work})
+    for aid, eid, r in work:
         asset = await db.get(AIAsset, aid)
         if asset is None:
             asset = AIAsset(
@@ -425,8 +444,11 @@ async def store_usage(
                 asset.first_seen = r.bucket_start
             if asset.last_seen is None or r.bucket_end > asset.last_seen:
                 asset.last_seen = r.bucket_end
+            # The current day's bucket ends in the future.
+            record_sighting(asset, min(r.bucket_end, now), now)
+            # Before anything flushes the session (changed_fields).
+            changes.record(asset, is_new=False)
 
-        eid = event_id_for(tenant_id, r)
         event = await db.get(AIUsageEvent, eid)
         if event is None:
             db.add(
@@ -448,6 +470,7 @@ async def store_usage(
             event.tokens_in = r.tokens_in
             event.tokens_out = r.tokens_out
             events_updated += 1
+    await changes.enqueue(db, tenant_id)
     return {
         "assets_created": assets_created,
         "events_created": events_created,

@@ -40,7 +40,10 @@ SCOPES: dict[str, str] = {
     "changes:read": "Read the /changes delta feed",
     "export:read": "Bulk export the registry (JSON or CycloneDX)",
     "webhooks:manage": "Create, list and delete webhook subscriptions",
-    "attestations:write": "Record human attestations of asset fields",
+    "attestations:write": (
+        "Record human attestations of asset fields, including retiring an "
+        "asset (an `asset` attestation with state `retired`) and un-retiring it"
+    ),
     "provider-credentials:manage": (
         "Store, rotate and delete provider admin keys (write-only) and "
         "key fingerprint links for the org usage pull"

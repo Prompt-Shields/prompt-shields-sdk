@@ -71,8 +71,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import rls
 from collector.dedup import compute_confidence
-from collector.lifecycle import lock_for_sighting, reactivate
+from collector.lifecycle import lock_assets, reactivate
 from collector.provider_usage_admin import require_operator
+from collector.webhooks import AssetChanges
 
 logger = logging.getLogger("prompt_shields.cloud_inventory")
 
@@ -1712,8 +1713,15 @@ async def store_inventory(
     in the registry are not overwritten.
     """
     created = updated = 0
-    for d in deployments:
-        aid = asset_id_for(tenant_id, d)
+    changes = AssetChanges()
+    # One asset per deployment id; a cloud listing the same deployment
+    # twice must not create it twice.
+    by_id = {asset_id_for(tenant_id, d): d for d in deployments}
+    # Lock the existing rows up front in id order, the order ingest takes
+    # them in (lifecycle.lock_assets), then work through them in that order.
+    await lock_assets(db, by_id)
+    for aid in sorted(by_id):
+        d = by_id[aid]
         owner = owner_from_tags(d.tags)
         environment = environment_from_tags(d.tags)
         business_unit = _tag(d.tags, BUSINESS_UNIT_TAGS)
@@ -1739,7 +1747,6 @@ async def store_inventory(
             )
             created += 1
             continue
-        await lock_for_sighting(db, asset)
         asset.model = d.model
         asset.region = d.region
         asset.owner_email = asset.owner_email or owner
@@ -1751,7 +1758,12 @@ async def store_inventory(
         if asset.last_seen is None or now > asset.last_seen:
             asset.last_seen = now
         reactivate(asset, now)
+        # asset.changed for sources, owner, lifecycle and the "retired asset
+        # still in use" signal, as ingest sends. New assets send no
+        # asset.created (unchanged: the inventory is a bulk backfill).
+        changes.record(asset, is_new=False)
         updated += 1
+    await changes.enqueue(db, tenant_id)
     await db.flush()
     return {"assets_created": created, "assets_updated": updated}
 
