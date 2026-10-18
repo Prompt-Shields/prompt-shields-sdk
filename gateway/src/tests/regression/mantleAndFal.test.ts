@@ -533,3 +533,94 @@ describe('fal.ai', () => {
     );
   });
 });
+
+describe('review hardening (#74)', () => {
+  const mantle = (extra: object = {}) => ({
+    'x-portkey-config': JSON.stringify({
+      provider: 'bedrock-mantle',
+      aws_access_key_id: 'AKIAREGRESSIONTEST',
+      aws_secret_access_key: 'regression-secret',
+      aws_region: 'us-east-1',
+      ...extra,
+    }),
+  });
+  const blockSecret = [
+    {
+      'default.contains': { words: ['SECRET'], operator: 'none' },
+      deny: true,
+    },
+  ];
+  const fal = {
+    'x-portkey-provider': 'fal-ai',
+    authorization: 'Bearer fal-regression-key',
+  };
+
+  test('an input guardrail blocks a Mantle /v1/responses request', async () => {
+    upstream(/.*/, () => json({}));
+    const res = await post(
+      app,
+      '/v1/responses',
+      { model: 'openai.gpt-oss-120b', input: 'tell me the SECRET' },
+      mantle({ input_guardrails: blockSecret })
+    );
+    expect(res.status).toBe(446);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('an input guardrail blocks a native Mantle /v1/messages request', async () => {
+    upstream(/.*/, () => json({}));
+    const res = await post(
+      app,
+      '/v1/messages',
+      {
+        model: 'anthropic.claude-opus-4-7',
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'tell me the SECRET' }],
+      },
+      mantle({ input_guardrails: blockSecret })
+    );
+    expect(res.status).toBe(446);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test.each(['/v1/proxy.evil.test/x', '/v1/proxy-evil.test/x'])(
+    'a proxy path cannot change the fal host (%s)',
+    async (path) => {
+      upstream(/.*/, () => json({}));
+      const res = await post(app, path, { prompt: 'x' }, fal);
+      expect(res.status).toBe(400);
+      expect(upstreamCalls).toHaveLength(0);
+    }
+  );
+
+  test('proxied multipart bodies keep their fields and bytes', async () => {
+    upstream(/fal\.run\/fal-ai\/whisper$/, () => json({ text: 'ok' }));
+    const bytes = new Uint8Array([0, 255, 1, 128, 10, 13]);
+    const form = new FormData();
+    form.append('task', 'transcribe');
+    form.append('audio', new Blob([bytes]), 'a.bin');
+    const res = await app.request('/v1/fal-ai/whisper', {
+      method: 'POST',
+      body: form,
+      headers: fal,
+    });
+    expect(res.status).toBe(200);
+    const sent = upstreamCalls[0].body as FormData;
+    expect(sent).toBeInstanceOf(FormData);
+    expect(sent.get('task')).toBe('transcribe');
+    const file = sent.get('audio') as unknown as Blob;
+    expect(new Uint8Array(await file.arrayBuffer())).toEqual(bytes);
+  });
+
+  test('proxied JSON bodies are read after psRouter parsed them', async () => {
+    upstream(/fal\.run\/fal-ai\/stable-audio$/, () => json({ ok: true }));
+    const res = await post(
+      app,
+      '/v1/fal-ai/stable-audio',
+      { prompt: 'rain', seconds_total: 5 },
+      fal
+    );
+    expect(res.status).toBe(200);
+    expect(upstreamCalls[0].body).toEqual({ prompt: 'rain', seconds_total: 5 });
+  });
+});
