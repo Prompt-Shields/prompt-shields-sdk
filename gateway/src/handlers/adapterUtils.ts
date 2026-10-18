@@ -30,6 +30,7 @@ import {
 import {
   routesMessagesViaResponses,
   transformMessagesToResponses,
+  MessagesViaResponsesRequestError,
   transformResponsesToMessages,
   transformResponsesStreamChunk,
   createResponsesToMessagesStreamState,
@@ -92,16 +93,35 @@ export function applyAdapterRequestTransform(
   params: Params,
   requestBody: Params | FormData | ArrayBuffer | ReadableStream,
   isStreamingMode: boolean,
-  method: string
+  method: string,
+  messagesViaResponses?: boolean
 ): AdapterRequestResult | Response | null {
   // PS fork (#73): models that only the Responses API serves (e.g. codex)
-  // are reached via Responses instead of Chat Completions.
+  // are reached via Responses instead of Chat Completions. The target's
+  // `messages_via_responses` / the x-portkey-messages-via-responses header
+  // force (true) or disable (false) this regardless of the model name.
   if (
     fn === 'messages' &&
     provider &&
-    routesMessagesViaResponses(provider, params.model || '')
+    routesMessagesViaResponses(
+      provider,
+      params.model || '',
+      messagesViaResponses
+    )
   ) {
-    const transformedParams = transformMessagesToResponses(params);
+    let transformedParams: Params;
+    try {
+      transformedParams = transformMessagesToResponses(params, provider);
+    } catch (err) {
+      if (!(err instanceof MessagesViaResponsesRequestError)) throw err;
+      return new Response(
+        JSON.stringify({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: err.message },
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
     return {
       adapterCtx: {
         isActive: true,
@@ -373,7 +393,7 @@ function adaptStreamingResponse(
 
   if (adapterCtx.via === 'responses') {
     // PS fork (#73): Responses SSE → Messages SSE
-    const state = createResponsesToMessagesStreamState();
+    const state = createResponsesToMessagesStreamState(adapterCtx.provider);
 
     (async () => {
       try {
