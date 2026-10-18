@@ -212,6 +212,7 @@ def build_bom(
             ("business_unit", a.business_unit),
             ("environment", a.environment),
             ("region", a.region),
+            ("modality", a.modality),
             ("status", a.status),
             ("data_classification", a.data_classification),
             ("calling_service", a.calling_service),

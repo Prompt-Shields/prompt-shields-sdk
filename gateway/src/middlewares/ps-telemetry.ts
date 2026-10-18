@@ -122,7 +122,7 @@ export function usageUnits(
 /**
  * The request body as telemetry needs it, read after the handler ran. JSON
  * bodies come from Hono's body cache. For a multipart upload (audio
- * transcription or translation) only the `model` field is taken from the
+ * transcription or translation, image edit) only the `model` field is taken from the
  * form the handler already parsed; the form is never re-read or serialised,
  * and no other field (file, prompt) is returned.
  */

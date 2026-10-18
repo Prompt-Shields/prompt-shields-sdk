@@ -369,3 +369,58 @@ describe('JSON payload size limit (#62)', () => {
     expect(upstreamCalls).toHaveLength(1);
   });
 });
+
+describe('multipart uploads report their model (#75)', () => {
+  const upload = (path: string, form: FormData, provider: string) =>
+    app.request(path, {
+      method: 'POST',
+      headers: { 'x-portkey-provider': provider, authorization: 'Bearer k' },
+      body: form,
+    });
+
+  test('a transcription is registered with its model and audio modality', async () => {
+    upstream(/api\.deepgram\.com\/v1\/listen/, () =>
+      json({
+        metadata: { duration: 2 },
+        results: { channels: [{ alternatives: [{ transcript: 'hi' }] }] },
+      })
+    );
+    const form = new FormData();
+    form.append('file', new Blob(['abc'], { type: 'audio/wav' }), 'a.wav');
+    form.append('model', 'nova-3');
+    form.append('prompt', 'secret context');
+    const res = await upload('/v1/audio/transcriptions', form, 'deepgram');
+    expect(res.status).toBe(200);
+    const event = await telemetryEvent();
+    expect(event).toMatchObject({
+      vendor: 'deepgram',
+      model: 'nova-3',
+      api_surface: 'audio',
+      modality: 'audio',
+      usage_units: 2,
+      usage_unit_type: 'seconds',
+    });
+    expect(JSON.stringify(event)).not.toContain('secret context');
+  });
+
+  test('an image edit is registered with its model, not unknown', async () => {
+    upstream(/api\.openai\.com\/v1\/images\/edits$/, () =>
+      json({ created: 1, data: [{ b64_json: 'AAAA' }] })
+    );
+    const form = new FormData();
+    form.append('image', new Blob(['png'], { type: 'image/png' }), 'a.png');
+    form.append('model', 'gpt-image-1');
+    form.append('prompt', 'secret prompt');
+    const res = await upload('/v1/images/edits', form, 'openai');
+    expect(res.status).toBe(200);
+    expect(upstreamCalls).toHaveLength(1);
+    const event = await telemetryEvent();
+    expect(event).toMatchObject({
+      vendor: 'openai',
+      model: 'gpt-image-1',
+      api_surface: 'images',
+      modality: 'image',
+    });
+    expect(JSON.stringify(event)).not.toContain('secret prompt');
+  });
+});

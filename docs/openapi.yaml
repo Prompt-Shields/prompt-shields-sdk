@@ -118,7 +118,8 @@ components:
           nullable: true
         modality:
           type: string
-          description: What the asset works on, from the first telemetry event that reported it (the gateway sets it from the endpoint). Null when no event reported one.
+          description: What the asset works on, from the first telemetry event that reported it (the gateway sets it from the endpoint; chat, embeddings and rerank are `text`, OCR is `document`). Null when no event reported a known one; other values are dropped at ingest and counted as `modality:invalid` in telemetry loss.
+          enum: [text, image, audio, document, null]
           example: "audio"
           nullable: true
         status:
@@ -1197,9 +1198,15 @@ paths:
           in: query
           schema:
             type: string
-            enum: [json]
+            enum: [json, cyclonedx]
             default: json
-          description: Export format
+          description: |
+            Export format. `json` is the registry envelope below. `cyclonedx`
+            is a CycloneDX 1.6 AI-BOM (`application/vnd.cyclonedx+json; version=1.6`):
+            each asset is an `application` component whose Prompt Shields data
+            (vendor, model, modality, discovery sources, confidence, owner, risk
+            classifications, ...) is carried as `promptshields:<name>` properties,
+            for example `promptshields:modality` = `audio`.
       security:
         - OAuth2: [export:read]
         - PartnerApiKey: []
@@ -1232,6 +1239,10 @@ paths:
                         type: string
                         format: uuid
                         description: Tenant of the credential that made the request
+            application/vnd.cyclonedx+json:
+              schema:
+                type: object
+                description: CycloneDX 1.6 BOM (`format=cyclonedx`), valid against the official CycloneDX 1.6 JSON schema.
 
   /partner/v1/health:
     get:

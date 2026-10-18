@@ -157,6 +157,7 @@ WATCHED_FIELDS: tuple[str, ...] = (
     "owner_email",
     "data_classification",
     "lifecycle_state",
+    "modality",
 )
 
 # Asset fields included in event payloads. owner_email (personal data) is
@@ -172,6 +173,7 @@ PAYLOAD_FIELDS: tuple[str, ...] = (
     "discovery_source",
     "confidence",
     "lifecycle_state",
+    "modality",
 )
 PAYLOAD_TIMESTAMPS: tuple[str, ...] = (
     "first_seen",

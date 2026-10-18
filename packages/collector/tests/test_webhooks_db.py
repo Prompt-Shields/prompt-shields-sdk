@@ -255,6 +255,35 @@ async def test_ingest_queues_created_then_changed_events(env):
         assert len(await _deliveries(env["factory"])) == 3
 
 
+async def test_asset_events_carry_modality_and_its_first_report_is_a_change(env):
+    """#75: payloads include the asset's modality; an asset registered before
+    any event reported one emits asset.changed once it gains it."""
+    event = {"vendor": "deepgram", "model": "nova-3", "source": "gateway"}
+    async with _client() as c:
+        await _subscribe(c, env["pa"])
+        await c.post("/ingest/events", headers=H_A, json={"events": [event]})
+        (created,) = await _deliveries(env["factory"])
+        assert created.payload["data"]["asset"]["modality"] is None
+
+        await c.post(
+            "/ingest/events",
+            headers=H_A,
+            json={"events": [{**event, "modality": "audio"}]},
+        )
+        rows = await _deliveries(env["factory"])
+        (changed,) = [r for r in rows if r.event_type == "asset.changed"]
+        assert changed.payload["data"]["changed_fields"] == ["modality"]
+        assert changed.payload["data"]["asset"]["modality"] == "audio"
+
+        # The first modality wins: a later, different one is no change.
+        await c.post(
+            "/ingest/events",
+            headers=H_A,
+            json={"events": [{**event, "modality": "text"}]},
+        )
+        assert len(await _deliveries(env["factory"])) == 2
+
+
 async def test_revoked_partner_gets_no_new_events(env):
     async with _client() as c:
         await _subscribe(c, env["pa"])

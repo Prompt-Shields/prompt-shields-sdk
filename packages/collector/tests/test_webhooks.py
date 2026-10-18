@@ -231,6 +231,9 @@ def test_payload_excludes_owner_email():
     payload = webhooks.asset_payload(asset)
     assert "owner_email" not in payload
     assert payload["vendor"] == "openai"
+    assert payload["modality"] is None
+    asset.modality = "document"
+    assert webhooks.asset_payload(asset)["modality"] == "document"
 
 
 async def test_post_signed_has_an_overall_deadline(monkeypatch):
