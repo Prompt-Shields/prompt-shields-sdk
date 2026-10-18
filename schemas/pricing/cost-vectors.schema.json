@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://promptshields.com/schemas/pricing/cost-vectors.schema.json",
   "title": "Golden cost vectors",
-  "description": "Normalised usage for one call and the USD cost every implementation (SDK, gateway) must compute for it at the default list prices. Usage uses the SDK event field names: tokens_in is the whole prompt (cache reads and writes and audio included), tokens_out includes reasoning and audio tokens, and the other counts are subsets of those. expected_cost null means the call must be reported as unmetered, not as zero. A runner compares cost within 1e-9 USD, and cost_source when expected_cost_source is present.",
+  "description": "Normalised usage for one call and the USD cost every implementation (SDK, gateway) must compute for it at the default list prices. Usage uses the SDK event field names: tokens_in is the whole prompt (cache reads and writes and audio included), tokens_out includes reasoning and audio tokens, and the other counts are subsets of those. A call billed by non-token units gives usage_units and usage_unit_type (seconds, characters, pages, search_units, or images with image_quality and image_size) instead of, or besides, token counts. expected_cost null means the call must be reported as unmetered, not as zero. A runner compares cost within 1e-9 USD, and cost_source when expected_cost_source is present.",
   "type": "object",
   "required": ["vectors"],
   "additionalProperties": false,
@@ -41,14 +41,18 @@
             "long_context",
             "audio_tokens",
             "tool_fee",
-            "provider_reported"
+            "provider_reported",
+            "usage_units"
           ]
         },
         "vendor": { "type": "string" },
         "model": { "type": "string" },
         "usage": {
           "type": "object",
-          "required": ["tokens_in", "tokens_out"],
+          "anyOf": [
+            { "required": ["tokens_in", "tokens_out"] },
+            { "required": ["usage_units", "usage_unit_type"] }
+          ],
           "additionalProperties": false,
           "properties": {
             "tokens_in": { "$ref": "#/$defs/count" },
@@ -60,7 +64,19 @@
             "tokens_audio_out": { "$ref": "#/$defs/count" },
             "web_search_requests": { "$ref": "#/$defs/count" },
             "service_tier": { "type": "string" },
-            "provider_cost": { "type": "number", "minimum": 0 }
+            "provider_cost": { "type": "number", "minimum": 0 },
+            "usage_units": { "type": "number", "minimum": 0 },
+            "usage_unit_type": {
+              "enum": [
+                "seconds",
+                "characters",
+                "pages",
+                "search_units",
+                "images"
+              ]
+            },
+            "image_quality": { "type": "string" },
+            "image_size": { "type": "string" }
           }
         },
         "expected_cost": { "type": ["number", "null"], "minimum": 0 },
@@ -70,7 +86,7 @@
         "derivation": {
           "type": "string",
           "minLength": 1,
-          "description": "The hand calculation from published list prices (USD per 1M tokens unless stated)."
+          "description": "The hand calculation from published list prices (USD per 1M tokens unless stated; per-unit prices as the vendor states them)."
         }
       }
     }

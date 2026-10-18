@@ -27,6 +27,7 @@ Public surface:
     Utilities:
         detect_pii_categories — pattern-based PII detection
         estimate_cost         — token-to-USD cost estimator
+        estimate_unit_cost    — per-unit (page, character, second, image) cost
 """
 
 from prompt_shields.async_client import (
@@ -45,7 +46,7 @@ from prompt_shields.instrumentation import (
     uninstrument,
 )
 from prompt_shields.pii import detect_pii_categories, scan_messages
-from prompt_shields.pricing import estimate_cost
+from prompt_shields.pricing import estimate_cost, estimate_unit_cost
 from prompt_shields.types import (
     DataClassification,
     DiscoverySource,
@@ -74,6 +75,7 @@ __all__ = [
     "Vendor",
     "detect_pii_categories",
     "estimate_cost",
+    "estimate_unit_cost",
     "instrument",
     "scan_messages",
     "suppress_instrumentation",

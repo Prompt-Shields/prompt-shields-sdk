@@ -32,7 +32,12 @@ Further pricing dimensions (#71):
 - Per-request tool fees (`web_search_requests`), not discounted by tier.
 - A cost the provider reports (OpenRouter `usage.cost`) is preferred over
   the table by `usage_cost` and recorded as `cost_source="provider_reported"`.
+- Non-token units (`usage_units` + `usage_unit_type`, as the gateway emits
+  them): OCR pages, speech characters, transcription seconds, rerank search
+  units, and generated images by quality and size. See `estimate_unit_cost`.
 """
+
+import math
 
 # Cache rates as a multiple of the input rate, when a table entry does not
 # give its own. OpenAI: cached input at 50% (gpt-4o / o1 families). Anthropic:
@@ -94,6 +99,76 @@ AUDIO_PRICING: dict[tuple[str, str], tuple[float, float]] = {
 # at OpenAI list prices.
 PRICING_VENDOR_FALLBACK: dict[str, str] = {
     "azure_openai": "openai",
+    # The gateway's provider slug for Mistral La Plateforme.
+    "mistral-ai": "mistral",
+}
+
+# Non-token usage units (#71), named as the gateway's ps-telemetry
+# `usageUnits()` emits `usage_unit_type`, plus "images" for image generation.
+UNIT_SECONDS = "seconds"
+UNIT_CHARACTERS = "characters"
+UNIT_PAGES = "pages"
+UNIT_SEARCH_UNITS = "search_units"
+UNIT_IMAGES = "images"
+USAGE_UNIT_TYPES = frozenset(
+    {UNIT_SECONDS, UNIT_CHARACTERS, UNIT_PAGES, UNIT_SEARCH_UNITS, UNIT_IMAGES}
+)
+
+# USD per unit, keyed (vendor, model, usage_unit_type). List prices checked
+# 2026-10-18 against the vendor page named on each entry (as indexed by web
+# search; the pages themselves were not reachable from the build host) and
+# cross-checked with LiteLLM 1.106.0 `model_prices_and_context_window.json`.
+# Models billed by tokens rather than by unit are left out on
+# purpose (their unit counts cannot be priced exactly): gpt-4o-transcribe,
+# gpt-4o-mini-transcribe and gpt-4o-mini-tts. So are prices that could not be
+# confirmed: Mistral OCR 2505 and the moving `mistral-ocr-latest` alias,
+# Deepgram (Nova-3 and Aura-2 voice-specific model ids), and DALL-E 2/3
+# (retired from the OpenAI API on 2026-05-12).
+UNIT_PRICING: dict[tuple[str, str, str], float] = {
+    # OpenAI, https://platform.openai.com/docs/pricing (2026-10-18):
+    # Whisper $0.006 / minute; TTS $15 / 1M characters, TTS HD $30 / 1M.
+    ("openai", "whisper-1", UNIT_SECONDS): 0.006 / 60,
+    ("openai", "tts-1", UNIT_CHARACTERS): 15.0 / 1_000_000,
+    ("openai", "tts-1-hd", UNIT_CHARACTERS): 30.0 / 1_000_000,
+    # Mistral OCR 3, https://mistral.ai/news/mistral-ocr-3 and
+    # https://mistral.ai/pricing (2026-10-18): $2 / 1,000 pages (annotations
+    # are billed apart and not included).
+    ("mistral", "mistral-ocr-2512", UNIT_PAGES): 2.0 / 1000,
+    # ElevenLabs, https://elevenlabs.io/pricing/api (2026-10-18):
+    # Multilingual v2 / v3 $0.10 / 1K characters, Flash / Turbo $0.05 / 1K,
+    # Scribe v1 / v2 (batch speech to text) $0.22 / hour.
+    ("elevenlabs", "eleven_multilingual_v2", UNIT_CHARACTERS): 0.10 / 1000,
+    ("elevenlabs", "eleven_v3", UNIT_CHARACTERS): 0.10 / 1000,
+    ("elevenlabs", "eleven_flash_v2", UNIT_CHARACTERS): 0.05 / 1000,
+    ("elevenlabs", "eleven_flash_v2_5", UNIT_CHARACTERS): 0.05 / 1000,
+    ("elevenlabs", "eleven_turbo_v2", UNIT_CHARACTERS): 0.05 / 1000,
+    ("elevenlabs", "eleven_turbo_v2_5", UNIT_CHARACTERS): 0.05 / 1000,
+    ("elevenlabs", "scribe_v1", UNIT_SECONDS): 0.22 / 3600,
+    ("elevenlabs", "scribe_v2", UNIT_SECONDS): 0.22 / 3600,
+    # Cohere Rerank 3.5, https://cohere.com/pricing (2026-10-18): $2 / 1,000
+    # searches (one search unit is a query over up to 100 documents). The
+    # Cohere page was not indexed; the rate is from LiteLLM and two price
+    # trackers that agree on it.
+    ("cohere", "rerank-v3.5", UNIT_SEARCH_UNITS): 2.0 / 1000,
+}
+
+# USD per generated image, keyed (vendor, model) then (quality, size).
+# OpenAI gpt-image-1, https://platform.openai.com/docs/pricing "Image
+# generation" (2026-10-18). gpt-image-1 bills image output tokens; these are
+# OpenAI's published per-image equivalents, used when only an image count is
+# known.
+IMAGE_PRICING: dict[tuple[str, str], dict[tuple[str, str], float]] = {
+    ("openai", "gpt-image-1"): {
+        ("low", "1024x1024"): 0.011,
+        ("low", "1024x1536"): 0.016,
+        ("low", "1536x1024"): 0.016,
+        ("medium", "1024x1024"): 0.042,
+        ("medium", "1024x1536"): 0.063,
+        ("medium", "1536x1024"): 0.063,
+        ("high", "1024x1024"): 0.167,
+        ("high", "1024x1536"): 0.25,
+        ("high", "1536x1024"): 0.25,
+    },
 }
 
 # (input_per_1k_tokens, output_per_1k_tokens) in USD
@@ -251,6 +326,83 @@ def estimate_cost(
     return round(token_cost * tier + fees, 6)
 
 
+def _unit_rate(
+    table: dict,
+    vendor: str,
+    model: str,
+    unit_type: str,
+    image_quality: str | None,
+    image_size: str | None,
+) -> float | None:
+    """The USD rate for one unit, from a custom table or the defaults.
+
+    A custom table prices units under `(vendor, model, usage_unit_type)`
+    keys: a float per unit, or for images a `{(quality, size): usd}` dict.
+    """
+    if table is not None:
+        rate = table.get((vendor, model, unit_type))
+    elif unit_type == UNIT_IMAGES:
+        rate = IMAGE_PRICING.get((vendor, model))
+    else:
+        rate = UNIT_PRICING.get((vendor, model, unit_type))
+    if isinstance(rate, dict):
+        rate = rate.get((image_quality, image_size))
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+        return float(rate)
+    return None
+
+
+def estimate_unit_cost(
+    vendor: str,
+    model: str | None,
+    usage_units: float | None,
+    usage_unit_type: str | None,
+    pricing_table: dict | None = None,
+    *,
+    image_quality: str | None = None,
+    image_size: str | None = None,
+    service_tier: str | None = None,
+) -> float | None:
+    """Estimate USD cost of a call billed by non-token units.
+
+    `usage_unit_type` is one of `USAGE_UNIT_TYPES`: "seconds" (speech to
+    text), "characters" (text to speech), "pages" (OCR), "search_units"
+    (rerank) or "images" (image generation, priced by `image_quality` and
+    `image_size`, e.g. "medium" and "1024x1024"). Units are priced as
+    reported, without rounding.
+
+    Returns None when the model, unit count or unit type is missing, the
+    (vendor, model, unit type) has no price, or the service tier is not a
+    standard one.
+    """
+    if model is None or usage_unit_type is None:
+        return None
+    if (
+        not isinstance(usage_units, (int, float))
+        or isinstance(usage_units, bool)
+        or not math.isfinite(usage_units)
+        or usage_units < 0
+    ):
+        return None
+
+    rate = _unit_rate(
+        pricing_table, vendor, model, usage_unit_type, image_quality, image_size
+    )
+    if rate is None and vendor in PRICING_VENDOR_FALLBACK:
+        vendor = PRICING_VENDOR_FALLBACK[vendor]
+        rate = _unit_rate(
+            pricing_table, vendor, model, usage_unit_type, image_quality, image_size
+        )
+    if rate is None:
+        return None
+
+    # Unit prices are standard-tier list prices; a batch or flex discount on
+    # them is not known, so any other tier is unpriced.
+    if service_tier is not None and service_tier not in STANDARD_SERVICE_TIERS:
+        return None
+    return round(usage_units * rate, 6)
+
+
 # Adapter fields, besides tokens_in/out, that estimate_cost prices.
 PRICING_DIMENSIONS = (
     "tokens_cached",
@@ -273,10 +425,25 @@ def usage_cost(
 
     A cost the provider reported (`provider_cost`, e.g. OpenRouter
     `usage.cost`) wins over the pricing table, even for unknown models.
+    A call with `usage_units` and `usage_unit_type` is priced per unit when
+    its (vendor, model, unit type) has a price, else from its tokens.
     """
     provider_cost = fields.get("provider_cost")
     if provider_cost is not None:
         return round(float(provider_cost), 6)
+    if fields.get("usage_unit_type") is not None:
+        unit_cost = estimate_unit_cost(
+            vendor,
+            model,
+            fields.get("usage_units"),
+            fields.get("usage_unit_type"),
+            pricing_table,
+            image_quality=fields.get("image_quality"),
+            image_size=fields.get("image_size"),
+            service_tier=fields.get("service_tier"),
+        )
+        if unit_cost is not None:
+            return unit_cost
     return estimate_cost(
         vendor,
         model,
@@ -296,6 +463,8 @@ USAGE_DETAIL_FIELDS = (
     "tokens_audio_out",
     "web_search_requests",
     "service_tier",
+    "usage_units",
+    "usage_unit_type",
 )
 
 # `cost_source` values: how the event's `cost` was produced.
