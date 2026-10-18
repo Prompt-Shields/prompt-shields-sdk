@@ -68,6 +68,12 @@ export class ProviderContext {
     const proxyEndpointPath =
       reqURL.pathname.indexOf('/v1/proxy') > -1 ? '/v1/proxy' : '/v1';
     reqPath = reqPath.replace(proxyEndpointPath, '');
+    // PS fork: `/v1/proxy.evil.com/x` would leave `.evil.com/x`, which
+    // appended to a bare-host base URL (`https://fal.run`) changes the host
+    // the provider's credentials are sent to.
+    if (reqPath && !reqPath.startsWith('/')) {
+      throw new GatewayError('Invalid proxy path', 400);
+    }
 
     if (
       this.provider === AZURE_OPEN_AI &&

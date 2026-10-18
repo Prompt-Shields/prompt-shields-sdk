@@ -479,6 +479,26 @@ estimate_cost("anthropic", "claude-sonnet-4-20250514", tokens_in=1000, tokens_ou
 
 Returns `None` when the model is unknown — the collector treats this as "unmetered" rather than zero.
 
+### Non-token units
+
+Calls billed by non-token units (transcription seconds, text-to-speech
+characters, OCR pages, rerank search units, generated images) are priced with
+`estimate_unit_cost`; `usage_unit_type` uses the gateway's names:
+
+```python
+from prompt_shields import estimate_unit_cost
+
+estimate_unit_cost("openai", "whisper-1", 90, "seconds")         # → 0.009
+estimate_unit_cost("mistral", "mistral-ocr-2512", 10, "pages")   # → 0.02
+estimate_unit_cost("openai", "gpt-image-1", 2, "images",
+                   image_quality="medium", image_size="1024x1024")  # → 0.084
+```
+
+Models billed by tokens (gpt-4o-transcribe, gpt-4o-mini-tts), moving aliases
+such as `mistral-ocr-latest`, and unknown image sizes return `None`. A custom
+`pricing_table` prices units under `(vendor, model, unit_type)` keys, e.g.
+`("openai", "whisper-1", "seconds"): 0.0001` (USD per unit).
+
 ### Custom pricing
 
 If you have negotiated rates or are using an internal LLM gateway, override the default table:

@@ -22,6 +22,8 @@ const NATIVE_PROVIDERS = new Set([
   'azure-openai',
   'groq',
   'iointelligence',
+  // PS fork (#74): Bedrock Mantle serves the OpenAI Responses API.
+  'bedrock-mantle',
 ]);
 
 export function supportsResponsesApiNatively(provider: string): boolean {

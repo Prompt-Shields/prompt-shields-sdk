@@ -10,6 +10,7 @@ import {
   ANTHROPIC,
   AZURE_AI_INFERENCE,
   BEDROCK,
+  BEDROCK_MANTLE,
   CLAUDE_PLATFORM_AWS,
   GOOGLE_VERTEX_AI,
 } from '../../globals';
@@ -25,6 +26,8 @@ const PROVIDERS_THAT_HANDLE_MESSAGES_FOR_ALL_MODELS = new Set([
 const PROVIDERS_THAT_HANDLE_MESSAGES_FOR_ANTHROPIC_MODELS = new Set([
   GOOGLE_VERTEX_AI,
   AZURE_AI_INFERENCE,
+  // Bedrock Mantle serves the Anthropic Messages API for Claude models (#74).
+  BEDROCK_MANTLE,
 ]);
 
 /**
