@@ -89,6 +89,7 @@ import IONOSConfig from './ionos';
 import STACKITConfig from './stackit';
 import MetaConfig from './meta';
 import SCXAIConfig from './scx-ai';
+import ClaudePlatformAwsConfig from './claude-platform-aws';
 
 const Providers: { [key: string]: ProviderConfigs } = {
   openai: OpenAIConfig,
@@ -178,6 +179,7 @@ const Providers: { [key: string]: ProviderConfigs } = {
   stackit: STACKITConfig,
   meta: MetaConfig,
   'scx-ai': SCXAIConfig,
+  'claude-platform-aws': ClaudePlatformAwsConfig,
 };
 
 export default Providers;
