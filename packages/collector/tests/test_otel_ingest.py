@@ -259,6 +259,7 @@ async def test_write_spans_stores_metadata_only():
     flows = AsyncMock()
     with (
         patch.object(otel_ingest, "find_or_create_asset", find),
+        patch.object(otel_ingest, "lock_asset_keys", AsyncMock()),
         patch.object(otel_ingest, "get_embedding", AsyncMock(return_value=None)),
         patch.object(otel_ingest, "record_event_flows", flows),
         patch.object(otel_ingest, "AssetChanges") as changes,
