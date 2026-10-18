@@ -100,7 +100,14 @@ export function toMessagesUsage(u: NormalizedUsage) {
 export function toResponsesUsage(u: NormalizedUsage) {
   return {
     input_tokens: u.promptTokens,
-    input_tokens_details: { cached_tokens: u.cacheReadTokens },
+    input_tokens_details: {
+      cached_tokens: u.cacheReadTokens,
+      // PS fork (#9): cache writes (Anthropic, Bedrock) are billed apart from
+      // reads; not an OpenAI field, so only sent when there are any.
+      ...(u.cacheCreationTokens
+        ? { cache_creation_tokens: u.cacheCreationTokens }
+        : {}),
+    },
     output_tokens: u.completionTokens,
     output_tokens_details: { reasoning_tokens: u.reasoningTokens },
     total_tokens: u.totalTokens,

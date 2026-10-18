@@ -8,7 +8,10 @@ import {
   inputTokensOf,
   observeStream,
   StreamSummary,
+  UsageDetails,
+  usageDetailsOf,
 } from './psStreamObserver';
+import { supportsResponsesApiNatively } from '../adapters/responses';
 import {
   AttemptRecord,
   attemptCountOf,
@@ -27,6 +30,16 @@ interface TelemetryEvent {
   source: string;
   tokens_in?: number;
   tokens_out?: number;
+  // Usage detail (#9), as the SDK reports it: cached, cache-write (and its
+  // 1-hour subset) and reasoning counts, the provider's service tier, and a
+  // cost only when the provider reported one (cost_source says so).
+  tokens_cached?: number;
+  tokens_cache_write?: number;
+  tokens_cache_write_1h?: number;
+  tokens_reasoning?: number;
+  service_tier?: string;
+  cost?: number;
+  cost_source?: string;
   latency_ms?: number;
   business_unit?: string;
   use_case_name?: string;
@@ -168,6 +181,68 @@ export function usageTokens(body: any): {
     tokens_in: inputTokensOf(u),
     tokens_out: u.completion_tokens ?? u.output_tokens,
   };
+}
+
+/** The SDK's `cost_source` for a cost the provider billed (pricing.py). */
+export const COST_SOURCE_PROVIDER_REPORTED = 'provider_reported';
+
+/**
+ * Usage details of a non-streamed response body. The tier is top level on
+ * Chat Completions and Responses bodies, inside `usage` on Anthropic's.
+ * `nativeTier` is false when the body was built by the Responses adapter,
+ * which echoes the requested tier (or `default`) rather than a served one.
+ */
+export function usageDetails(
+  body: any,
+  nativeTier = true,
+  zeroFilled = false
+): UsageDetails {
+  const details = usageDetailsOf(body?.usage);
+  const tier = body?.service_tier;
+  if (typeof tier === 'string' && tier) details.service_tier = tier;
+  if (!nativeTier) delete details.service_tier;
+  return zeroFilled ? withoutFilledZeros(details) : details;
+}
+
+/**
+ * Providers whose usage the gateway rebuilds in Chat Completions shape and
+ * fills a count the provider left out with 0: Gemini and Vertex
+ * (`thoughtsTokenCount`, `cachedContentTokenCount`) and Bedrock Converse
+ * (`cacheReadInputTokens`). The Responses adapter does the same for any
+ * provider. The SDK omits a count the provider did not report.
+ */
+const ZERO_FILLED_VENDORS = new Set(['google', 'vertex-ai', 'bedrock']);
+
+/** Whether a zero cached or reasoning count may be a filled-in default. */
+export function usageZeroFilled(vendor: string, adapted: boolean): boolean {
+  return adapted || ZERO_FILLED_VENDORS.has(vendor);
+}
+
+/** `details` without zero cached and reasoning counts. */
+export function withoutFilledZeros(details: UsageDetails): UsageDetails {
+  const out = { ...details };
+  if (out.tokens_cached === 0) delete out.tokens_cached;
+  if (out.tokens_reasoning === 0) delete out.tokens_reasoning;
+  return out;
+}
+
+/**
+ * Event fields for usage details. Like the SDK's `add_usage_detail_fields`,
+ * `cost_source` accompanies a cost only: the gateway prices nothing itself,
+ * so a cost (and `cost_source: provider_reported`) is sent only when the
+ * provider reported what it billed.
+ */
+export function usageDetailFields(
+  details: UsageDetails | undefined
+): Partial<TelemetryEvent> {
+  if (!details) return {};
+  const { provider_cost, ...rest } = details;
+  const out: Partial<TelemetryEvent> = { ...rest };
+  if (provider_cost !== undefined) {
+    out.cost = provider_cost;
+    out.cost_source = COST_SOURCE_PROVIDER_REPORTED;
+  }
+  return out;
 }
 
 const PS_COLLECTOR_URL =
@@ -316,6 +391,9 @@ export function psTelemetryMiddleware() {
         model,
         source: 'gateway',
         ...usageTokens(response.body),
+        ...usageDetailFields(
+          usageDetails(response.body, true, usageZeroFilled(vendor, false))
+        ),
         latency_ms: latencyMs,
         ...psHeaders,
       };
@@ -342,11 +420,17 @@ export function psTelemetryMiddleware() {
 export function withStreamSummary(
   event: TelemetryEvent,
   summary: StreamSummary,
-  routed = false
+  routed = false,
+  nativeTier = true,
+  zeroFilled = false
 ): TelemetryEvent {
   const out: TelemetryEvent = { ...event, stream: true };
   if (summary.tokens_in !== undefined) out.tokens_in = summary.tokens_in;
   if (summary.tokens_out !== undefined) out.tokens_out = summary.tokens_out;
+  let details = summary.details && { ...summary.details };
+  if (details && !nativeTier) delete details.service_tier;
+  if (details && zeroFilled) details = withoutFilledZeros(details);
+  Object.assign(out, usageDetailFields(details));
   if (routed && summary.model) out.served_model = summary.model;
   if (summary.truncated) out.stream_truncated = true;
   if (summary.cancelled) out.stream_cancelled = true;
@@ -403,12 +487,24 @@ export function psTelemetry() {
         'unknown';
 
       const path = new URL(url).pathname;
+      const surface = apiSurfaceOf(path);
+      // The Responses adapter (#59) reports no served tier of its own.
+      const adapted =
+        surface === 'responses' && !supportsResponsesApiNatively(vendor);
+      const zeroFilled = usageZeroFilled(vendor, adapted);
       const event: TelemetryEvent = {
         vendor,
         model,
         source: 'gateway',
-        ...(reportsOwnUsage(path) ? usageTokens(responseBody) : {}),
-        api_surface: apiSurfaceOf(path),
+        ...(reportsOwnUsage(path)
+          ? {
+              ...usageTokens(responseBody),
+              ...usageDetailFields(
+                usageDetails(responseBody, !adapted, zeroFilled)
+              ),
+            }
+          : {}),
+        api_surface: surface,
         modality: modalityOf(path),
         ...usageUnits(path, responseBody, requestBody),
         latency_ms: Date.now() - startTime,
@@ -440,7 +536,9 @@ export function psTelemetry() {
       }
       stream
         .then((summary) =>
-          sendTelemetry(withStreamSummary(event, summary, !!route))
+          sendTelemetry(
+            withStreamSummary(event, summary, !!route, !adapted, zeroFilled)
+          )
         )
         .catch(() => {});
     } catch (err) {
