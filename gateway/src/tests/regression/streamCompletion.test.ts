@@ -388,6 +388,77 @@ describe('response cache: only complete responses are written (#72)', () => {
     await again.text();
     expect(upstreamCalls).toHaveLength(2);
   });
+  test('after a fallback, the failed target is not cached and the served one is', async () => {
+    const okBody = {
+      id: 'chatcmpl-fb',
+      object: 'chat.completion',
+      created: 1,
+      model: 'gpt-4o-mini',
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: 'from B' },
+          finish_reason: 'stop',
+        },
+      ],
+    };
+    upstream(/api\.openai\.com\/v1\/chat\/completions$/, (call) =>
+      call.headers.authorization === 'Bearer sk-target-a'
+        ? json({ error: { message: 'overloaded', type: 'server_error' } }, 500)
+        : json(okBody)
+    );
+    const config = {
+      strategy: { mode: 'fallback' },
+      targets: [
+        { provider: 'openai', api_key: 'sk-target-a' },
+        { provider: 'openai', api_key: 'sk-target-b' },
+      ],
+    };
+    const send = () =>
+      post(app, '/v1/chat/completions', chat('gpt-4o-mini'), {
+        'x-portkey-config': JSON.stringify(config),
+        'x-ps-cache': 'on',
+      });
+    const auths = () => upstreamCalls.map((u) => u.headers.authorization);
+
+    const first = await send();
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as any).choices[0].message.content).toBe(
+      'from B'
+    );
+    expect(auths()).toEqual(['Bearer sk-target-a', 'Bearer sk-target-b']);
+
+    // Target A's 500 was not cached (it is called again); target B's answer
+    // was, keyed on the same request, so B is served from the cache.
+    const second = await send();
+    expect(second.status).toBe(200);
+    expect(second.headers.get('x-portkey-cache-status')).toBe('HIT');
+    expect(((await second.json()) as any).choices[0].message.content).toBe(
+      'from B'
+    );
+    expect(auths()).toEqual([
+      'Bearer sk-target-a',
+      'Bearer sk-target-b',
+      'Bearer sk-target-a',
+    ]);
+  });
+
+  test('a non-chat 200 JSON response (embeddings) is still cached', async () => {
+    upstream(/api\.openai\.com\/v1\/embeddings$/, () =>
+      json({
+        object: 'list',
+        data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+        model: 'text-embedding-3-small',
+        usage: { prompt_tokens: 2, total_tokens: 2 },
+      })
+    );
+    const body = { model: 'text-embedding-3-small', input: 'hi' };
+    await (await cached(body, '/v1/embeddings')).text();
+    const again = await cached(body, '/v1/embeddings');
+    expect(again.headers.get('x-portkey-cache-status')).toBe('HIT');
+    expect(((await again.json()) as any).data[0].embedding).toEqual([0.1, 0.2]);
+    expect(upstreamCalls).toHaveLength(1);
+  });
 });
 
 describe('Gemini / Vertex tool calls finish with tool_calls (#72)', () => {
@@ -511,6 +582,44 @@ describe('Gemini / Vertex tool calls finish with tool_calls (#72)', () => {
         .map((c) => c.choices?.[0]?.finish_reason)
         .filter(Boolean);
       expect(finishes).toEqual(['stop']);
+    });
+
+    test('n>1: only the candidate that called a function gets tool_calls', async () => {
+      upstream(/:generateContent/, () =>
+        json({
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'Hi' }] },
+              finishReason: 'STOP',
+              index: 0,
+            },
+            {
+              content: { role: 'model', parts: [fnCall] },
+              finishReason: 'STOP',
+              index: 1,
+            },
+            {
+              content: { role: 'model', parts: [fnCall] },
+              finishReason: 'MAX_TOKENS',
+              index: 2,
+            },
+          ],
+          modelVersion: 'gemini-2.0-flash',
+          ...usage,
+        })
+      );
+      const res = await post(
+        app,
+        '/v1/chat/completions',
+        { ...body(false), n: 3 },
+        headers
+      );
+      const out: any = await res.json();
+      expect(out.choices.map((c: any) => c.finish_reason)).toEqual([
+        'stop',
+        'tool_calls',
+        'length',
+      ]);
     });
 
     test('non-strict mode keeps the native finish reason', async () => {
