@@ -15,7 +15,8 @@ import { Context } from 'hono';
  */
 export async function imageEditsHandler(c: Context): Promise<Response> {
   try {
-    let request = await c.req.raw.formData();
+    // PS: Hono-cached form, so telemetry can read `model` without re-reading.
+    let request = await c.req.formData();
     let requestHeaders = Object.fromEntries(c.req.raw.headers);
     const camelCaseConfig = constructConfigFromRequestHeaders(requestHeaders);
 

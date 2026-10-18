@@ -268,4 +268,24 @@ describe('sync', () => {
     expect(res.data[0].businessUnit).toBe('HR');
     expect(m.calls[0].url).toBe('https://api.promptshields.io/partner/v1/export');
   });
+
+  it('exports a CycloneDX AI-BOM unchanged', async () => {
+    const bom = {
+      bomFormat: 'CycloneDX',
+      specVersion: '1.6',
+      serialNumber: 'urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79',
+      components: [
+        {
+          type: 'application',
+          'bom-ref': 'asset-1',
+          name: 'openai/gpt-4o',
+          properties: [{ name: 'promptshields:modality', value: 'audio' }],
+        },
+      ],
+    };
+    const m = mockFetch(json(bom));
+    const res = await client(m.fetch).export.get({ format: 'cyclonedx' });
+    expect(res).toEqual(bom);
+    expect(m.calls[0].url).toBe('https://api.promptshields.io/partner/v1/export?format=cyclonedx');
+  });
 });

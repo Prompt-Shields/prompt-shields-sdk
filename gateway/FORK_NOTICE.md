@@ -62,6 +62,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/handlers/createTranscriptionHandler.ts`
 - `src/handlers/createTranslationHandler.ts`
 - `src/handlers/handlerUtils.ts`
+- `src/handlers/imageEditsHandler.ts`
 - `src/handlers/modelResponsesHandler.ts`
 - `src/handlers/proxyHandler.ts`
 - `src/handlers/retryHandler.ts`

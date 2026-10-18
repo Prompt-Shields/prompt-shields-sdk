@@ -255,6 +255,38 @@ async def test_ingest_queues_created_then_changed_events(env):
         assert len(await _deliveries(env["factory"])) == 3
 
 
+async def test_asset_events_carry_modality_but_gaining_one_is_no_change(env):
+    """#75: payloads include the asset's modality. An asset gaining its first
+    modality emits nothing, so existing assets do not each fire asset.changed
+    on their first gateway event after the upgrade; the next real change
+    carries it."""
+    event = {"vendor": "deepgram", "model": "nova-3", "source": "gateway"}
+    async with _client() as c:
+        await _subscribe(c, env["pa"])
+        await c.post("/ingest/events", headers=H_A, json={"events": [event]})
+        (created,) = await _deliveries(env["factory"])
+        assert created.payload["data"]["asset"]["modality"] is None
+
+        await c.post(
+            "/ingest/events",
+            headers=H_A,
+            json={"events": [{**event, "modality": "audio"}]},
+        )
+        assert len(await _deliveries(env["factory"])) == 1
+
+        # A later watched change carries the modality in its payload.
+        await c.post(
+            "/ingest/events",
+            headers=H_A,
+            json={"events": [{**event, "source": "sdk", "modality": "text"}]},
+        )
+        rows = await _deliveries(env["factory"])
+        (changed,) = [r for r in rows if r.event_type == "asset.changed"]
+        assert "modality" not in changed.payload["data"]["changed_fields"]
+        assert "discovery_source" in changed.payload["data"]["changed_fields"]
+        assert changed.payload["data"]["asset"]["modality"] == "audio"
+
+
 async def test_revoked_partner_gets_no_new_events(env):
     async with _client() as c:
         await _subscribe(c, env["pa"])

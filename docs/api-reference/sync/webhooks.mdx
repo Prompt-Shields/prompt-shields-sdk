@@ -12,7 +12,7 @@ Instead of polling [`/partner/v1/changes`](/api-reference/sync/get-changes), a p
 | Type | Sent when |
 |------|-----------|
 | `asset.created` | A new AI asset is discovered (SDK, gateway or OTel telemetry) |
-| `asset.changed` | An asset's discovery sources, confidence, owner, data classification or lifecycle state changes. This includes going `stale` and being reactivated. `data.changed_fields` names the fields that changed. |
+| `asset.changed` | An asset's discovery sources, confidence, owner, data classification or lifecycle state changes. This includes going `stale` and being reactivated. `data.changed_fields` names the fields that changed. An asset gaining its first `modality` is not a change; payloads carry the current modality. |
 | `asset.retired` | The lifecycle sweep retires an asset |
 | `asset.attested` | Someone records an attestation (`POST …/assets/{id}/attestations`) for one of the asset's fields (attested, disputed, retired or reset to unreviewed). `data.attestation` says which field and state. |
 
@@ -37,6 +37,7 @@ Body:
       "discovery_source": ["sdk", "gateway"],
       "confidence": "verified",
       "lifecycle_state": "active",
+      "modality": "text",
       "first_seen": "2026-09-01T10:00:00+00:00",
       "last_seen": "2026-10-15T09:12:44+00:00",
       "lifecycle_changed_at": null

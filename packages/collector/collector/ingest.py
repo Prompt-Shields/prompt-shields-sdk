@@ -86,7 +86,12 @@ class IngestEvent(BaseModel):
     @classmethod
     def _modality(cls, value: Any) -> str | None:
         value = _lenient_str(value, MAX_LABEL_LENGTH)
-        return value.lower() if value is not None else None
+        if value is None:
+            return None
+        value = value.lower()
+        # An unknown value would register the asset under a modality nothing
+        # filters on; it is dropped (counted as modality:invalid) instead.
+        return value if value in MODALITIES else None
 
     @field_validator(
         "tokens_cached",
@@ -121,6 +126,12 @@ MAX_LABEL_LENGTH = 64
 MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
+
+# The modalities telemetry reports, as the gateway's modalityOf() sets them
+# from the endpoint: chat, completions, messages, responses, embeddings and
+# rerank are text; /v1/images is image; /v1/audio is audio; /v1/ocr is
+# document. Matched case-insensitively, stored lower-case.
+MODALITIES = frozenset({"text", "image", "audio", "document"})
 
 # Lenient fields whose dropped values are reported in ignored_fields as
 # "<field>:invalid", so a client sending bad values shows up in

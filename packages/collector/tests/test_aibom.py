@@ -238,6 +238,20 @@ class TestBuildBom:
         for name, _ in p1 + p2:
             assert name.startswith("promptshields:")
 
+    def test_modality_property(self):
+        """#75: the asset's modality is exported; none, no property."""
+        audio = _asset(TENANT_A, vendor="deepgram", model="nova-3", modality="audio")
+        plain = _asset(TENANT_A)
+        bom = aibom.build_bom(TENANT_A, [audio, plain])
+        assert_valid(bom)
+        by_ref = {c["bom-ref"]: c for c in bom["components"]}
+        assert ("promptshields:modality", "audio") in _props(
+            by_ref[f"promptshields:asset:{audio.id}"]
+        )
+        assert "promptshields:modality" not in {
+            n for n, _ in _props(by_ref[f"promptshields:asset:{plain.id}"])
+        }
+
     def test_risk_properties_are_unique_per_framework_and_category(self):
         assets, flows, _ = _registry(TENANT_A)
         a1 = assets[0]

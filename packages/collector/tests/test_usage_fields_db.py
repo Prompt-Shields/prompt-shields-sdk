@@ -221,6 +221,35 @@ def test_lenient_usage_units_rejects_non_finite():
     assert IngestEvent(vendor="v", usage_units=0).usage_units == 0
 
 
+def test_modality_allowed_set():
+    from collector.ingest import MODALITIES, IngestEvent
+
+    # What the gateway's modalityOf() emits for each endpoint.
+    assert MODALITIES == {"text", "image", "audio", "document"}
+    for value in ("text", "IMAGE", " Audio ", "document"):
+        assert IngestEvent(vendor="v", modality=value).modality == value.strip().lower()
+    for value in ("video", "ocr", "embedding", "speech", "", None, 3):
+        assert IngestEvent(vendor="v", modality=value).modality is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_modality_is_stored_null_and_counted(seeded_db):
+    event = {"vendor": "openai", "model": "gpt-4o", "source": "gateway"}
+    resp, loss = await _ingest(
+        [{**event, "modality": "hologram"}, {**event, "modality": "text"}]
+    )
+    assert resp.status_code == 200, resp.text
+
+    (stats,) = loss["clients"]
+    assert stats["ignored_fields"].get("modality:invalid") == 1
+    assert "modality" not in stats["ignored_fields"]
+
+    events, assets = await _rows(seeded_db)
+    assert sorted(str(e.modality) for e in events) == ["None", "text"]
+    # The unknown value never reached the asset; the valid one did.
+    assert [a.modality for a in assets.values()] == ["text"]
+
+
 @pytest.mark.asyncio
 async def test_existing_asset_gains_modality_once(seeded_db):
     first = {"vendor": "deepgram", "model": "nova-3", "source": "gateway"}

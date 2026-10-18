@@ -147,7 +147,10 @@ MAX_URL_LENGTH = 2048
 MAX_ERROR_LENGTH = 200
 
 # Asset fields whose change emits asset.changed. last_seen moves on every
-# event and is deliberately not one of them.
+# event and is deliberately not one of them. Neither is modality: it only
+# ever goes from null to its first value (dedup keeps the first), so watching
+# it would fire one asset.changed for every existing asset on its first
+# gateway event after the upgrade that added it. It is in the payload.
 WATCHED_FIELDS: tuple[str, ...] = (
     "discovery_source",
     "confidence",
@@ -169,6 +172,7 @@ PAYLOAD_FIELDS: tuple[str, ...] = (
     "discovery_source",
     "confidence",
     "lifecycle_state",
+    "modality",
 )
 PAYLOAD_TIMESTAMPS: tuple[str, ...] = (
     "first_seen",
