@@ -18,6 +18,7 @@ import {
   ORACLE,
   DATABRICKS,
   CLAUDE_PLATFORM_AWS,
+  BEDROCK_MANTLE,
 } from '../globals';
 import { endpointStrings } from '../providers/types';
 import { Options, Params, StrategyModes, Targets } from '../types/requestBody';
@@ -1098,6 +1099,13 @@ export function constructConfigFromRequestHeaders(
       requestHeaders[`anthropic-workspace-id`],
   };
 
+  // Bedrock Mantle: AWS credentials and the Anthropic headers (#74).
+  const bedrockMantleConfig = {
+    ...awsConfig,
+    bedrockMantleApiPath:
+      requestHeaders[`x-${POWERED_BY}-bedrock-mantle-api-path`],
+  };
+
   const sagemakerConfig = {
     amznSagemakerCustomAttributes:
       requestHeaders[`x-${POWERED_BY}-amzn-sagemaker-custom-attributes`],
@@ -1257,6 +1265,13 @@ export function constructConfigFromRequestHeaders(
         };
       }
 
+      if (parsedConfigJson.provider === BEDROCK_MANTLE) {
+        parsedConfigJson = {
+          ...parsedConfigJson,
+          ...bedrockMantleConfig,
+        };
+      }
+
       if (parsedConfigJson.provider === SAGEMAKER) {
         parsedConfigJson = {
           ...parsedConfigJson,
@@ -1369,6 +1384,8 @@ export function constructConfigFromRequestHeaders(
       sagemakerConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === CLAUDE_PLATFORM_AWS &&
       claudePlatformAwsConfig),
+    ...(requestHeaders[`x-${POWERED_BY}-provider`] === BEDROCK_MANTLE &&
+      bedrockMantleConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === WORKERS_AI &&
       workersAiConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === GOOGLE_VERTEX_AI &&

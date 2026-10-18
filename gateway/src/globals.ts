@@ -129,6 +129,8 @@ export const STACKIT: string = 'stackit';
 export const META: string = 'meta';
 export const SCX_AI: string = 'scx-ai';
 export const CLAUDE_PLATFORM_AWS: string = 'claude-platform-aws';
+export const BEDROCK_MANTLE: string = 'bedrock-mantle';
+export const FAL_AI: string = 'fal-ai';
 
 export const VALID_PROVIDERS = [
   ANTHROPIC,
@@ -221,6 +223,8 @@ export const VALID_PROVIDERS = [
   META,
   SCX_AI,
   CLAUDE_PLATFORM_AWS,
+  BEDROCK_MANTLE,
+  FAL_AI,
 ];
 
 export const CONTENT_TYPES = {
