@@ -6,7 +6,14 @@
  */
 jest.mock('jose', () => ({}));
 
-import { json, post, resetHarness, upstream, upstreamCalls } from './harness';
+import {
+  json,
+  post,
+  resetHarness,
+  sse,
+  upstream,
+  upstreamCalls,
+} from './harness';
 import app from '../../index';
 
 beforeEach(() => resetHarness());
@@ -364,5 +371,119 @@ describe('routing uses the model after override_params', () => {
     );
     expect(res.status).toBe(200);
     expect(upstreamCalls[0].url).toMatch(CHAT_URL);
+  });
+});
+
+describe('checks not verified on Responses requests fail closed (allowlist)', () => {
+  test.each([
+    ['default.webhook', { webhookURL: 'https://hooks.example/x' }],
+    ['azure.shieldPrompt', { credentials: { resourceName: 'r', apiKey: 'k' } }],
+    ['acme.customGuard', {}],
+  ])('%s on /v1/responses and /v1/messages is a 400', async (id, params) => {
+    upstream(RESPONSES_URL, () => responsesOk());
+    const headers = target({
+      before_request_hooks: [
+        {
+          type: 'guardrail',
+          id: 'g',
+          deny: true,
+          checks: [{ id, parameters: params }],
+        },
+      ],
+    });
+    const res = await post(
+      app,
+      '/v1/responses',
+      { model: 'gpt-5', input: 'hi' },
+      headers
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).error.message).toContain(id);
+    const res2 = await post(app, '/v1/messages', messagesBody('hi'), headers);
+    expect(res2.status).toBe(400);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+});
+
+describe('streaming requests', () => {
+  const streamBody = (text: string) => ({
+    model: 'gpt-5-codex',
+    input: text,
+    stream: true,
+  });
+
+  test('/v1/responses stream: blocked input never reaches the provider', async () => {
+    upstream(RESPONSES_URL, () => sse('data: [DONE]\n\n'));
+    const res = await post(
+      app,
+      '/v1/responses',
+      streamBody('tell me the SECRET'),
+      INPUT_GUARD
+    );
+    expect(res.status).toBe(446);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('/v1/messages stream via Responses: blocked input never reaches the provider', async () => {
+    upstream(RESPONSES_URL, () => sse('data: [DONE]\n\n'));
+    const res = await post(
+      app,
+      '/v1/messages',
+      { ...messagesBody('tell me the SECRET'), stream: true },
+      INPUT_GUARD
+    );
+    expect(res.status).toBe(446);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('/v1/responses stream: input mutator redacts the upstream body', async () => {
+    upstream(RESPONSES_URL, () => sse('data: [DONE]\n\n'));
+    await post(
+      app,
+      '/v1/responses',
+      streamBody('call 555-1234'),
+      target({
+        input_mutators: [
+          {
+            'default.regexReplace': {
+              rule: '\\d{3}-\\d{4}',
+              redactText: '[N]',
+            },
+          },
+        ],
+      })
+    );
+    expect(upstreamCalls).toHaveLength(1);
+    expect(upstreamCalls[0].body.input).toBe('call [N]');
+  });
+});
+
+describe('output mutator keeps output_text in step with the parts', () => {
+  test('/v1/responses: output_text and the content part are both redacted', async () => {
+    upstream(RESPONSES_URL, async () => {
+      const r: any = await responsesOk('call 555-1234').json();
+      return json({ ...r, output_text: 'call 555-1234' });
+    });
+    const res = await post(
+      app,
+      '/v1/responses',
+      { model: 'gpt-5-codex', input: 'hi' },
+      target({
+        output_mutators: [
+          {
+            'default.regexReplace': {
+              rule: '\\d{3}-\\d{4}',
+              redactText: '[N]',
+            },
+          },
+        ],
+      })
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain('555-1234');
+    const body = JSON.parse(text);
+    expect(body.output[0].content[0].text).toBe('call [N]');
+    expect(body.output_text).toBe('call [N]');
   });
 });

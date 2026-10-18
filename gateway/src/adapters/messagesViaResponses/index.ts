@@ -48,9 +48,9 @@ export function routesMessagesViaResponses(
  *
  * The header (which the caller, not the operator, controls) cannot force
  * the route onto a target with hooks: `true` is then ignored. Hooks run on
- * the Responses route too, but a few checks only understand Chat
- * Completions (`responsesUnsupportedChecks`), so the caller must not be
- * able to move a hooked target onto it. `false` stays honoured.
+ * the Responses route too, but only allowlisted checks may run there
+ * (`responsesUnsupportedChecks`), so the caller must not be able to move a
+ * hooked target onto it. `false` stays honoured.
  */
 export function messagesViaResponsesOverride(
   targetSetting: unknown,
