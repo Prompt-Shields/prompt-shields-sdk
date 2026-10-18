@@ -164,6 +164,26 @@ curl localhost:8787/v1/chat/completions \
 
 To use an API key generated in the AWS console (*Claude Platform on AWS → API keys*), pass `"api_key"` instead of the AWS keys; it is sent as `x-api-key`. With headers instead of a config, use `x-portkey-provider: claude-platform-aws`, the `x-portkey-aws-*` headers and `anthropic-workspace-id`. Claude Console keys and Bedrock keys do not work on this endpoint, and the AWS account needs outbound web identity federation enabled (`aws iam enable-outbound-web-identity-federation`).
 
+`bedrock-mantle` (Amazon Bedrock Mantle, Bedrock's OpenAI-compatible endpoint at `https://bedrock-mantle.<region>.api.aws`) serves `/v1/chat/completions`, `/v1/responses` and, for Claude models, `/v1/messages`. Pass `aws_region` and either AWS credentials (SigV4, service `bedrock-mantle`; `aws_auth_type` `assumedRole` / `serviceRole` work as for Bedrock) or a Bedrock API key as `api_key`. OpenAI's GPT models (not gpt-oss) are called on `/openai/v1`, other models on `/v1`; set `bedrock_mantle_api_path` to `/v1` or `/openai/v1` to choose:
+
+```bash
+curl localhost:8787/v1/chat/completions \
+  -H 'x-portkey-config: {"provider":"bedrock-mantle","api_key":"<bedrock api key>","aws_region":"us-east-1"}' \
+  -H 'content-type: application/json' \
+  -d '{"model":"openai.gpt-oss-120b","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+`fal-ai` (fal.ai) takes the fal key (sent as `Authorization: Key <key>`) and a fal model id as `model`. `/v1/images/generations` maps `n`, `size` (`WxH` or a fal preset such as `landscape_16_9`) and `response_format`; video and audio models are called through the proxy with the model id as the path:
+
+```bash
+curl localhost:8787/v1/images/generations -H 'x-portkey-provider: fal-ai' -H 'authorization: Bearer <fal key>' \
+  -H 'content-type: application/json' -d '{"model":"fal-ai/flux/schnell","prompt":"a lighthouse","size":"1024x768"}'
+curl localhost:8787/v1/fal-ai/kling-video/v2/master/text-to-video -H 'x-portkey-provider: fal-ai' -H 'authorization: Bearer <fal key>' \
+  -H 'content-type: application/json' -d '{"prompt":"a lighthouse at dusk"}'
+```
+
+Only fal's synchronous API (`fal.run`) is used; long video jobs can hit fal's sync timeout, and the queue API is not wired.
+
 ---
 
 ## When to use the Gateway vs the SDK

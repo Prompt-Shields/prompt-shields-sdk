@@ -170,6 +170,8 @@ export interface Options {
   anthropicApiKey?: string;
   /** Claude Platform on AWS workspace (`anthropic-workspace-id`) */
   anthropicAwsWorkspaceId?: string;
+  /** Bedrock Mantle OpenAI-compatible base path (`/v1` or `/openai/v1`) */
+  bedrockMantleApiPath?: string;
 
   /** Fireworks finetune required fields */
   fireworksAccountId?: string;

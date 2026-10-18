@@ -90,6 +90,8 @@ import STACKITConfig from './stackit';
 import MetaConfig from './meta';
 import SCXAIConfig from './scx-ai';
 import ClaudePlatformAwsConfig from './claude-platform-aws';
+import BedrockMantleConfig from './bedrock-mantle';
+import FalAIConfig from './fal-ai';
 
 const Providers: { [key: string]: ProviderConfigs } = {
   openai: OpenAIConfig,
@@ -180,6 +182,8 @@ const Providers: { [key: string]: ProviderConfigs } = {
   meta: MetaConfig,
   'scx-ai': SCXAIConfig,
   'claude-platform-aws': ClaudePlatformAwsConfig,
+  'bedrock-mantle': BedrockMantleConfig,
+  'fal-ai': FalAIConfig,
 };
 
 export default Providers;

@@ -22,7 +22,7 @@ the tool lands must do these steps by hand and say so in the methodology record.
 
 | Step | Issue | State on `main` |
 |---|---|---|
-| Per-call cost: cache read/write (5m and 1h), reasoning, service tier (batch/flex), long-context bands, audio, web-search fees, provider-reported cost | #9, #71 (PRs #138, #157) | Built, in `packages/sdk/prompt_shields/pricing.py`. Checked by `schemas/pricing/cost-vectors.v1.json`. |
+| Per-call cost: cache read/write (5m and 1h), reasoning, service tier (batch/flex), long-context bands, audio, web-search fees, provider-reported cost, non-token units (seconds, characters, pages, search units, images) | #9, #71 (PRs #138, #157) | Built, in `packages/sdk/prompt_shields/pricing.py`. Checked by `schemas/pricing/cost-vectors.v1.json`. |
 | Price at `served_model`, not `requested_model` | #6 | **Pending.** See [§4.2](#42-served-model-vs-requested-model). |
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
@@ -145,6 +145,7 @@ Cost is in USD and comes from `prompt_shields.pricing.usage_cost` /
 | Audio | `tokens_audio_in` / `tokens_audio_out` (subsets of input and output) at the model's audio rates. Audio tokens on a model with no audio rate give a null cost. |
 | Tool fees | Per-request fees (Anthropic web search, $0.01 each). Not discounted by service tier. |
 | Provider-reported cost | If the provider reports the cost (e.g. OpenRouter `usage.cost`), that number is used as it is, even for models not in the table. |
+| Non-token units | A call with `usage_units` and `usage_unit_type` (as the gateway reports them: transcription `seconds`, text-to-speech `characters`, OCR `pages`, rerank `search_units`; image generation `images` by quality and size) is priced per unit when the (vendor, model, unit type) has a list price: OpenAI whisper-1, tts-1, tts-1-hd, gpt-image-1; Mistral OCR 3 (`mistral-ocr-2512`); ElevenLabs Scribe; Cohere `rerank-v3.5`. Otherwise it falls back to its token counts. Token-billed audio models (gpt-4o-transcribe, gpt-4o-mini-tts), moving aliases (`mistral-ocr-latest`), unconfirmed prices (Deepgram, ElevenLabs text to speech) and non-standard tiers give a null cost. Units are priced as reported, without rounding. |
 
 ### 4.2 Served model vs. requested model
 

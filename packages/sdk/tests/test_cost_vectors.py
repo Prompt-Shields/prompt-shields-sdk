@@ -12,7 +12,11 @@ import json
 from pathlib import Path
 
 import pytest
-from prompt_shields.pricing import add_usage_detail_fields, usage_cost
+from prompt_shields.pricing import (
+    USAGE_UNIT_TYPES,
+    add_usage_detail_fields,
+    usage_cost,
+)
 
 PRICING_DIR = Path(__file__).resolve().parents[3] / "schemas" / "pricing"
 DOC = json.loads((PRICING_DIR / "cost-vectors.v1.json").read_text())
@@ -29,7 +33,17 @@ def test_every_dimension_has_a_vector():
     assert {v["dimension"] for v in VECTORS} == {
         "base", "cache_read", "cache_write", "cache_write_1h", "service_tier",
         "long_context", "audio_tokens", "tool_fee", "provider_reported",
+        "usage_units",
     }
+
+
+def test_every_unit_type_has_a_priced_vector():
+    priced = {
+        v["usage"]["usage_unit_type"]
+        for v in VECTORS
+        if v["dimension"] == "usage_units" and v["expected_cost"] is not None
+    }
+    assert priced == USAGE_UNIT_TYPES
 
 
 @pytest.mark.parametrize("vector", VECTORS, ids=[v["id"] for v in VECTORS])

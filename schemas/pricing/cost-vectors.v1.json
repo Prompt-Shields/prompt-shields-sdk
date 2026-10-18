@@ -1,6 +1,6 @@
 {
   "$schema": "./cost-vectors.schema.json",
-  "description": "Hand-computed from vendor list prices (USD per 1M tokens) as of 2026-Q1. Shared by the SDK (packages/sdk/tests/test_cost_vectors.py) and, once it prices calls, the gateway.",
+  "description": "Hand-computed from vendor list prices (USD per 1M tokens) as of 2026-Q1; per-unit (seconds, characters, pages, search units, images) prices as of 2026-10-18. Shared by the SDK (packages/sdk/tests/test_cost_vectors.py) and, once it prices calls, the gateway.",
   "vectors": [
     {
       "id": "openai-gpt-4o-base",
@@ -81,7 +81,11 @@
       "dimension": "service_tier",
       "vendor": "anthropic",
       "model": "claude-sonnet-4-20250514",
-      "usage": { "tokens_in": 10000, "tokens_out": 1000, "service_tier": "batch" },
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "service_tier": "batch"
+      },
       "expected_cost": 0.0225,
       "derivation": "Batch list price $1.50 in / $7.50 out: 10000 x $1.50 + 1000 x $7.50 = $0.015 + $0.0075"
     },
@@ -117,7 +121,11 @@
       "dimension": "service_tier",
       "vendor": "openai",
       "model": "o3",
-      "usage": { "tokens_in": 10000, "tokens_out": 2000, "service_tier": "flex" },
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 2000,
+        "service_tier": "flex"
+      },
       "expected_cost": 0.018,
       "derivation": "Flex list price $1.00 in / $4.00 out: 10000 x $1.00 + 2000 x $4.00 = $0.010 + $0.008"
     },
@@ -126,7 +134,11 @@
       "dimension": "service_tier",
       "vendor": "openai",
       "model": "gpt-4o",
-      "usage": { "tokens_in": 1000, "tokens_out": 2000, "service_tier": "batch" },
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "service_tier": "batch"
+      },
       "expected_cost": 0.01125,
       "derivation": "Batch list price $1.25 in / $5.00 out: 1000 x $1.25 + 2000 x $5.00 = $0.00125 + $0.010"
     },
@@ -161,7 +173,11 @@
       "dimension": "service_tier",
       "vendor": "google",
       "model": "gemini-2.5-flash",
-      "usage": { "tokens_in": 10000, "tokens_out": 1000, "service_tier": "batch" },
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "service_tier": "batch"
+      },
       "expected_cost": 0.00275,
       "derivation": "Batch list price $0.15 in / $1.25 out: 10000 x $0.15 + 1000 x $1.25 = $0.0015 + $0.00125"
     },
@@ -245,6 +261,156 @@
       "expected_cost": 0.00123,
       "expected_cost_source": "provider_reported",
       "derivation": "OpenRouter usage.cost is used as reported, even for a model the catalog does not price"
+    },
+    {
+      "id": "openai-whisper-1-seconds",
+      "dimension": "usage_units",
+      "vendor": "openai",
+      "model": "whisper-1",
+      "usage": { "usage_units": 90, "usage_unit_type": "seconds" },
+      "expected_cost": 0.009,
+      "expected_cost_source": "pricing_table",
+      "derivation": "90 s x $0.006 / minute = 1.5 min x $0.006"
+    },
+    {
+      "id": "elevenlabs-scribe-v1-seconds",
+      "dimension": "usage_units",
+      "vendor": "elevenlabs",
+      "model": "scribe_v1",
+      "usage": { "usage_units": 1800, "usage_unit_type": "seconds" },
+      "expected_cost": 0.11,
+      "derivation": "1800 s x $0.22 / hour = 0.5 h x $0.22"
+    },
+    {
+      "id": "openai-tts-1-characters",
+      "dimension": "usage_units",
+      "vendor": "openai",
+      "model": "tts-1",
+      "usage": { "usage_units": 2000, "usage_unit_type": "characters" },
+      "expected_cost": 0.03,
+      "expected_cost_source": "pricing_table",
+      "derivation": "2000 characters x $15.00 / 1M characters"
+    },
+    {
+      "id": "openai-tts-1-hd-characters",
+      "dimension": "usage_units",
+      "vendor": "openai",
+      "model": "tts-1-hd",
+      "usage": { "usage_units": 2000, "usage_unit_type": "characters" },
+      "expected_cost": 0.06,
+      "derivation": "2000 characters x $30.00 / 1M characters"
+    },
+    {
+      "id": "elevenlabs-flash-v2-5-characters-unpriced",
+      "dimension": "usage_units",
+      "vendor": "elevenlabs",
+      "model": "eleven_flash_v2_5",
+      "usage": { "usage_units": 1000, "usage_unit_type": "characters" },
+      "expected_cost": null,
+      "derivation": "ElevenLabs text-to-speech list prices could not be confirmed (vendor page and LiteLLM disagree), so the call is unmetered"
+    },
+    {
+      "id": "openai-gpt-4o-mini-tts-characters-unpriced",
+      "dimension": "usage_units",
+      "vendor": "openai",
+      "model": "gpt-4o-mini-tts",
+      "usage": { "usage_units": 2000, "usage_unit_type": "characters" },
+      "expected_cost": null,
+      "derivation": "gpt-4o-mini-tts bills text and audio tokens, not characters: a character count has no exact price, so the call is unmetered"
+    },
+    {
+      "id": "mistral-ocr-2512-pages",
+      "dimension": "usage_units",
+      "vendor": "mistral",
+      "model": "mistral-ocr-2512",
+      "usage": { "usage_units": 10, "usage_unit_type": "pages" },
+      "expected_cost": 0.02,
+      "expected_cost_source": "pricing_table",
+      "derivation": "10 pages x $2.00 / 1,000 pages (Mistral OCR 3)"
+    },
+    {
+      "id": "mistral-ai-gateway-slug-ocr-pages",
+      "dimension": "usage_units",
+      "vendor": "mistral-ai",
+      "model": "mistral-ocr-2512",
+      "usage": { "usage_units": 250, "usage_unit_type": "pages" },
+      "expected_cost": 0.5,
+      "derivation": "The gateway's mistral-ai provider slug is priced as mistral: 250 pages x $2.00 / 1,000 pages"
+    },
+    {
+      "id": "mistral-ocr-latest-pages-unpriced",
+      "dimension": "usage_units",
+      "vendor": "mistral",
+      "model": "mistral-ocr-latest",
+      "usage": { "usage_units": 10, "usage_unit_type": "pages" },
+      "expected_cost": null,
+      "derivation": "The -latest alias moves between OCR versions with different prices, so it is unmetered rather than priced at a guessed version"
+    },
+    {
+      "id": "mistral-ocr-2512-batch-unpriced",
+      "dimension": "usage_units",
+      "vendor": "mistral",
+      "model": "mistral-ocr-2512",
+      "usage": {
+        "usage_units": 10,
+        "usage_unit_type": "pages",
+        "service_tier": "batch"
+      },
+      "expected_cost": null,
+      "derivation": "Unit prices are standard-tier list prices; a non-standard tier is unmetered rather than priced at the standard rate"
+    },
+    {
+      "id": "cohere-rerank-v3-5-search-units",
+      "dimension": "usage_units",
+      "vendor": "cohere",
+      "model": "rerank-v3.5",
+      "usage": { "usage_units": 3, "usage_unit_type": "search_units" },
+      "expected_cost": 0.006,
+      "expected_cost_source": "pricing_table",
+      "derivation": "3 search units x $2.00 / 1,000 searches"
+    },
+    {
+      "id": "openai-gpt-image-1-medium-square-images",
+      "dimension": "usage_units",
+      "vendor": "openai",
+      "model": "gpt-image-1",
+      "usage": {
+        "usage_units": 2,
+        "usage_unit_type": "images",
+        "image_quality": "medium",
+        "image_size": "1024x1024"
+      },
+      "expected_cost": 0.084,
+      "expected_cost_source": "pricing_table",
+      "derivation": "2 images x $0.042 (medium, 1024x1024)"
+    },
+    {
+      "id": "openai-gpt-image-1-high-landscape-images",
+      "dimension": "usage_units",
+      "vendor": "openai",
+      "model": "gpt-image-1",
+      "usage": {
+        "usage_units": 1,
+        "usage_unit_type": "images",
+        "image_quality": "high",
+        "image_size": "1536x1024"
+      },
+      "expected_cost": 0.25,
+      "derivation": "1 image x $0.25 (high, 1536x1024)"
+    },
+    {
+      "id": "openai-gpt-image-1-unknown-size-unpriced",
+      "dimension": "usage_units",
+      "vendor": "openai",
+      "model": "gpt-image-1",
+      "usage": {
+        "usage_units": 1,
+        "usage_unit_type": "images",
+        "image_quality": "auto",
+        "image_size": "auto"
+      },
+      "expected_cost": null,
+      "derivation": "Quality and size 'auto' resolve server-side, so there is no per-image price to apply"
     }
   ]
 }
