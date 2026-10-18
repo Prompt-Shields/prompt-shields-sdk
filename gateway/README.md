@@ -152,6 +152,18 @@ OpenAI · Anthropic · Google (Gemini, Vertex) · Azure OpenAI · AWS Bedrock ·
 
 For per-provider auth conventions, see Portkey's [provider docs](https://portkey.wiki/gh-59). The PS fork doesn't override any of them.
 
+Providers added by this fork for #74 use fixed vendor hosts. Most take an API key as `Authorization: Bearer`. `meta` (Llama API, `https://api.llama.com/compat/v1`) works this way and supports chat (with streaming) and `GET /v1/models`. `claude-platform-aws` (Claude Platform on AWS, which Anthropic operates and AWS bills; this is not Bedrock) needs a region and a workspace:
+
+```bash
+# SigV4 with AWS keys (aws_auth_type assumedRole / serviceRole also work, as for Bedrock)
+curl localhost:8787/v1/chat/completions \
+  -H 'x-portkey-config: {"provider":"claude-platform-aws","aws_access_key_id":"AKIA...","aws_secret_access_key":"...","aws_region":"us-west-2","anthropic_aws_workspace_id":"wrkspc_..."}' \
+  -H 'content-type: application/json' \
+  -d '{"model":"claude-sonnet-5-5","max_tokens":256,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+To use an API key generated in the AWS console (*Claude Platform on AWS → API keys*), pass `"api_key"` instead of the AWS keys; it is sent as `x-api-key`. With headers instead of a config, use `x-portkey-provider: claude-platform-aws`, the `x-portkey-aws-*` headers and `anthropic-workspace-id`. Claude Console keys and Bedrock keys do not work on this endpoint, and the AWS account needs outbound web identity federation enabled (`aws iam enable-outbound-web-identity-federation`).
+
 ---
 
 ## When to use the Gateway vs the SDK

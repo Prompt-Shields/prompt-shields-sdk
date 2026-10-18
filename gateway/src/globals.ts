@@ -128,6 +128,7 @@ export const IONOS: string = 'ionos';
 export const STACKIT: string = 'stackit';
 export const META: string = 'meta';
 export const SCX_AI: string = 'scx-ai';
+export const CLAUDE_PLATFORM_AWS: string = 'claude-platform-aws';
 
 export const VALID_PROVIDERS = [
   ANTHROPIC,
@@ -219,6 +220,7 @@ export const VALID_PROVIDERS = [
   STACKIT,
   META,
   SCX_AI,
+  CLAUDE_PLATFORM_AWS,
 ];
 
 export const CONTENT_TYPES = {

@@ -168,6 +168,8 @@ export interface Options {
   anthropicBeta?: string;
   anthropicVersion?: string;
   anthropicApiKey?: string;
+  /** Claude Platform on AWS workspace (`anthropic-workspace-id`) */
+  anthropicAwsWorkspaceId?: string;
 
   /** Fireworks finetune required fields */
   fireworksAccountId?: string;
