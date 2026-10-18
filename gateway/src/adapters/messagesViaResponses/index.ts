@@ -19,17 +19,55 @@ const PROVIDERS = new Set([OPEN_AI, AZURE_OPEN_AI]);
 const RESPONSES_ONLY_MODEL =
   /codex|^(o1-pro|o3-pro|o3-deep-research|o4-mini-deep-research|gpt-5(\.\d+)?-pro)(-|$)/;
 
-/** Whether a Messages request for this target must go via Responses. */
+/** Request header forcing (`true`) or disabling (`false`) the routing. */
+export const MESSAGES_VIA_RESPONSES_HEADER = 'x-portkey-messages-via-responses';
+
+/**
+ * Whether a Messages request for this target must go via Responses.
+ *
+ * `override` is the explicit choice from the target config
+ * (`messages_via_responses`) or the request header: `true` forces the route
+ * (e.g. an Azure deployment of a codex model whose name does not say so),
+ * `false` disables it. Left undefined, the model name decides. Only OpenAI
+ * and Azure OpenAI targets are ever routed; an override elsewhere is ignored.
+ */
 export function routesMessagesViaResponses(
   provider: string,
-  model: string
+  model: string,
+  override?: boolean
 ): boolean {
   if (!PROVIDERS.has((provider || '').toLowerCase())) return false;
+  if (typeof override === 'boolean') return override;
   const id = (model || '').toLowerCase().split('/').pop() || '';
   return RESPONSES_ONLY_MODEL.test(id);
 }
 
-export { transformMessagesToResponses } from './requestTransform';
+/**
+ * The explicit routing choice for one target: its config key wins over the
+ * request header; anything but a boolean / `true` / `false` is no choice.
+ *
+ * Guardrails and mutators do not run on Responses-format requests, so the
+ * header (which the caller, not the operator, controls) cannot force the
+ * route onto a target with hooks: `true` is then ignored. `false` stays
+ * honoured, as the Chat Completions route runs the hooks.
+ */
+export function messagesViaResponsesOverride(
+  targetSetting: unknown,
+  headerValue: string | undefined,
+  targetHasHooks: boolean = false
+): boolean | undefined {
+  if (typeof targetSetting === 'boolean') return targetSetting;
+  const h = (headerValue || '').trim().toLowerCase();
+  if (h === 'true') return targetHasHooks ? undefined : true;
+  if (h === 'false') return false;
+  return undefined;
+}
+
+export { stripIssuedReasoning } from './reasoningSignature';
+export {
+  transformMessagesToResponses,
+  MessagesViaResponsesRequestError,
+} from './requestTransform';
 export { transformResponsesToMessages } from './responseTransform';
 export {
   transformResponsesStreamChunk,
