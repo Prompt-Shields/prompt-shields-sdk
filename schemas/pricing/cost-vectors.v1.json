@@ -301,13 +301,13 @@
       "derivation": "2000 characters x $30.00 / 1M characters"
     },
     {
-      "id": "elevenlabs-flash-v2-5-characters",
+      "id": "elevenlabs-flash-v2-5-characters-unpriced",
       "dimension": "usage_units",
       "vendor": "elevenlabs",
       "model": "eleven_flash_v2_5",
       "usage": { "usage_units": 1000, "usage_unit_type": "characters" },
-      "expected_cost": 0.05,
-      "derivation": "1000 characters x $0.05 / 1K characters (Flash / Turbo)"
+      "expected_cost": null,
+      "derivation": "ElevenLabs text-to-speech list prices could not be confirmed (vendor page and LiteLLM disagree), so the call is unmetered"
     },
     {
       "id": "openai-gpt-4o-mini-tts-characters-unpriced",

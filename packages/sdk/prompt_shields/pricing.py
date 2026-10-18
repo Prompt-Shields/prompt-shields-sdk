@@ -117,13 +117,16 @@ USAGE_UNIT_TYPES = frozenset(
 # USD per unit, keyed (vendor, model, usage_unit_type). List prices checked
 # 2026-10-18 against the vendor page named on each entry (as indexed by web
 # search; the pages themselves were not reachable from the build host) and
-# cross-checked with LiteLLM 1.106.0 `model_prices_and_context_window.json`.
-# Models billed by tokens rather than by unit are left out on
-# purpose (their unit counts cannot be priced exactly): gpt-4o-transcribe,
-# gpt-4o-mini-transcribe and gpt-4o-mini-tts. So are prices that could not be
-# confirmed: Mistral OCR 2505 and the moving `mistral-ocr-latest` alias,
-# Deepgram (Nova-3 and Aura-2 voice-specific model ids), and DALL-E 2/3
-# (retired from the OpenAI API on 2026-05-12).
+# cross-checked with LiteLLM 1.105.1 `model_prices_and_context_window.json`;
+# every entry below matches it. Models billed by tokens rather than by unit
+# are left out on purpose (their unit counts cannot be priced exactly):
+# gpt-4o-transcribe, gpt-4o-mini-transcribe and gpt-4o-mini-tts. So are
+# prices that could not be confirmed: Mistral OCR 2505 and the moving
+# `mistral-ocr-latest` alias, Deepgram (Nova-3 and Aura-2 voice-specific
+# model ids), ElevenLabs text to speech (the vendor page and LiteLLM
+# disagree, $0.10 vs $0.18 / 1K characters for Multilingual v2 / v3, and
+# Flash / Turbo are not in LiteLLM), and DALL-E 2/3 (retired from the OpenAI
+# API on 2026-05-12).
 UNIT_PRICING: dict[tuple[str, str, str], float] = {
     # OpenAI, https://platform.openai.com/docs/pricing (2026-10-18):
     # Whisper $0.006 / minute; TTS $15 / 1M characters, TTS HD $30 / 1M.
@@ -135,14 +138,7 @@ UNIT_PRICING: dict[tuple[str, str, str], float] = {
     # are billed apart and not included).
     ("mistral", "mistral-ocr-2512", UNIT_PAGES): 2.0 / 1000,
     # ElevenLabs, https://elevenlabs.io/pricing/api (2026-10-18):
-    # Multilingual v2 / v3 $0.10 / 1K characters, Flash / Turbo $0.05 / 1K,
     # Scribe v1 / v2 (batch speech to text) $0.22 / hour.
-    ("elevenlabs", "eleven_multilingual_v2", UNIT_CHARACTERS): 0.10 / 1000,
-    ("elevenlabs", "eleven_v3", UNIT_CHARACTERS): 0.10 / 1000,
-    ("elevenlabs", "eleven_flash_v2", UNIT_CHARACTERS): 0.05 / 1000,
-    ("elevenlabs", "eleven_flash_v2_5", UNIT_CHARACTERS): 0.05 / 1000,
-    ("elevenlabs", "eleven_turbo_v2", UNIT_CHARACTERS): 0.05 / 1000,
-    ("elevenlabs", "eleven_turbo_v2_5", UNIT_CHARACTERS): 0.05 / 1000,
     ("elevenlabs", "scribe_v1", UNIT_SECONDS): 0.22 / 3600,
     ("elevenlabs", "scribe_v2", UNIT_SECONDS): 0.22 / 3600,
     # Cohere Rerank 3.5, https://cohere.com/pricing (2026-10-18): $2 / 1,000

@@ -124,3 +124,63 @@ def test_unpriced_unit_event_has_no_cost_source():
     assert event["cost"] is None
     assert "cost_source" not in event
     assert event["usage_units"] == 10
+
+
+# Unit sanity checks: one hand-computed example per unit type, written from
+# the vendor's own price unit so a per-minute / per-second (or per-1K /
+# per-1M) slip in the table shows up here.
+@pytest.mark.parametrize(
+    ("vendor", "model", "units", "unit_type", "kwargs", "expected"),
+    [
+        # whisper-1: $0.006 per minute; 2 min 30 s = 2.5 min -> $0.015
+        ("openai", "whisper-1", 150, "seconds", {}, 2.5 * 0.006),
+        # Scribe: $0.22 per hour; 2 hours = 7200 s -> $0.44
+        ("elevenlabs", "scribe_v1", 7200, "seconds", {}, 2 * 0.22),
+        # tts-1: $15 per 1M characters; 1M characters -> $15
+        ("openai", "tts-1", 1_000_000, "characters", {}, 15.0),
+        # tts-1-hd: $30 per 1M characters; 500K characters -> $15
+        ("openai", "tts-1-hd", 500_000, "characters", {}, 15.0),
+        # Mistral OCR 3: $2 per 1,000 pages; 1,000 pages -> $2
+        ("mistral", "mistral-ocr-2512", 1000, "pages", {}, 2.0),
+        # Cohere rerank-v3.5: $2 per 1,000 searches; 1,000 -> $2
+        ("cohere", "rerank-v3.5", 1000, "search_units", {}, 2.0),
+        # gpt-image-1 low 1024x1024: $0.011 per image; 10 images -> $0.11
+        (
+            "openai", "gpt-image-1", 10, "images",
+            {"image_quality": "low", "image_size": "1024x1024"}, 0.11,
+        ),
+    ],
+)
+def test_unit_price_sanity(vendor, model, units, unit_type, kwargs, expected):
+    assert estimate_unit_cost(
+        vendor, model, units, unit_type, **kwargs
+    ) == pytest.approx(expected)
+
+
+def test_unconfirmed_elevenlabs_tts_is_unpriced():
+    for model in ("eleven_multilingual_v2", "eleven_v3", "eleven_flash_v2_5"):
+        assert estimate_unit_cost("elevenlabs", model, 1000, "characters") is None
+
+
+def test_tokens_and_priced_units_are_not_added_together():
+    # A call carrying both tokens and a priced unit is priced once, by unit.
+    fields = {
+        "tokens_in": 1000,
+        "tokens_out": 1000,
+        "usage_units": 60,
+        "usage_unit_type": "seconds",
+    }
+    assert usage_cost("openai", "whisper-1", fields) == pytest.approx(0.006)
+
+
+def test_token_billed_transcription_is_not_priced_by_unit():
+    # gpt-4o-transcribe bills tokens: its seconds must not add a unit price.
+    fields = {"usage_units": 60, "usage_unit_type": "seconds"}
+    assert usage_cost("openai", "gpt-4o-transcribe", fields) is None
+
+
+def test_gateway_mistral_slug_prices_tokens_as_mistral():
+    fields = {"tokens_in": 1000, "tokens_out": 1000}
+    assert usage_cost("mistral-ai", "mistral-large-latest", fields) == (
+        usage_cost("mistral", "mistral-large-latest", fields)
+    )
