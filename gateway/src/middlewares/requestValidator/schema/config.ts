@@ -124,6 +124,8 @@ export const configSchema: any = z
     azure_model_name: z.string().optional(),
     azure_auth_mode: z.string().optional(),
     strict_open_ai_compliance: z.boolean().optional(),
+    // PS fork (#73): force or disable Messages → Responses routing
+    messages_via_responses: z.boolean().optional(),
   })
   .refine(
     (value) => {

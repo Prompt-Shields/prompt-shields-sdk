@@ -155,6 +155,12 @@ export interface Options {
   /** The parameter to determine if extra non-openai compliant fields should be returned in response */
   strictOpenAiCompliance?: boolean;
 
+  /**
+   * PS fork (#73): route `/v1/messages` to this OpenAI / Azure OpenAI target
+   * via the Responses API (true) or never (false); unset decides by model.
+   */
+  messagesViaResponses?: boolean;
+
   /** Parameter to determine if fim/completions endpoint is to be used */
   mistralFimCompletion?: string;
 
