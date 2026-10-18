@@ -11,7 +11,7 @@ from collector import loss_accounting
 from collector.auth import resolve_tenant
 from collector.config import settings
 from collector.data_flows import record_event_flows
-from collector.dedup import AssetKey, find_or_create_asset, lock_missing_asset_keys
+from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
 from collector.webhooks import AssetChanges
@@ -275,7 +275,7 @@ async def ingest_events(
 async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
     assets_created = 0
     changes = AssetChanges()
-    await lock_missing_asset_keys(
+    await lock_asset_keys(
         db,
         tenant_id,
         (

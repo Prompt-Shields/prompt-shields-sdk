@@ -11,6 +11,7 @@ sent (PS_TEST_DATABASE_URL):
 """
 
 import asyncio
+import random
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -157,6 +158,38 @@ async def test_concurrent_ingest_does_not_duplicate_new_asset(seeded_db):
     assert a2.id == a1.id
     _, assets = await _rows(seeded_db)
     assert len(assets) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_batches_in_different_orders_do_not_deadlock(
+    seeded_db, monkeypatch
+):
+    # Each batch updates (or creates) the same assets, in its own order.
+    # Without locking them up front in one order, two such batches can wait
+    # on each other's rows and Postgres aborts one with a deadlock (500).
+    from collector.config import settings
+
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 0)
+    keys = [{"vendor": "openai", "model": f"m{i}", "source": "sdk"} for i in range(6)]
+    rng = random.Random(195)
+
+    async def post(events):
+        async with _client() as c:
+            return await c.post(
+                "/ingest/events", headers=HEADERS, json={"events": events}
+            )
+
+    created = 0
+    for _ in range(6):  # the first round creates the assets, later ones update
+        batches = [rng.sample(keys, len(keys)) for _ in range(4)]
+        resps = await asyncio.gather(*(post(b) for b in batches))
+        assert [r.status_code for r in resps] == [200] * 4, [r.text for r in resps]
+        created += sum(r.json()["assets_created"] for r in resps)
+
+    assert created == len(keys)
+    events, assets = await _rows(seeded_db)
+    assert len(assets) == len(keys)
+    assert len(events) == 6 * 4 * len(keys)
 
 
 # --- cost and count bounds -------------------------------------------------

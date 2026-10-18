@@ -96,23 +96,45 @@ async def _lock(db: AsyncSession, tenant_id: UUID, key: AssetKey) -> None:
     )
 
 
-async def lock_missing_asset_keys(
+async def lock_asset_keys(
     db: AsyncSession, tenant_id: UUID, keys: Iterable[AssetKey]
 ) -> None:
-    """Take the creation lock for each of ``keys`` that has no asset yet, in
-    a fixed order, before a batch calls ``find_or_create_asset`` per event.
+    """Take every lock a batch will need, in a fixed order, before it calls
+    ``find_or_create_asset`` per event: the creation lock of each key that
+    has no asset yet (sorted by lock id), then the rows of the assets the
+    keys resolve to (sorted by id).
 
-    ``find_or_create_asset`` locks a missing key on its own, but two batches
-    creating the same new keys in different orders would then deadlock (one
-    aborted with a 500). Locking them up front in sorted order cannot.
+    ``find_or_create_asset`` locks a missing key on its own, and updates
+    each matched asset's row, in event order. Two batches doing that for
+    the same keys in different orders would deadlock (one aborted with a
+    500). Locking everything up front in one global order cannot.
     """
-    missing = {
-        _lock_id(tenant_id, key): key
-        for key in set(keys)
-        if await _lookup(db, tenant_id, key) is None
-    }
+    keys = set(keys)
+    asset_ids = set()
+    missing = {}
+    for key in keys:
+        asset = await _lookup(db, tenant_id, key)
+        if asset is None:
+            missing[_lock_id(tenant_id, key)] = key
+        else:
+            asset_ids.add(asset.id)
     for lock_id in sorted(missing):
         await _lock(db, tenant_id, missing[lock_id])
+    # A transaction we waited on may have just created some of them.
+    for key in missing.values():
+        asset = await _lookup(db, tenant_id, key)
+        if asset is not None:
+            asset_ids.add(asset.id)
+    if asset_ids:
+        # populate_existing: reload what the lookups cached, so updates
+        # build on the locked row, not on a version read before the lock.
+        await db.execute(
+            select(AIAsset)
+            .where(AIAsset.id.in_(asset_ids))
+            .order_by(AIAsset.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
 
 
 async def find_or_create_asset(
@@ -132,7 +154,7 @@ async def find_or_create_asset(
     """Find existing asset by merge key, or create new one. Returns (asset, is_new).
 
     Callers writing several assets in one transaction should call
-    ``lock_missing_asset_keys`` first (see there).
+    ``lock_asset_keys`` first (see there).
     """
     now = datetime.now(UTC)
     key = AssetKey(vendor, model, use_case_name, business_unit, environment)
