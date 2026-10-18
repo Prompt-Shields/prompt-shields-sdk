@@ -83,6 +83,14 @@ Enables all providers to accept Anthropic's Messages API format.
 
 **Native Providers** (bypass adapter): `anthropic`, `bedrock`
 
+### `messagesViaResponses/` - Messages API via the Responses API (PS fork, #73)
+
+OpenAI and Azure OpenAI models that only the Responses API serves (codex,
+`-pro` reasoning models, deep research) cannot go through Chat Completions.
+For them a Messages request is translated straight to a Responses request,
+sent to the provider's native `/responses`, and the Responses JSON or SSE is
+translated back to Messages. `routesMessagesViaResponses` decides per target.
+
 ## Adding a New Adapter
 
 1. Create a folder: `src/adapters/{api-name}/`

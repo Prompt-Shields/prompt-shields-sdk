@@ -87,7 +87,8 @@ const OpenAIAPIConfig: ProviderAPIConfig = {
       case 'listBatches':
         return basePath;
       case 'createModelResponse':
-        return basePath;
+        // PS fork (#73): /v1/messages routed via Responses (codex models)
+        return basePath.startsWith('/responses') ? basePath : '/responses';
       case 'getModelResponse':
         return basePath;
       case 'deleteModelResponse':
