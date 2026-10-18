@@ -71,7 +71,11 @@ stricter rule would mark an asset stale between two on-schedule runs of its
 slowest source. The trade-off: when only the fast source stops seeing such
 an asset, it goes stale later.
 
-New telemetry for a stale or retired asset makes it `active` again. Filter with
+New telemetry for a stale or retired asset makes it `active` again. The
+cloud inventory and the provider usage pull count as sightings too; the
+usage pull reads past daily buckets, so only usage from after the asset's
+last lifecycle change counts (a re-pulled bucket from before the owner
+retired it does not raise "still in use"). Filter with
 `?lifecycle_state=stale` on the asset list endpoints; the delta feed
 (`/partner/v1/changes`) reports transitions in `lifecycle_change`
 (`stale`, `retired`, `reactivated` or `retired_in_use`).
@@ -111,6 +115,39 @@ A tenant admin can also sweep their own tenant with
 `POST /api/v1/admin/asset-lifecycle/sweep` (optional `stale_after_days` and
 `retire_after_days` query parameters, which likewise apply to every source).
 The response lists the per-source thresholds it used in `source_thresholds`.
+
+### Merging duplicate assets
+
+Before ingest locked asset creation, two batches arriving at the same moment
+for a new model could each create an asset for it. Later events always go
+to the oldest one, so the others keep only their early events. An operator
+merges them with:
+
+```bash
+python -m collector.dedup merge-duplicates                  # dry run: lists what would merge
+python -m collector.dedup merge-duplicates --tenant <id> --apply
+```
+
+Duplicates are assets of one tenant with exactly the same vendor, model,
+use case, business unit and environment. Assets created by the provider
+usage pull and the cloud inventory are never merged: they keep one asset per
+project, API key and model, or per deployment, on purpose. Each group is
+merged into its oldest asset (the one created first). Attestation history
+cannot be moved, so if one asset of a group has attestations it is kept
+instead, and a second attested asset is left alone and reported as
+`skipped`. Usage events, data flows, risk mappings and webhook delivery
+history move to the surviving asset, which also takes the union of
+discovery sources and the widest seen times; the duplicates are deleted.
+Each tenant runs in its own transaction under its RLS context, writes one
+`retention_audit_log` row (action `merge_assets`) and sends one
+`asset.changed` webhook per surviving asset with `merged_asset_ids`.
+Records already pushed to ServiceNow or LeanIX for a removed asset are not
+deleted there. Running it again finds nothing to merge.
+
+When several assets match an event, the collector picks the one created
+first (`created_at`), not the one with the earliest `first_seen`: the usage
+pull backdates `first_seen` to its earliest bucket, which would otherwise
+let a newly created platform_signal asset take over a key.
 
 ## Key Fields
 
