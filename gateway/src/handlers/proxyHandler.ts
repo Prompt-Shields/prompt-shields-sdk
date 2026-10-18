@@ -5,6 +5,11 @@ import {
   tryTargetsRecursively,
 } from './handlerUtils';
 import { RouterError } from '../errors/RouterError';
+import {
+  classifyProxyRequest,
+  configHasHooks,
+  proxyGuardrailsUnsupportedResponse,
+} from './proxyGuardrails';
 
 // PS fork: read through Hono's request (HonoRequest) so a body that a
 // middleware already parsed (psRouter reads every JSON POST) comes from the
@@ -36,6 +41,22 @@ export async function proxyHandler(c: Context): Promise<Response> {
     const request = await getRequestData(c.req, requestContentType);
 
     const camelCaseConfig = constructConfigFromRequestHeaders(requestHeaders);
+
+    // PS fork (security): with guardrails anywhere in the config, refuse a
+    // proxied request they cannot inspect before any target is called (so a
+    // fallback order cannot reach an upstream first). tryPost runs the hooks
+    // per target for the requests they can inspect.
+    if (configHasHooks(camelCaseConfig)) {
+      const decision = classifyProxyRequest(
+        c,
+        c.req.method,
+        request,
+        requestHeaders
+      );
+      if (decision.kind === 'unsupported') {
+        return proxyGuardrailsUnsupportedResponse(decision.reason);
+      }
+    }
 
     const tryTargetsResponse = await tryTargetsRecursively(
       c,

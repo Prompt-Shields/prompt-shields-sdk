@@ -19,6 +19,11 @@ export class RequestContext {
   private _transformedRequestBody: any;
   public readonly providerOption: Options;
   private _requestURL: string = ''; // Is set at the beginning of tryPost()
+  /**
+   * PS fork (security): on a proxied request with guardrails, the endpoint
+   * type the hooks run as (`fn` stays `proxy` for the upstream call).
+   */
+  public hooksEndpoint?: endpointStrings;
 
   constructor(
     public readonly honoContext: Context,
