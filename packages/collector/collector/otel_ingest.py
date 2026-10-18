@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.auth import resolve_tenant
 from collector.data_flows import record_event_flows
-from collector.dedup import find_or_create_asset
+from collector.dedup import AssetKey, find_or_create_asset, lock_missing_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
 from collector.otel_mapping import GenAISpan, count_spans, iter_spans, map_span
 from collector.webhooks import AssetChanges
@@ -76,6 +76,11 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
     """
     assets_created = 0
     changes = AssetChanges()
+    await lock_missing_asset_keys(
+        db,
+        tenant_id,
+        (AssetKey(s.vendor, s.model, environment=s.environment) for s in spans),
+    )
     for span in spans:
         asset, is_new = await find_or_create_asset(
             db=db,

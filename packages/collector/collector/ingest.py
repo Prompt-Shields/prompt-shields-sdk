@@ -11,7 +11,7 @@ from collector import loss_accounting
 from collector.auth import resolve_tenant
 from collector.config import settings
 from collector.data_flows import record_event_flows
-from collector.dedup import find_or_create_asset
+from collector.dedup import AssetKey, find_or_create_asset, lock_missing_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
 from collector.webhooks import AssetChanges
@@ -66,9 +66,11 @@ class IngestEvent(BaseModel):
     @field_validator("api_key_fingerprint", mode="before")
     @classmethod
     def _fingerprint(cls, value: Any) -> str | None:
-        if isinstance(value, str) and FINGERPRINT_RE.fullmatch(value):
-            return value
-        return None
+        # Hex case and stray whitespace don't change the key it identifies.
+        if not isinstance(value, str):
+            return None
+        value = value.strip().lower()
+        return value if FINGERPRINT_RE.fullmatch(value) else None
 
     @field_validator("requested_model", "served_model", mode="before")
     @classmethod
@@ -94,6 +96,9 @@ class IngestEvent(BaseModel):
         return value if value in MODALITIES else None
 
     @field_validator(
+        "tokens_in",
+        "tokens_out",
+        "latency_ms",
         "tokens_cached",
         "tokens_cache_write",
         "tokens_cache_write_1h",
@@ -107,24 +112,22 @@ class IngestEvent(BaseModel):
     @field_validator("usage_units", mode="before")
     @classmethod
     def _usage_units(cls, value: Any) -> float | None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        # Check ints before float(): a huge JSON integer overflows float()
-        # with OverflowError, which pydantic does not catch (500, batch lost).
-        if isinstance(value, int) and not 0 <= value <= MAX_USAGE_UNITS:
-            return None
-        value = float(value)
-        if not math.isfinite(value) or value < 0 or value > MAX_USAGE_UNITS:
-            return None
-        return value
+        return _lenient_amount(value, MAX_USAGE_UNITS)
+
+    @field_validator("cost", mode="before")
+    @classmethod
+    def _cost(cls, value: Any) -> float | None:
+        return _lenient_amount(value, MAX_COST)
 
 
-# Limits for the extended usage fields. Longer or out-of-range values are
-# dropped (stored as null), not truncated: half a model name is wrong data.
+# Limits for the lenient fields (extended usage, cost and the core counts).
+# Longer or out-of-range values are dropped (stored as null), not truncated:
+# half a model name is wrong data.
 MAX_MODEL_NAME_LENGTH = 256
 MAX_LABEL_LENGTH = 64
 MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
+MAX_COST = 9999.999999  # largest Numeric(10, 6) value
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
 
 # The modalities telemetry reports, as the gateway's modalityOf() sets them
@@ -137,6 +140,10 @@ MODALITIES = frozenset({"text", "image", "audio", "document"})
 # "<field>:invalid", so a client sending bad values shows up in
 # /telemetry/loss instead of losing the data silently.
 LENIENT_FIELDS = (
+    "tokens_in",
+    "tokens_out",
+    "cost",
+    "latency_ms",
     "requested_model",
     "served_model",
     "tokens_cached",
@@ -168,6 +175,21 @@ def _lenient_count(value: Any) -> int | None:
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if not isinstance(value, int) or value < 0 or value > MAX_TOKEN_COUNT:
+        return None
+    return value
+
+
+def _lenient_amount(value: Any, maximum: float) -> float | None:
+    """A finite number in [0, maximum] once rounded to the column's 6 decimal
+    places (9999.9999999 rounds to 10000 and overflows Numeric(10, 6))."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    # Check ints before float(): a huge JSON integer overflows float()
+    # with OverflowError, which pydantic does not catch (500, batch lost).
+    if isinstance(value, int) and not 0 <= value <= maximum:
+        return None
+    value = float(value)
+    if not math.isfinite(value) or value < 0 or round(value, 6) > maximum:
         return None
     return value
 
@@ -253,6 +275,14 @@ async def ingest_events(
 async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
     assets_created = 0
     changes = AssetChanges()
+    await lock_missing_asset_keys(
+        db,
+        tenant_id,
+        (
+            AssetKey(e.vendor, e.model, e.use_case_name, e.business_unit, e.environment)
+            for e in events
+        ),
+    )
     for event in events:
         asset, is_new = await find_or_create_asset(
             db=db,

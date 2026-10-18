@@ -1,10 +1,15 @@
+import hashlib
+import json
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import NamedTuple
 from uuid import UUID
-from datetime import datetime, timezone
-from sqlalchemy import select, and_
-from sqlalchemy.ext.asyncio import AsyncSession
-from db.models import AIAsset
-from collector.lifecycle import reactivate
 
+from db.models import AIAsset
+from sqlalchemy import and_, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from collector.lifecycle import reactivate
 
 CLASSIFICATION_ORDER = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
 
@@ -34,6 +39,82 @@ def compute_confidence(sources: list[str]) -> str:
     return "low"
 
 
+class AssetKey(NamedTuple):
+    """The merge key ``find_or_create_asset`` matches on. A field that is
+    empty is not matched on, so an event that omits it joins any asset that
+    agrees on the rest."""
+
+    vendor: str
+    model: str | None = None
+    use_case_name: str | None = None
+    business_unit: str | None = None
+    environment: str | None = None
+
+
+def _conditions(tenant_id: UUID, key: AssetKey) -> list:
+    conditions = [AIAsset.tenant_id == tenant_id, AIAsset.vendor == key.vendor]
+    if key.model:
+        conditions.append(AIAsset.model == key.model)
+    if key.use_case_name:
+        conditions.append(AIAsset.use_case_name == key.use_case_name)
+    if key.business_unit:
+        conditions.append(AIAsset.business_unit == key.business_unit)
+    if key.environment:
+        conditions.append(AIAsset.environment == key.environment)
+    return conditions
+
+
+async def _lookup(db: AsyncSession, tenant_id: UUID, key: AssetKey) -> AIAsset | None:
+    # Several assets can match one key, by design: the provider usage puller
+    # keeps one platform_signal asset per (project, API key, model), and a
+    # key that omits use case/BU/environment matches every asset that sets
+    # them. Pick one deterministically, the oldest, so repeated events for
+    # the key always land on the same asset (and never raise
+    # MultipleResultsFound).
+    stmt = (
+        select(AIAsset)
+        .where(and_(*_conditions(tenant_id, key)))
+        .order_by(AIAsset.first_seen.asc().nulls_last(), AIAsset.id.asc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+def _lock_id(tenant_id: UUID, key: AssetKey) -> int:
+    parts = [str(tenant_id), key.vendor] + [p or None for p in key[1:]]
+    digest = hashlib.sha256(json.dumps(["ai_asset", *parts]).encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+async def _lock(db: AsyncSession, tenant_id: UUID, key: AssetKey) -> None:
+    # Transaction-scoped: released on commit/rollback. ai_assets has no unique
+    # constraint on the merge key (it can't: see _lookup), so this is what
+    # stops two concurrent ingests from both creating the same new asset.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:id)"), {"id": _lock_id(tenant_id, key)}
+    )
+
+
+async def lock_missing_asset_keys(
+    db: AsyncSession, tenant_id: UUID, keys: Iterable[AssetKey]
+) -> None:
+    """Take the creation lock for each of ``keys`` that has no asset yet, in
+    a fixed order, before a batch calls ``find_or_create_asset`` per event.
+
+    ``find_or_create_asset`` locks a missing key on its own, but two batches
+    creating the same new keys in different orders would then deadlock (one
+    aborted with a 500). Locking them up front in sorted order cannot.
+    """
+    missing = {
+        _lock_id(tenant_id, key): key
+        for key in set(keys)
+        if await _lookup(db, tenant_id, key) is None
+    }
+    for lock_id in sorted(missing):
+        await _lock(db, tenant_id, missing[lock_id])
+
+
 async def find_or_create_asset(
     db: AsyncSession,
     tenant_id: UUID,
@@ -48,25 +129,20 @@ async def find_or_create_asset(
     data_classification: str | None = None,
     modality: str | None = None,
 ) -> tuple[AIAsset, bool]:
-    """Find existing asset by merge key, or create new one. Returns (asset, is_new)."""
-    now = datetime.now(timezone.utc)
+    """Find existing asset by merge key, or create new one. Returns (asset, is_new).
 
-    conditions = [
-        AIAsset.tenant_id == tenant_id,
-        AIAsset.vendor == vendor,
-    ]
-    if model:
-        conditions.append(AIAsset.model == model)
-    if use_case_name:
-        conditions.append(AIAsset.use_case_name == use_case_name)
-    if business_unit:
-        conditions.append(AIAsset.business_unit == business_unit)
-    if environment:
-        conditions.append(AIAsset.environment == environment)
+    Callers writing several assets in one transaction should call
+    ``lock_missing_asset_keys`` first (see there).
+    """
+    now = datetime.now(UTC)
+    key = AssetKey(vendor, model, use_case_name, business_unit, environment)
 
-    stmt = select(AIAsset).where(and_(*conditions))
-    result = await db.execute(stmt)
-    asset = result.scalar_one_or_none()
+    asset = await _lookup(db, tenant_id, key)
+    if asset is None:
+        # Serialise creation of this key with concurrent ingests, then look
+        # again: the transaction we waited on may have just created it.
+        await _lock(db, tenant_id, key)
+        asset = await _lookup(db, tenant_id, key)
 
     if asset is not None:
         if source not in asset.discovery_source:
