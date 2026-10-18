@@ -69,7 +69,7 @@ components:
             export:read: Access bulk export endpoint
             changes:read: Access delta feed endpoint
             webhooks:manage: Manage webhook subscriptions (never granted by default)
-            attestations:write: Record human attestations (never granted by default)
+            attestations:write: Record human attestations, including retiring and un-retiring assets (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
@@ -1537,6 +1537,10 @@ paths:
         Appends an attestation for one field of an asset. Requires the
         `attestations:write` scope. Never changes `confidence`. The asset
         then appears in `/changes` with the field in `attestation_changes`.
+        An `asset` attestation with state `retired` retires the asset (its
+        owner's word; the lifecycle sweep and new telemetry leave it
+        retired), and a later `attested` or `unreviewed` one un-retires it,
+        so this scope can retire assets.
       security:
         - OAuth2: [attestations:write]
         - PartnerApiKey: []

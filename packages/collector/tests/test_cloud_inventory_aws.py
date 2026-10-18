@@ -50,11 +50,23 @@ class FakeSession:
     def add(self, obj):
         self.rows[obj.id] = obj
 
+    async def execute(self, _stmt):
+        # Row locks and the webhook outbox's subscription lookup: no rows.
+        return _NoRows()
+
     async def flush(self):
         return None
 
     async def commit(self):
         return None
+
+
+class _NoRows:
+    def scalars(self):
+        return iter(())
+
+    def all(self):
+        return []
 
 
 def _creds(**kw) -> ci.AwsInventoryCredentials:

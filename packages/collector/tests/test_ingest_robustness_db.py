@@ -99,7 +99,9 @@ async def test_sdk_ingest_with_two_platform_signal_assets_for_one_model(seeded_d
 
     events, assets = await _rows(seeded_db)
     assert len(assets) == 2
-    oldest = min(assets, key=lambda a: a.first_seen)
+    # The oldest is the one created first, not the one whose (backdated)
+    # first_seen is earliest (dedup.OLDEST_FIRST).
+    oldest = min(assets, key=lambda a: (a.created_at, a.id))
     sdk_events = [e for e in events if e.source == "sdk"]
     assert len(sdk_events) == 2
     assert {e.asset_id for e in sdk_events} == {oldest.id}
