@@ -110,6 +110,55 @@ describe('headers', () => {
     }
   });
 
+  test('rejects look-alike, userinfo, port and path-smuggled URLs', async () => {
+    for (const url of [
+      'https://aws-external-anthropic.eu-west-1.api.aws.evil.com/v1/messages',
+      'https://evil.com/aws-external-anthropic.eu-west-1.api.aws/v1/messages',
+      'https://evil.com?x=aws-external-anthropic.eu-west-1.api.aws',
+      'https://x-aws-external-anthropic.eu-west-1.api.aws/v1/messages',
+      'https://aws-external-anthropic.eu-west-1.api.aws:8443/v1/messages',
+      'https://aws-external-anthropic.eu-west-1.api.aws@evil.com/v1/messages',
+      'https://u:p@aws-external-anthropic.eu-west-1.api.aws/v1/messages',
+      'https://evil.api.aws/v1/messages',
+    ]) {
+      await expect(
+        headers(sigv4, { transformedRequestUrl: url })
+      ).rejects.toThrow(/regional endpoint|Invalid AWS/);
+    }
+  });
+
+  test('rejects regions that would change the host', () => {
+    for (const awsRegion of [
+      'eu-west-1.evil.com',
+      'eu-west-1/',
+      'eu-west-1@evil.com',
+      'eu-west-1:443',
+      'eu-west-1\r\nx: y',
+      'EU-WEST-1',
+      ' eu-west-1',
+      'eu-west-1 ',
+    ]) {
+      expect(() => baseURL({ awsRegion })).toThrow(/Invalid AWS region/);
+    }
+  });
+
+  test('serviceRole needs AWS_AMBIENT_CREDENTIALS_ENABLED, like Bedrock', async () => {
+    await expect(
+      headers({
+        awsAuthType: 'serviceRole',
+        awsRegion: 'eu-west-1',
+        anthropicAwsWorkspaceId: 'wrkspc_1',
+      })
+    ).rejects.toThrow(/serviceRole is disabled/);
+    await expect(
+      headers({
+        awsAuthType: 'assumedRole',
+        awsRegion: 'eu-west-1',
+        anthropicAwsWorkspaceId: 'wrkspc_1',
+      })
+    ).rejects.toThrow(/role ARN/);
+  });
+
   test('needs a workspace id and some credential', async () => {
     await expect(
       headers({ ...sigv4, anthropicAwsWorkspaceId: undefined })
@@ -162,5 +211,29 @@ describe('transforms', () => {
       choices: [{ message: { content: 'Hi' }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
     });
+  });
+});
+
+describe('assertAwsUrl with a fixed domain', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { assertAwsUrl } = require('../../utils/awsAuth');
+  test('accepts only https subdomains of the given domain', () => {
+    expect(assertAwsUrl(URL_, {}, 'api.aws')).toBe(URL_);
+    for (const url of [
+      'https://aws-external-anthropic.eu-west-1.api.aws.evil.com/',
+      'https://evilapi.aws/',
+      'https://api.aws/',
+      'http://aws-external-anthropic.eu-west-1.api.aws/',
+      'https://aws-external-anthropic.eu-west-1.api.aws:444/',
+      'https://a@aws-external-anthropic.eu-west-1.api.aws/',
+    ]) {
+      expect(() => assertAwsUrl(url, {}, 'api.aws')).toThrow();
+    }
+  });
+  test('without a domain, existing callers still require amazonaws.com', () => {
+    expect(() => assertAwsUrl(URL_, {})).toThrow();
+    expect(
+      assertAwsUrl('https://bedrock-runtime.us-east-1.amazonaws.com/x', {})
+    ).toBeTruthy();
   });
 });

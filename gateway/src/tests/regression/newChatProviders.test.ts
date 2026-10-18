@@ -187,6 +187,94 @@ describe('Claude Platform on AWS', () => {
     });
   });
 
+  test('/v1/messages is native: Messages-only fields reach the provider', async () => {
+    upstream(/aws-external-anthropic\.us-west-2\.api\.aws\/v1\/messages$/, () =>
+      json(message)
+    );
+    const res = await post(
+      app,
+      '/v1/messages',
+      {
+        model: 'claude-sonnet-5-5',
+        max_tokens: 1024,
+        thinking: { type: 'enabled', budget_tokens: 512 },
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: 'Say hi',
+                cache_control: { type: 'ephemeral' },
+              },
+            ],
+          },
+        ],
+      },
+      { 'x-portkey-config': sigv4Config() }
+    );
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body).toMatchObject({ type: 'message', content: [{ text: 'Hi' }] });
+    expect(upstreamCalls[0].body).toMatchObject({
+      thinking: { type: 'enabled', budget_tokens: 512 },
+      messages: [{ content: [{ cache_control: { type: 'ephemeral' } }] }],
+    });
+  });
+
+  test('streaming /v1/messages passes events through and reports usage', async () => {
+    const ev = (type: string, data: object) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    upstream(/aws-external-anthropic\.us-west-2\.api\.aws\/v1\/messages$/, () =>
+      sse(
+        ev('message_start', {
+          message: { ...message, content: [], usage: { input_tokens: 8 } },
+        }) +
+          ev('content_block_start', {
+            index: 0,
+            content_block: { type: 'text', text: '' },
+          }) +
+          ev('content_block_delta', {
+            index: 0,
+            delta: { type: 'text_delta', text: 'Hi' },
+          }) +
+          ev('content_block_stop', { index: 0 }) +
+          ev('message_delta', {
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 2 },
+          }) +
+          ev('message_stop', {})
+      )
+    );
+    const res = await post(app, '/v1/messages', chatBody({ stream: true }), {
+      'x-portkey-config': apiKeyConfig,
+    });
+    const text = await res.text();
+    expect(text).toContain('event: message_start');
+    expect(text).toContain('"text":"Hi"');
+    expect(upstreamCalls[0].headers['x-api-key']).toBe('aws-claude-key');
+    expect(await telemetryEvent()).toMatchObject({
+      vendor: 'claude-platform-aws',
+      stream: true,
+      tokens_in: 8,
+      tokens_out: 2,
+    });
+  });
+
+  test('count_tokens is a signed POST to /v1/messages/count_tokens', async () => {
+    upstream(
+      /aws-external-anthropic\.us-west-2\.api\.aws\/v1\/messages\/count_tokens$/,
+      () => json({ input_tokens: 11 })
+    );
+    const res = await post(app, '/v1/messages/count_tokens', chatBody(), {
+      'x-portkey-config': sigv4Config(),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ input_tokens: 11 });
+    expect(upstreamCalls[0].url).toBe(`${HOST}/v1/messages/count_tokens`);
+    expectSigned(upstreamCalls[0], 'POST');
+  });
+
   test('model listing is a signed GET to /v1/models', async () => {
     upstream(/aws-external-anthropic\.us-west-2\.api\.aws\/v1\/models$/, () =>
       json({
