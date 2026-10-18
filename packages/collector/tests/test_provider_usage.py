@@ -24,8 +24,14 @@ async def _no_sleep(_seconds: float) -> None:
     return None
 
 
+class _NoRows:
+    def scalars(self):
+        return iter(())
+
+
 class FakeSession:
-    """Just enough of AsyncSession for store_usage: get / add / flush / commit."""
+    """Just enough of AsyncSession for store_usage: get / add / flush / commit.
+    `execute` (stored credentials, fingerprint links) finds nothing."""
 
     def __init__(self):
         self.rows: dict[tuple[type, uuid.UUID], object] = {}
@@ -36,6 +42,9 @@ class FakeSession:
 
     def add(self, obj):
         self.rows[(type(obj), obj.id)] = obj
+
+    async def execute(self, _stmt):
+        return _NoRows()
 
     async def flush(self):
         return None

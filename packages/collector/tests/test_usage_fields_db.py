@@ -49,7 +49,7 @@ SDK_EVENT = {
     "latency_ms": 900,
     "tool_calls_used": None,
     "cost": 0.0123,
-    "api_key_fingerprint": "sk-ant-...abcd",
+    "api_key_fingerprint": "0123456789abcdef",
     "tokens_cached": 800,
     "tokens_cache_write": 300,
     "tokens_cache_write_1h": 100,
@@ -121,11 +121,8 @@ async def test_sdk_event_round_trip(seeded_db):
 
     # Only fields still out of scope are reported as ignored.
     (stats,) = loss["clients"]
-    assert set(stats["ignored_fields"]) == {
-        "api_key_fingerprint",
-        "stream",
-        "stream_completed",
-    }
+    assert set(stats["ignored_fields"]) == {"stream", "stream_completed"}
+    assert ev.api_key_fingerprint == "0123456789abcdef"
 
 
 @pytest.mark.asyncio

@@ -67,7 +67,6 @@ import hmac
 import ipaddress
 import json
 import logging
-import re
 import secrets
 import socket
 import time
@@ -80,9 +79,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from db.models import (
     AIAsset,
     AssetAttestation,
@@ -94,7 +91,7 @@ from sqlalchemy import delete, inspect, or_, select, update
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import egress, rls
+from collector import egress, rls, secret_keyring
 from collector.config import (
     WEBHOOK_CLAIM_LEASE_SECONDS,
     WEBHOOK_MAX_TIMEOUT_SECONDS,
@@ -184,30 +181,19 @@ PAYLOAD_TIMESTAMPS: tuple[str, ...] = (
 )
 
 
-class WebhooksNotConfigured(RuntimeError):
-    """No usable encryption key: PS_WEBHOOK_SECRET_KEYS and
-    PS_WEBHOOK_SECRET_KEY are both unset, a key is too short, or the
-    keyring is malformed."""
+# No usable encryption key: PS_WEBHOOK_SECRET_KEYS and PS_WEBHOOK_SECRET_KEY
+# are both unset, a key is too short, or the keyring is malformed. The
+# keyring itself is shared (collector.secret_keyring), so this is its error.
+WebhooksNotConfigured = secret_keyring.KeyringNotConfigured
 
 
 class DestinationNotAllowed(ValueError):
     """The webhook URL is malformed or points somewhere it must not."""
 
 
-class SecretKeyMissing(ValueError):
-    """A stored secret names a key this process does not have: a key id
-    missing from PS_WEBHOOK_SECRET_KEYS, or a legacy "v1." token without
-    PS_WEBHOOK_SECRET_KEY.
-
-    Usually a rolling restart that adds a key: processes already running
-    the new keyring re-encrypt secrets with it, and the others cannot read
-    them until they restart. Deliveries treat it as a retryable failure.
-    """
-
-    def __init__(self, key_id: str | None) -> None:
-        self.key_id = key_id
-        name = "legacy key PS_WEBHOOK_SECRET_KEY" if key_id is None else f"key id {key_id!r}"
-        super().__init__(f"secret needs {name}, which this process does not have")
+# Deliveries treat a missing key (usually a rolling restart that adds one)
+# as a retryable failure; see secret_keyring.SecretKeyMissing.
+SecretKeyMissing = secret_keyring.SecretKeyMissing
 
 
 def _utcnow() -> datetime:
@@ -223,45 +209,11 @@ def generate_signing_secret() -> str:
     return f"whsec_{secrets.token_urlsafe(32)}"
 
 
-MIN_KEY_LENGTH = 32
-_KEY_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
+MIN_KEY_LENGTH = secret_keyring.MIN_KEY_LENGTH
 _INFO_LEGACY = b"prompt-shields webhook signing secrets v1"
 _INFO_KEYRING = b"prompt-shields webhook signing secrets v2"
-
-
-def _derive(key: str, info: bytes) -> AESGCM:
-    derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(
-        key.encode()
-    )
-    return AESGCM(derived)
-
-
-def keyring() -> list[tuple[str, str]]:
-    """(key id, key) pairs from PS_WEBHOOK_SECRET_KEYS, active key first.
-
-    Raises WebhooksNotConfigured if the keyring is malformed. Messages name
-    key ids, never key material.
-    """
-    raw = settings.webhook_secret_keys.strip()
-    if not raw:
-        return []
-    ring: list[tuple[str, str]] = []
-    for position, entry in enumerate(raw.split(","), start=1):
-        kid, sep, key = (part.strip() for part in entry.partition(":"))
-        if not sep or not _KEY_ID_RE.fullmatch(kid):
-            raise WebhooksNotConfigured(
-                f"PS_WEBHOOK_SECRET_KEYS entry {position} must be <key id>:<key>, "
-                "with a key id of 1-32 characters from A-Z a-z 0-9 _ -"
-            )
-        if any(kid == seen for seen, _ in ring):
-            raise WebhooksNotConfigured(f"PS_WEBHOOK_SECRET_KEYS repeats key id {kid!r}")
-        if len(key) < MIN_KEY_LENGTH:
-            raise WebhooksNotConfigured(
-                f"PS_WEBHOOK_SECRET_KEYS key {kid!r} must be at least "
-                f"{MIN_KEY_LENGTH} characters"
-            )
-        ring.append((kid, key))
-    return ring
+_derive = secret_keyring.derive
+keyring = secret_keyring.keyring
 
 
 def active_key_id() -> str | None:
@@ -284,11 +236,6 @@ def _legacy_aead() -> AESGCM:
     return _derive(settings.webhook_secret_key, _INFO_LEGACY)
 
 
-def _keyring_aad(subscription_id: UUID, kid: str) -> bytes:
-    # The key id is authenticated too, so a token cannot be relabelled.
-    return subscription_id.bytes + b"." + kid.encode()
-
-
 def encrypt_secret(plaintext: str, subscription_id: UUID) -> str:
     """Encrypt with the active key, bound to the subscription id.
 
@@ -300,24 +247,10 @@ def encrypt_secret(plaintext: str, subscription_id: UUID) -> str:
     if kid is None:
         ct = _legacy_aead().encrypt(nonce, plaintext.encode(), subscription_id.bytes)
         return "v1." + base64.urlsafe_b64encode(nonce + ct).decode()
-    key = dict(keyring())[kid]
-    ct = _derive(key, _INFO_KEYRING).encrypt(
-        nonce, plaintext.encode(), _keyring_aad(subscription_id, kid)
-    )
-    return f"v2.{kid}." + base64.urlsafe_b64encode(nonce + ct).decode()
+    return secret_keyring.seal(plaintext, subscription_id.bytes, _INFO_KEYRING)
 
 
-def token_key_id(token: str) -> str | None:
-    """Key id a stored token was encrypted with (None: the legacy key).
-    Raises ValueError for an unknown format."""
-    version, _, rest = token.partition(".")
-    if version == "v1" and rest:
-        return None
-    if version == "v2":
-        kid, _, blob = rest.partition(".")
-        if kid and blob:
-            return kid
-    raise ValueError("unknown secret format")
+token_key_id = secret_keyring.token_key_id
 
 
 def needs_rekey(token: str) -> bool:
@@ -339,18 +272,13 @@ def decrypt_secret(token: str, subscription_id: UUID) -> str:
     Raises WebhooksNotConfigured if the keyring itself is malformed (so a
     configuration mistake never dead-letters deliveries).
     """
-    kid = token_key_id(token)
+    if token_key_id(token) is not None:
+        return secret_keyring.unseal(token, subscription_id.bytes, _INFO_KEYRING)
+    aead = _legacy_aead()
     blob = token.rsplit(".", 1)[1]
-    if kid is None:
-        aead, aad = _legacy_aead(), subscription_id.bytes
-    else:
-        key = dict(keyring()).get(kid)
-        if key is None:
-            raise SecretKeyMissing(kid)
-        aead, aad = _derive(key, _INFO_KEYRING), _keyring_aad(subscription_id, kid)
     try:
         raw = base64.urlsafe_b64decode(blob.encode())
-        pt = aead.decrypt(raw[:12], raw[12:], aad)
+        pt = aead.decrypt(raw[:12], raw[12:], subscription_id.bytes)
     except (InvalidTag, ValueError) as exc:  # binascii.Error is a ValueError
         raise ValueError("secret could not be decrypted") from exc
     return pt.decode()

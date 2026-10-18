@@ -73,6 +73,8 @@ token or an API key. Scopes not granted are denied.
 | `changes:read` | `/changes` |
 | `export:read` | `/export` |
 | `webhooks:manage` | Webhook subscriptions. Never granted unless asked for |
+| `attestations:write` | `POST /assets/{id}/attestations`. Never granted unless asked for |
+| `provider-credentials:manage` | `/provider-credentials`, `/provider-key-fingerprints` (provider admin keys for the org usage pull, write-only). Never granted unless asked for |
 
 New credentials get the six read scopes unless the tenant admin picks fewer.
 Changing a credential's scopes takes effect on its next request, including

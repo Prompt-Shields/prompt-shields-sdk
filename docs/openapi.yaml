@@ -55,6 +55,7 @@ components:
             changes:read: Access delta feed endpoint
             webhooks:manage: Manage webhook subscriptions (never granted by default)
             attestations:write: Record human attestations (never granted by default)
+            provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
