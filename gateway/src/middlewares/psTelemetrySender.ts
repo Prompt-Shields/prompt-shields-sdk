@@ -23,8 +23,11 @@
  * Retry-After (1 s without one, at most 300 s). Until then nothing is sent:
  * new events and events due for a retry wait in one queue, in the order they
  * were enqueued, still within the `maxPending` bound (overflow is counted as
- * `rate_limited`). At the deadline the queue is sent one request at a time,
- * oldest first, so the collector is not hit by every waiting event at once.
+ * `rate_limited`). At the deadline the queue is sent oldest first, at most
+ * DRAIN_CONCURRENCY requests at a time, so the collector is not hit by every
+ * waiting event at once; a 429 among them pauses the rest again. Events that
+ * arrive once sending has resumed are sent at once, as before the 429, so a
+ * backlog never throttles live traffic to the drain rate.
  *
  * Shutdown: shutdown(timeoutMs) stops accepting events, ends any back-off
  * (there is no later retry, as in the SDK's close()) and waits up to
@@ -73,6 +76,8 @@ export const MAX_RETRY_AFTER_MS = 300_000;
 export const DEFAULT_RETRY_AFTER_MS = 1000;
 /** How long shutdown() waits for pending events by default. */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5000;
+/** Requests in flight at once while the back-off queue drains. */
+export const DRAIN_CONCURRENCY = 8;
 
 export interface SenderOptions {
   url: string;
@@ -258,8 +263,10 @@ export class PSTelemetrySender {
           resolve,
         };
         this.live.add(item);
-        // Behind the back-off, or behind events already waiting for it.
-        if (this.paused || this.queue.length) this.requeue(item);
+        // Behind the back-off. Once it has ended, new events go straight
+        // out while the queue drains: queuing them behind it would hold live
+        // traffic to the drain rate, and overflow it, for good.
+        if (this.paused) this.requeue(item);
         else void this.process(item);
       });
     } catch (err) {
@@ -353,8 +360,8 @@ export class PSTelemetrySender {
 
   /**
    * The one loop that sends queued events: it waits out the back-off, then
-   * sends them one request at a time, oldest first (a 429 among them pauses
-   * it again).
+   * sends them oldest first, DRAIN_CONCURRENCY at a time (a 429 among them
+   * pauses it again).
    */
   private async drain(): Promise<void> {
     if (this.draining) return;
@@ -367,13 +374,23 @@ export class PSTelemetrySender {
           // A 429 that arrived meanwhile set a new deadline: wait for it.
           if (this.pauses === seen) this.paused = false;
         }
-        const item = this.queue.shift();
-        if (item && !item.settled) await this.process(item);
+        const workers: Promise<void>[] = [];
+        for (let i = 0; i < DRAIN_CONCURRENCY && this.queue.length; i++)
+          workers.push(this.drainWorker());
+        await Promise.all(workers);
       }
     } catch (err) {
       console.warn('[PS Telemetry] drain failed:', err);
     } finally {
       this.draining = false;
+    }
+  }
+
+  /** Send queued events one after another until empty or paused again. */
+  private async drainWorker(): Promise<void> {
+    while (this.queue.length && !this.paused) {
+      const item = this.queue.shift();
+      if (item && !item.settled) await this.process(item);
     }
   }
 

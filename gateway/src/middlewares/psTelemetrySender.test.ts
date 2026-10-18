@@ -5,6 +5,7 @@
 import {
   DEFAULT_MAX_PENDING,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  DRAIN_CONCURRENCY,
   MAX_RETRY_AFTER_MS,
   PSTelemetrySender,
   parseRetryAfterMs,
@@ -206,7 +207,7 @@ describe('shared 429 back-off (fake timers)', () => {
   const tooMany = (secs: string) =>
     new Response('', { status: 429, headers: { 'retry-after': secs } });
 
-  test('a 429 pauses every send until the deadline, then sends in order, one at a time', async () => {
+  test('a 429 pauses every send until the deadline, then drains oldest first', async () => {
     const { s, seen, maxInflight } = collector([tooMany('5')]);
     const first = s.send({ id: 'a' });
     await jest.advanceTimersByTimeAsync(10); // a: 429
@@ -218,10 +219,10 @@ describe('shared 429 back-off (fake timers)', () => {
     expect(seen).toEqual(['a']); // nothing sent while paused
     expect(s.stats()).toMatchObject({ pending: 4, queued: 4 });
 
-    await jest.advanceTimersByTimeAsync(20 + 4 * 10);
+    await jest.advanceTimersByTimeAsync(20 + 10);
     await Promise.all([first, ...rest]);
     expect(seen).toEqual(['a', 'a', 'b', 'c', 'd']);
-    expect(maxInflight()).toBe(1);
+    expect(maxInflight()).toBe(4); // within DRAIN_CONCURRENCY
     expect(s.stats()).toMatchObject({
       enqueued: 4,
       sent: 4,
@@ -246,18 +247,47 @@ describe('shared 429 back-off (fake timers)', () => {
   });
 
   test('a 429 while draining pauses the rest of the queue again', async () => {
-    const { s, seen } = collector([tooMany('1'), ok(), tooMany('2')]);
+    const n = DRAIN_CONCURRENCY + 2;
+    const ids = Array.from({ length: n }, (_, i) => `e${i}`);
+    // a, e0..e6 drain together and all get 429 (2 s); e7..e9 wait for it.
+    const script = [
+      tooMany('1'),
+      ...Array.from({ length: DRAIN_CONCURRENCY }, () => tooMany('2')),
+    ];
+    const { s, seen, maxInflight } = collector(script);
     const sends = [s.send({ id: 'a' })];
     await jest.advanceTimersByTimeAsync(10);
-    sends.push(s.send({ id: 'b' }), s.send({ id: 'c' }));
-    await jest.advanceTimersByTimeAsync(1000 + 20); // a ok, b 429
-    expect(seen).toEqual(['a', 'a', 'b']);
+    sends.push(...ids.map((id) => s.send({ id })));
+    await jest.advanceTimersByTimeAsync(1000 + 20);
+    const firstBatch = ['a', ...ids.slice(0, DRAIN_CONCURRENCY - 1)];
+    expect(seen).toEqual(['a', ...firstBatch]);
     await jest.advanceTimersByTimeAsync(1900);
-    expect(seen).toEqual(['a', 'a', 'b']);
-    await jest.advanceTimersByTimeAsync(100 + 20);
+    expect(seen).toHaveLength(1 + DRAIN_CONCURRENCY); // paused again
+    await jest.advanceTimersByTimeAsync(200);
     await Promise.all(sends);
-    expect(seen).toEqual(['a', 'a', 'b', 'b', 'c']);
-    expect(s.stats()).toMatchObject({ sent: 3, dropped_total: 0 });
+    // The queue resumes oldest first.
+    expect(seen.slice(1 + DRAIN_CONCURRENCY)).toEqual(['a', ...ids]);
+    expect(maxInflight()).toBeLessThanOrEqual(DRAIN_CONCURRENCY);
+    expect(s.stats()).toMatchObject({ sent: n + 1, dropped_total: 0 });
+  });
+
+  test('events after the back-off ends are not held behind the queue', async () => {
+    const { s, seen } = collector([tooMany('1')], 50);
+    const sends = [s.send({ id: 'a' })];
+    await jest.advanceTimersByTimeAsync(50);
+    for (let i = 0; i < 100; i++) sends.push(s.send({ id: `q${i}` }));
+    await jest.advanceTimersByTimeAsync(1000 + 10); // drain has started
+    expect(s.stats().queued).toBeGreaterThan(0);
+    sends.push(s.send({ id: 'live' }));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(seen).toContain('live'); // sent at once, not behind 90+ events
+    await jest.advanceTimersByTimeAsync(2000);
+    await Promise.all(sends);
+    expect(s.stats()).toMatchObject({
+      sent: 102,
+      pending: 0,
+      dropped_total: 0,
+    });
   });
 
   test('overflow while paused is counted as rate_limited', async () => {
