@@ -335,3 +335,132 @@ async def test_sweep_filter_and_reactivate_end_to_end(seeded_db):
             "/api/v1/registry/assets?lifecycle_state=active", headers=HEADERS
         )
         assert len(active.json()["data"]) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Per-source thresholds and owner retirement (#100); DB tests in
+# test_lifecycle_sources_db.py
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestSourceThresholds:
+    def test_most_lenient_source_wins(self):
+        t = lifecycle.Thresholds(
+            default=(30, 90), by_source={"sdk": (14, 60), "code_scan": (90, 180)}
+        )
+        assert t.for_sources(["sdk"]) == (14, 60)
+        assert t.for_sources(["sdk", "code_scan"]) == (90, 180)
+        assert t.for_sources(["sdk", "custom"]) == (30, 90)
+        assert t.for_sources([]) == (30, 90)
+        assert t.for_sources(None) == (30, 90)
+
+    def test_defaults_only_for_sources_with_their_own_cadence(self):
+        # Runtime and endpoint sources keep the global settings (30 / 90 by
+        # default, as before #100), so upgrading does not flip them stale.
+        assert set(lifecycle.DEFAULT_SOURCE_THRESHOLDS) == {
+            "platform_signal",
+            "code_scan",
+            "survey",
+        }
+        for stale, retire in lifecycle.DEFAULT_SOURCE_THRESHOLDS.values():
+            assert 1 <= stale < retire
+        t = lifecycle.resolve_source_thresholds()
+        for source in ("sdk", "gateway", "otel", "browser_extension", "macos_app"):
+            assert t.for_sources([source]) == (30, 90)
+
+    def test_settings_override_single_sources(self, monkeypatch):
+        monkeypatch.setattr(
+            lifecycle.settings, "asset_lifecycle_source_thresholds", "sdk=7:21, survey=1:2"
+        )
+        t = lifecycle.resolve_source_thresholds()
+        assert t.by_source["sdk"] == (7, 21)
+        assert t.by_source["survey"] == (1, 2)
+        assert t.by_source["code_scan"] == lifecycle.DEFAULT_SOURCE_THRESHOLDS["code_scan"]
+
+    def test_explicit_days_apply_to_every_source(self):
+        t = lifecycle.resolve_source_thresholds(5, 10)
+        assert t.by_source == {}
+        assert t.for_sources(["code_scan"]) == (5, 10)
+
+    @pytest.mark.parametrize(
+        "value", ["sdk", "sdk=7", "sdk=a:b", "=7:21", "sdk=0:5", "sdk=10:10"]
+    )
+    def test_bad_setting_is_rejected(self, value):
+        from collector.config import Settings, parse_source_thresholds
+
+        with pytest.raises(ValueError):
+            parse_source_thresholds(value)
+        with pytest.raises(ValueError):
+            Settings(asset_lifecycle_source_thresholds=value)
+
+    async def test_sweep_uses_per_row_thresholds_and_skips_owner_retired(self):
+        db = FakeSession()
+        result = await sweep_asset_lifecycle(db, now=NOW)
+        assert result.source_thresholds["platform_signal"] == {
+            "stale_after_days": 7,
+            "retire_after_days": 30,
+        }
+        for stmt in db.statements:
+            sql = _sql(stmt)
+            assert "unnest(ai_assets.discovery_source)" in sql
+            assert "make_interval" in sql
+            assert "ai_assets.retired_by IS NULL" in sql
+
+
+class TestOwnerRetire:
+    def test_retire_and_in_use_signal(self):
+        asset = AIAsset(lifecycle_state=ACTIVE, discovery_source=["sdk"], last_seen=NOW)
+        assert lifecycle.owner_retire(asset, "o@x.com", NOW) is True
+        assert (asset.lifecycle_state, asset.retired_by) == (RETIRED, "o@x.com")
+        assert asset.lifecycle_changed_at == NOW
+
+        later = NOW + timedelta(hours=1)
+        assert reactivate(asset, later) is False
+        assert asset.lifecycle_state == RETIRED
+        assert asset.retired_in_use_at == later
+        # Raised once: a later sighting keeps the first time.
+        reactivate(asset, later + timedelta(hours=1))
+        assert asset.retired_in_use_at == later
+
+        # Retiring again acknowledges it and is not a new retirement.
+        assert lifecycle.owner_retire(asset, "o@x.com", later) is False
+        assert asset.retired_in_use_at is None
+
+    def test_unretire_goes_back_to_telemetry_state(self):
+        thresholds = lifecycle.Thresholds(default=(30, 90))
+        recent = AIAsset(
+            lifecycle_state=RETIRED,
+            retired_by="o@x.com",
+            discovery_source=["sdk"],
+            last_seen=NOW - timedelta(days=1),
+        )
+        assert lifecycle.owner_unretire(recent, NOW, thresholds) is True
+        assert (recent.lifecycle_state, recent.retired_by) == (ACTIVE, None)
+
+        old = AIAsset(
+            lifecycle_state=RETIRED,
+            retired_by="o@x.com",
+            discovery_source=["sdk"],
+            last_seen=NOW - timedelta(days=200),
+            lifecycle_changed_at=NOW - timedelta(days=1),
+        )
+        assert lifecycle.owner_unretire(old, NOW, thresholds) is False
+        assert (old.lifecycle_state, old.retired_by) == (RETIRED, None)
+        assert old.lifecycle_changed_at == NOW - timedelta(days=1)
+
+    def test_unretire_is_noop_unless_owner_retired(self):
+        asset = AIAsset(lifecycle_state=RETIRED, last_seen=NOW)
+        assert lifecycle.owner_unretire(asset, NOW) is False
+        assert asset.lifecycle_state == RETIRED
+
+    def test_delta_feed_reports_retired_in_use(self):
+        since = NOW - timedelta(days=1)
+        asset = AIAsset(
+            lifecycle_state=RETIRED,
+            retired_by="o@x.com",
+            lifecycle_changed_at=NOW - timedelta(days=5),
+            retired_in_use_at=NOW,
+        )
+        assert lifecycle_change_for(asset, since) == "retired_in_use"
+        asset.retired_in_use_at = None
+        assert lifecycle_change_for(asset, since) is None
