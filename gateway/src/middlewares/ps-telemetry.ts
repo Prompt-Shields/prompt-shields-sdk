@@ -520,18 +520,29 @@ export function psTelemetry() {
 
       // A streamed response carries its usage at the end of the stream, so
       // the event is sent once the client has received the whole stream.
+      // On Workers, keep the isolate alive until the send settles (Node has
+      // no execution context: the sender is flushed at shutdown instead).
+      let waitUntil: (p: Promise<unknown>) => void = () => {};
+      try {
+        const ctx = c.executionCtx;
+        if (ctx?.waitUntil) waitUntil = (p) => ctx.waitUntil(p);
+      } catch {
+        /* no execution context */
+      }
       const stream = observeStream(c);
       if (!stream) {
-        sendTelemetry(event).catch(() => {});
+        waitUntil(sendTelemetry(event).catch(() => {}));
         return;
       }
-      stream
-        .then((summary) =>
-          sendTelemetry(
-            withStreamSummary(event, summary, !!route, !adapted, zeroFilled)
+      waitUntil(
+        stream
+          .then((summary) =>
+            sendTelemetry(
+              withStreamSummary(event, summary, !!route, !adapted, zeroFilled)
+            )
           )
-        )
-        .catch(() => {});
+          .catch(() => {})
+      );
     } catch (err) {
       // Fail-open: telemetry must never affect the response.
       console.warn('[PS Telemetry] hono adapter skipped:', err);
