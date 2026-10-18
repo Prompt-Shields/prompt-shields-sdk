@@ -10,6 +10,7 @@ import {
   ANTHROPIC,
   AZURE_AI_INFERENCE,
   BEDROCK,
+  CLAUDE_PLATFORM_AWS,
   GOOGLE_VERTEX_AI,
 } from '../../globals';
 
@@ -17,6 +18,8 @@ import {
 const PROVIDERS_THAT_HANDLE_MESSAGES_FOR_ALL_MODELS = new Set([
   ANTHROPIC,
   BEDROCK,
+  // Claude Platform on AWS serves the first-party Messages API (#74).
+  CLAUDE_PLATFORM_AWS,
 ]);
 
 const PROVIDERS_THAT_HANDLE_MESSAGES_FOR_ANTHROPIC_MODELS = new Set([

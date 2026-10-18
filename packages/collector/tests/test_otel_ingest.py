@@ -172,6 +172,7 @@ def mocked():
     with (
         patch.object(otel_ingest, "resolve_tenant", AsyncMock(return_value=TENANT)),
         patch.object(otel_ingest, "write_spans", writer),
+        patch.object(otel_ingest, "record_otel", AsyncMock()),
     ):
         yield writer
 

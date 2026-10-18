@@ -289,3 +289,39 @@ describe('sync', () => {
     expect(m.calls[0].url).toBe('https://api.promptshields.io/partner/v1/export?format=cyclonedx');
   });
 });
+
+describe('telemetry', () => {
+  it('reads coverage per source, camelCased', async () => {
+    const m = mockFetch(
+      json({
+        coverage: 0.95,
+        received_events: 95,
+        dropped_events: 4,
+        unaccounted_events: 1,
+        sources: [
+          {
+            source: 'gateway',
+            clients: 1,
+            received_events: 95,
+            dropped_events: 4,
+            unaccounted_events: 1,
+            coverage: 0.95,
+            last_seen: '2026-10-18T10:00:00+00:00',
+          },
+        ],
+      }),
+    );
+    const cov = await client(m.fetch).telemetry.coverage();
+    expect(new URL(m.calls[0].url).pathname).toBe('/partner/v1/telemetry/coverage');
+    expect(cov.coverage).toBe(0.95);
+    expect(cov.sources[0]).toEqual({
+      source: 'gateway',
+      clients: 1,
+      receivedEvents: 95,
+      droppedEvents: 4,
+      unaccountedEvents: 1,
+      coverage: 0.95,
+      lastSeen: '2026-10-18T10:00:00+00:00',
+    });
+  });
+});

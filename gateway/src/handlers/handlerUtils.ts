@@ -17,6 +17,7 @@ import {
   CORTEX,
   ORACLE,
   DATABRICKS,
+  CLAUDE_PLATFORM_AWS,
 } from '../globals';
 import { endpointStrings } from '../providers/types';
 import { Options, Params, StrategyModes, Targets } from '../types/requestBody';
@@ -46,6 +47,11 @@ import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
 import { recordAttempt } from '../middlewares/psAttempts';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
+import {
+  MESSAGES_VIA_RESPONSES_HEADER,
+  messagesViaResponsesOverride,
+  stripIssuedReasoning,
+} from '../adapters/messagesViaResponses';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 
 function constructRequestBody(
@@ -322,20 +328,36 @@ export async function tryPost(
     requestBody instanceof ReadableStream ||
     requestBody instanceof ArrayBuffer;
   const params = (isRawBody ? {} : requestBody) as Params;
+  const targetHasHooks = [
+    providerOption.beforeRequestHooks,
+    providerOption.afterRequestHooks,
+    providerOption.defaultInputGuardrails,
+    providerOption.defaultOutputGuardrails,
+  ].some((h) => Array.isArray(h) && h.length > 0);
   const adapterResult = applyAdapterRequestTransform(
     fn,
     providerOption.provider ?? '',
     params,
     requestBody,
     Boolean(params.stream),
-    method
+    method,
+    // PS fork (#73): explicit Messages → Responses routing choice.
+    messagesViaResponsesOverride(
+      providerOption.messagesViaResponses,
+      requestHeaders[MESSAGES_VIA_RESPONSES_HEADER],
+      targetHasHooks
+    )
   );
   if (adapterResult instanceof Response) return adapterResult;
   if (!adapterResult) {
     return tryPostToProvider(
       c,
       providerOption,
-      requestBody,
+      // PS fork (#73): thinking signed by the Messages → Responses route
+      // means nothing to a native Messages target; drop it there.
+      !isRawBody && (fn === 'messages' || fn === 'messagesCountTokens')
+        ? stripIssuedReasoning(requestBody)
+        : requestBody,
       requestHeaders,
       fn,
       currentIndex,
@@ -633,6 +655,17 @@ export async function tryTargetsRecursively(
   } else if (typeof inheritedConfig.strictOpenAiCompliance === 'boolean') {
     currentInheritedConfig.strictOpenAiCompliance =
       inheritedConfig.strictOpenAiCompliance;
+  }
+
+  // PS fork (#73): Messages → Responses routing choice, inherited like
+  // strict_open_ai_compliance.
+  if (typeof currentTarget.messagesViaResponses === 'boolean') {
+    currentInheritedConfig.messagesViaResponses =
+      currentTarget.messagesViaResponses;
+  } else if (typeof inheritedConfig.messagesViaResponses === 'boolean') {
+    currentInheritedConfig.messagesViaResponses =
+      inheritedConfig.messagesViaResponses;
+    currentTarget.messagesViaResponses = inheritedConfig.messagesViaResponses;
   }
 
   if (currentTarget.forwardHeaders) {
@@ -1010,6 +1043,14 @@ export function constructConfigFromRequestHeaders(
       requestHeaders[`anthropic-version`],
   };
 
+  // Claude Platform on AWS: AWS credentials plus the Anthropic headers (#74).
+  const claudePlatformAwsConfig = {
+    ...awsConfig,
+    anthropicAwsWorkspaceId:
+      requestHeaders[`x-${POWERED_BY}-anthropic-aws-workspace-id`] ||
+      requestHeaders[`anthropic-workspace-id`],
+  };
+
   const sagemakerConfig = {
     amznSagemakerCustomAttributes:
       requestHeaders[`x-${POWERED_BY}-amzn-sagemaker-custom-attributes`],
@@ -1162,6 +1203,13 @@ export function constructConfigFromRequestHeaders(
         };
       }
 
+      if (parsedConfigJson.provider === CLAUDE_PLATFORM_AWS) {
+        parsedConfigJson = {
+          ...parsedConfigJson,
+          ...claudePlatformAwsConfig,
+        };
+      }
+
       if (parsedConfigJson.provider === SAGEMAKER) {
         parsedConfigJson = {
           ...parsedConfigJson,
@@ -1272,6 +1320,8 @@ export function constructConfigFromRequestHeaders(
     ) && awsConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === SAGEMAKER &&
       sagemakerConfig),
+    ...(requestHeaders[`x-${POWERED_BY}-provider`] === CLAUDE_PLATFORM_AWS &&
+      claudePlatformAwsConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === WORKERS_AI &&
       workersAiConfig),
     ...(requestHeaders[`x-${POWERED_BY}-provider`] === GOOGLE_VERTEX_AI &&

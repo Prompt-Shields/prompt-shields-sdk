@@ -19,6 +19,21 @@ for any application that routes LLM traffic through the gateway.
 Set these environment variables:
 - `PS_COLLECTOR_URL` — URL of the Prompt Shields collector (default: `http://localhost:8000`)
 - `PS_API_KEY` — Prompt Shields API key for authentication
+- `PS_TELEMETRY_MAX_ATTEMPTS` — collector send attempts per event (default 3);
+  `PS_TELEMETRY_RETRY_BASE_MS` — first retry delay, doubled per attempt
+  (default 200; a 429 waits its `Retry-After`, at most 300 s);
+  `PS_TELEMETRY_MAX_PENDING` — events awaiting delivery before new ones are
+  dropped (default 1000)
+
+### Event-loss accounting
+
+Like the Python SDK, every collector request carries a `metadata` object
+(`psTelemetrySender.ts`): `client_id` (random, stable for the process),
+`seq` (monotonic per request body, a retry included), `enqueued_total` and
+`dropped` — cumulative events that never reached the collector, by reason
+(`buffer_overflow`, `send_failed`, `rate_limited`, `server_skipped`,
+`serialization_failed`) — with `sdk: "gateway"`. The collector reconciles
+them in `GET /telemetry/loss` and reports gateway coverage as its own source.
 
 ### X-PS-* Headers
 

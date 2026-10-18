@@ -2,10 +2,12 @@
  * PS fork (#73): OpenAI Responses response → Anthropic Messages response.
  *
  * Output items map in order: `reasoning` summaries to `thinking` blocks
- * (with an empty signature, as the chat adapter does for reasoning text),
- * `message` text and refusals to `text` blocks, `function_call` to
- * `tool_use`. Usage keeps cached tokens apart from `input_tokens`, as the
- * Messages API reports them.
+ * (signed with the encrypted reasoning when the request asked for it, see
+ * reasoningSignature.ts; a reasoning item with no summary but encrypted
+ * content becomes `redacted_thinking`), `message` text and refusals to
+ * `text` blocks, `function_call` to `tool_use`, and a `web_search_call` to
+ * a `server_tool_use` + `web_search_tool_result` pair. Usage keeps cached
+ * tokens apart from `input_tokens`, as the Messages API reports them.
  */
 
 import { randomUUID } from 'crypto';
@@ -16,6 +18,7 @@ import {
   MessagesResponse,
 } from '../../types/messagesResponse';
 import { NormalizedUsage, toMessagesError, toMessagesUsage } from '../shared';
+import { encodeReasoningSignature } from './reasoningSignature';
 
 const pos = (v: unknown) =>
   typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
@@ -76,6 +79,70 @@ export function reasoningSummaryText(item: any): string {
     .join('\n\n');
 }
 
+/**
+ * The thinking block for a reasoning item, or undefined when it carries
+ * neither summary text nor encrypted reasoning.
+ */
+export function reasoningBlock(
+  item: any,
+  provider: string
+): Record<string, any> | undefined {
+  const thinking = reasoningSummaryText(item);
+  const encrypted =
+    typeof item?.encrypted_content === 'string' && item.encrypted_content
+      ? encodeReasoningSignature(provider, item.encrypted_content)
+      : '';
+  if (thinking) return { type: 'thinking', thinking, signature: encrypted };
+  if (encrypted) return { type: 'redacted_thinking', data: encrypted };
+  return undefined;
+}
+
+/**
+ * A `web_search_call` as Anthropic web search blocks. Only `search` actions
+ * map (open_page / find have no Messages equivalent). Results list the
+ * sources the provider returned; the Responses API gives no titles or
+ * encrypted page content, so the URL stands in for the title.
+ */
+export function webSearchBlocks(item: any): Record<string, any>[] {
+  const action = item?.action;
+  if (action && action.type && action.type !== 'search') return [];
+  const id = item?.id || `srvtoolu_${randomUUID()}`;
+  const query = typeof action?.query === 'string' ? action.query : '';
+  const sources: any[] = Array.isArray(action?.sources) ? action.sources : [];
+  return [
+    {
+      type: 'server_tool_use',
+      id,
+      name: 'web_search',
+      input: { query },
+    },
+    {
+      type: 'web_search_tool_result',
+      tool_use_id: id,
+      content: sources
+        .filter((s: any) => typeof s?.url === 'string' && s.url)
+        .map((s: any) => ({
+          type: 'web_search_result',
+          url: s.url,
+          title: s.title || s.url,
+          encrypted_content: '',
+          page_age: null,
+        })),
+    },
+  ];
+}
+
+/** Messages usage, with the web search count when searches ran. */
+export function messagesUsage(usage: any, webSearches: number) {
+  const out: Record<string, any> = toMessagesUsage(
+    normalizeResponsesUsage(usage)
+  );
+  if (webSearches > 0) {
+    out.server_tool_use = { web_search_requests: webSearches };
+  }
+  return out;
+}
+
 export function transformResponsesToMessages(
   response: any,
   responseStatus: number,
@@ -87,13 +154,18 @@ export function transformResponsesToMessages(
 
   const content: ContentBlock[] = [];
   let hasToolUse = false;
+  let webSearches = 0;
   for (const item of response?.output || []) {
     switch (item?.type) {
       case 'reasoning': {
-        const thinking = reasoningSummaryText(item);
-        if (thinking) {
-          content.push({ type: 'thinking', thinking, signature: '' } as any);
-        }
+        const block = reasoningBlock(item, provider);
+        if (block) content.push(block as any);
+        break;
+      }
+      case 'web_search_call': {
+        const blocks = webSearchBlocks(item);
+        if (blocks.length) webSearches++;
+        content.push(...(blocks as any[]));
         break;
       }
       case 'message':
@@ -129,6 +201,6 @@ export function transformResponsesToMessages(
     model: response?.model,
     stop_reason: responsesStopReason(response, hasToolUse),
     stop_sequence: null,
-    usage: toMessagesUsage(normalizeResponsesUsage(response?.usage)),
+    usage: messagesUsage(response?.usage, webSearches),
   } as MessagesResponse;
 }

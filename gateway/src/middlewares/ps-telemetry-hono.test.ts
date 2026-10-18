@@ -3,6 +3,8 @@
  * and emits a fire-and-forget event to the collector.
  */
 process.env.PS_API_KEY = 'ps-test';
+// One attempt: a retried send must not land in a later test's capture.
+process.env.PS_TELEMETRY_MAX_ATTEMPTS = '1';
 
 import { Hono } from 'hono';
 import { psTelemetry } from './ps-telemetry';
