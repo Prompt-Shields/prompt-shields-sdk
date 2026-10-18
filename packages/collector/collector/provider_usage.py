@@ -15,10 +15,16 @@ Re-runs are idempotent: asset and event ids are UUIDv5 values derived
 from the tenant, provider, project, key, model and bucket, so pulling an
 overlapping window overwrites the same rows instead of adding to them.
 
-Credentials: the collector has no secrets store yet, so the per-tenant
-admin keys come from ``PS_PROVIDER_ADMIN_KEYS`` (JSON, see
-``ProviderUsageSettings``). Keys are held as ``SecretStr`` and are never
-logged or returned. HTTP clients only call the fixed vendor hosts below.
+Credentials: a tenant's admin key is stored encrypted per tenant and
+provider (collector.provider_credentials, managed through the admin and
+Partner APIs). ``PS_PROVIDER_ADMIN_KEYS`` (JSON, see
+``ProviderUsageSettings``) is the fallback for a provider with no stored
+key. Keys are held as ``SecretStr`` and are never logged or returned. HTTP
+clients only call the fixed vendor hosts below.
+
+After storing, `provider_credentials.corroborate_by_fingerprint` links
+these assets to SDK sightings of the same key (registered
+key id -> api_key_fingerprint links) and model.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import provider_credentials
 from collector.dedup import compute_confidence
 
 logger = logging.getLogger("prompt_shields.provider_usage")
@@ -80,6 +87,36 @@ def admin_keys_for_tenant(
         for p, k in keys.items()
         if p in SUPPORTED_PROVIDERS and k.get_secret_value()
     }
+
+
+async def resolve_admin_keys(
+    db: AsyncSession, tenant_id: UUID, settings: ProviderUsageSettings | None = None
+) -> tuple[dict[str, SecretStr], dict[str, str], dict[str, str]]:
+    """Admin keys for a tenant: stored credentials first, env as fallback.
+
+    Returns (keys, source per provider: "stored" | "env", errors per
+    provider). A stored key that cannot be decrypted is an error for that
+    provider, not a silent fall back to env. A stored key under an older
+    keyring key is re-encrypted with the active one (not committed here).
+    """
+    keys = dict(admin_keys_for_tenant(tenant_id, settings))
+    sources = {p: "env" for p in keys}
+    errors: dict[str, str] = {}
+    for row in await provider_credentials.list_credentials(db, tenant_id):
+        if row.provider not in SUPPORTED_PROVIDERS:
+            continue
+        keys.pop(row.provider, None)
+        sources.pop(row.provider, None)
+        try:
+            plain = provider_credentials.open_credential(row)
+            provider_credentials.rekey_if_needed(row, plain)
+        except (ValueError, provider_credentials.CredentialsNotConfigured) as exc:
+            # Messages name key ids at most, never key material.
+            errors[row.provider] = f"stored credential unusable: {exc}"
+            continue
+        keys[row.provider] = SecretStr(plain)
+        sources[row.provider] = "stored"
+    return keys, sources, errors
 
 
 class ProviderUsageError(Exception):
@@ -439,10 +476,13 @@ async def pull_provider_usage(
     if start >= end:
         raise ValueError("start must be before end")
 
-    keys = admin_keys_for_tenant(tenant_id, settings)
+    keys, sources, key_errors = await resolve_admin_keys(db, tenant_id, settings)
     wanted = [p for p in (providers or SUPPORTED_PROVIDERS) if p in SUPPORTED_PROVIDERS]
     result: dict[str, dict] = {}
     for provider in wanted:
+        if provider in key_errors:
+            result[provider] = {"status": "error", "error": key_errors[provider]}
+            continue
         key = keys.get(provider)
         if key is None:
             result[provider] = {"status": "not_configured"}
@@ -462,10 +502,19 @@ async def pull_provider_usage(
         logger.info(
             "provider usage pull: tenant=%s provider=%s %s", tenant_id, provider, counts
         )
-        result[provider] = {"status": "ok", "records": len(records), **counts}
+        result[provider] = {
+            "status": "ok",
+            "credential_source": sources[provider],
+            "records": len(records),
+            **counts,
+        }
+    corroborated = await provider_credentials.corroborate_by_fingerprint(db, tenant_id)
+    # Also persists any credential re-encrypted under the active key.
+    await db.commit()
     return {
         "tenant_id": str(tenant_id),
         "start": start.isoformat(),
         "end": end.isoformat(),
         "providers": result,
+        "corroborated_assets": corroborated,
     }

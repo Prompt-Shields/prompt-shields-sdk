@@ -7,7 +7,8 @@ There is no scheduler in the collector, so the pull runs on demand:
   - ``python -m collector.provider_usage_admin --tenant <uuid> [--days 7]``
     for cron / Kubernetes CronJob use
 
-The HTTP route makes outbound calls with operator-held admin keys, so it is
+The HTTP route makes outbound calls with the tenant's admin keys (stored, or
+operator-held in PS_PROVIDER_ADMIN_KEYS), so it is
 an operator surface, not a tenant one: a tenant ingest key cannot trigger it.
 With ``PS_ADMIN_TOKEN`` unset the route answers 404, as if absent.
 

@@ -41,6 +41,10 @@ SCOPES: dict[str, str] = {
     "export:read": "Bulk export the registry (JSON or CycloneDX)",
     "webhooks:manage": "Create, list and delete webhook subscriptions",
     "attestations:write": "Record human attestations of asset fields",
+    "provider-credentials:manage": (
+        "Store, rotate and delete provider admin keys (write-only) and "
+        "key fingerprint links for the org usage pull"
+    ),
 }
 
 # What `registry:read` meant in Phase 1: every read route. Frozen on
