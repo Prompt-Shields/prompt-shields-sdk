@@ -11,6 +11,8 @@ import {
   getRegionFromEnv,
 } from './utils';
 import { externalServiceFetch } from '../../utils/fetch';
+import { assertAwsUrl } from '../../utils/awsAuth';
+import { GatewayError } from '../../errors/GatewayError';
 import { env } from 'hono/adapter';
 
 const getModelProvider = (modelId: string) => {
@@ -124,7 +126,12 @@ export const BedrockGetBatchOutputRequestHandler = async ({
       providerOptions,
       env(c)
     );
-    const s3FileURL = `https://${awsS3Bucket}.s3.${awsRegion}.${getAwsEndpointDomain(env(c))}/${awsS3ObjectKey}`;
+    // Header signing also runs assertAwsUrl, but `awsAuthType: apiKey` skips
+    // signing, and the region here may not have passed through getBaseURL.
+    const s3FileURL = assertAwsUrl(
+      `https://${awsS3Bucket}.s3.${awsRegion}.${getAwsEndpointDomain(env(c))}/${awsS3ObjectKey}`,
+      env(c)
+    );
     const s3FileHeaders = await BedrockAPIConfig.headers({
       c,
       providerOptions,
@@ -157,6 +164,7 @@ export const BedrockGetBatchOutputRequestHandler = async ({
       throw new Error(body);
     }
   } catch (error: any) {
+    if (error instanceof GatewayError) throw error;
     let errorResponse;
 
     try {
