@@ -204,9 +204,11 @@ export interface UsageSummary {
   totalTokensCacheWrite: number;
   /** Reasoning tokens (part of `totalTokensOut`). */
   totalTokensReasoning: number;
-  estimatedCostUsd: number;
+  /** `null` when no event in the period reported a cost. */
+  estimatedCostUsd: number | null;
   uniqueSessions: number;
-  avgLatencyMs: number;
+  /** `null` when no event in the period reported a latency. */
+  avgLatencyMs: number | null;
   period: UsagePeriod;
 }
 
@@ -338,8 +340,9 @@ export interface ListAttestationsParams {
   limit?: number;
 }
 
-// Webhook subscriptions: the tenant admin API under /api/v1/admin/webhooks.
-// Not part of docs/openapi.yaml; see docs/api-reference/sync/webhooks.mdx.
+// Webhook subscriptions: the tenant admin API under /api/v1/admin/webhooks
+// (the "Webhooks" tag in docs/openapi.yaml; see also
+// docs/api-reference/sync/webhooks.mdx).
 
 /** A webhook subscription. The signing secret is never included. */
 export interface WebhookSubscription {

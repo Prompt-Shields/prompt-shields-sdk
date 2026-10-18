@@ -54,7 +54,13 @@ export interface PartnerClientOptions {
   clientSecret?: string;
   /** API origin. Defaults to `https://api.promptshields.io`. */
   baseUrl?: string;
-  /** Retries for 429, 502, 503, 504 and network errors. Default 2. */
+  /**
+   * Retries for 429, 502, 503, 504 and network errors. Default 2.
+   * POST requests (other than the OAuth token request) are retried only on
+   * 429: a POST that reached the server could record an attestation or
+   * rotate a secret twice, so it is not sent again after a 5xx or a
+   * network error.
+   */
   maxRetries?: number;
   /**
    * Longest `Retry-After` (seconds) the client will wait out on a 429.

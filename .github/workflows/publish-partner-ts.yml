@@ -63,7 +63,12 @@ jobs:
             exit 1
           fi
 
-      - run: npm ci --no-audit --no-fund
+      # --ignore-scripts: no dependency's install script (preinstall,
+      # install, postinstall, prepare) runs in this job, which holds the
+      # id-token and NPM_TOKEN. No dev dependency needs one on Linux (only
+      # the optional macOS fsevents has one; test/release.test.ts checks
+      # this); our own build runs below as an explicit step.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck
       - run: npx jest --ci
       - run: npm run build

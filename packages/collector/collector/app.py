@@ -19,18 +19,32 @@ async def lifespan(app: FastAPI):
     if settings.rls_required:
         async with engine.connect() as conn:
             await rls.check_required(conn)
-    worker = None
+    tasks: list[asyncio.Task] = []
     if settings.webhook_worker_interval_seconds > 0:
         from collector.webhooks import run_worker
 
-        worker = asyncio.create_task(
-            run_worker(SessionLocal, settings.webhook_worker_interval_seconds)
+        tasks.append(
+            asyncio.create_task(
+                run_worker(SessionLocal, settings.webhook_worker_interval_seconds)
+            )
+        )
+    if settings.provider_usage_pull_interval_seconds > 0:
+        from collector.provider_usage_admin import run_schedule
+
+        tasks.append(
+            asyncio.create_task(
+                run_schedule(
+                    SessionLocal,
+                    settings.provider_usage_pull_interval_seconds,
+                    settings.provider_usage_pull_days,
+                )
+            )
         )
     yield
-    if worker is not None:
-        worker.cancel()
+    for task in tasks:
+        task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await worker
+            await task
     await engine.dispose()
 
 

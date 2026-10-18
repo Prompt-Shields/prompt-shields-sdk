@@ -61,6 +61,6 @@ npm test
 
 Tests mock `fetch` and make no network calls.
 
-**Types and `docs/openapi.yaml`.** The types in `src/types.ts` are written by hand, because the SDK camelCases the wire format. `test/openapi.test.ts` (part of `npm test`, or alone with `npm run check:openapi`) reads `src/types.ts` with the TypeScript compiler and fails when a schema property, enum value, query parameter or operation in `docs/openapi.yaml` has no counterpart in the SDK, or the SDK has a field the spec does not. The webhook admin API is not in `docs/openapi.yaml`; its types follow `packages/collector/collector/webhook_admin.py`.
+**Types and `docs/openapi.yaml`.** The types in `src/types.ts` are written by hand, because the SDK camelCases the wire format. `test/openapi.test.ts` (part of `npm test`, or alone with `npm run check:openapi`) reads `src/types.ts` with the TypeScript compiler and fails when a schema property, enum value, query parameter or operation in `docs/openapi.yaml` has no counterpart in the SDK, or the SDK has a field the spec does not. It also fails when a field is optional in one and required in the other, and it checks request bodies. The webhook admin API (`client.webhooks`) is covered too. The provider credential routes are in the spec but not wrapped by the SDK; call them with `client.send()`.
 
 **Releasing.** See [RELEASING.md](RELEASING.md). Publishing needs the `NPM_TOKEN` secret and the `@prompt-shields` npm org.

@@ -277,6 +277,135 @@ def test_cli_fail_on_known_tokens_no_warning(repo, capsys):
     assert "warning" not in capsys.readouterr().err
 
 
+def _emitted_vendor_sources():
+    """Every vendor string the scanner can put on a Finding, found by
+    walking scan.py rather than by trusting how KNOWN_VENDORS is built.
+
+    Starts at each function that constructs a ``Finding`` and follows the
+    module-level names it (and the module functions it calls) reads:
+
+    - a string literal passed as ``Finding``'s vendor, or returned by a
+      function the vendor comes from (``_host_vendor``'s ``"unknown"``);
+    - a module-level ``dict`` with string values (prefix/name -> vendor);
+    - a module-level list of ``(vendor, pattern)`` tuples, including
+      compiled ones such as ``_MODEL_RES``.
+
+    Returns {source description: set of vendor strings}.
+    """
+    import ast
+    import inspect
+
+    from prompt_shields import scan
+
+    tree = ast.parse(inspect.getsource(scan))
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def is_finding_call(node):
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Finding"
+        )
+
+    sources: dict[str, set[str]] = {}
+    seen_functions: set[str] = set()
+    pending = [
+        name
+        for name, fn in functions.items()
+        if any(is_finding_call(n) for n in ast.walk(fn))
+    ]
+    while pending:
+        fname = pending.pop()
+        if fname in seen_functions:
+            continue
+        seen_functions.add(fname)
+        fn = functions[fname]
+        for node in ast.walk(fn):
+            # Literal vendor on a Finding: Finding(kind, vendor, ...).
+            if is_finding_call(node):
+                vendor = node.args[1] if len(node.args) > 1 else None
+                for kw in node.keywords:
+                    if kw.arg == "vendor":
+                        vendor = kw.value
+                if isinstance(vendor, ast.Constant) and isinstance(vendor.value, str):
+                    sources.setdefault(f"{fname}: Finding literal", set()).add(
+                        vendor.value
+                    )
+            # Literal returned by a vendor lookup (e.g. the "unknown" fallback).
+            if (
+                fname.endswith("_vendor")
+                and isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                sources.setdefault(f"{fname}: return literal", set()).add(
+                    node.value.value
+                )
+            if not isinstance(node, ast.Name):
+                continue
+            if node.id in functions:
+                pending.append(node.id)
+                continue
+            table = getattr(scan, node.id, None)
+            values: set[str] = set()
+            if (
+                isinstance(table, dict)
+                and table
+                and all(isinstance(v, str) for v in table.values())
+            ):
+                values = set(table.values())
+            elif (
+                isinstance(table, list)
+                and table
+                and all(
+                    isinstance(t, tuple) and len(t) == 2 and isinstance(t[0], str)
+                    for t in table
+                )
+            ):
+                values = {t[0] for t in table}
+            if values:
+                sources[node.id] = values
+    return sources
+
+
+def test_every_emittable_vendor_is_a_known_fail_on_token():
+    """A vendor the scanner can emit but KNOWN_VENDORS lacks would make
+    ``--fail-on <vendor>`` warn as a typo (and, alone, exit 2)."""
+    from prompt_shields.scan import KNOWN_VENDORS
+
+    sources = _emitted_vendor_sources()
+    # The walk must reach every kind of source, or it proves nothing.
+    for expected in (
+        "MODULE_VENDORS",
+        "CLIENT_VENDORS",
+        "QUALIFIED_CLIENTS",
+        "ENV_VAR_VENDORS",
+        "_MODEL_RES",
+        "_HOST_RES",
+        "_host_vendor: return literal",
+        "_scan_python: Finding literal",
+        "_scan_clients_regex: Finding literal",
+    ):
+        assert expected in sources, sorted(sources)
+
+    missing = {
+        source: sorted(values - KNOWN_VENDORS)
+        for source, values in sources.items()
+        if values - KNOWN_VENDORS
+    }
+    assert missing == {}
+
+
+def test_emitted_vendor_walk_catches_a_new_vendor(monkeypatch):
+    """Self-test: a vendor added to a table but not to KNOWN_VENDORS shows up."""
+    from prompt_shields import scan
+
+    monkeypatch.setitem(scan.ENV_VAR_VENDORS, "XAI_API_KEY", "xai")
+    sources = _emitted_vendor_sources()
+    assert "xai" in sources["ENV_VAR_VENDORS"]
+    assert "xai" not in scan.KNOWN_VENDORS
+
+
 def test_cli_fail_on_no_findings(tmp_path):
     (tmp_path / "plain.py").write_text("print('hello')\n")
     assert main([str(tmp_path), "--fail-on", "any"]) == 0

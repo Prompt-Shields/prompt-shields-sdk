@@ -7,6 +7,8 @@ from pydantic_settings import BaseSettings
 # attempts queued behind it in the same run, or nothing is ever sent.
 WEBHOOK_CLAIM_LEASE_SECONDS = 300
 WEBHOOK_MAX_TIMEOUT_SECONDS = 60
+# Shortest in-process provider usage pull interval (one hour).
+PROVIDER_USAGE_MIN_INTERVAL_SECONDS = 3600
 
 
 def parse_source_thresholds(value: str) -> dict[str, tuple[int, int]]:
@@ -98,7 +100,42 @@ class Settings(BaseSettings):
     webhook_worker_interval_seconds: float = 0
     webhook_delivery_retention_days: int = 30
 
+    # Provider org usage pull (#93), see collector/provider_usage_admin.py.
+    # Seconds between in-process pulls of every tenant with a stored
+    # credential or a PS_PROVIDER_ADMIN_KEYS entry; 0 (the default) disables
+    # it. Off by default because it calls the providers' admin APIs with
+    # tenants' admin keys, which an operator should opt into. Runs that
+    # overlap are serialised by an advisory lock (the later one skips), but
+    # replicas whose runs do not overlap each pull (idempotently, spending
+    # vendor API calls): turn it on in one replica, or run
+    # `python -m collector.provider_usage_admin --all-tenants` from cron.
+    # 86400 (daily) matches the providers' daily usage buckets; anything
+    # under PROVIDER_USAGE_MIN_INTERVAL_SECONDS is refused.
+    provider_usage_pull_interval_seconds: float = 0
+    # Days each scheduled pull covers. Over 1 so a bucket the provider
+    # finalises late, or a missed run, is picked up next time; re-pulled
+    # days overwrite the same rows.
+    provider_usage_pull_days: int = 3
+
     model_config = {"env_prefix": "PS_"}
+
+    @field_validator("provider_usage_pull_interval_seconds")
+    @classmethod
+    def _provider_usage_interval(cls, value: float) -> float:
+        if value != 0 and value < PROVIDER_USAGE_MIN_INTERVAL_SECONDS:
+            raise ValueError(
+                "PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS must be 0 (off) or at "
+                f"least {PROVIDER_USAGE_MIN_INTERVAL_SECONDS} (usage is reported "
+                "in daily buckets; 86400 is the usual value)"
+            )
+        return value
+
+    @field_validator("provider_usage_pull_days")
+    @classmethod
+    def _provider_usage_days(cls, value: int) -> int:
+        if not 1 <= value <= 90:
+            raise ValueError("PS_PROVIDER_USAGE_PULL_DAYS must be between 1 and 90")
+        return value
 
     @field_validator("asset_lifecycle_source_thresholds")
     @classmethod
