@@ -280,6 +280,10 @@ def _serialize_asset(a: AIAsset) -> dict:
         "lifecycle_changed_at": (
             a.lifecycle_changed_at.isoformat() if a.lifecycle_changed_at else None
         ),
+        "retired_by": a.retired_by,
+        "retired_in_use_at": (
+            a.retired_in_use_at.isoformat() if a.retired_in_use_at else None
+        ),
     }
 
 

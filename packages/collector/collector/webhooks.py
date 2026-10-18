@@ -8,8 +8,11 @@ signed JSON event for each asset change.
 Events
   asset.created   a new asset was discovered (ingest, OTel ingest)
   asset.changed   discovery sources, confidence, owner, classification or
-                  lifecycle state changed (including stale and reactivated)
-  asset.retired   the lifecycle sweep retired the asset
+                  lifecycle state changed (including stale, reactivated and
+                  an owner un-retiring), or an owner-retired asset was
+                  sighted again (`retired_in_use_at`)
+  asset.retired   the lifecycle sweep or the owner (an `asset` attestation
+                  with state `retired`) retired the asset
   asset.attested  a person recorded an attestation for one of the asset's
                   fields (collector.attestation): field, state, actor type
                   and time. The free-text comment, the attested value and
@@ -157,6 +160,9 @@ WATCHED_FIELDS: tuple[str, ...] = (
     "owner_email",
     "data_classification",
     "lifecycle_state",
+    # Set on the first sighting of an owner-retired asset ("retired asset
+    # still in use", collector.lifecycle.reactivate).
+    "retired_in_use_at",
 )
 
 # Asset fields included in event payloads. owner_email (personal data) is
@@ -178,6 +184,7 @@ PAYLOAD_TIMESTAMPS: tuple[str, ...] = (
     "first_seen",
     "last_seen",
     "lifecycle_changed_at",
+    "retired_in_use_at",
 )
 
 
@@ -485,6 +492,9 @@ def asset_payload(asset: AIAsset) -> dict:
     for field in PAYLOAD_TIMESTAMPS:
         value = getattr(asset, field, None)
         out[field] = value.isoformat() if value is not None else None
+    # Who retired it (`retired_by`, usually an email) is left out, like
+    # owner_email; only whether an owner did.
+    out["retired_by_owner"] = getattr(asset, "retired_by", None) is not None
     return out
 
 

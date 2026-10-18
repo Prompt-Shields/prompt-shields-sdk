@@ -35,7 +35,7 @@ export type RiskStatus = OpenString<'suggested' | 'confirmed' | 'rejected'>;
 export type RiskSource = OpenString<'manual' | 'rules'>;
 export type UsagePeriod = OpenString<'7d' | '30d' | '90d'>;
 export type LifecycleState = OpenString<'active' | 'stale' | 'retired'>;
-export type LifecycleChange = OpenString<'stale' | 'retired' | 'reactivated'>;
+export type LifecycleChange = OpenString<'stale' | 'retired' | 'reactivated' | 'retired_in_use'>;
 export type AttestationState = OpenString<'unreviewed' | 'attested' | 'disputed' | 'retired'>;
 /** Attestable fields. Sent and returned as these snake_case strings. */
 export type AttestableField = OpenString<'asset' | 'owner' | 'data_classification'>;
@@ -74,6 +74,10 @@ export interface AIAsset {
   lifecycleState?: LifecycleState;
   /** ISO 8601 timestamp of the last `lifecycleState` change. */
   lifecycleChangedAt?: string | null;
+  /** Who retired the asset (an `asset` attestation with state `retired`); null unless its owner did. */
+  retiredBy?: string | null;
+  /** ISO 8601 timestamp of the first sighting since the owner retired it ("still in use"). */
+  retiredInUseAt?: string | null;
   /**
    * Human sign-off per attestable field. Keys are the wire field names
    * (`asset`, `owner`, `data_classification`), kept as-is so they match

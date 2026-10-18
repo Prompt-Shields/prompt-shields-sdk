@@ -71,7 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import rls
 from collector.dedup import compute_confidence
-from collector.lifecycle import reactivate
+from collector.lifecycle import lock_for_sighting, reactivate
 from collector.provider_usage_admin import require_operator
 
 logger = logging.getLogger("prompt_shields.cloud_inventory")
@@ -1739,6 +1739,7 @@ async def store_inventory(
             )
             created += 1
             continue
+        await lock_for_sighting(db, asset)
         asset.model = d.model
         asset.region = d.region
         asset.owner_email = asset.owner_email or owner
