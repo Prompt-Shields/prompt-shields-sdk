@@ -1,4 +1,4 @@
-import { Context } from 'hono';
+import { Context, HonoRequest } from 'hono';
 import { CONTENT_TYPES } from '../globals';
 import {
   constructConfigFromRequestHeaders,
@@ -6,7 +6,10 @@ import {
 } from './handlerUtils';
 import { RouterError } from '../errors/RouterError';
 
-async function getRequestData(request: Request, contentType: string) {
+// PS fork: read through Hono's request (HonoRequest) so a body that a
+// middleware already parsed (psRouter reads every JSON POST) comes from the
+// body cache instead of the consumed raw stream.
+async function getRequestData(request: HonoRequest, contentType: string) {
   // Body-less requests (and any content type we do not parse) proxy with
   // empty params. Most SDKs send GET/DELETE without a content-type, which
   // previously left the body undefined and crashed tryPost on params.stream.
@@ -30,7 +33,7 @@ export async function proxyHandler(c: Context): Promise<Response> {
     let requestHeaders = Object.fromEntries(c.req.raw.headers);
     const requestContentType = requestHeaders['content-type']?.split(';')[0];
 
-    const request = await getRequestData(c.req.raw, requestContentType);
+    const request = await getRequestData(c.req, requestContentType);
 
     const camelCaseConfig = constructConfigFromRequestHeaders(requestHeaders);
 
