@@ -7,9 +7,7 @@ fields that let the collector prove requested-vs-served savings.
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from prompt_shields import AsyncShieldsClient, RouteHint, ShieldsClient
-
 
 # --- RouteHint.to_headers -------------------------------------------------
 
@@ -73,8 +71,6 @@ def test_event_records_requested_and_served_model():
 
 def test_served_model_falls_back_to_requested_when_absent():
     client = ShieldsClient(api_key="sk-test", ps_api_key="ps-test")
-    resp = MagicMock(spec=[])  # no .model attribute
-    resp_usage = MagicMock()
     event = client._build_event(
         model="gpt-4o",
         messages=[{"role": "user", "content": "hi"}],

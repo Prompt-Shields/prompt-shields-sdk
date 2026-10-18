@@ -243,7 +243,7 @@ def test_cli_fail_on_any(repo, capsys):
 
 def test_cli_fail_on_vendor_and_kind(repo, capsys, tmp_path):
     assert main([str(repo), "--fail-on", "anthropic"]) == 1
-    assert main([str(repo), "--fail-on", "nonexistent-vendor"]) == 0
+    assert main([str(repo), "--fail-on", "portkey"]) == 0  # known, no match
     assert main([str(repo), "--fail-on", "env_var,nonexistent"]) == 1
     # The report is still written before the non-zero exit.
     dest = tmp_path / "out.sarif"
@@ -251,6 +251,30 @@ def test_cli_fail_on_vendor_and_kind(repo, capsys, tmp_path):
     assert main(argv) == 1
     assert json.loads(dest.read_text())["runs"][0]["results"]
     capsys.readouterr()
+
+
+def test_cli_fail_on_warns_on_unknown_tokens(repo, capsys):
+    assert main([str(repo), "--fail-on", "Anthropc,ANTHROPIC,env-var"]) == 1
+    err = capsys.readouterr().err
+    assert "warning: ignoring unknown --fail-on token(s): anthropc, env-var" in err
+    assert "env_var" in err and "matched --fail-on" in err
+
+
+def test_cli_fail_on_all_unknown_is_usage_error(repo, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main([str(repo), "--fail-on", "antropic", "--fail-on", "openia"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "--fail-on: no known tokens in antropic, openia" in captured.err
+    assert captured.out == ""  # nothing scanned or printed
+
+
+def test_cli_fail_on_known_tokens_no_warning(repo, capsys):
+    from prompt_shields.scan import FINDING_KINDS, KNOWN_VENDORS
+
+    tokens = ",".join(["any", *FINDING_KINDS, *sorted(KNOWN_VENDORS)])
+    main([str(repo), "--fail-on", tokens])
+    assert "warning" not in capsys.readouterr().err
 
 
 def test_cli_fail_on_no_findings(tmp_path):

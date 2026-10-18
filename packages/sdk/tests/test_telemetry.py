@@ -1,5 +1,5 @@
 import pytest
-from prompt_shields.telemetry import TelemetrySender, MAX_BUFFER_SIZE
+from prompt_shields.telemetry import MAX_BUFFER_SIZE, TelemetrySender
 
 
 def test_buffer_enqueue():

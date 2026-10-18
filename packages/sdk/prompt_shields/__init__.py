@@ -59,28 +59,23 @@ from prompt_shields.types import (
 __version__ = "0.2.0"
 
 __all__ = [
-    # Sync clients
-    "ShieldsClient",
-    "ShieldsOpenAI",
-    "ShieldsAnthropic",
-    # Async clients
+    "AsyncShieldsAnthropic",
     "AsyncShieldsClient",
     "AsyncShieldsOpenAI",
-    "AsyncShieldsAnthropic",
-    # Types
-    "PSMetadata",
-    "PSConfig",
-    "RouteHint",
-    "Quality",
     "DataClassification",
     "DiscoverySource",
+    "PSConfig",
+    "PSMetadata",
+    "Quality",
+    "RouteHint",
+    "ShieldsAnthropic",
+    "ShieldsClient",
+    "ShieldsOpenAI",
     "Vendor",
-    # Auto-instrumentation
-    "instrument",
-    "uninstrument",
-    "suppress_instrumentation",
-    # Utilities
     "detect_pii_categories",
-    "scan_messages",
     "estimate_cost",
+    "instrument",
+    "scan_messages",
+    "suppress_instrumentation",
+    "uninstrument",
 ]
