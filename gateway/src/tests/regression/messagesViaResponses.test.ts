@@ -15,7 +15,10 @@ import {
   upstreamCalls,
 } from './harness';
 import app from '../../index';
-import { routesMessagesViaResponses } from '../../adapters/messagesViaResponses';
+import {
+  routesMessagesViaResponses,
+  transformMessagesToResponses,
+} from '../../adapters/messagesViaResponses';
 
 beforeEach(() => resetHarness());
 
@@ -643,5 +646,40 @@ describe('Messages via Responses (#73)', () => {
     expect(upstreamCalls[0].url).toBe(
       'https://api.openai.com/v1/chat/completions'
     );
+  });
+});
+
+describe('messages → responses request edge cases', () => {
+  test('max_tokens below 16 is raised to the Responses minimum', () => {
+    const base = { model: 'gpt-5-codex', messages: [] };
+    expect(
+      transformMessagesToResponses({ ...base, max_tokens: 1 })
+    ).toMatchObject({ max_output_tokens: 16 });
+    expect(
+      transformMessagesToResponses({ ...base, max_tokens: 64 })
+    ).toMatchObject({ max_output_tokens: 64 });
+    expect(
+      (transformMessagesToResponses(base) as any).max_output_tokens
+    ).toBeUndefined();
+  });
+
+  test('base64 image without media_type gets a sniffed type, never undefined', () => {
+    const urlFor = (data: string) =>
+      (
+        transformMessagesToResponses({
+          model: 'gpt-5-codex',
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'image', source: { type: 'base64', data } }],
+            },
+          ],
+        }) as any
+      ).input[0].content[0].image_url;
+    expect(urlFor('/9j/4AAQ')).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    expect(urlFor('iVBORw0K')).toBe('data:image/png;base64,iVBORw0K');
+    expect(urlFor('R0lGODlh')).toBe('data:image/gif;base64,R0lGODlh');
+    expect(urlFor('UklGRiQA')).toBe('data:image/webp;base64,UklGRiQA');
+    expect(urlFor('AAAA')).not.toContain('undefined');
   });
 });

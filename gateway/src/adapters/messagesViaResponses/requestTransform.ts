@@ -17,6 +17,7 @@
 import { Params } from '../../types/requestBody';
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const MIN_OUTPUT_TOKENS = 16;
 
 export function transformMessagesToResponses(req: any): Params {
   const result: Record<string, any> = {
@@ -27,7 +28,11 @@ export function transformMessagesToResponses(req: any): Params {
 
   const instructions = systemText(req.system);
   if (instructions) result.instructions = instructions;
-  if (req.max_tokens != null) result.max_output_tokens = req.max_tokens;
+  // The Responses API rejects max_output_tokens below 16 (Messages allows
+  // 1, e.g. Claude Code's probes), so small limits are raised to 16.
+  if (typeof req.max_tokens === 'number') {
+    result.max_output_tokens = Math.max(MIN_OUTPUT_TOKENS, req.max_tokens);
+  }
   if (req.stream != null) result.stream = req.stream;
 
   const tools = (req.tools || [])
@@ -176,9 +181,21 @@ function imageUrl(source: any): string | undefined {
   if (!source) return undefined;
   if (source.type === 'url' && source.url) return source.url;
   if (source.type === 'base64' && source.data) {
-    return `data:${source.media_type};base64,${source.data}`;
+    const mediaType = source.media_type || sniffImageType(source.data);
+    return `data:${mediaType};base64,${source.data}`;
   }
   return undefined;
+}
+
+/**
+ * Media type from the base64 magic bytes, for a source without
+ * `media_type`; PNG when unrecognised (a data URL needs a type).
+ */
+function sniffImageType(data: string): string {
+  if (data.startsWith('/9j/')) return 'image/jpeg';
+  if (data.startsWith('R0lGOD')) return 'image/gif';
+  if (data.startsWith('UklGR')) return 'image/webp';
+  return 'image/png';
 }
 
 /** tool_result content as text (same rules as the chat adapter). */
