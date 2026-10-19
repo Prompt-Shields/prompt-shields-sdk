@@ -40,11 +40,11 @@ info:
       build provider headers from the resolved config, and the proxy routes
       drop every `x-portkey-*` header.
     - `x-ps-*` headers are read by the gateway (routing, cache, telemetry,
-      metrics) and are not sent upstream on the unified endpoints. On the
-      proxy routes (`/v1/proxy/{path}` and the `/v1/{path}` catch-all) all
-      other client headers, including `x-ps-*`, are forwarded.
+      metrics) and are never sent upstream, on any route, in any case.
+    - On the proxy routes (`/v1/proxy/{path}` and the `/v1/{path}`
+      catch-all) all other client headers are forwarded.
     - On every route a header named in `x-portkey-forward-headers` is
-      forwarded.
+      forwarded, except `x-ps-*` headers.
   license:
     name: MIT
     url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/gateway/LICENSE
@@ -1654,92 +1654,92 @@ components:
         Pins a routing group, bypassing the cost-aware router's hints
         (needs `PS_ROUTER_ENABLED=true`). An unknown group falls back to the
         default group.
-        Not sent upstream (forwarded on proxy routes).
+        Never sent upstream.
       schema:
         type: string
       example: frontier
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsQuality:
       name: x-ps-quality
       in: header
       required: false
-      description: Routing intent; the router maps it to a model group. Not sent upstream (forwarded on proxy routes).
+      description: Routing intent; the router maps it to a model group. Never sent upstream.
       schema:
         type: string
         enum: [draft, balanced, critical]
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsMaxCost:
       name: x-ps-max-cost
       in: header
       required: false
       description: |
         Per-call cost ceiling in USD. The router downgrades within the group
-        to stay under it. Not sent upstream (forwarded on proxy routes).
+        to stay under it. Never sent upstream.
       schema:
         type: string
         pattern: '^[0-9]*\.?[0-9]+$'
       example: '0.02'
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsCache:
       name: x-ps-cache
       in: header
       required: false
       description: |
         Per-request cache mode, overriding `PS_CACHE_DEFAULT`: `on`, `off`,
-        or `refresh` (serve from upstream and overwrite the entry). Not sent
-        upstream (forwarded on proxy routes).
+        or `refresh` (serve from upstream and overwrite the entry). Never sent
+        upstream.
       schema:
         type: string
         enum: ['on', 'off', refresh]
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsBusinessUnit:
       name: x-ps-business-unit
       in: header
       required: false
-      description: Business unit for telemetry, OTel spans and the `business_unit` metrics label. Not sent upstream (forwarded on proxy routes).
+      description: Business unit for telemetry, OTel spans and the `business_unit` metrics label. Never sent upstream.
       schema:
         type: string
       example: HR
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsUseCase:
       name: x-ps-use-case
       in: header
       required: false
-      description: Use-case name for telemetry and OTel spans. Not sent upstream (forwarded on proxy routes).
+      description: Use-case name for telemetry and OTel spans. Never sent upstream.
       schema:
         type: string
       example: interview-screening
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsOwner:
       name: x-ps-owner
       in: header
       required: false
-      description: Owner email for telemetry and OTel spans. Not sent upstream (forwarded on proxy routes).
+      description: Owner email for telemetry and OTel spans. Never sent upstream.
       schema:
         type: string
         format: email
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsDataClassification:
       name: x-ps-data-classification
       in: header
       required: false
-      description: Data classification for telemetry and OTel spans. Not sent upstream (forwarded on proxy routes).
+      description: Data classification for telemetry and OTel spans. Never sent upstream.
       schema:
         type: string
       example: confidential
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
     XPsEnvironment:
       name: x-ps-environment
       in: header
       required: false
       description: |
         Deployment environment for telemetry, the `environment` metrics
-        label and the OTel `deployment.environment.name` attribute. Not sent
-        upstream (forwarded on proxy routes).
+        label and the OTel `deployment.environment.name` attribute. Never sent
+        upstream.
       schema:
         type: string
       example: production
-      x-ps-sent-upstream: proxy-routes-only
+      x-ps-sent-upstream: never
 
     # --- Portkey-compatible headers (x-portkey-*), never sent upstream ----
     XPortkeyProvider:
