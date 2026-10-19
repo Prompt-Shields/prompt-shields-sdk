@@ -23,6 +23,7 @@ from db.models import (
     AIUsageEvent,
     Base,
     DataFlow,
+    McpToolUsage,
     PartnerAuditLog,
     PartnerCredential,
     RetentionAuditLog,
@@ -62,6 +63,7 @@ TENANT_TABLES = (
     PartnerCredential,
     AIAsset,
     TelemetryClientStats,
+    McpToolUsage,
 )
 
 
@@ -151,10 +153,33 @@ async def seed_full_tenant(db, name: str, **tenant_settings) -> uuid.UUID:
             ),
             TelemetryClientStats(tenant_id=tid, client_id="c1", received_events=1),
             TelemetryClientStats(tenant_id=tid, client_id="c2", received_events=2),
+            McpToolUsage(
+                tenant_id=tid,
+                source="sdk",
+                server_name="github",
+                tool_name="create_issue",
+                call_count=3,
+            ),
         ]
     )
     await db.commit()
     return tid
+
+
+async def add_mcp_usage(db, tenant_id, *ages_days: int) -> None:
+    for i, age in enumerate(ages_days):
+        db.add(
+            McpToolUsage(
+                tenant_id=tenant_id,
+                source="sdk",
+                server_name="github",
+                tool_name=f"tool-{i}",
+                call_count=1,
+                first_seen=NOW - timedelta(days=age + 1),
+                last_seen=NOW - timedelta(days=age),
+            )
+        )
+    await db.commit()
 
 
 async def count(db, model, tenant_id) -> int:
@@ -269,6 +294,26 @@ class TestPurge:
             assert audits[0].actor == "test"
             assert audits[0].details == {"ai_usage_events": 2}
 
+    async def test_purges_mcp_usage_not_seen_within_retention(self, session_factory):
+        async with session_factory() as db:
+            a = await make_tenant(db, "a", retention_days=30)
+            b = await make_tenant(db, "b", retention_days=30)
+            await add_mcp_usage(db, a, 1, 29, 31, 400)
+            await add_mcp_usage(db, b, 31, 400)
+
+            dry = await retention.purge_tenant_events(db, a, now=NOW, dry_run=True)
+            assert dry.mcp_tool_usage_deleted == 2
+            assert await count(db, McpToolUsage, a) == 4
+
+            result = await retention.purge_tenant_events(
+                db, a, now=NOW, batch_size=1, actor="test"
+            )
+            assert (result.events_deleted, result.mcp_tool_usage_deleted) == (0, 2)
+            assert await count(db, McpToolUsage, a) == 2
+            assert await count(db, McpToolUsage, b) == 2  # other tenant untouched
+            audit = (await db.execute(select(RetentionAuditLog))).scalar_one()
+            assert audit.details == {"ai_usage_events": 0, "mcp_tool_usage": 2}
+
     async def test_single_tenant_purge_leaves_other_tenant_alone(self, session_factory):
         async with session_factory() as db:
             a = await make_tenant(db, "a", retention_days=1)
@@ -333,6 +378,7 @@ class TestErase:
 
             assert result.tenant_existed is True
             assert result.rows_deleted["ai_usage_events"] == 2
+            assert result.rows_deleted["mcp_tool_usage"] == 1
             assert result.rows_deleted["tenants"] == 1
             assert set((await snapshot(db, a)).values()) == {0}
             assert await snapshot(db, b) == before_b

@@ -24,6 +24,10 @@
                   `invoke_model` and `invoke_model_with_response_stream`, via
                   botocore's `BaseClient._make_api_call`. `invoke_model` usage
                   comes from response headers; its body stream is never read.
+  - mcp:          the official `mcp` package's `ClientSession.call_tool`
+                  (client-side MCP tool calls; see `mcp_instrumentation`).
+                  Names, outcome and latency only, sent to `/ingest/mcp`;
+                  tool arguments and results are never read.
 Missing packages, or methods an installed version lacks, are skipped.
 openai and anthropic are imported and patched by `instrument()`; the other
 SDKs are patched when the app imports them (at once if already imported),
@@ -73,6 +77,7 @@ import weakref
 from types import SimpleNamespace
 from typing import Any
 
+from prompt_shields import mcp_instrumentation
 from prompt_shields.providers import (
     ADAPTERS,
     AzureOpenAIAdapter,
@@ -175,6 +180,10 @@ _TARGETS = (
     # boto3 builds client classes per service at runtime; every operation
     # goes through this one method, which passes non-Bedrock calls through.
     ("bedrock", "botocore.client", "BaseClient", "_make_api_call", "bedrock"),
+    # Client-side MCP tool calls (mcp_instrumentation). `initialize` only
+    # remembers the server's name for mcp 1.x, which has no `server_info`.
+    ("mcp", "mcp.client.session", "ClientSession", "initialize", "mcp_initialize"),
+    ("mcp", "mcp.client.session", "ClientSession", "call_tool", "mcp_call_tool"),
 )
 
 # Patched for either vendor: Azure clients reuse the OpenAI resource classes.
@@ -183,7 +192,10 @@ _TARGET_VENDORS = {"openai": ("openai", "azure_openai")}
 # Vendors patched when their SDK is first imported (at once if it already
 # is), so `instrument()` does not import them: together they add ~1s to
 # startup. openai and anthropic are imported and patched up front.
-_LAZY_VENDORS = ("google", "mistral", "cohere", "bedrock")
+_LAZY_VENDORS = ("google", "mistral", "cohere", "bedrock", "mcp")
+
+# Largest batch the MCP sender posts (the collector accepts up to 1000).
+_MCP_MAX_BATCH = 500
 
 # (module, class) -> the (module, class) that replaces it when present: the
 # public cohere clients are only patched when there is no raw client (the
@@ -417,8 +429,12 @@ def suppress_instrumentation():
 
 class _State:
     def __init__(self, telemetry, atlas, metadata, scan_pii, send_prompt_text,
-                 pricing_table, vendors=None, azure_deployments=None):
+                 pricing_table, vendors=None, azure_deployments=None,
+                 collector_url=None, api_key=None):
         self.telemetry = telemetry
+        self.collector_url = collector_url
+        self.api_key = api_key
+        self.mcp_telemetry: TelemetrySender | None = None
         self.vendors = vendors
         self.azure_adapter = AzureOpenAIAdapter(azure_deployments)
         self.atlas = atlas
@@ -428,6 +444,22 @@ class _State:
         self.pricing_table = pricing_table
         self.patches: list[tuple[type, str, Any, Any]] = []
         self.finder: _PatchOnImport | None = None
+
+    def mcp_sender(self) -> TelemetrySender:
+        """The `/ingest/mcp` sender, created on the first MCP tool call so
+        apps that never use MCP get no extra client."""
+        with _lock:
+            if self.mcp_telemetry is None:
+                self.mcp_telemetry = TelemetrySender(
+                    self.collector_url,
+                    self.api_key,
+                    path="/ingest/mcp",
+                    max_batch=_MCP_MAX_BATCH,
+                    report_loss=False,
+                )
+                if _state is self:
+                    register_exit_flush(self.mcp_telemetry)
+            return self.mcp_telemetry
 
 
 def is_instrumented() -> bool:
@@ -461,7 +493,8 @@ def instrument(
     `PS_CALLING_SERVICE`, `PS_ATLAS_URL`, `PS_ATLAS_API_KEY`.
 
     `vendors` limits instrumentation (e.g. `("openai",)`); default is all:
-    openai, azure_openai, anthropic, google, mistral, cohere, bedrock.
+    openai, azure_openai, anthropic, google, mistral, cohere, bedrock, mcp
+    (client-side MCP tool calls, when the `mcp` package is installed).
     "openai" also covers Azure clients (tagged azure_openai); select only
     "azure_openai" to instrument Azure without plain OpenAI.
     `azure_deployments` maps Azure deployment names to model ids for
@@ -518,6 +551,8 @@ def instrument(
             pricing_table=pricing_table,
             vendors=frozenset(vendors) if vendors is not None else None,
             azure_deployments=azure_deployments,
+            collector_url=ps_collector_url,
+            api_key=ps_api_key,
         )
 
         lazy: dict[str, list[tuple]] = {}
@@ -581,7 +616,10 @@ def _patch(state: _State, module: Any, target: tuple) -> bool:
     original = cls.__dict__.get(method)
     if original is None or getattr(original, "__ps_original__", None):
         return True
-    wrapper = _make_wrapper(original, vendor, api)
+    if vendor == "mcp":
+        wrapper = mcp_instrumentation.make_wrapper(original, api, _mcp_state)
+    else:
+        wrapper = _make_wrapper(original, vendor, api)
     setattr(cls, method, wrapper)
     state.patches.append((cls, method, original, wrapper))
     return True
@@ -676,13 +714,21 @@ def uninstrument() -> bool:
             # Only restore what is still ours; leave later patches alone.
             if cls.__dict__.get(name) is wrapper:
                 setattr(cls, name, original)
-        unregister_exit_flush(_state.telemetry, _state.atlas)
+        unregister_exit_flush(_state.telemetry, _state.atlas,
+                              _state.mcp_telemetry)
         set_exit_flush_timeout(None)
         _state = None
         return True
 
 
 # --- wrappers ----------------------------------------------------------------
+
+
+def _mcp_state() -> "_State | None":
+    """The state MCP tool calls report to, or None to pass them through."""
+    if _SUPPRESSED.get():
+        return None
+    return _state
 
 
 def _make_wrapper(original: Any, vendor: str, api: str) -> Any:

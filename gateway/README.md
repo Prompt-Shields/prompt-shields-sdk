@@ -65,6 +65,7 @@ PS_MAX_CUSTOM_HOST_RESPONSE_BYTES=52428800            # optional; cap on custom-
 TRUSTED_CUSTOM_HOSTS=localhost,127.0.0.1              # optional; hosts exempt from the SSRF checks
 PS_METRICS_ENABLED=true                               # optional; Prometheus metrics at GET /metrics
 PS_METRICS_TOKEN=<random>                             # optional; require Bearer token on /metrics
+PS_SHUTDOWN_TIMEOUT_MS=25000                          # optional; on SIGTERM, wait this long for in-flight requests (streams included) before exiting
 PS_SECURITY_EVENTS_LOG=true                           # optional; security events as JSON lines on stdout (or `stderr`); see docs/guides/security-events.mdx
 PS_SECURITY_EVENTS_TENANT=bank-a                      # optional; ps.tenant on every security event
 MAX_JSON_PAYLOAD_SIZE_IN_MB=10                        # optional; 413 for larger JSON bodies
@@ -117,7 +118,7 @@ Notes: exact-match only (SHA-256 of request body + endpoint) — semantic cachin
 docker run -p 8787:8787 \
   -e PS_COLLECTOR_URL=https://collector.promptshields.io \
   -e PS_API_KEY=ps-... \
-  promptshields/gateway
+  ghcr.io/prompt-shields/prompt-shields-sdk/gateway
 
 # Point any OpenAI client at the gateway
 export OPENAI_BASE_URL=http://localhost:8787/v1
