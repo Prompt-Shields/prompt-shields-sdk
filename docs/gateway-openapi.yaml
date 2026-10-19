@@ -219,8 +219,6 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '408':
           $ref: '#/components/responses/RequestTimeout'
-        '411':
-          $ref: '#/components/responses/LengthRequired'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '446':
@@ -784,6 +782,10 @@ paths:
                 $ref: '#/components/schemas/ImagesResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -865,6 +867,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -905,6 +911,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1004,6 +1014,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1638,7 +1652,8 @@ components:
       required: false
       description: |
         Pins a routing group, bypassing the cost-aware router's hints
-        (needs `PS_ROUTER_ENABLED=true`). An unknown group is ignored.
+        (needs `PS_ROUTER_ENABLED=true`). An unknown group falls back to the
+        default group.
         Not sent upstream (forwarded on proxy routes).
       schema:
         type: string
@@ -1970,14 +1985,18 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     LengthRequired:
       description: |
-        `MAX_JSON_PAYLOAD_SIZE_IN_MB` is set and a JSON POST has no
+        `MAX_FILE_PAYLOAD_SIZE_IN_MB` is set and a `multipart/form-data`
+        (or `application/x-www-form-urlencoded`) POST has no valid
         `content-length`.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/GatewayFailure'
     PayloadTooLarge:
-      description: The JSON body exceeds `MAX_JSON_PAYLOAD_SIZE_IN_MB`
+      description: |
+        The declared `content-length` exceeds `MAX_JSON_PAYLOAD_SIZE_IN_MB`
+        (JSON bodies) or `MAX_FILE_PAYLOAD_SIZE_IN_MB` (multipart and
+        form-encoded uploads).
       content:
         application/json:
           schema:

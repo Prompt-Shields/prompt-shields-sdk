@@ -60,6 +60,12 @@ function mountedOperations(): Set<string> {
     ) {
       const method = node.expression.name.text;
       const first = node.arguments[0];
+      // A path built from a variable or template would be skipped silently.
+      if (
+        [...METHODS, 'all'].includes(method) &&
+        (!first || !ts.isStringLiteralLike(first))
+      )
+        throw new Error(`app.${method} route needs a string literal path`);
       if (
         [...METHODS, 'all'].includes(method) &&
         first &&
