@@ -149,6 +149,14 @@ It listens on port 8787. See the [gateway README](gateway/README.md) for Docker,
 
 </details>
 
+<details>
+<summary><b>Collector API docs (<code>/docs</code>)</b></summary>
+<br>
+
+The collector does not serve FastAPI's `/docs`, `/redoc` or `/openapi.json` by default (they return 404). To browse them locally, start the collector with `PS_COLLECTOR_API_DOCS_ENABLED=true`. They are then served without authentication and list every route, including the operator routes, so the collector logs a warning at startup. Leave the setting off on any collector that untrusted clients can reach. The published Partner API spec is [`docs/openapi.yaml`](docs/openapi.yaml).
+
+</details>
+
 <br>
 
 ## What you get
