@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from collector import partner_rate_limit
 from collector.app import app
+from collector.config import settings
+from collector.partner_rate_limit import FixedWindowRateLimiter, get_kong_rate_limiter
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
@@ -171,3 +175,53 @@ async def test_size_and_shape_limits(seeded_db):
     assert client["lost_events"] == 0
     async with seeded_db.connect() as conn:
         assert (await conn.execute(text("select count(*) from ai_usage_events"))).scalar() == 0
+
+
+@pytest.mark.asyncio
+async def test_one_unstorable_entry_does_not_fail_the_batch(seeded_db):
+    def entry(model):
+        return {
+            "route": {"name": "r"},
+            "ai": {"proxy": {"meta": {"provider_name": "openai", "request_model": model}}},
+        }
+
+    body = json.dumps([entry("gpt-4o"), entry("gpt\u00004o"), entry("gpt\ud8004o")])
+    async with _client() as c:
+        resp = await c.post(URL, content=body, headers=HEADERS)
+        nested = await c.post(URL, content="[" * 100_000 + "]" * 100_000, headers=HEADERS)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ingested"] == 3
+    assert nested.status_code == 400
+    async with seeded_db.connect() as conn:
+        events = (await conn.execute(text("select count(*) from ai_usage_events"))).scalar()
+        models = (await conn.execute(text("select model from ai_assets"))).scalars().all()
+    assert events == 3
+    assert "gpt-4o" in models
+
+
+@pytest.fixture
+def kong_limit(monkeypatch):
+    monkeypatch.setattr(settings, "kong_rate_limit_per_minute", 2)
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 1)
+    monkeypatch.setattr(
+        partner_rate_limit, "time", SimpleNamespace(time=lambda: 1_700_000_030.0)
+    )
+    fresh = FixedWindowRateLimiter()
+    app.dependency_overrides[get_kong_rate_limiter] = lambda: fresh
+    yield
+    app.dependency_overrides.pop(get_kong_rate_limiter, None)
+
+
+@pytest.mark.asyncio
+async def test_kong_has_its_own_rate_limit(seeded_db, kong_limit):
+    async with _client() as c:
+        ok = [await c.post(URL, content=b"[]", headers=HEADERS) for _ in range(2)]
+        # Checked before the body is read: an oversized body still gets 429.
+        blocked = await c.post(URL, content=b"x" * (5 * 1024 * 1024), headers=HEADERS)
+        # Not shared with /ingest/events (limit 1 here, still unused).
+        sdk = await c.post("/ingest/events", headers=HEADERS, json={"events": []})
+    assert [r.status_code for r in ok] == [200, 200]
+    assert ok[0].headers["X-RateLimit-Limit"] == "2"
+    assert blocked.status_code == 429
+    assert blocked.headers["Retry-After"] == "10"
+    assert sdk.status_code == 200

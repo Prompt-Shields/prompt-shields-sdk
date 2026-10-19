@@ -32,15 +32,22 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import ValidationError
 
 from collector import loss_accounting
 from collector.auth import resolve_tenant
-from collector.ingest import LENIENT_FIELDS, IngestEvent, _store_events
+from collector.config import settings
+from collector.ingest import (
+    LENIENT_FIELDS,
+    IngestEvent,
+    _enforce_rate_limit,
+    _store_events,
+)
 from collector.otel_ingest import _problem, _read_bounded_body
+from collector.partner_rate_limit import FixedWindowRateLimiter, get_kong_rate_limiter
 
 router = APIRouter()
 
@@ -80,6 +87,16 @@ def _text(value: Any, max_length: int = MAX_NAME_LENGTH) -> str | None:
         return None
     value = value.strip()
     if not value or len(value) > max_length or value.lower() == _UNSPECIFIED:
+        return None
+    # Postgres text cannot hold NUL, and a lone surrogate cannot be encoded.
+    # Either would fail the whole batch's write with a 500, which Kong retries
+    # until it drops every entry in the batch. The model name comes from the
+    # caller's request body, so any client behind Kong could send one.
+    if "\x00" in value:
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
         return None
     return value
 
@@ -246,10 +263,17 @@ def map_payload(payload: Any) -> MappedEntry:
 
 
 @router.post("/ingest/kong")
-async def ingest_kong(request: Request):
-    # Not under the /ingest/events request limit (like the OTLP receiver):
-    # that counter is per tenant, so Kong traffic would use up the SDK's.
+async def ingest_kong(
+    request: Request,
+    response: Response,
+    limiter: Annotated[FixedWindowRateLimiter, Depends(get_kong_rate_limiter)],
+):
+    # Kong's own per-tenant limit (PS_KONG_RATE_LIMIT_PER_MINUTE), not the
+    # /ingest/events one: http-log sends one request per proxied call unless
+    # batching is on, so Kong traffic would use up the SDK's budget. Checked
+    # before the body is read; Kong retries a 429.
     tenant_id = await resolve_tenant(request)
+    _enforce_rate_limit(limiter, tenant_id, response, settings.kong_rate_limit_per_minute)
     db = request.state.db
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if content_type != "application/json":
@@ -260,7 +284,7 @@ async def ingest_kong(request: Request):
     raw = await _read_bounded_body(request)
     try:
         payload = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):  # deep nesting
         raise _problem(400, "Bad Request", "Body is not valid JSON") from None
     if not isinstance(payload, (dict, list)):
         raise _problem(

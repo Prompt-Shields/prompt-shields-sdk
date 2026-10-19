@@ -204,6 +204,7 @@ business unit and environment as for every other source.
 | `401` | Missing or wrong tenant key | retries, then drops |
 | `413` | Body over 4 MiB or more than 1,000 entries | retries, then drops |
 | `415` | Content type is not `application/json` | retries, then drops |
+| `429` | Over the tenant's Kong limit, `PS_KONG_RATE_LIMIT_PER_MINUTE` (default 6,000 requests/minute per collector process, `0` disables; counted apart from `/ingest/events`) | retries |
 | `5xx` | Write failed | retries |
 
 Entries without AI analytics (non-AI routes, or `log_statistics` off) are

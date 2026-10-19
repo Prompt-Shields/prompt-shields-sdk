@@ -214,6 +214,26 @@ def test_malformed_values_are_dropped_and_counted():
     }
 
 
+@pytest.mark.parametrize("bad", ["gpt\u00004o", "gpt\ud8004o"])
+def test_strings_postgres_cannot_store_are_dropped(bad):
+    # NUL and lone surrogates would fail the batch's write (500, Kong retries
+    # the whole batch until it drops it); they are dropped like any bad value.
+    entry = {
+        "request": {"headers": {"x-ps-use-case": bad}},
+        "consumer": {"username": bad},
+        "route": {"name": "r"},
+        "ai": {
+            "proxy": {"meta": {"provider_name": "openai", "request_model": bad}},
+            "ai-request-transformer": {"meta": {"provider_name": bad}},
+        },
+    }
+    mapped = map_entry(entry)
+    (event,) = mapped.events
+    assert (event.model, event.requested_model, event.use_case_name) == (None, None, None)
+    assert event.calling_service == "r"
+    assert mapped.rejected == {"no_vendor": 1}
+
+
 @pytest.mark.parametrize("entry", [{}, {"ai": None}, {"ai": {"payload": {"request": "x"}}}])
 def test_entries_without_ai_analytics_are_ignored(entry):
     mapped = map_entry(entry)

@@ -201,11 +201,13 @@ class IngestRequest(BaseModel):
 
 
 def _enforce_rate_limit(
-    limiter: FixedWindowRateLimiter, tenant_id, response: Response
+    limiter: FixedWindowRateLimiter, tenant_id, response: Response, limit: int | None = None
 ) -> None:
     """Per-tenant request limit on ingest. Sets X-RateLimit-* headers and
-    raises 429 with Retry-After once the tenant exceeds the window."""
-    limit = settings.rate_limit_per_minute
+    raises 429 with Retry-After once the tenant exceeds the window. ``limit``
+    defaults to PS_RATE_LIMIT_PER_MINUTE."""
+    if limit is None:
+        limit = settings.rate_limit_per_minute
     if limit <= 0:
         return
     result = limiter.check(tenant_id, limit)
