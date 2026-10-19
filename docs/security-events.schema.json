@@ -1,0 +1,831 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs.promptshields.com/security-events/v1.schema.json",
+  "title": "Prompt Shields gateway security event, v1",
+  "description": "One JSON object per line, written by the gateway when PS_SECURITY_EVENTS_LOG is set. Never contains prompt or response content, PII values, credentials, client IPs or caller emails. Within v1 fields may be added, never renamed or removed. TypeScript types: gateway/src/middlewares/psSecurityEvents/schema.ts.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/guardrail_verdict"
+    },
+    {
+      "$ref": "#/$defs/pii_detected"
+    },
+    {
+      "$ref": "#/$defs/injection_detected"
+    },
+    {
+      "$ref": "#/$defs/auth_failure"
+    },
+    {
+      "$ref": "#/$defs/rate_limit_hit"
+    },
+    {
+      "$ref": "#/$defs/payload_rejected"
+    }
+  ],
+  "$defs": {
+    "guardrail_verdict": {
+      "type": "object",
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC time the event was recorded."
+        },
+        "ps.schema_version": {
+          "const": "1.0.0"
+        },
+        "event.id": {
+          "type": "string",
+          "description": "Random id of this event."
+        },
+        "event.name": {
+          "const": "guardrail.verdict"
+        },
+        "event.kind": {
+          "enum": ["alert", "event"],
+          "description": "ECS event.kind."
+        },
+        "event.category": {
+          "type": "array",
+          "items": {
+            "enum": ["intrusion_detection", "authentication", "network"]
+          },
+          "description": "ECS event.category."
+        },
+        "event.outcome": {
+          "enum": ["success", "failure", "unknown"],
+          "description": "ECS event.outcome."
+        },
+        "log.logger": {
+          "const": "ps.security",
+          "description": "Filter on this to route security events."
+        },
+        "service.name": {
+          "const": "prompt-shields-gateway"
+        },
+        "vendor_product": {
+          "const": "Prompt Shields Gateway",
+          "description": "Splunk CIM vendor_product."
+        },
+        "severity": {
+          "enum": ["informational", "low", "medium", "high"],
+          "description": "Splunk CIM severity."
+        },
+        "action": {
+          "enum": ["allowed", "blocked", "failure"],
+          "description": "Splunk CIM action."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Splunk CIM signature: check id, PII category or rejection reason."
+        },
+        "ps.request_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "x-portkey-trace-id when it is a short token, else generated once per request."
+        },
+        "http.route": {
+          "type": "string",
+          "description": "Matched route pattern, e.g. /v1/chat/completions."
+        },
+        "http.request.method": {
+          "type": "string"
+        },
+        "ps.tenant": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "PS_SECURITY_EVENTS_TENANT, when set."
+        },
+        "ps.business_unit": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Workspace: the X-PS-Business-Unit header."
+        },
+        "ps.environment": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The X-PS-Environment header."
+        },
+        "gen_ai.provider.name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "gen_ai.request.model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.guardrail.hook_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.guardrail.hook_type": {
+          "enum": ["guardrail", "mutator"]
+        },
+        "ps.guardrail.check_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Plugin check id, e.g. default.contains, portkey.pii."
+        },
+        "ps.guardrail.stage": {
+          "enum": ["input", "output"]
+        },
+        "ps.guardrail.verdict": {
+          "enum": ["allow", "deny", "flag", "error"]
+        },
+        "ps.guardrail.deny": {
+          "type": "boolean",
+          "description": "True when the hook denies on failure (the request got a 446)."
+        },
+        "ps.guardrail.duration_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "@timestamp",
+        "ps.schema_version",
+        "event.id",
+        "event.name",
+        "event.kind",
+        "event.category",
+        "event.outcome",
+        "log.logger",
+        "service.name",
+        "vendor_product",
+        "severity",
+        "action",
+        "signature",
+        "ps.request_id",
+        "http.route",
+        "http.request.method",
+        "ps.guardrail.hook_id",
+        "ps.guardrail.hook_type",
+        "ps.guardrail.check_id",
+        "ps.guardrail.stage",
+        "ps.guardrail.verdict",
+        "ps.guardrail.deny"
+      ],
+      "additionalProperties": false
+    },
+    "pii_detected": {
+      "type": "object",
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC time the event was recorded."
+        },
+        "ps.schema_version": {
+          "const": "1.0.0"
+        },
+        "event.id": {
+          "type": "string",
+          "description": "Random id of this event."
+        },
+        "event.name": {
+          "const": "pii.detected"
+        },
+        "event.kind": {
+          "enum": ["alert", "event"],
+          "description": "ECS event.kind."
+        },
+        "event.category": {
+          "type": "array",
+          "items": {
+            "enum": ["intrusion_detection", "authentication", "network"]
+          },
+          "description": "ECS event.category."
+        },
+        "event.outcome": {
+          "enum": ["success", "failure", "unknown"],
+          "description": "ECS event.outcome."
+        },
+        "log.logger": {
+          "const": "ps.security",
+          "description": "Filter on this to route security events."
+        },
+        "service.name": {
+          "const": "prompt-shields-gateway"
+        },
+        "vendor_product": {
+          "const": "Prompt Shields Gateway",
+          "description": "Splunk CIM vendor_product."
+        },
+        "severity": {
+          "enum": ["informational", "low", "medium", "high"],
+          "description": "Splunk CIM severity."
+        },
+        "action": {
+          "enum": ["allowed", "blocked", "failure"],
+          "description": "Splunk CIM action."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Splunk CIM signature: check id, PII category or rejection reason."
+        },
+        "ps.request_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "x-portkey-trace-id when it is a short token, else generated once per request."
+        },
+        "http.route": {
+          "type": "string",
+          "description": "Matched route pattern, e.g. /v1/chat/completions."
+        },
+        "http.request.method": {
+          "type": "string"
+        },
+        "ps.tenant": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "PS_SECURITY_EVENTS_TENANT, when set."
+        },
+        "ps.business_unit": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Workspace: the X-PS-Business-Unit header."
+        },
+        "ps.environment": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The X-PS-Environment header."
+        },
+        "gen_ai.provider.name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "gen_ai.request.model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.guardrail.hook_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.guardrail.hook_type": {
+          "enum": ["guardrail", "mutator"]
+        },
+        "ps.guardrail.check_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Plugin check id, e.g. default.contains, portkey.pii."
+        },
+        "ps.guardrail.stage": {
+          "enum": ["input", "output"]
+        },
+        "ps.guardrail.verdict": {
+          "enum": ["allow", "deny", "flag", "error"]
+        },
+        "ps.pii.category": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$",
+          "description": "Category as the check reports it, 'unspecified' or 'other'. Never a value."
+        },
+        "ps.pii.count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "@timestamp",
+        "ps.schema_version",
+        "event.id",
+        "event.name",
+        "event.kind",
+        "event.category",
+        "event.outcome",
+        "log.logger",
+        "service.name",
+        "vendor_product",
+        "severity",
+        "action",
+        "signature",
+        "ps.request_id",
+        "http.route",
+        "http.request.method",
+        "ps.guardrail.hook_id",
+        "ps.guardrail.hook_type",
+        "ps.guardrail.check_id",
+        "ps.guardrail.stage",
+        "ps.guardrail.verdict",
+        "ps.pii.category",
+        "ps.pii.count"
+      ],
+      "additionalProperties": false
+    },
+    "injection_detected": {
+      "type": "object",
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC time the event was recorded."
+        },
+        "ps.schema_version": {
+          "const": "1.0.0"
+        },
+        "event.id": {
+          "type": "string",
+          "description": "Random id of this event."
+        },
+        "event.name": {
+          "const": "injection.detected"
+        },
+        "event.kind": {
+          "enum": ["alert", "event"],
+          "description": "ECS event.kind."
+        },
+        "event.category": {
+          "type": "array",
+          "items": {
+            "enum": ["intrusion_detection", "authentication", "network"]
+          },
+          "description": "ECS event.category."
+        },
+        "event.outcome": {
+          "enum": ["success", "failure", "unknown"],
+          "description": "ECS event.outcome."
+        },
+        "log.logger": {
+          "const": "ps.security",
+          "description": "Filter on this to route security events."
+        },
+        "service.name": {
+          "const": "prompt-shields-gateway"
+        },
+        "vendor_product": {
+          "const": "Prompt Shields Gateway",
+          "description": "Splunk CIM vendor_product."
+        },
+        "severity": {
+          "enum": ["informational", "low", "medium", "high"],
+          "description": "Splunk CIM severity."
+        },
+        "action": {
+          "enum": ["allowed", "blocked", "failure"],
+          "description": "Splunk CIM action."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Splunk CIM signature: check id, PII category or rejection reason."
+        },
+        "ps.request_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "x-portkey-trace-id when it is a short token, else generated once per request."
+        },
+        "http.route": {
+          "type": "string",
+          "description": "Matched route pattern, e.g. /v1/chat/completions."
+        },
+        "http.request.method": {
+          "type": "string"
+        },
+        "ps.tenant": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "PS_SECURITY_EVENTS_TENANT, when set."
+        },
+        "ps.business_unit": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Workspace: the X-PS-Business-Unit header."
+        },
+        "ps.environment": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The X-PS-Environment header."
+        },
+        "gen_ai.provider.name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "gen_ai.request.model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.guardrail.hook_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.guardrail.hook_type": {
+          "enum": ["guardrail", "mutator"]
+        },
+        "ps.guardrail.check_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Plugin check id, e.g. default.contains, portkey.pii."
+        },
+        "ps.guardrail.stage": {
+          "enum": ["input", "output"]
+        },
+        "ps.guardrail.verdict": {
+          "enum": ["allow", "deny", "flag", "error"]
+        }
+      },
+      "required": [
+        "@timestamp",
+        "ps.schema_version",
+        "event.id",
+        "event.name",
+        "event.kind",
+        "event.category",
+        "event.outcome",
+        "log.logger",
+        "service.name",
+        "vendor_product",
+        "severity",
+        "action",
+        "signature",
+        "ps.request_id",
+        "http.route",
+        "http.request.method",
+        "ps.guardrail.hook_id",
+        "ps.guardrail.hook_type",
+        "ps.guardrail.check_id",
+        "ps.guardrail.stage",
+        "ps.guardrail.verdict"
+      ],
+      "additionalProperties": false
+    },
+    "auth_failure": {
+      "type": "object",
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC time the event was recorded."
+        },
+        "ps.schema_version": {
+          "const": "1.0.0"
+        },
+        "event.id": {
+          "type": "string",
+          "description": "Random id of this event."
+        },
+        "event.name": {
+          "const": "auth.failure"
+        },
+        "event.kind": {
+          "enum": ["alert", "event"],
+          "description": "ECS event.kind."
+        },
+        "event.category": {
+          "type": "array",
+          "items": {
+            "enum": ["intrusion_detection", "authentication", "network"]
+          },
+          "description": "ECS event.category."
+        },
+        "event.outcome": {
+          "enum": ["success", "failure", "unknown"],
+          "description": "ECS event.outcome."
+        },
+        "log.logger": {
+          "const": "ps.security",
+          "description": "Filter on this to route security events."
+        },
+        "service.name": {
+          "const": "prompt-shields-gateway"
+        },
+        "vendor_product": {
+          "const": "Prompt Shields Gateway",
+          "description": "Splunk CIM vendor_product."
+        },
+        "severity": {
+          "enum": ["informational", "low", "medium", "high"],
+          "description": "Splunk CIM severity."
+        },
+        "action": {
+          "enum": ["allowed", "blocked", "failure"],
+          "description": "Splunk CIM action."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Splunk CIM signature: check id, PII category or rejection reason."
+        },
+        "ps.request_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "x-portkey-trace-id when it is a short token, else generated once per request."
+        },
+        "http.route": {
+          "type": "string",
+          "description": "Matched route pattern, e.g. /v1/chat/completions."
+        },
+        "http.request.method": {
+          "type": "string"
+        },
+        "ps.tenant": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "PS_SECURITY_EVENTS_TENANT, when set."
+        },
+        "ps.business_unit": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Workspace: the X-PS-Business-Unit header."
+        },
+        "ps.environment": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The X-PS-Environment header."
+        },
+        "gen_ai.provider.name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "gen_ai.request.model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.auth.realm": {
+          "enum": ["admin", "metrics"]
+        },
+        "ps.auth.reason": {
+          "enum": ["missing_credentials", "invalid_credentials"]
+        },
+        "http.response.status_code": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "@timestamp",
+        "ps.schema_version",
+        "event.id",
+        "event.name",
+        "event.kind",
+        "event.category",
+        "event.outcome",
+        "log.logger",
+        "service.name",
+        "vendor_product",
+        "severity",
+        "action",
+        "signature",
+        "ps.request_id",
+        "http.route",
+        "http.request.method",
+        "ps.auth.realm",
+        "ps.auth.reason",
+        "http.response.status_code"
+      ],
+      "additionalProperties": false
+    },
+    "rate_limit_hit": {
+      "type": "object",
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC time the event was recorded."
+        },
+        "ps.schema_version": {
+          "const": "1.0.0"
+        },
+        "event.id": {
+          "type": "string",
+          "description": "Random id of this event."
+        },
+        "event.name": {
+          "const": "rate_limit.hit"
+        },
+        "event.kind": {
+          "enum": ["alert", "event"],
+          "description": "ECS event.kind."
+        },
+        "event.category": {
+          "type": "array",
+          "items": {
+            "enum": ["intrusion_detection", "authentication", "network"]
+          },
+          "description": "ECS event.category."
+        },
+        "event.outcome": {
+          "enum": ["success", "failure", "unknown"],
+          "description": "ECS event.outcome."
+        },
+        "log.logger": {
+          "const": "ps.security",
+          "description": "Filter on this to route security events."
+        },
+        "service.name": {
+          "const": "prompt-shields-gateway"
+        },
+        "vendor_product": {
+          "const": "Prompt Shields Gateway",
+          "description": "Splunk CIM vendor_product."
+        },
+        "severity": {
+          "enum": ["informational", "low", "medium", "high"],
+          "description": "Splunk CIM severity."
+        },
+        "action": {
+          "enum": ["allowed", "blocked", "failure"],
+          "description": "Splunk CIM action."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Splunk CIM signature: check id, PII category or rejection reason."
+        },
+        "ps.request_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "x-portkey-trace-id when it is a short token, else generated once per request."
+        },
+        "http.route": {
+          "type": "string",
+          "description": "Matched route pattern, e.g. /v1/chat/completions."
+        },
+        "http.request.method": {
+          "type": "string"
+        },
+        "ps.tenant": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "PS_SECURITY_EVENTS_TENANT, when set."
+        },
+        "ps.business_unit": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Workspace: the X-PS-Business-Unit header."
+        },
+        "ps.environment": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The X-PS-Environment header."
+        },
+        "gen_ai.provider.name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "gen_ai.request.model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.rate_limit.source": {
+          "enum": ["upstream", "gateway"]
+        },
+        "http.response.status_code": {
+          "const": 429
+        }
+      },
+      "required": [
+        "@timestamp",
+        "ps.schema_version",
+        "event.id",
+        "event.name",
+        "event.kind",
+        "event.category",
+        "event.outcome",
+        "log.logger",
+        "service.name",
+        "vendor_product",
+        "severity",
+        "action",
+        "signature",
+        "ps.request_id",
+        "http.route",
+        "http.request.method",
+        "ps.rate_limit.source",
+        "http.response.status_code"
+      ],
+      "additionalProperties": false
+    },
+    "payload_rejected": {
+      "type": "object",
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC time the event was recorded."
+        },
+        "ps.schema_version": {
+          "const": "1.0.0"
+        },
+        "event.id": {
+          "type": "string",
+          "description": "Random id of this event."
+        },
+        "event.name": {
+          "const": "payload.rejected"
+        },
+        "event.kind": {
+          "enum": ["alert", "event"],
+          "description": "ECS event.kind."
+        },
+        "event.category": {
+          "type": "array",
+          "items": {
+            "enum": ["intrusion_detection", "authentication", "network"]
+          },
+          "description": "ECS event.category."
+        },
+        "event.outcome": {
+          "enum": ["success", "failure", "unknown"],
+          "description": "ECS event.outcome."
+        },
+        "log.logger": {
+          "const": "ps.security",
+          "description": "Filter on this to route security events."
+        },
+        "service.name": {
+          "const": "prompt-shields-gateway"
+        },
+        "vendor_product": {
+          "const": "Prompt Shields Gateway",
+          "description": "Splunk CIM vendor_product."
+        },
+        "severity": {
+          "enum": ["informational", "low", "medium", "high"],
+          "description": "Splunk CIM severity."
+        },
+        "action": {
+          "enum": ["allowed", "blocked", "failure"],
+          "description": "Splunk CIM action."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Splunk CIM signature: check id, PII category or rejection reason."
+        },
+        "ps.request_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "x-portkey-trace-id when it is a short token, else generated once per request."
+        },
+        "http.route": {
+          "type": "string",
+          "description": "Matched route pattern, e.g. /v1/chat/completions."
+        },
+        "http.request.method": {
+          "type": "string"
+        },
+        "ps.tenant": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "PS_SECURITY_EVENTS_TENANT, when set."
+        },
+        "ps.business_unit": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Workspace: the X-PS-Business-Unit header."
+        },
+        "ps.environment": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The X-PS-Environment header."
+        },
+        "gen_ai.provider.name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "gen_ai.request.model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.payload.reason": {
+          "enum": [
+            "payload_too_large",
+            "length_required",
+            "unsupported_guardrail"
+          ]
+        },
+        "http.response.status_code": {
+          "type": "integer"
+        },
+        "http.request.body.size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "@timestamp",
+        "ps.schema_version",
+        "event.id",
+        "event.name",
+        "event.kind",
+        "event.category",
+        "event.outcome",
+        "log.logger",
+        "service.name",
+        "vendor_product",
+        "severity",
+        "action",
+        "signature",
+        "ps.request_id",
+        "http.route",
+        "http.request.method",
+        "ps.payload.reason",
+        "http.response.status_code"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
