@@ -1,0 +1,31 @@
+# Spectral ruleset for docs/openapi.yaml (collector Partner API) and
+# docs/gateway-openapi.yaml (AI gateway). Run by .github/workflows/openapi.yml:
+#   spectral lint --fail-severity error docs/openapi.yaml docs/gateway-openapi.yaml
+# Warnings from spectral:oas (e.g. typed-enum on nullable enums) are
+# reported but do not fail the job; the rules below are errors.
+extends:
+  - spectral:oas
+functionsDir: ./.spectral/functions
+functions:
+  - operationSecurityDefined
+rules:
+  # Summaries are enough on pass-through operations.
+  operation-description: off
+  # deck file openapi2kong / openapi2mcp name routes and tools after it.
+  operation-operationId: error
+  operation-operationId-unique: error
+  # Every operation states its auth: its own `security` (an empty list means
+  # "no auth" on purpose) or a non-empty top-level `security`.
+  operation-security-defined:
+    description: Every operation must declare security, or inherit a non-empty top-level security.
+    message: '{{error}}'
+    severity: error
+    given: $
+    then:
+      function: operationSecurityDefined
+overrides:
+  # A WebSocket upgrade answers 101, which is neither 2xx nor 3xx.
+  - files:
+      - 'docs/gateway-openapi.yaml#/paths/~1v1~1realtime/get/responses'
+    rules:
+      operation-success-response: off
