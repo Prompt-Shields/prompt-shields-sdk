@@ -5,6 +5,12 @@ Only an allowlist of metadata attributes is ever read. Prompt and completion
 content (``gen_ai.prompt*``, ``gen_ai.completion*``, ``gen_ai.input.messages``
 and friends, and every span event) is dropped before mapping, so it can never
 reach the database.
+
+MCP ``tools/call`` spans (OTel MCP semantic conventions: ``mcp.method.name``,
+``gen_ai.tool.name``, ``server.address``, ``network.transport``,
+``error.type``) map to an MCP tool call (``map_mcp_span``), not a usage
+event: names, outcome and duration only. Tool arguments and results
+(``gen_ai.tool.call.arguments`` / ``.result``) are dropped like any content.
 """
 
 from __future__ import annotations
@@ -12,6 +18,15 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Any
+
+from collector.mcp_usage import (
+    MAX_LABEL_LENGTH,
+    OTEL_SOURCE,
+    UNKNOWN_SERVER,
+    McpCall,
+    clean_name,
+    server_identity,
+)
 
 # Attribute keys (exact or prefix) that may carry message content. They are
 # stripped before any mapping happens.
@@ -204,6 +219,78 @@ def invalid_attributes(span: dict) -> dict[str, int]:
     ):
         out["span.duration:invalid"] = 1
     return out
+
+
+# --- MCP spans --------------------------------------------------------------
+
+MCP_METHOD = "mcp.method.name"
+MCP_TOOLS_CALL = "tools/call"
+# OTLP span kind SERVER (enum value 2 or its JSON name).
+_KIND_SERVER = {2, "2", "SPAN_KIND_SERVER"}
+
+
+def is_mcp_span(attrs: dict[str, Any]) -> bool:
+    return MCP_METHOD in attrs
+
+
+def _tool_from_span_name(name: Any) -> str | None:
+    """The target in a ``{mcp.method.name} {target}`` span name. Some
+    clients (the Python SDK's "MCP send tools/call <tool>") set no
+    ``gen_ai.tool.name``."""
+    if not isinstance(name, str):
+        return None
+    marker = MCP_TOOLS_CALL + " "
+    idx = name.find(marker)
+    return name[idx + len(marker) :] if idx >= 0 else None
+
+
+def _mcp_transport(attrs: dict[str, Any]) -> str | None:
+    transport = _str(attrs.get("network.transport"))
+    if transport == "pipe":
+        return "stdio"
+    if _str(attrs.get("network.protocol.name")) == "http":
+        return "http"
+    return clean_name(transport, MAX_LABEL_LENGTH)
+
+
+def map_mcp_span(span: dict, resource_attrs: dict[str, Any]) -> McpCall | None:
+    """An MCP ``tools/call`` span as a tool call, else None.
+
+    Server identity: on a server span (kind SERVER) the server's own
+    ``service.name``; otherwise (client spans) the ``server.address`` host,
+    or "unknown" (stdio servers have no address). The calling service is
+    the client's ``service.name``; a server span does not know its caller.
+    Errors: status ERROR or any ``error.type`` (``tool_error`` for a result
+    with ``isError``).
+    """
+    attrs = safe_attributes(span.get("attributes"))
+    if _str(attrs.get(MCP_METHOD)) != MCP_TOOLS_CALL:
+        return None
+    tool = clean_name(attrs.get("gen_ai.tool.name")) or clean_name(
+        _tool_from_span_name(span.get("name"))
+    )
+    if tool is None:
+        return None
+    service = clean_name(resource_attrs.get("service.name"))
+    if span.get("kind") in _KIND_SERVER:
+        server, caller = service, None
+    else:
+        server, caller = server_identity(attrs.get("server.address")), service
+    status = span.get("status") if isinstance(span.get("status"), dict) else {}
+    environment = _str(resource_attrs.get("deployment.environment.name")) or _str(
+        resource_attrs.get("deployment.environment")
+    )
+    return McpCall(
+        source=OTEL_SOURCE,
+        server_name=server or UNKNOWN_SERVER,
+        tool_name=tool,
+        is_error=status.get("code") in _STATUS_ERROR
+        or attrs.get("error.type") is not None,
+        latency_ms=_duration_ms(span),
+        calling_service=caller or "",
+        environment=clean_name(environment, MAX_LABEL_LENGTH) or "",
+        transport=_mcp_transport(attrs),
+    )
 
 
 def _list(value: Any) -> list:

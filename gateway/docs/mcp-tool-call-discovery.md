@@ -129,6 +129,14 @@ Do not overload AI assets. Add a separate aggregate, and keep `tool_calls_used` 
 
 If the gateway port is approved later, the minimum file set is the proxy + session group above plus `utils/emitLog.ts` rewritten to post to the collector. `middleware/{controlPlane,oauth,jwt,userAccess}`, `routes/*`, `services/{oauthGateway,upstreamOAuth,mcpAccessService}.ts` and `utils/{userIdentity,oauthTokenRevocation,mcpCacheKeyTracker}.ts` are not ported.
 
+## Phase 0 implemented
+
+The observe-only work (option C part 2, option D and the collector schema above) is implemented in the PR that adds `020_mcp_tool_usage.py`. It does not change the status of this record: the scope questions under _Decision needed_ are still open. What it adds:
+
+- SDK: `instrument()` wraps `mcp.ClientSession.call_tool` (and `initialize`, only to remember `serverInfo.name` on mcp 1.x) and posts names, outcome and latency to `POST /ingest/mcp`. `list_tools` is not wrapped.
+- Collector: `mcp_tool_usage`, as specified above, plus `latency_ms_total`/`latency_count` and `environment` in the key. `POST /ingest/mcp`, MCP `tools/call` spans on the OTLP receiver (`source: "otel"`), and a tenant read route `GET /api/v1/registry/mcp-tools`.
+- Not yet: the Partner API scope (`mcp:read`), AI-BOM `services`, MCP config scanning in `ps-scan` (option E), and the TypeScript MCP client.
+
 ## First slice (this change)
 
 Observe-only, no new dependency, no collector change:
