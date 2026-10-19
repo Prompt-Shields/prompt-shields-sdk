@@ -7,6 +7,7 @@ import { Options } from '../types/requestBody';
 import { RealtimeLlmEventParser } from '../services/realtimeLlmEventParser';
 import { WSContext, WSEvents } from 'hono/ws';
 import { getURLForOutgoingConnection, toWebSocketURL } from './websocketUtils';
+import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 
 export async function realTimeHandlerNode(
   c: Context
@@ -49,7 +50,8 @@ export async function realTimeHandlerNode(
     };
 
     const outgoingWebSocket = new WebSocket(url, {
-      headers,
+      // PS fork (privacy): X-PS-* business metadata never reaches the provider.
+      headers: stripPSInternalHeaders(headers),
       // PS fork (security): ws's default, stated: never follow a redirect.
       followRedirects: false,
     });

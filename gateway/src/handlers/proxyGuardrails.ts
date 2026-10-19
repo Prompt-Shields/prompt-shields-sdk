@@ -15,6 +15,7 @@
 import { Context } from 'hono';
 import { CONTENT_TYPES } from '../globals';
 import { endpointStrings } from '../providers/types';
+import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 
 export type ProxyHooksDecision =
   /** Run the target's hooks as this endpoint type. */
@@ -179,8 +180,12 @@ export function classifyProxyRequest(
   return { kind: 'hooks', fn: route.fn };
 }
 
-/** The 400 returned before any upstream call. */
-export function proxyGuardrailsUnsupportedResponse(reason: string): Response {
+/** The 400 returned before any upstream call (recorded as payload.rejected). */
+export function proxyGuardrailsUnsupportedResponse(
+  reason: string,
+  c?: Context
+): Response {
+  if (c) reportPayloadRejected(c, 'unsupported_guardrail', 400);
   const message =
     'Guardrails are configured for this target but cannot be applied to ' +
     `this proxied request (${reason}). Use the matching /v1 endpoint, or a ` +

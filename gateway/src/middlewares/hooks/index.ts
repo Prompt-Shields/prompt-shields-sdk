@@ -14,6 +14,7 @@ import {
 import { plugins } from '../../../plugins';
 import { Context } from 'hono';
 import { HOOKS_EVENT_TYPE_PRESETS } from './globals';
+import { recordHookResults } from '../psSecurityEvents';
 
 export class HookSpan {
   private context: HookSpanContext;
@@ -246,6 +247,13 @@ export class HookSpan {
 export class HooksManager {
   private spans: Record<string, HookSpan> = {};
   private plugins: any;
+  // PS fork (security events): called once per executeHooks run with the
+  // hooks run and their results. Set by the `hooks` middleware.
+  public onHookResults?: (
+    span: HookSpan,
+    hooks: HookObject[],
+    results: HookResult[]
+  ) => void;
 
   constructor() {
     this.plugins = plugins;
@@ -310,6 +318,12 @@ export class HooksManager {
         (result, index) =>
           !result.verdict && hooksToExecute[index].deny && !result.skipped
       );
+
+      try {
+        this.onHookResults?.(span, hooksToExecute, results);
+      } catch {
+        // Reporting must never change the hook outcome.
+      }
 
       return { results, shouldDeny };
     } catch (err) {
@@ -600,6 +614,8 @@ export class HooksManager {
 
 export const hooks = (c: Context, next: any) => {
   const hooksManager = new HooksManager();
+  hooksManager.onHookResults = (span, hooks, results) =>
+    recordHookResults(c, span.getContext(), hooks, results, plugins);
   c.set('hooksManager', hooksManager);
   c.set('executeHooks', hooksManager.executeHooks.bind(hooksManager));
   return next();
