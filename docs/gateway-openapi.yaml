@@ -1,0 +1,2731 @@
+openapi: 3.1.0
+info:
+  title: Prompt Shields AI Gateway
+  version: 1.15.2
+  description: |
+    HTTP API of the Prompt Shields AI Gateway (`gateway/`, a fork of the
+    Portkey AI Gateway). The gateway exposes OpenAI-compatible and
+    Anthropic-compatible endpoints and routes each call to the provider
+    chosen by the `x-portkey-provider` or `x-portkey-config` header.
+
+    **Scope of this document.** Request and response bodies are a pinned,
+    minimal subset: the fields the gateway itself reads, writes or
+    translates between providers. Every other field passes through to the
+    provider unchanged (`additionalProperties: true`). For the full bodies
+    see the upstream specifications:
+    - OpenAI: https://github.com/openai/openai-openapi (Chat Completions,
+      Completions, Responses, Embeddings, Images, Audio, Files, Batches,
+      Fine-tuning, Models);
+    - Anthropic Messages: https://docs.anthropic.com/en/api/messages;
+    - Cohere Rerank v2: https://docs.cohere.com/reference/rerank.
+
+    **Authentication.** The gateway has no client authentication of its
+    own. The `Authorization` (or `x-api-key`) header carries the
+    *provider's* API key and is forwarded to the provider; credentials can
+    also travel inside `x-portkey-config`. Put the gateway behind an API
+    gateway such as Kong for client authentication, and strip the
+    provider-credential headers listed below at that layer if clients must
+    not choose their own credentials.
+
+    **Headers that are not documented on purpose.** Provider credential
+    headers (`x-portkey-aws-secret-access-key`, `x-portkey-aws-session-token`,
+    `x-portkey-azure-ad-token`, `x-portkey-azure-entra-client-secret`,
+    `x-portkey-vertex-service-account-json`, `x-portkey-oracle-private-key`,
+    `x-portkey-oauth-client-secret` and the other per-provider key, role and
+    service-account headers in `constructConfigFromRequestHeaders`) are
+    accepted but are not part of this contract.
+
+    **What reaches the provider.**
+    - `x-portkey-*` headers are never forwarded upstream: unified endpoints
+      build provider headers from the resolved config, and the proxy routes
+      drop every `x-portkey-*` header.
+    - `x-ps-*` headers are read by the gateway (routing, cache, telemetry,
+      metrics) and are never sent upstream, on any route, in any case.
+    - On the proxy routes (`/v1/proxy/{path}` and the `/v1/{path}`
+      catch-all) all other client headers are forwarded.
+    - On every route a header named in `x-portkey-forward-headers` is
+      forwarded, except `x-ps-*` headers.
+  license:
+    name: MIT
+    url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/gateway/LICENSE
+  contact:
+    name: Prompt Shields Developer Support
+    email: partners@promptshields.io
+
+# One server only: deck file openapi2kong turns every server into a target of
+# one Kong upstream, so a second entry would load-balance across both.
+servers:
+  - url: '{gatewayUrl}'
+    description: Your gateway (the Node server listens on port 8787 by default)
+    variables:
+      gatewayUrl:
+        default: http://localhost:8787
+
+tags:
+  - name: Chat
+    description: OpenAI Chat Completions and legacy Completions
+  - name: Responses
+    description: OpenAI Responses API
+  - name: Messages
+    description: Anthropic Messages API
+  - name: Embeddings
+    description: Embeddings and rerank
+  - name: Images
+    description: Image generation and editing
+  - name: Audio
+    description: Speech, transcription and translation
+  - name: OCR
+    description: Document OCR
+  - name: Files
+    description: Provider file storage
+  - name: Batches
+    description: Provider batch jobs
+  - name: Fine-tuning
+    description: Provider fine-tuning jobs
+  - name: Models
+    description: Model listing
+  - name: Realtime
+    description: Realtime API over WebSocket
+  - name: Proxy
+    description: Pass-through to any provider path
+  - name: Operations
+    description: Health and Prometheus metrics
+
+paths:
+  /:
+    get:
+      operationId: getRoot
+      tags: [Operations]
+      summary: Greeting
+      description: Plain-text greeting. No auth and no upstream call.
+      security: []
+      responses:
+        '200':
+          description: Greeting
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: AI Gateway says hey!
+
+  /v1/health:
+    get:
+      operationId: getHealth
+      tags: [Operations]
+      summary: Liveness check
+      description: |
+        Proves the process is serving. No auth and no upstream call, so it
+        is safe for liveness and readiness probes.
+      security: []
+      responses:
+        '200':
+          description: Gateway is serving
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [Operations]
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition. Off unless `PS_METRICS_ENABLED=true`
+        (404 otherwise). When `PS_METRICS_TOKEN` is set, the request must
+        send it as a bearer token. Labels never carry prompt content, keys
+        or user identifiers.
+      security:
+        - MetricsToken: []
+        - {}
+      responses:
+        '200':
+          description: Metrics in Prometheus text format 0.0.4
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: '`PS_METRICS_TOKEN` is set and the bearer token is missing or wrong'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayFailure'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/chat/completions:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPortkeyTraceId'
+      - $ref: '#/components/parameters/XPortkeyMetadata'
+      - $ref: '#/components/parameters/XPortkeyStrictOpenAiCompliance'
+      - $ref: '#/components/parameters/XPortkeyDefaultInputGuardrails'
+      - $ref: '#/components/parameters/XPortkeyDefaultOutputGuardrails'
+      - $ref: '#/components/parameters/XPsRoute'
+      - $ref: '#/components/parameters/XPsQuality'
+      - $ref: '#/components/parameters/XPsMaxCost'
+      - $ref: '#/components/parameters/XPsCache'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createChatCompletion
+      tags: [Chat]
+      summary: Create a chat completion
+      description: |
+        OpenAI Chat Completions, translated to the target provider's API.
+        With `stream: true` the response is a server-sent event stream of
+        `chat.completion.chunk` objects.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: Chat completion, or an event stream when `stream` is true
+          headers:
+            x-portkey-trace-id:
+              $ref: '#/components/headers/TraceId'
+            x-portkey-cache-status:
+              $ref: '#/components/headers/CacheStatus'
+            x-portkey-retry-attempt-count:
+              $ref: '#/components/headers/RetryAttemptCount'
+            x-portkey-last-used-option-index:
+              $ref: '#/components/headers/LastUsedOptionIndex'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: '`data: <chat.completion.chunk JSON>` events, ending with `data: [DONE]`'
+        '246':
+          $ref: '#/components/responses/HooksFailed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '446':
+          $ref: '#/components/responses/GuardrailDenied'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/completions:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPortkeyTraceId'
+      - $ref: '#/components/parameters/XPortkeyMetadata'
+      - $ref: '#/components/parameters/XPortkeyDefaultInputGuardrails'
+      - $ref: '#/components/parameters/XPortkeyDefaultOutputGuardrails'
+      - $ref: '#/components/parameters/XPsRoute'
+      - $ref: '#/components/parameters/XPsQuality'
+      - $ref: '#/components/parameters/XPsMaxCost'
+      - $ref: '#/components/parameters/XPsCache'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createCompletion
+      tags: [Chat]
+      summary: Create a (legacy) text completion
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletionRequest'
+      responses:
+        '200':
+          description: Completion, or an event stream when `stream` is true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+        '246':
+          $ref: '#/components/responses/HooksFailed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '446':
+          $ref: '#/components/responses/GuardrailDenied'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/responses:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPortkeyTraceId'
+      - $ref: '#/components/parameters/XPortkeyMetadata'
+      - $ref: '#/components/parameters/XPortkeyDefaultInputGuardrails'
+      - $ref: '#/components/parameters/XPortkeyDefaultOutputGuardrails'
+      - $ref: '#/components/parameters/XPsRoute'
+      - $ref: '#/components/parameters/XPsQuality'
+      - $ref: '#/components/parameters/XPsMaxCost'
+      - $ref: '#/components/parameters/XPsCache'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createResponse
+      tags: [Responses]
+      summary: Create a model response
+      description: |
+        OpenAI Responses API. Served natively by providers that have it and
+        through the gateway's Responses adapter for chat-only providers.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResponsesRequest'
+      responses:
+        '200':
+          description: Response object, or an event stream when `stream` is true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseObject'
+            text/event-stream:
+              schema:
+                type: string
+        '246':
+          $ref: '#/components/responses/HooksFailed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '446':
+          $ref: '#/components/responses/GuardrailDenied'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/responses/input_tokens:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    post:
+      operationId: countResponseInputTokens
+      tags: [Responses]
+      summary: Count input tokens for a Responses request
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResponsesRequest'
+      responses:
+        '200':
+          description: Token count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/responses/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: getResponse
+      tags: [Responses]
+      summary: Retrieve a stored response
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Response object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+    delete:
+      operationId: deleteResponse
+      tags: [Responses]
+      summary: Delete a stored response
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/responses/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    post:
+      operationId: cancelResponse
+      tags: [Responses]
+      summary: Cancel a background response
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: The cancelled response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/responses/{id}/input_items:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: listResponseInputItems
+      tags: [Responses]
+      summary: List the input items of a stored response
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: List of input items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/messages:
+    parameters:
+      - $ref: '#/components/parameters/AnthropicVersion'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPortkeyTraceId'
+      - $ref: '#/components/parameters/XPortkeyMetadata'
+      - $ref: '#/components/parameters/XPortkeyDefaultInputGuardrails'
+      - $ref: '#/components/parameters/XPortkeyDefaultOutputGuardrails'
+      - $ref: '#/components/parameters/XPortkeyAnthropicBeta'
+      - $ref: '#/components/parameters/XPortkeyMessagesViaResponses'
+      - $ref: '#/components/parameters/XPsRoute'
+      - $ref: '#/components/parameters/XPsQuality'
+      - $ref: '#/components/parameters/XPsMaxCost'
+      - $ref: '#/components/parameters/XPsCache'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createMessage
+      tags: [Messages]
+      summary: Create a message (Anthropic Messages API)
+      description: |
+        Anthropic Messages. Served natively by Anthropic, Bedrock, Vertex,
+        Claude Platform on AWS and Bedrock Mantle, and translated for
+        OpenAI-compatible providers (Responses-only OpenAI models go through
+        the Responses API).
+      security:
+        - ProviderApiKey: []
+        - ProviderBearer: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessagesRequest'
+      responses:
+        '200':
+          description: Message, or an event stream when `stream` is true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagesResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: Anthropic stream events (`message_start` ... `message_stop`)
+        '246':
+          $ref: '#/components/responses/HooksFailed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '446':
+          $ref: '#/components/responses/GuardrailDenied'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/messages/count_tokens:
+    parameters:
+      - $ref: '#/components/parameters/AnthropicVersion'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    post:
+      operationId: countMessageTokens
+      tags: [Messages]
+      summary: Count tokens for a Messages request
+      security:
+        - ProviderApiKey: []
+        - ProviderBearer: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessagesRequest'
+      responses:
+        '200':
+          description: Token count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CountTokensResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/embeddings:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPortkeyTraceId'
+      - $ref: '#/components/parameters/XPortkeyMetadata'
+      - $ref: '#/components/parameters/XPortkeyDefaultInputGuardrails'
+      - $ref: '#/components/parameters/XPsRoute'
+      - $ref: '#/components/parameters/XPsCache'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createEmbedding
+      tags: [Embeddings]
+      summary: Create embeddings
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingRequest'
+      responses:
+        '200':
+          description: Embeddings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingResponse'
+        '246':
+          $ref: '#/components/responses/HooksFailed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '446':
+          $ref: '#/components/responses/GuardrailDenied'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/rerank:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPortkeyTraceId'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createRerank
+      tags: [Embeddings]
+      summary: Rerank documents
+      description: Cohere-style rerank. Supported providers are Cohere, Jina, Voyage and Bedrock.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RerankRequest'
+      responses:
+        '200':
+          description: Ranked results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RerankResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/images/generations:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createImage
+      tags: [Images]
+      summary: Generate images
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImageGenerationRequest'
+      responses:
+        '200':
+          description: Generated images
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImagesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/images/edits:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createImageEdit
+      tags: [Images]
+      summary: Edit an image
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MultipartPassThrough'
+      responses:
+        '200':
+          description: Edited images
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImagesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/audio/speech:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createSpeech
+      tags: [Audio]
+      summary: Text to speech
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeechRequest'
+      responses:
+        '200':
+          description: Audio bytes in the requested format
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/audio/transcriptions:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createTranscription
+      tags: [Audio]
+      summary: Speech to text
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MultipartPassThrough'
+      responses:
+        '200':
+          description: Transcription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/audio/translations:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createTranslation
+      tags: [Audio]
+      summary: Translate speech to English text
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MultipartPassThrough'
+      responses:
+        '200':
+          description: Translation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/ocr:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+      - $ref: '#/components/parameters/XPortkeyRequestTimeout'
+      - $ref: '#/components/parameters/XPsBusinessUnit'
+      - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsOwner'
+      - $ref: '#/components/parameters/XPsDataClassification'
+      - $ref: '#/components/parameters/XPsEnvironment'
+    post:
+      operationId: createOcr
+      tags: [OCR]
+      summary: Extract text from a document (Mistral OCR shape)
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PassThroughObject'
+      responses:
+        '200':
+          description: OCR result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/files:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: listFiles
+      tags: [Files]
+      summary: List files
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: File list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+    post:
+      operationId: uploadFile
+      tags: [Files]
+      summary: Upload a file
+      parameters:
+        - $ref: '#/components/parameters/XPortkeyFilePurpose'
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MultipartPassThrough'
+      responses:
+        '200':
+          description: Uploaded file object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/files/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: retrieveFile
+      tags: [Files]
+      summary: Retrieve file metadata
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: File object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+    delete:
+      operationId: deleteFile
+      tags: [Files]
+      summary: Delete a file
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/files/{id}/content:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: retrieveFileContent
+      tags: [Files]
+      summary: Download file content
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/batches:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: listBatches
+      tags: [Batches]
+      summary: List batches
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Batch list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+    post:
+      operationId: createBatch
+      tags: [Batches]
+      summary: Create a batch
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PassThroughObject'
+      responses:
+        '200':
+          description: Batch object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/batches/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: retrieveBatch
+      tags: [Batches]
+      summary: Retrieve a batch
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Batch object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/batches/{id}/output:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: getBatchOutput
+      tags: [Batches]
+      summary: Download a batch's output
+      description: Gateway addition. Returns the batch output file as JSON Lines.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Batch output
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/batches/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    post:
+      operationId: cancelBatch
+      tags: [Batches]
+      summary: Cancel a batch
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Batch object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/fine_tuning/jobs:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: listFineTuningJobs
+      tags: [Fine-tuning]
+      summary: List fine-tuning jobs
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+    post:
+      operationId: createFineTuningJob
+      tags: [Fine-tuning]
+      summary: Create a fine-tuning job
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PassThroughObject'
+      responses:
+        '200':
+          description: Job object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/fine_tuning/jobs/{jobId}:
+    parameters:
+      - $ref: '#/components/parameters/JobIdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    get:
+      operationId: retrieveFineTuningJob
+      tags: [Fine-tuning]
+      summary: Retrieve a fine-tuning job
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Job object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/fine_tuning/jobs/{jobId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/JobIdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+      - $ref: '#/components/parameters/XPortkeyForwardHeaders'
+    post:
+      operationId: cancelFineTuningJob
+      tags: [Fine-tuning]
+      summary: Cancel a fine-tuning job
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Job object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/models:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+    get:
+      operationId: listModels
+      tags: [Models]
+      summary: List models
+      description: |
+        Proxies the provider's models endpoint and normalises the list.
+        Callers that send `anthropic-version` get Anthropic's shape
+        (`limit`, `after_id` and `before_id` applied locally when the
+        provider does not paginate); everyone else gets OpenAI's shape.
+      parameters:
+        - $ref: '#/components/parameters/AnthropicVersion'
+        - name: limit
+          in: query
+          required: false
+          description: Anthropic shape only. Page size.
+          schema:
+            type: integer
+            minimum: 1
+        - name: after_id
+          in: query
+          required: false
+          description: Anthropic shape only. Return models after this id.
+          schema:
+            type: string
+        - name: before_id
+          in: query
+          required: false
+          description: Anthropic shape only. Return models before this id.
+          schema:
+            type: string
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          description: Model list
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/OpenAIModelList'
+                  - $ref: '#/components/schemas/AnthropicModelList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/realtime:
+    parameters:
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+    get:
+      operationId: connectRealtime
+      tags: [Realtime]
+      summary: Realtime API (WebSocket upgrade)
+      description: |
+        OpenAI Realtime over WebSocket. Send `Upgrade: websocket`; the
+        gateway opens a WebSocket to the provider and relays frames. Served
+        by the Node server and on Cloudflare Workers.
+      parameters:
+        - name: model
+          in: query
+          required: false
+          schema:
+            type: string
+      security:
+        - ProviderBearer: []
+        - {}
+      responses:
+        '101':
+          description: Switching protocols to WebSocket
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/prompts/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        description: Remaining path. Only paths ending in `/v1/chat/completions` or `/v1/completions` are served.
+        schema:
+          type: string
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+    post:
+      operationId: createPromptCompletion
+      tags: [Chat]
+      summary: Prompt completions (upstream Portkey compatibility)
+      deprecated: true
+      description: |
+        Kept for upstream compatibility. A path ending in
+        `/v1/chat/completions` or `/v1/completions` is handled like that
+        endpoint; any other path returns 500. Use the endpoints directly.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PassThroughObject'
+      responses:
+        '200':
+          description: Same as the matching endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PassThroughObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/proxy/{path}:
+    parameters:
+      - $ref: '#/components/parameters/ProxyPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+    post:
+      operationId: proxyPostLegacy
+      tags: [Proxy]
+      summary: Proxy a POST to the provider (deprecated prefix)
+      deprecated: true
+      description: |
+        Same as `POST /v1/{path}`; the `/v1/proxy` prefix is cut before the
+        provider path is built. See the `/v1/{path}` description for
+        guardrail behaviour.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        $ref: '#/components/requestBodies/ProxyBody'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProxySuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '446':
+          $ref: '#/components/responses/GuardrailDenied'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+  /v1/{path}:
+    parameters:
+      - $ref: '#/components/parameters/ProxyPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+    get:
+      operationId: proxyGet
+      tags: [Proxy]
+      summary: Proxy a GET to the provider
+      description: |
+        Catch-all for any `/v1` path not listed above (the path may contain
+        `/`; `/v1/realtime` is excluded). The path after `/v1` is appended to
+        the provider's base URL. Client headers other than `x-portkey-*`,
+        `content-length` and `expect` are forwarded.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          $ref: '#/components/responses/ProxySuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+    post:
+      operationId: proxyPost
+      tags: [Proxy]
+      summary: Proxy a POST to the provider
+      description: |
+        Catch-all for any `/v1` POST path not listed above. JSON,
+        multipart and `audio/*` bodies are accepted.
+
+        **Guardrails on proxy routes fail closed.** When the resolved config
+        has guardrails or hooks on any target, a proxied request that is
+        recognisably Chat Completions, Completions, Messages, Responses or
+        Embeddings (path suffix and body shape) runs the hooks for that
+        endpoint type (446 on deny). Any other proxied request is refused
+        with a 400 `unsupported_guardrail` before any upstream is called.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      requestBody:
+        $ref: '#/components/requestBodies/ProxyBody'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProxySuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '446':
+          $ref: '#/components/responses/GuardrailDenied'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+    delete:
+      operationId: proxyDelete
+      tags: [Proxy]
+      summary: Proxy a DELETE to the provider
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - {}
+      responses:
+        '200':
+          $ref: '#/components/responses/ProxySuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
+components:
+  securitySchemes:
+    ProviderBearer:
+      type: http
+      scheme: bearer
+      description: |
+        The provider's API key (`Authorization: Bearer <key>`), forwarded to
+        the provider. Not a gateway credential.
+    ProviderApiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Anthropic-style provider API key, forwarded to the provider.
+    MetricsToken:
+      type: http
+      scheme: bearer
+      description: The `PS_METRICS_TOKEN` value, required on `/metrics` when it is set.
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      description: Provider object id (file, batch or response)
+      schema:
+        type: string
+    JobIdPath:
+      name: jobId
+      in: path
+      required: true
+      description: Provider fine-tuning job id
+      schema:
+        type: string
+    ProxyPath:
+      name: path
+      in: path
+      required: true
+      description: Provider path, appended to the provider base URL. May contain `/`.
+      schema:
+        type: string
+      example: chat/completions
+    AnthropicVersion:
+      name: anthropic-version
+      in: header
+      required: false
+      description: Anthropic API version. On `GET /v1/models` it selects the Anthropic list shape.
+      schema:
+        type: string
+      example: '2023-06-01'
+
+    # --- Prompt Shields headers (x-ps-*) ---------------------------------
+    XPsRoute:
+      name: x-ps-route
+      in: header
+      required: false
+      description: |
+        Pins a routing group, bypassing the cost-aware router's hints
+        (needs `PS_ROUTER_ENABLED=true`). An unknown group falls back to the
+        default group.
+        Never sent upstream.
+      schema:
+        type: string
+      example: frontier
+      x-ps-sent-upstream: never
+    XPsQuality:
+      name: x-ps-quality
+      in: header
+      required: false
+      description: Routing intent; the router maps it to a model group. Never sent upstream.
+      schema:
+        type: string
+        enum: [draft, balanced, critical]
+      x-ps-sent-upstream: never
+    XPsMaxCost:
+      name: x-ps-max-cost
+      in: header
+      required: false
+      description: |
+        Per-call cost ceiling in USD. The router downgrades within the group
+        to stay under it. Never sent upstream.
+      schema:
+        type: string
+        pattern: '^[0-9]*\.?[0-9]+$'
+      example: '0.02'
+      x-ps-sent-upstream: never
+    XPsCache:
+      name: x-ps-cache
+      in: header
+      required: false
+      description: |
+        Per-request cache mode, overriding `PS_CACHE_DEFAULT`: `on`, `off`,
+        or `refresh` (serve from upstream and overwrite the entry). Never sent
+        upstream.
+      schema:
+        type: string
+        enum: ['on', 'off', refresh]
+      x-ps-sent-upstream: never
+    XPsBusinessUnit:
+      name: x-ps-business-unit
+      in: header
+      required: false
+      description: Business unit for telemetry, OTel spans and the `business_unit` metrics label. Never sent upstream.
+      schema:
+        type: string
+      example: HR
+      x-ps-sent-upstream: never
+    XPsUseCase:
+      name: x-ps-use-case
+      in: header
+      required: false
+      description: Use-case name for telemetry and OTel spans. Never sent upstream.
+      schema:
+        type: string
+      example: interview-screening
+      x-ps-sent-upstream: never
+    XPsOwner:
+      name: x-ps-owner
+      in: header
+      required: false
+      description: Owner email for telemetry and OTel spans. Never sent upstream.
+      schema:
+        type: string
+        format: email
+      x-ps-sent-upstream: never
+    XPsDataClassification:
+      name: x-ps-data-classification
+      in: header
+      required: false
+      description: Data classification for telemetry and OTel spans. Never sent upstream.
+      schema:
+        type: string
+      example: confidential
+      x-ps-sent-upstream: never
+    XPsEnvironment:
+      name: x-ps-environment
+      in: header
+      required: false
+      description: |
+        Deployment environment for telemetry, the `environment` metrics
+        label and the OTel `deployment.environment.name` attribute. Never sent
+        upstream.
+      schema:
+        type: string
+      example: production
+      x-ps-sent-upstream: never
+
+    # --- Portkey-compatible headers (x-portkey-*), never sent upstream ----
+    XPortkeyProvider:
+      name: x-portkey-provider
+      in: header
+      required: false
+      description: |
+        Target provider slug (e.g. `openai`, `anthropic`, `azure-openai`,
+        `bedrock`, `vertex-ai`). Either this or `x-portkey-config` is
+        required on every route except `/`, `/v1/health` and `/metrics`
+        (400 otherwise). Never sent upstream.
+      schema:
+        type: string
+      example: openai
+      x-ps-sent-upstream: never
+    XPortkeyConfig:
+      name: x-portkey-config
+      in: header
+      required: false
+      description: |
+        Gateway config as JSON: targets, fallback / load-balance strategy,
+        retries, timeouts, cache, guardrails and hooks, and provider
+        credentials. Validated on entry (400 `Invalid config passed`). Never
+        sent upstream. Treat it as a secret when it carries keys.
+      schema:
+        type: string
+        contentMediaType: application/json
+      example: '{"provider":"openai","retry":{"attempts":2}}'
+      x-ps-sent-upstream: never
+    XPortkeyCustomHost:
+      name: x-portkey-custom-host
+      in: header
+      required: false
+      description: |
+        Override the provider base URL. Private, link-local, metadata and
+        internal hosts are refused unless listed in `TRUSTED_CUSTOM_HOSTS`
+        (400 `Invalid custom host`). Never sent upstream.
+      schema:
+        type: string
+        format: uri
+      x-ps-sent-upstream: never
+    XPortkeyForwardHeaders:
+      name: x-portkey-forward-headers
+      in: header
+      required: false
+      description: |
+        Comma-separated client header names to forward to the provider
+        (cannot name itself). Never sent upstream itself.
+      schema:
+        type: string
+      example: x-request-id,openai-organization
+      x-ps-sent-upstream: never
+    XPortkeyRequestTimeout:
+      name: x-portkey-request-timeout
+      in: header
+      required: false
+      description: Upstream timeout in milliseconds; a timeout returns 408. Never sent upstream.
+      schema:
+        type: string
+        pattern: '^[0-9]+$'
+      x-ps-sent-upstream: never
+    XPortkeyTraceId:
+      name: x-portkey-trace-id
+      in: header
+      required: false
+      description: Trace id, echoed in the response and attached to logs. Never sent upstream.
+      schema:
+        type: string
+      x-ps-sent-upstream: never
+    XPortkeyMetadata:
+      name: x-portkey-metadata
+      in: header
+      required: false
+      description: JSON object of string metadata for logs and hooks. Never sent upstream.
+      schema:
+        type: string
+        contentMediaType: application/json
+      x-ps-sent-upstream: never
+    XPortkeyStrictOpenAiCompliance:
+      name: x-portkey-strict-open-ai-compliance
+      in: header
+      required: false
+      description: |
+        `false` keeps provider-specific response fields (for example
+        reasoning content) that strict OpenAI compliance would drop. Never
+        sent upstream.
+      schema:
+        type: string
+        enum: ['true', 'false']
+      x-ps-sent-upstream: never
+    XPortkeyDefaultInputGuardrails:
+      name: x-portkey-default-input-guardrails
+      in: header
+      required: false
+      description: JSON array of guardrails run before every request, in addition to the config's. Never sent upstream.
+      schema:
+        type: string
+        contentMediaType: application/json
+      x-ps-sent-upstream: never
+    XPortkeyDefaultOutputGuardrails:
+      name: x-portkey-default-output-guardrails
+      in: header
+      required: false
+      description: JSON array of guardrails run on every response, in addition to the config's. Never sent upstream.
+      schema:
+        type: string
+        contentMediaType: application/json
+      x-ps-sent-upstream: never
+    XPortkeyMessagesViaResponses:
+      name: x-portkey-messages-via-responses
+      in: header
+      required: false
+      description: |
+        `true` sends `/v1/messages` for `openai` / `azure-openai` targets
+        through the Responses API; `false` opts out of the model-name
+        detection. The config key `messages_via_responses` wins. Never sent
+        upstream.
+      schema:
+        type: string
+        enum: ['true', 'false']
+      x-ps-sent-upstream: never
+    XPortkeyAnthropicBeta:
+      name: x-portkey-anthropic-beta
+      in: header
+      required: false
+      description: Anthropic beta flags, sent to Anthropic as `anthropic-beta`. The `x-portkey-` header itself is not sent.
+      schema:
+        type: string
+      x-ps-sent-upstream: never
+    XPortkeyFilePurpose:
+      name: x-portkey-file-purpose
+      in: header
+      required: false
+      description: File purpose for providers whose upload API needs it outside the form. Never sent upstream.
+      schema:
+        type: string
+      example: batch
+      x-ps-sent-upstream: never
+
+  headers:
+    TraceId:
+      description: The request's trace id
+      schema:
+        type: string
+    CacheStatus:
+      description: Gateway cache result, e.g. `HIT`, `MISS`, `REFRESH` or `DISABLED`
+      schema:
+        type: string
+    RetryAttemptCount:
+      description: Number of upstream retries made for the served target
+      schema:
+        type: string
+    LastUsedOptionIndex:
+      description: Index of the config target that served the request (fallback / load balance)
+      schema:
+        type: string
+
+  requestBodies:
+    ProxyBody:
+      required: false
+      description: Any body the provider path accepts.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PassThroughObject'
+        multipart/form-data:
+          schema:
+            $ref: '#/components/schemas/MultipartPassThrough'
+        audio/*:
+          schema:
+            type: string
+            contentMediaType: application/octet-stream
+
+  responses:
+    ProxySuccess:
+      description: The provider's response, passed through
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PassThroughObject'
+        application/octet-stream:
+          schema:
+            type: string
+            contentMediaType: application/octet-stream
+    HooksFailed:
+      description: |
+        The response succeeded, but at least one guardrail or hook that is
+        not set to deny failed. The body is the normal success body plus
+        `hook_results` (non-streaming); streams keep their body.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/PassThroughObject'
+              - type: object
+                properties:
+                  hook_results:
+                    $ref: '#/components/schemas/HookResults'
+    BadRequest:
+      description: |
+        Rejected by the gateway before or instead of an upstream call:
+        missing `x-portkey-provider` / `x-portkey-config`, an invalid
+        provider, config, custom host or content type, a router error, or a
+        proxied request that guardrails cannot inspect
+        (`error.code: unsupported_guardrail`, see `POST /v1/{path}`).
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/GatewayFailure'
+              - $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missingProvider:
+              summary: No provider or config
+              value:
+                status: failure
+                message: Either x-portkey-config or x-portkey-provider header is required
+            unsupportedGuardrail:
+              summary: Proxy guardrail fail-closed
+              value:
+                error:
+                  message: >-
+                    Guardrails are configured for this target but cannot be
+                    applied to this proxied request (unrecognised path). Use
+                    the matching /v1 endpoint, or a target without guardrails.
+                  type: invalid_request_error
+                  param: null
+                  code: unsupported_guardrail
+    GuardrailDenied:
+      description: |
+        A guardrail or hook with `deny: true` failed, before the request
+        (no upstream call) or on the response. `hook_results` lists each
+        check's verdict.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HooksFailedError'
+    RequestTimeout:
+      description: The upstream call exceeded the request timeout
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    LengthRequired:
+      description: |
+        `MAX_FILE_PAYLOAD_SIZE_IN_MB` is set and a `multipart/form-data`
+        (or `application/x-www-form-urlencoded`) POST has no valid
+        `content-length`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GatewayFailure'
+    PayloadTooLarge:
+      description: |
+        The declared `content-length` exceeds `MAX_JSON_PAYLOAD_SIZE_IN_MB`
+        (JSON bodies) or `MAX_FILE_PAYLOAD_SIZE_IN_MB` (multipart and
+        form-encoded uploads).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GatewayFailure'
+    InternalError:
+      description: Unexpected gateway error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GatewayFailure'
+    UpstreamRedirect:
+      description: |
+        The provider answered with a 3xx. The gateway never follows upstream
+        redirects (they would re-send the body and credentials to another
+        host) and returns this error instead, without the `Location`. A 502
+        can also be a provider's own 502, passed through.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: The upstream answered with a redirect (302), which the gateway does not follow
+              type: upstream_redirect
+              param: null
+              code: null
+    UpstreamError:
+      description: |
+        Provider error, passed through with the provider's status. Errors
+        from non-OpenAI providers are mapped to the OpenAI error shape on
+        the unified endpoints.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Not found (also returned by `/metrics` when metrics are disabled)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NotFoundResponse'
+
+  schemas:
+    PassThroughObject:
+      type: object
+      description: |
+        A body the gateway passes through. See the upstream specification
+        for the endpoint (linked in this document's description).
+      additionalProperties: true
+    MultipartPassThrough:
+      type: object
+      description: Multipart form passed through to the provider. See the upstream specification.
+      additionalProperties: true
+
+    HealthResponse:
+      type: object
+      required: [status, message, version]
+      properties:
+        status:
+          type: string
+          const: success
+        message:
+          type: string
+          example: Server is healthy
+        version:
+          type: string
+          description: Gateway package version
+          example: 1.15.2
+
+    GatewayFailure:
+      type: object
+      description: Error produced by the gateway itself
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          const: failure
+        message:
+          type: string
+        errors:
+          type: array
+          description: Config validation issues (`Invalid config passed`)
+          items:
+            type: string
+    ErrorResponse:
+      type: object
+      description: OpenAI-shaped error
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message]
+          properties:
+            message:
+              type: string
+            type:
+              type: [string, 'null']
+              description: e.g. `invalid_request_error`, `hooks_failed`, `upstream_redirect`
+            param:
+              type: [string, 'null']
+            code:
+              type: [string, 'null']
+              description: e.g. `unsupported_guardrail`
+          additionalProperties: true
+      additionalProperties: true
+    HookResults:
+      type: object
+      properties:
+        before_request_hooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/HookResult'
+        after_request_hooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/HookResult'
+    HookResult:
+      type: object
+      description: One hook's verdict
+      properties:
+        id:
+          type: string
+        verdict:
+          type: boolean
+        deny:
+          type: boolean
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              verdict:
+                type: boolean
+              error:
+                type: ['object', 'null']
+              data:
+                type: ['object', 'null']
+            additionalProperties: true
+      additionalProperties: true
+    HooksFailedError:
+      type: object
+      required: [error, hook_results]
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              const: hooks_failed
+            param:
+              type: 'null'
+            code:
+              type: 'null'
+        hook_results:
+          $ref: '#/components/schemas/HookResults'
+    NotFoundResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          const: Not Found
+        ok:
+          type: boolean
+          const: false
+
+    # --- Chat Completions (OpenAI) subset ---------------------------------
+    ChatMessage:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [system, developer, user, assistant, tool, function]
+        content:
+          description: Text, or an array of content parts (text, image_url, input_audio, file)
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+            - type: 'null'
+        name:
+          type: string
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolCall'
+        tool_call_id:
+          type: string
+      additionalProperties: true
+    ToolCall:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: function
+        function:
+          type: object
+          properties:
+            name:
+              type: string
+            arguments:
+              type: string
+      additionalProperties: true
+    ChatCompletionRequest:
+      type: object
+      description: |
+        Subset of OpenAI `CreateChatCompletionRequest`. Every other field
+        passes through.
+      required: [messages]
+      properties:
+        model:
+          type: string
+          description: Model id. Optional when the config sets `override_params.model`; the router may replace it.
+          example: gpt-4o-mini
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        stream:
+          type: boolean
+        stream_options:
+          type: object
+          properties:
+            include_usage:
+              type: boolean
+        temperature:
+          type: number
+        top_p:
+          type: number
+        max_tokens:
+          type: integer
+        max_completion_tokens:
+          type: integer
+        n:
+          type: integer
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+        response_format:
+          type: object
+          additionalProperties: true
+        reasoning_effort:
+          type: string
+        user:
+          type: string
+      additionalProperties: true
+    Usage:
+      type: object
+      description: OpenAI usage; detail objects are kept when the provider reports them
+      properties:
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        prompt_tokens_details:
+          type: object
+          additionalProperties: true
+        completion_tokens_details:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    ChatCompletionResponse:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+        model:
+          type: string
+        provider:
+          type: string
+          description: Gateway addition, the provider that served the call
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                $ref: '#/components/schemas/ChatMessage'
+              finish_reason:
+                type: [string, 'null']
+            additionalProperties: true
+        usage:
+          $ref: '#/components/schemas/Usage'
+      additionalProperties: true
+
+    CompletionRequest:
+      type: object
+      description: Subset of OpenAI `CreateCompletionRequest`.
+      required: [prompt]
+      properties:
+        model:
+          type: string
+        prompt:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        max_tokens:
+          type: integer
+        temperature:
+          type: number
+        stream:
+          type: boolean
+      additionalProperties: true
+    CompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: text_completion
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              text:
+                type: string
+              finish_reason:
+                type: [string, 'null']
+            additionalProperties: true
+        usage:
+          $ref: '#/components/schemas/Usage'
+      additionalProperties: true
+
+    # --- Responses (OpenAI) subset -----------------------------------------
+    ResponsesRequest:
+      type: object
+      description: Subset of OpenAI `CreateResponse`.
+      properties:
+        model:
+          type: string
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+        instructions:
+          type: string
+        stream:
+          type: boolean
+        background:
+          type: boolean
+        store:
+          type: boolean
+        previous_response_id:
+          type: string
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        reasoning:
+          type: object
+          additionalProperties: true
+        max_output_tokens:
+          type: integer
+      additionalProperties: true
+    ResponseObject:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: response
+        created_at:
+          type: integer
+        status:
+          type: string
+          description: e.g. `completed`, `in_progress`, `cancelled`, `failed`
+        model:
+          type: string
+        output:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+            input_tokens_details:
+              type: object
+              additionalProperties: true
+            output_tokens_details:
+              type: object
+              additionalProperties: true
+          additionalProperties: true
+      additionalProperties: true
+
+    # --- Messages (Anthropic) subset ---------------------------------------
+    MessagesRequest:
+      type: object
+      description: Subset of Anthropic `POST /v1/messages`.
+      required: [messages]
+      properties:
+        model:
+          type: string
+          example: claude-sonnet-4-5
+        max_tokens:
+          type: integer
+        system:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                type: string
+                enum: [user, assistant]
+              content:
+                oneOf:
+                  - type: string
+                  - type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+            additionalProperties: true
+        stream:
+          type: boolean
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+          type: object
+          additionalProperties: true
+        thinking:
+          type: object
+          additionalProperties: true
+        temperature:
+          type: number
+        stop_sequences:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    MessagesResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: message
+        role:
+          type: string
+          const: assistant
+        model:
+          type: string
+        content:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        stop_reason:
+          type: [string, 'null']
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            cache_read_input_tokens:
+              type: [integer, 'null']
+            cache_creation_input_tokens:
+              type: [integer, 'null']
+          additionalProperties: true
+      additionalProperties: true
+    CountTokensResponse:
+      type: object
+      required: [input_tokens]
+      properties:
+        input_tokens:
+          type: integer
+
+    # --- Embeddings / rerank -----------------------------------------------
+    EmbeddingRequest:
+      type: object
+      description: Subset of OpenAI `CreateEmbeddingRequest`.
+      required: [input]
+      properties:
+        model:
+          type: string
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items: {}
+        dimensions:
+          type: integer
+        encoding_format:
+          type: string
+          enum: [float, base64]
+      additionalProperties: true
+    EmbeddingResponse:
+      type: object
+      properties:
+        object:
+          type: string
+          const: list
+        model:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              object:
+                type: string
+                const: embedding
+              index:
+                type: integer
+              embedding:
+                oneOf:
+                  - type: array
+                    items:
+                      type: number
+                  - type: string
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+      additionalProperties: true
+    RerankRequest:
+      type: object
+      description: Cohere-style rerank request.
+      required: [query, documents]
+      properties:
+        model:
+          type: string
+          example: rerank-v3.5
+        query:
+          type: string
+        documents:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: object
+                additionalProperties: true
+        top_n:
+          type: integer
+        return_documents:
+          type: boolean
+      additionalProperties: true
+    RerankResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        model:
+          type: string
+        results:
+          type: array
+          items:
+            type: object
+            required: [index, relevance_score]
+            properties:
+              index:
+                type: integer
+              relevance_score:
+                type: number
+              document:
+                type: object
+                additionalProperties: true
+        usage:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+
+    # --- Images / audio ----------------------------------------------------
+    ImageGenerationRequest:
+      type: object
+      description: Subset of OpenAI `CreateImageRequest`.
+      required: [prompt]
+      properties:
+        model:
+          type: string
+        prompt:
+          type: string
+        n:
+          type: integer
+        size:
+          type: string
+        quality:
+          type: string
+        response_format:
+          type: string
+          enum: [url, b64_json]
+      additionalProperties: true
+    ImagesResponse:
+      type: object
+      properties:
+        created:
+          type: integer
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+              b64_json:
+                type: string
+              revised_prompt:
+                type: string
+            additionalProperties: true
+      additionalProperties: true
+    SpeechRequest:
+      type: object
+      description: Subset of OpenAI `CreateSpeechRequest`.
+      required: [input]
+      properties:
+        model:
+          type: string
+        input:
+          type: string
+        voice:
+          type: string
+        response_format:
+          type: string
+      additionalProperties: true
+
+    # --- Models -------------------------------------------------------------
+    OpenAIModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            type: object
+            required: [id, object]
+            properties:
+              id:
+                type: string
+              object:
+                type: string
+                const: model
+              created:
+                type: integer
+              owned_by:
+                type: string
+    AnthropicModelList:
+      type: object
+      required: [data, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            required: [type, id]
+            properties:
+              type:
+                type: string
+                const: model
+              id:
+                type: string
+              display_name:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+        has_more:
+          type: boolean
+        first_id:
+          type: [string, 'null']
+        last_id:
+          type: [string, 'null']

@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     retention_batch_size: int = 5000
     # Operator token for /api/v1/operator/*. Empty disables those endpoints.
     admin_token: str = ""
+    # Serve FastAPI's /docs, /redoc and /openapi.json
+    # (PS_COLLECTOR_API_DOCS_ENABLED). Off by default: they are
+    # unauthenticated and list every route, including operator routes.
+    # docs/openapi.yaml is the published Partner API spec.
+    collector_api_docs_enabled: bool = False
     # Row-level security (#83). The collector always sets the tenant context;
     # with this on it also refuses to start unless RLS is enforced on every
     # tenant table for its database role. See collector/rls.py.
@@ -116,6 +121,19 @@ class Settings(BaseSettings):
     # finalises late, or a missed run, is picked up next time; re-pulled
     # days overwrite the same rows.
     provider_usage_pull_days: int = 3
+
+    # Kubernetes / replicas. PS_COLLECTOR_RUN_WORKERS=false keeps the
+    # background loops above (webhook delivery, provider usage pull) out of
+    # the API process even when their intervals are set, so API replicas can
+    # scale while one `python -m collector.workers` process (or CronJobs) runs
+    # them. Default true: unchanged behaviour.
+    collector_run_workers: bool = True
+    # GET /readyz runs SELECT 1 with this deadline; 503 when it fails.
+    readyz_timeout_seconds: float = 2.0
+    # Prometheus metrics at GET /metrics (404 when off). With a token set,
+    # the endpoint requires `Authorization: Bearer <token>`.
+    collector_metrics_enabled: bool = False
+    collector_metrics_token: str = ""
 
     model_config = {"env_prefix": "PS_"}
 

@@ -1,0 +1,95 @@
+{{- if .Values.migration.enabled }}
+{{- $m := .Values.migration }}
+{{- /*
+Runs before install and upgrade, as the role that owns the tables. Hooks run
+before the release's ordinary objects exist, so this Job uses no ConfigMap
+or chart ServiceAccount: its environment is inline, its Secret is a hook
+object or a Secret that already exists (see ps.migrationSecretMode).
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ps.fullname" . }}-migrate
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "migration") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: {{ $m.hookDeletePolicy }}
+    {{- with $m.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  backoffLimit: {{ $m.backoffLimit }}
+  activeDeadlineSeconds: {{ $m.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $m.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "ps.selectorLabels" (dict "ctx" $ "component" "migration") | nindent 8 }}
+      {{- with $m.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      restartPolicy: Never
+      {{- with $m.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      {{- include "ps.imagePullSecrets" . | nindent 6 }}
+      {{- include "ps.podSecurityContext" . | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "ps.migrationImage" . }}
+          imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          workingDir: /app
+          {{- if $m.command }}
+          command:
+            {{- toYaml $m.command | nindent 12 }}
+          {{- with $m.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- else }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              alembic -c packages/db/alembic.ini upgrade head
+              {{- if $m.enableRls }}
+              python -m collector.rls enable
+              {{- end }}
+          {{- end }}
+          env:
+            {{- range $k, $v := .Values.collector.config }}
+            - name: {{ $k }}
+              value: {{ toString $v | quote }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "ps.migrationSecretName" . }}
+          {{- include "ps.containerSecurityContext" . | nindent 10 }}
+          {{- with $m.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- with $m.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $m.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $m.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

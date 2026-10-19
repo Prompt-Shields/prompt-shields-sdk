@@ -1,0 +1,131 @@
+{{- if .Values.gateway.enabled }}
+{{- $g := .Values.gateway }}
+{{- $secret := include "ps.secretName" (dict "ctx" $ "component" "gateway") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ps.fullname" . }}-gateway
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+spec:
+  {{- if not $g.autoscaling.enabled }}
+  replicas: {{ $g.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "ps.selectorLabels" (dict "ctx" $ "component" "gateway") | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "ps.selectorLabels" (dict "ctx" $ "component" "gateway") | nindent 8 }}
+        {{- with $g.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if $.Values.secrets.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with $g.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ps.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- include "ps.imagePullSecrets" . | nindent 6 }}
+      {{- include "ps.podSecurityContext" . | nindent 6 }}
+      terminationGracePeriodSeconds: {{ $g.terminationGracePeriodSeconds }}
+      {{- with $g.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: {{ include "ps.image" (dict "ctx" $ "image" $g.image) }}
+          imagePullPolicy: {{ $g.image.pullPolicy }}
+          {{- with $g.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            {{- range $g.args }}
+            - {{ . | quote }}
+            {{- end }}
+            - {{ printf "--port=%v" $g.port | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $g.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "ps.fullname" . }}-gateway
+            {{- if $secret }}
+            - secretRef:
+                name: {{ $secret }}
+            {{- end }}
+            {{- with $g.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- $tokenEnv := include "ps.metricsTokenEnv" (dict "ctx" $ "component" "gateway") }}
+          {{- if or $tokenEnv $g.extraEnv }}
+          env:
+            {{- with $tokenEnv }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with $g.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- include "ps.containerSecurityContext" . | nindent 10 }}
+          {{- with $g.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $g.probes.startup.enabled }}
+          startupProbe:
+            {{- include "ps.httpProbe" (dict "probe" $g.probes.startup "port" "http") | nindent 12 }}
+          {{- end }}
+          {{- if $g.probes.liveness.enabled }}
+          livenessProbe:
+            {{- include "ps.httpProbe" (dict "probe" $g.probes.liveness "port" "http") | nindent 12 }}
+          {{- end }}
+          {{- if $g.probes.readiness.enabled }}
+          readinessProbe:
+            {{- include "ps.httpProbe" (dict "probe" $g.probes.readiness "port" "http") | nindent 12 }}
+          {{- end }}
+          {{- include "ps.preStop" $g.preStopSleepSeconds | nindent 10 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with $g.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        {{- with $g.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $g.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $g.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $g.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $g.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
+{{- end }}

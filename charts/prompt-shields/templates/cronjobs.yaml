@@ -1,0 +1,69 @@
+{{- $c := .Values.collector }}
+{{- range $name, $job := .Values.cronJobs.jobs }}
+{{- if and $job (kindIs "map" $job) $job.enabled }}
+{{- $j := mergeOverwrite (deepCopy $.Values.cronJobs.defaults) $job }}
+{{- $secret := include "ps.collectorSecretName" $ }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  {{- /* CronJob names are limited to 52 characters. */}}
+  name: {{ printf "%s-%s" (include "ps.fullname" $) ($name | kebabcase) | trunc 52 | trimSuffix "-" }}
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "cronjob") | nindent 4 }}
+    prompt-shields.io/job: {{ $name | kebabcase | quote }}
+spec:
+  schedule: {{ required (printf "cronJobs.jobs.%s.schedule is required" $name) $j.schedule | quote }}
+  {{- with $j.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: {{ $j.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ $j.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $j.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ $j.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $j.backoffLimit }}
+      activeDeadlineSeconds: {{ $j.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: {{ $j.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            {{- include "ps.selectorLabels" (dict "ctx" $ "component" "cronjob") | nindent 12 }}
+            prompt-shields.io/job: {{ $name | kebabcase | quote }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "ps.serviceAccountName" $ }}
+          automountServiceAccountToken: {{ $.Values.serviceAccount.automountServiceAccountToken }}
+          {{- include "ps.imagePullSecrets" $ | nindent 10 }}
+          {{- include "ps.podSecurityContext" $ | nindent 10 }}
+          containers:
+            - name: job
+              image: {{ include "ps.image" (dict "ctx" $ "image" $c.image) }}
+              imagePullPolicy: {{ $c.image.pullPolicy }}
+              command:
+                {{- required (printf "cronJobs.jobs.%s.args is required" $name) $j.args | toYaml | nindent 16 }}
+              {{- include "ps.collectorEnvFrom" (dict "ctx" $ "secretName" $secret) | nindent 14 }}
+              {{- with $c.extraEnv }}
+              env:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- include "ps.containerSecurityContext" $ | nindent 14 }}
+              {{- with $j.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                {{- include "ps.collectorVolumeMounts" $ | nindent 16 }}
+          volumes:
+            {{- include "ps.collectorVolumes" $ | nindent 12 }}
+          {{- with $c.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $c.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
+{{- end }}

@@ -1759,6 +1759,10 @@ paths:
                       model: "claude-sonnet-4-20250514"
                       use_case_name: "contract-review"
                       business_unit: "Legal"
+                      owner_email: "sam.lee@acme.com"
+                      environment: "production"
+                      status: "active"
+                      data_classification: "confidential"
                       confidence: "high"
                       discovery_source: ["gateway"]
                       first_seen: "2026-03-25T14:00:00Z"
@@ -1772,6 +1776,10 @@ paths:
                       model: "gpt-4o"
                       use_case_name: "interview-screening"
                       business_unit: "HR"
+                      owner_email: "jane.doe@acme.com"
+                      environment: "production"
+                      status: "active"
+                      data_classification: "confidential"
                       confidence: "verified"
                       discovery_source: ["sdk", "browser_extension"]
                       first_seen: "2026-03-01T10:00:00Z"

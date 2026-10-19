@@ -60,6 +60,7 @@ import {
 } from '../adapters/messagesViaResponses';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
+import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 
 function constructRequestBody(
   requestContext: RequestContext,
@@ -184,7 +185,9 @@ function constructRequestHeaders(
     }
   }
 
-  return headers;
+  // PS fork (privacy): X-PS-* business metadata never reaches the provider,
+  // whether it came in through the proxy pass-through or forward_headers.
+  return stripPSInternalHeaders(headers);
 }
 
 /**
@@ -357,7 +360,7 @@ export async function tryPost(
       requestHeaders
     );
     if (decision.kind === 'unsupported') {
-      return proxyGuardrailsUnsupportedResponse(decision.reason);
+      return proxyGuardrailsUnsupportedResponse(decision.reason, c);
     }
     if (decision.kind === 'hooks' && decision.fn === 'createModelResponse') {
       const unsupported = responsesUnsupportedChecks(targetHooks);

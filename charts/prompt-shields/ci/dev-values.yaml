@@ -1,0 +1,19 @@
+# Development shape: the chart creates the Secrets (never in production).
+# One database role for migrations and the app; RLS still required.
+secrets:
+  create: true
+  collector:
+    values:
+      PS_DATABASE_URL: postgresql+asyncpg://ps_user:ps_local_dev@postgres:5432/prompt_shields
+      PS_PARTNER_JWT_SECRET: ci-only-partner-jwt-secret-at-least-32-chars
+      PS_ADMIN_TOKEN: ci-only-admin-token
+  gateway:
+    values:
+      PS_API_KEY: ps-ci-only
+gateway:
+  replicaCount: 1
+collector:
+  replicaCount: 1
+  rlsRequired: false
+networkPolicy:
+  enabled: false

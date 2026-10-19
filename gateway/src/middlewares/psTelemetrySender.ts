@@ -43,6 +43,8 @@
  * do not await it on the request path).
  */
 
+import { telemetryDroppedTotal } from './psMetrics/security';
+
 // Drop reasons (a superset of the SDK's DROP_REASONS):
 //   buffer_overflow       too many events already waiting to be delivered
 //                         while sends are succeeding
@@ -310,6 +312,7 @@ export class PSTelemetrySender {
 
   private drop(reason: DropReason, n = 1) {
     this.dropped[reason] += n;
+    telemetryDroppedTotal.inc({ sink: 'ps_telemetry', reason }, n);
     console.warn(`[PS Telemetry] dropped ${n} event(s) (${reason})`);
   }
 

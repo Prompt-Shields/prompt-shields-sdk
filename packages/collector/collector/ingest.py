@@ -7,7 +7,7 @@ from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, field_validator
 
-from collector import loss_accounting
+from collector import loss_accounting, metrics
 from collector.auth import resolve_tenant
 from collector.config import settings
 from collector.data_flows import record_event_flows
@@ -242,6 +242,7 @@ async def ingest_events(
         _enforce_rate_limit(limiter, tenant_id, response)
     except HTTPException as exc:
         if exc.status_code == 429:
+            metrics.record_ingest("events", "rate_limited", len(body.events))
             await loss_accounting.record_rejected(
                 db, tenant_id, meta, len(body.events), "rate_limited"
             )
@@ -264,11 +265,14 @@ async def ingest_events(
         await db.commit()
     except Exception:
         await db.rollback()
+        metrics.record_ingest("events", "write_failed", len(body.events))
         await loss_accounting.record_rejected(
             db, tenant_id, meta, len(body.events), "write_failed"
         )
         raise
 
+    metrics.record_ingest("events", "accepted", len(body.events))
+    metrics.record_assets_created("events", assets_created)
     return {"ingested": len(body.events), "assets_created": assets_created}
 
 

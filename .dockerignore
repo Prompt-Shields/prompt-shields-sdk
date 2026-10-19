@@ -1,0 +1,14 @@
+# Build context for packages/collector/Dockerfile (repository root). The
+# gateway image builds from gateway/ with its own .dockerignore.
+.git
+.github
+.claude
+gateway
+demo
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.env
+**/.env.*
+**/.creds.json

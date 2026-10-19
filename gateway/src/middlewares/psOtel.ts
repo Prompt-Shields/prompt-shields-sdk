@@ -31,6 +31,7 @@ import {
   observeStream,
   StreamSummary,
 } from './psStreamObserver';
+import { telemetryDroppedTotal } from './psMetrics/security';
 
 export interface OtelConfig {
   endpoint: string;
@@ -541,7 +542,12 @@ export class OtlpJsonExporter {
   enqueue(span: BuiltSpan, waitUntil?: (p: Promise<unknown>) => void) {
     this.queue.push(span);
     if (this.queue.length > this.config.maxQueue) {
-      this.queue.splice(0, this.queue.length - this.config.maxQueue);
+      const dropped = this.queue.length - this.config.maxQueue;
+      this.queue.splice(0, dropped);
+      telemetryDroppedTotal.inc(
+        { sink: 'otel', reason: 'queue_full' },
+        dropped
+      );
     }
     if (waitUntil) {
       waitUntil(this.flush());
@@ -556,7 +562,10 @@ export class OtlpJsonExporter {
     }
   }
 
-  /** Send everything queued. Never throws; failed batches are dropped. */
+  /**
+   * Send everything queued. Never throws; failed batches are dropped and
+   * counted in ps_gateway_telemetry_dropped_total{sink="otel"}.
+   */
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -580,8 +589,18 @@ export class OtlpJsonExporter {
         ),
         ...(timeout ? { signal: timeout } : {}),
       });
-      if (!res.ok) this.warn(`HTTP ${res.status}`);
+      if (!res.ok) {
+        telemetryDroppedTotal.inc(
+          { sink: 'otel', reason: 'http_error' },
+          batch.length
+        );
+        this.warn(`HTTP ${res.status}`);
+      }
     } catch (err) {
+      telemetryDroppedTotal.inc(
+        { sink: 'otel', reason: 'send_failed' },
+        batch.length
+      );
       this.warn(err);
     }
   }
