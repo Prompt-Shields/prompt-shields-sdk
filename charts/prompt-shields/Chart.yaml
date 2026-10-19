@@ -1,0 +1,25 @@
+apiVersion: v2
+name: prompt-shields
+description: >-
+  Prompt Shields AI gateway and collector (AI asset registry) for Kubernetes.
+  Bring-your-own PostgreSQL with pgvector.
+type: application
+# Chart version. Released by pushing a `chart-v<version>` tag that matches it
+# (.github/workflows/helm.yml).
+version: 0.1.0
+# Default image tag for the gateway and collector images.
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/Prompt-Shields/prompt-shields-sdk
+sources:
+  - https://github.com/Prompt-Shields/prompt-shields-sdk
+keywords:
+  - ai-gateway
+  - llm
+  - ai-governance
+  - prompt-shields
+maintainers:
+  - name: Prompt Shields
+    url: https://github.com/Prompt-Shields
+annotations:
+  artifacthub.io/license: Apache-2.0

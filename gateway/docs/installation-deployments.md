@@ -107,17 +107,15 @@ curl --location --request POST 'https://$DISTRIBUTED_CLOUD_TENANT.console.ves.vo
 Save the response in a YAML file for later use.  
 [more detailed instructions for retrieving the App Stack kubeconfig file](https://f5cloud.zendesk.com/hc/en-us/articles/4407917988503-How-to-download-kubeconfig-via-API-or-vesctl)  
 
-3. Copy the deployment YAML
-```shell
-wget https://raw.githubusercontent.com/Portkey-AI/gateway/main/deployment.yaml
-```
-
-4. Apply the manifest
+3. Install the gateway with the Prompt Shields Helm chart (`charts/prompt-shields` in the repository root; see its README). Upstream's `deployment.yaml` ran Portkey's image as root and is no longer shipped.
 ```shell
 export KUBECONFIG=path/to/downloaded/global/kubeconfig/in/step/two
-# apply the file downloaded in step 3
-kubectl apply -f deployment.yaml
+helm install prompt-shields oci://ghcr.io/prompt-shields/charts/prompt-shields \
+  --namespace $DISTRIBUTED_CLOUD_APP_STACK_NAMESPACE -f my-values.yaml
 ```
+
+4. The gateway Service is `prompt-shields-gateway` (for a release named `prompt-shields`) on port 8787; use it as `$DISTRIBUTED_CLOUD_SERVICE_NAME` below.
+
 5. Create Origin Pool
 ```shell
 # create origin pool

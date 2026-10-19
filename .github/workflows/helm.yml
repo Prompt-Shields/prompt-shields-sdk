@@ -1,0 +1,157 @@
+name: Helm chart
+
+# Pull requests touching charts/: helm lint, chart-testing (ct) lint,
+# helm-unittest and kubeconform on every values file in charts/*/ci/.
+# A `chart-v<version>` tag (matching charts/prompt-shields/Chart.yaml) also
+# packages the chart, pushes it to oci://ghcr.io/prompt-shields/charts and
+# signs it with cosign (keyless, GitHub OIDC). See charts/prompt-shields/README.md.
+
+on:
+  pull_request:
+    paths:
+      - "charts/**"
+      - ".github/workflows/helm.yml"
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - ".github/workflows/helm.yml"
+    tags:
+      - "chart-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  HELM_VERSION: v3.16.4
+  HELM_UNITTEST_VERSION: v0.8.2
+  KUBECONFORM_VERSION: v0.6.7
+  KUBERNETES_VERSION: 1.29.0
+  CHART_DIR: charts/prompt-shields
+  CHART_REGISTRY: ghcr.io/prompt-shields/charts
+
+jobs:
+  lint:
+    name: Lint, unit tests, schema validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # ct compares against the target branch.
+          fetch-depth: 0
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: helm/chart-testing-action@0d28d3144d3a25ea2cc349d6e59901c4ff469b3b # v2.7.0
+
+      - name: helm lint
+        run: |
+          helm lint "$CHART_DIR"
+          for f in "$CHART_DIR"/ci/*-values.yaml; do
+            echo "::group::helm lint --strict $f"
+            helm lint --strict "$CHART_DIR" -f "$f"
+            echo "::endgroup::"
+          done
+
+      - name: ct lint
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            ct lint --config charts/ct.yaml --target-branch "$BASE_REF"
+          else
+            ct lint --config charts/ct.yaml --all --check-version-increment=false
+          fi
+
+      - name: helm-unittest
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest.git --version "$HELM_UNITTEST_VERSION"
+          helm unittest --color "$CHART_DIR"
+
+      - name: kubeconform
+        run: |
+          go install "github.com/yannh/kubeconform/cmd/kubeconform@${KUBECONFORM_VERSION}"
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          for f in "$CHART_DIR"/ci/*-values.yaml; do
+            echo "::group::kubeconform $f"
+            helm template ps "$CHART_DIR" --namespace prompt-shields \
+                --kube-version "$KUBERNETES_VERSION" -f "$f" \
+              | kubeconform -strict -summary \
+                  -kubernetes-version "$KUBERNETES_VERSION" \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+            echo "::endgroup::"
+          done
+
+  release:
+    name: Package, push and sign
+    if: startsWith(github.ref, 'refs/tags/chart-v')
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      # cosign keyless signing.
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
+
+      - name: Check the tag matches Chart.yaml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(helm show chart "$CHART_DIR" | sed -n 's/^version: //p')"
+          if [ "$TAG" != "chart-v$version" ]; then
+            echo "::error::Tag $TAG does not match Chart.yaml version $version (expected chart-v$version)."
+            exit 1
+          fi
+
+      - name: Check the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main. Tag a commit that has been merged."
+            exit 1
+          fi
+
+      - name: Package and push
+        id: push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          helm package "$CHART_DIR" --destination dist
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+          helm push dist/*.tgz "oci://$CHART_REGISTRY" 2>&1 | tee push.log
+          digest="$(sed -n 's/^Digest: //p' push.log)"
+          if [ -z "$digest" ]; then
+            echo "::error::helm push did not report a digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign with cosign (keyless)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$GITHUB_TOKEN" | cosign login ghcr.io --username "$ACTOR" --password-stdin
+          cosign sign --yes "$CHART_REGISTRY/prompt-shields@$DIGEST"
+          echo "Signed $CHART_REGISTRY/prompt-shields@$DIGEST" >> "$GITHUB_STEP_SUMMARY"

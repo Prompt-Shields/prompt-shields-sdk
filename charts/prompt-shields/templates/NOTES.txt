@@ -1,0 +1,30 @@
+Prompt Shields {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }}.
+{{- if .Values.gateway.enabled }}
+
+Gateway (in-cluster): http://{{ include "ps.fullname" . }}-gateway.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ps.fullname" . }}-gateway 8787:{{ .Values.gateway.service.port }}
+  curl http://localhost:8787/v1/health
+{{- if not (include "ps.secretName" (dict "ctx" $ "component" "gateway")) }}
+  Note: the gateway has no Secret, so it sends telemetry without PS_API_KEY.
+  Set secrets.gateway.existingSecret to a Secret with PS_API_KEY.
+{{- end }}
+{{- end }}
+{{- if .Values.collector.enabled }}
+
+Collector (in-cluster): http://{{ include "ps.fullname" . }}-collector.{{ .Release.Namespace }}.svc:{{ .Values.collector.service.port }}
+{{- end }}
+{{- if .Values.migration.enabled }}
+
+Migrations ran as a pre-install/pre-upgrade hook with Secret {{ include "ps.migrationSecretName" . }}.
+{{- if eq (include "ps.migrationSecretMode" .) "collector" }}
+  WARNING: migrations and the collector use the same database role. That
+  role owns the tables, so it could switch row-level security off. Set
+  secrets.migration.existingSecret to a separate owner role (README,
+  "Database roles").
+{{- end }}
+{{- end }}
+{{- if .Values.secrets.create }}
+
+WARNING: secrets.create is on. Secret values are stored in the Helm release
+history. Use existingSecret or externalSecrets outside development.
+{{- end }}

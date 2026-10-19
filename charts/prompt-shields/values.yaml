@@ -1,0 +1,557 @@
+# Default values for the prompt-shields chart.
+# README.md in this directory documents every value and the environment
+# variables they set. Secrets never go in this file in production: point
+# `secrets.*.existingSecret` at Secrets you manage, or use `externalSecrets`.
+
+global:
+  # Registry host that replaces every image's `registry`, e.g. an air-gapped
+  # mirror ("artifactory.example.com/ghcr"). Empty keeps each image's own.
+  imageRegistry: ""
+  # Pull secrets added to every pod: [{name: my-pull-secret}]
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Labels added to every object.
+commonLabels: {}
+
+serviceAccount:
+  create: true
+  # Defaults to the release fullname.
+  name: ""
+  # e.g. eks.amazonaws.com/role-arn for IRSA, or
+  # iam.gke.io/gcp-service-account for GKE Workload Identity.
+  annotations: {}
+  # Off: no pod needs the Kubernetes API. Turn on for projected-token
+  # identity (IRSA, Workload Identity, Azure Workload Identity).
+  automountServiceAccountToken: false
+
+# Pod and container security, shared by every workload (gateway, collector,
+# worker, CronJobs, migration Job). The defaults satisfy the "restricted"
+# Pod Security Standard. On OpenShift set podSecurityContext.runAsUser,
+# runAsGroup and fsGroup to null so the restricted SCC assigns the UID.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+# ──────────────────────────────────────────────────────────────────────
+# Secrets
+# ──────────────────────────────────────────────────────────────────────
+# Each Secret is loaded with envFrom, so its keys are environment variable
+# names (PS_DATABASE_URL, PS_ADMIN_TOKEN, ...). For each component the chart
+# uses, in order: `existingSecret`; the Secret an ExternalSecret creates
+# (externalSecrets.enabled); a Secret the chart creates from `values`
+# (secrets.create, for development and CI only: the values end up in the
+# release history).
+secrets:
+  create: false
+  collector:
+    # Keys: PS_DATABASE_URL (required; the *application* role, see
+    # README "Database roles"), PS_PARTNER_JWT_SECRET (required),
+    # PS_ADMIN_TOKEN, PS_WEBHOOK_SECRET_KEYS, PS_WEBHOOK_SECRET_KEY,
+    # PS_PROVIDER_ADMIN_KEYS, PS_LEANIX, PS_SERVICENOW, PS_CLOUD_INVENTORY,
+    # OPENAI_API_KEY.
+    existingSecret: ""
+    values: {}
+  migration:
+    # Keys: PS_DATABASE_URL for the *migration* role, which owns the tables.
+    # Empty (and no ExternalSecret or created Secret) falls back to the
+    # collector Secret, i.e. one role for both; see README.
+    existingSecret: ""
+    values: {}
+  gateway:
+    # Optional. Keys: PS_API_KEY (tenant API key for telemetry to the
+    # collector), PS_GATEWAY_ADMIN_TOKEN, PS_METRICS_TOKEN,
+    # REDIS_CONNECTION_STRING, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY,
+    # PS_OTEL_HEADERS. Callers send their own provider keys per request.
+    existingSecret: ""
+    values: {}
+
+# External Secrets Operator (external-secrets.io/v1beta1). One
+# ExternalSecret per component whose `data` or `dataFrom` is set; it
+# creates a Secret named <fullname>-<component> that the chart then uses.
+externalSecrets:
+  enabled: false
+  apiVersion: external-secrets.io/v1beta1
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ""
+    kind: ClusterSecretStore
+  collector:
+    # - secretKey: PS_DATABASE_URL
+    #   remoteRef: {key: prompt-shields/collector, property: database_url}
+    data: []
+    # - extract: {key: prompt-shields/collector}
+    dataFrom: []
+  migration:
+    data: []
+    dataFrom: []
+  gateway:
+    data: []
+    dataFrom: []
+
+# ──────────────────────────────────────────────────────────────────────
+# Gateway (Node, port 8787)
+# ──────────────────────────────────────────────────────────────────────
+gateway:
+  enabled: true
+  image:
+    registry: ghcr.io
+    repository: prompt-shields/prompt-shields-sdk/gateway
+    # Defaults to the chart's appVersion.
+    tag: ""
+    # sha256:...; when set it is used instead of the tag.
+    digest: ""
+    pullPolicy: IfNotPresent
+  # Runs node directly (no npm in front of it, so SIGTERM reaches the
+  # server) without the local UI.
+  command: ["node", "build/start-server.js"]
+  args: ["--headless"]
+  port: 8787
+  replicaCount: 2
+  # Kept above preStop sleep + shutdown.timeoutMs + the telemetry flush
+  # (PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS, 5 s by default): 5 + 25 + 5 < 40.
+  terminationGracePeriodSeconds: 40
+  # Sleep before SIGTERM so endpoints are removed before the server stops
+  # accepting connections. 0 disables it. Needs `sleep` in the image.
+  preStopSleepSeconds: 5
+  shutdown:
+    # Drain in-flight (including streaming) requests for up to this long
+    # after SIGTERM.
+    timeoutMs: 25000
+    envName: PS_SHUTDOWN_TIMEOUT_MS
+  # PS_COLLECTOR_URL. Empty: the in-cluster collector Service (or nothing
+  # when collector.enabled is false).
+  collectorUrl: ""
+  metrics:
+    # PS_METRICS_ENABLED: Prometheus metrics on GET /metrics.
+    enabled: false
+    path: /metrics
+    # Require a bearer token: a Secret key whose value becomes
+    # PS_METRICS_TOKEN (valueFrom) and the ServiceMonitor's bearer token.
+    # PS_METRICS_TOKEN in the gateway Secret also works; then set
+    # serviceMonitor.bearerTokenSecret.
+    tokenSecret: {}
+    #  name: prompt-shields-gateway
+    #  key: PS_METRICS_TOKEN
+    tokenEnvName: PS_METRICS_TOKEN
+  # Plain (non-secret) environment, rendered into a ConfigMap. Any gateway
+  # setting works here; README lists them. Examples:
+  #   MAX_JSON_PAYLOAD_SIZE_IN_MB: "100"
+  #   TRUSTED_CUSTOM_HOSTS: "llm.internal.example.com"
+  #   AWS_AMBIENT_CREDENTIALS_ENABLED: "true"
+  #   HTTPS_PROXY: "http://egress-proxy.example.com:3128"
+  #   PS_OTEL_ENDPOINT: "http://otel-collector:4318/v1/traces"
+  #   PS_CACHE_DEFAULT: "simple"
+  #   LOG_LEVEL: "info"
+  config:
+    NODE_ENV: production
+  # Extra env entries (full EnvVar objects, e.g. valueFrom).
+  extraEnv: []
+  extraEnvFrom: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  probes:
+    startup:
+      enabled: true
+      path: /v1/health
+      periodSeconds: 5
+      failureThreshold: 24
+      timeoutSeconds: 3
+    liveness:
+      enabled: true
+      path: /v1/health
+      periodSeconds: 15
+      failureThreshold: 3
+      timeoutSeconds: 3
+    readiness:
+      enabled: true
+      path: /v1/health
+      periodSeconds: 10
+      failureThreshold: 3
+      timeoutSeconds: 3
+  service:
+    type: ClusterIP
+    port: 8787
+    annotations: {}
+  podAnnotations: {}
+  podLabels: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: null
+    behavior: {}
+  podDisruptionBudget:
+    enabled: true
+    # Only rendered when more than one replica can run.
+    minAvailable: 1
+    maxUnavailable: null
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: gateway.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  # Gateway API (gateway.networking.k8s.io/v1).
+  httpRoute:
+    enabled: false
+    annotations: {}
+    parentRefs: []
+    #  - name: shared-gateway
+    #    namespace: gateway-system
+    hostnames: []
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    # Secret key sent as the bearer token. Defaults to metrics.tokenSecret,
+    # or to the chart-created Secret when secrets.gateway.values has
+    # PS_METRICS_TOKEN.
+    bearerTokenSecret: {}
+
+# ──────────────────────────────────────────────────────────────────────
+# Collector (FastAPI, port 8000)
+# ──────────────────────────────────────────────────────────────────────
+collector:
+  enabled: true
+  image:
+    registry: ghcr.io
+    repository: prompt-shields/prompt-shields-sdk/collector
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  command: ["uvicorn"]
+  args: ["collector.app:app", "--host", "0.0.0.0", "--port", "8000"]
+  port: 8000
+  replicaCount: 2
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+  # PS_RLS_REQUIRED: refuse to start unless row-level security binds the
+  # collector's database role. Needs migration.enableRls (or a manual
+  # `python -m collector.rls enable`) and a non-superuser role without
+  # BYPASSRLS.
+  rlsRequired: true
+  # Background loops in the API pods (PS_COLLECTOR_RUN_WORKERS; the image
+  # defaults to true). "" (auto): set to "false" when the worker Deployment
+  # or the webhooksDeliver / providerUsage CronJob is enabled, so those loops
+  # run there and not in every API replica; otherwise not set (other CronJobs
+  # do not count). "true" / "false" force it.
+  runWorkers:
+    envName: PS_COLLECTOR_RUN_WORKERS
+    value: ""
+  metrics:
+    enabled: false
+    envName: PS_COLLECTOR_METRICS_ENABLED
+    path: /metrics
+    # Require a bearer token: a Secret key whose value becomes
+    # PS_COLLECTOR_METRICS_TOKEN (valueFrom) and the ServiceMonitor's bearer
+    # token. PS_COLLECTOR_METRICS_TOKEN in the collector Secret also works;
+    # then set serviceMonitor.bearerTokenSecret.
+    tokenSecret: {}
+    tokenEnvName: PS_COLLECTOR_METRICS_TOKEN
+  # PS_READYZ_TIMEOUT_SECONDS: deadline of /readyz's database check. Keep it
+  # below probes.readiness.timeoutSeconds.
+  readyzTimeoutSeconds: 2
+  # Interactive API docs: /docs, /redoc and /openapi.json.
+  apiDocs:
+    enabled: false
+    envName: PS_COLLECTOR_API_DOCS_ENABLED
+  # Plain (non-secret) environment for the collector, worker, CronJobs and
+  # migration Job. README lists every PS_* setting. Examples:
+  #   PS_EMBEDDINGS_BACKEND: "none"        # auto | openai | local | none
+  #   PS_EMBEDDINGS_OPENAI_BASE_URL: "https://llm-proxy.internal/v1"
+  #   PS_RATE_LIMIT_PER_MINUTE: "100"
+  #   PS_AUDIT_RETENTION_DAYS: "365"
+  #   PS_RETENTION_DAYS_DEFAULT: "365"
+  #   PS_WEBHOOK_TIMEOUT_SECONDS: "10"
+  config:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+    HOME: /tmp
+  extraEnv: []
+  extraEnvFrom: []
+  # Writable scratch space (read-only root filesystem).
+  tmpSizeLimit: 256Mi
+  # fastembed model cache for PS_EMBEDDINGS_BACKEND=local, mounted at
+  # PS_EMBEDDINGS_CACHE_DIR. With no existingClaim an emptyDir is used, so
+  # weights download at start (not air-gap safe; see README).
+  embeddingsCache:
+    enabled: false
+    mountPath: /var/cache/fastembed
+    existingClaim: ""
+    sizeLimit: 2Gi
+  extraVolumes: []
+  extraVolumeMounts: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  probes:
+    startup:
+      enabled: true
+      path: /partner/v1/health
+      periodSeconds: 5
+      # Up to 5 minutes, for a first fastembed model load.
+      failureThreshold: 60
+      timeoutSeconds: 3
+    liveness:
+      enabled: true
+      path: /partner/v1/health
+      periodSeconds: 15
+      failureThreshold: 3
+      timeoutSeconds: 3
+    readiness:
+      enabled: true
+      # SELECT 1 against the database (503 when it fails).
+      path: /readyz
+      periodSeconds: 10
+      failureThreshold: 3
+      timeoutSeconds: 5
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations: {}
+  podAnnotations: {}
+  podLabels: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: null
+    behavior: {}
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: collector.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  httpRoute:
+    enabled: false
+    annotations: {}
+    parentRefs: []
+    hostnames: []
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    # Defaults to metrics.tokenSecret, or to the chart-created Secret when
+    # secrets.collector.values has PS_COLLECTOR_METRICS_TOKEN.
+    bearerTokenSecret: {}
+
+# ──────────────────────────────────────────────────────────────────────
+# Database migrations
+# ──────────────────────────────────────────────────────────────────────
+# A Job run as a Helm pre-install/pre-upgrade hook (Argo CD runs Helm hooks
+# as PreSync). It connects with the migration Secret's PS_DATABASE_URL.
+migration:
+  enabled: true
+  # Defaults to the collector image (which includes alembic).
+  image: {}
+  #  registry: ghcr.io
+  #  repository: prompt-shields/prompt-shields-sdk/collector
+  #  tag: ""
+  # Turn row-level security on for every tenant table after migrating
+  # (`python -m collector.rls enable`, idempotent).
+  enableRls: true
+  # Overrides the generated script, which runs from /app:
+  #   alembic -c packages/db/alembic.ini upgrade head
+  #   python -m collector.rls enable          (with enableRls)
+  command: []
+  args: []
+  # A ServiceAccount that already exists (the chart's own is created after
+  # the hook runs). Empty: the namespace default, with no token mounted.
+  serviceAccountName: ""
+  backoffLimit: 1
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  # Extra annotations, e.g. argocd.argoproj.io/sync-wave.
+  annotations: {}
+  hookDeletePolicy: before-hook-creation,hook-succeeded
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  podAnnotations: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  tolerations: []
+  affinity: {}
+
+# ──────────────────────────────────────────────────────────────────────
+# Background work (collector image)
+# ──────────────────────────────────────────────────────────────────────
+# A single-replica Deployment running `python -m collector.workers`: the
+# webhook delivery loop and/or the provider usage pull, each on when its
+# interval is above 0 (at least one must be). Use either a loop here or the
+# matching CronJob (webhooksDeliver, providerUsage), not both.
+worker:
+  enabled: false
+  command: ["python", "-m", "collector.workers"]
+  # PS_WEBHOOK_WORKER_INTERVAL_SECONDS; 0 turns delivery off here.
+  webhookIntervalSeconds: 5
+  # PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS; 0 (off) or at least 3600.
+  # 86400 matches the providers' daily usage buckets.
+  providerUsagePullIntervalSeconds: 0
+  extraEnv: []
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  podAnnotations: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  tolerations: []
+  affinity: {}
+
+# Scheduled jobs (collector image, collector Secret and config). All off by
+# default: retention and audit purges delete data. `schedule` is cron
+# syntax in the controller's time zone unless `timeZone` is set.
+cronJobs:
+  defaults:
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    startingDeadlineSeconds: 600
+    backoffLimit: 1
+    activeDeadlineSeconds: 3600
+    ttlSecondsAfterFinished: 86400
+    timeZone: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+  jobs:
+    auditPurge:
+      enabled: false
+      schedule: "17 2 * * *"
+      args: ["python", "-m", "collector.audit", "purge"]
+    retentionPurge:
+      enabled: false
+      schedule: "37 2 * * *"
+      args: ["python", "-m", "collector.retention", "purge"]
+    lifecycleSweep:
+      enabled: false
+      schedule: "7 3 * * *"
+      args: ["python", "-m", "collector.lifecycle"]
+    webhooksDeliver:
+      enabled: false
+      schedule: "* * * * *"
+      activeDeadlineSeconds: 300
+      args: ["python", "-m", "collector.webhooks", "deliver"]
+    webhooksPurge:
+      enabled: false
+      schedule: "47 3 * * *"
+      args: ["python", "-m", "collector.webhooks", "purge"]
+    providerUsage:
+      enabled: false
+      schedule: "27 4 * * *"
+      args: ["python", "-m", "collector.provider_usage_admin", "--all-tenants"]
+    # Per-tenant connectors take --tenant, e.g.:
+    # leanixAcme:
+    #   enabled: true
+    #   schedule: "0 5 * * *"
+    #   args: ["python", "-m", "collector.leanix", "--tenant", "<uuid>"]
+    # servicenowAcme: ["python", "-m", "collector.servicenow", "--tenant", "<uuid>"]
+    # cloudInventoryAcme: ["python", "-m", "collector.cloud_inventory", "--tenant", "<uuid>"]
+
+# ──────────────────────────────────────────────────────────────────────
+# NetworkPolicy
+# ──────────────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  gateway:
+    # Who may reach the gateway. Empty: any source (it is the API clients
+    # call). Narrow it to your ingress controller or Kong, e.g.
+    #  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kong}}
+    ingressFrom: []
+  collector:
+    # Sources besides the gateway pods. Add the ingress controller's
+    # namespace when collector.ingress is on, and Prometheus for /metrics.
+    extraIngressFrom: []
+  egress:
+    # DNS to any destination on port 53.
+    dns: true
+    # Database destinations. Empty cidrs allows any destination on `port`.
+    database:
+      cidrs: []
+      port: 5432
+    # Allow all other egress (LLM providers, webhooks, OpenAI embeddings,
+    # LeanIX/ServiceNow, Redis, OTLP). Set false and list destinations (an
+    # egress proxy, VPC endpoints) in `extra` to lock it down.
+    allowExternal: true
+    # Extra NetworkPolicyEgressRule entries for every pod.
+    extra: []
+
+# Extra manifests rendered with tpl (strings or maps).
+extraObjects: []

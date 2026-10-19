@@ -1,0 +1,133 @@
+# Every optional object switched on, for lint and schema validation.
+global:
+  imageRegistry: registry.example.com/mirror
+  imagePullSecrets:
+    - name: mirror-pull
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: vault
+    kind: ClusterSecretStore
+  collector:
+    dataFrom:
+      - extract:
+          key: prompt-shields/collector
+  migration:
+    data:
+      - secretKey: PS_DATABASE_URL
+        remoteRef:
+          key: prompt-shields/migration
+          property: database_url
+  gateway:
+    dataFrom:
+      - extract:
+          key: prompt-shields/gateway
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/prompt-shields
+  automountServiceAccountToken: true
+gateway:
+  image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  metrics:
+    enabled: true
+  config:
+    AWS_AMBIENT_CREDENTIALS_ENABLED: "true"
+    HTTPS_PROXY: http://egress-proxy.example.com:3128
+  autoscaling:
+    enabled: true
+    targetMemoryUtilizationPercentage: 80
+  ingress:
+    enabled: true
+    className: nginx
+    tls:
+      - secretName: gateway-tls
+        hosts: [gateway.example.com]
+  httpRoute:
+    enabled: true
+    parentRefs:
+      - name: shared-gateway
+        namespace: gateway-system
+    hostnames: [gateway.example.com]
+  serviceMonitor:
+    enabled: true
+    bearerTokenSecret:
+      name: prompt-shields-gateway
+      key: PS_METRICS_TOKEN
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: gateway
+collector:
+  metrics:
+    enabled: true
+    tokenSecret:
+      name: prompt-shields-metrics
+      key: collector-token
+  config:
+    PS_EMBEDDINGS_BACKEND: local
+  embeddingsCache:
+    enabled: true
+    existingClaim: fastembed-weights
+  autoscaling:
+    enabled: true
+  ingress:
+    enabled: true
+    className: nginx
+  httpRoute:
+    enabled: true
+    parentRefs:
+      - name: shared-gateway
+  serviceMonitor:
+    enabled: true
+worker:
+  enabled: true
+  providerUsagePullIntervalSeconds: 86400
+cronJobs:
+  defaults:
+    timeZone: Europe/Helsinki
+  jobs:
+    auditPurge:
+      enabled: true
+    retentionPurge:
+      enabled: true
+    lifecycleSweep:
+      enabled: true
+    webhooksPurge:
+      enabled: true
+    leanixAcme:
+      enabled: true
+      schedule: "0 5 * * *"
+      args: ["python", "-m", "collector.leanix", "--tenant", "00000000-0000-0000-0000-000000000001"]
+networkPolicy:
+  gateway:
+    ingressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kong
+  collector:
+    extraIngressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+  egress:
+    database:
+      cidrs: ["10.20.0.0/16"]
+    allowExternal: false
+    extra:
+      - to:
+          - ipBlock:
+              cidr: 10.30.0.10/32
+        ports:
+          - port: 3128
+            protocol: TCP
+extraObjects:
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: "{{ .Release.Name }}-extra"
+    data:
+      hello: world

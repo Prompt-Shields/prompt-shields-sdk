@@ -1,0 +1,227 @@
+suite: optional objects
+templates:
+  - templates/cronjobs.yaml
+  - templates/worker-deployment.yaml
+  - templates/hpa-pdb.yaml
+  - templates/networkpolicy.yaml
+  - templates/routing.yaml
+  - templates/servicemonitor.yaml
+  - templates/configmap.yaml
+release:
+  name: ps
+set:
+  secrets.collector.existingSecret: ps-collector
+tests:
+  - it: renders no CronJobs by default
+    template: templates/cronjobs.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders an enabled CronJob with the collector image and Secret
+    template: templates/cronjobs.yaml
+    set:
+      cronJobs.jobs.retentionPurge.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields-retention-purge
+      - equal:
+          path: spec.concurrencyPolicy
+          value: Forbid
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command
+          value: ["python", "-m", "collector.retention", "purge"]
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].envFrom
+          content:
+            secretRef:
+              name: ps-collector
+
+  - it: refuses webhook delivery in both the worker and a CronJob
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+      cronJobs.jobs.webhooksDeliver.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "enable one"
+
+  - it: lets the CronJob deliver webhooks while the worker pulls usage
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+      worker.webhookIntervalSeconds: 0
+      worker.providerUsagePullIntervalSeconds: 86400
+      cronJobs.jobs.webhooksDeliver.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS
+            value: "86400"
+
+  - it: refuses a worker with no loop on
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+      worker.webhookIntervalSeconds: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "exits when no loop is on"
+
+  - it: refuses a provider usage interval under an hour
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+      worker.providerUsagePullIntervalSeconds: 600
+    asserts:
+      - failedTemplate:
+          errorPattern: "at least 3600"
+
+  - it: runs collector.workers as a single Recreate replica
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["python", "-m", "collector.workers"]
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_WEBHOOK_WORKER_INTERVAL_SECONDS
+            value: "5"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS
+            value: "0"
+
+  - it: renders PDBs only with more than one replica
+    template: templates/hpa-pdb.yaml
+    set:
+      gateway.replicaCount: 1
+      collector.replicaCount: 3
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields-collector
+
+  - it: renders HPAs when autoscaling
+    template: templates/hpa-pdb.yaml
+    set:
+      gateway.autoscaling.enabled: true
+    asserts:
+      - containsDocument:
+          kind: HorizontalPodAutoscaler
+          apiVersion: autoscaling/v2
+          name: ps-prompt-shields-gateway
+          any: true
+
+  - it: lets only the gateway reach the collector
+    template: templates/networkpolicy.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.ingress[0].from[0].podSelector.matchLabels["app.kubernetes.io/component"]
+          value: gateway
+
+  - it: drops open egress when allowExternal is off
+    template: templates/networkpolicy.yaml
+    documentIndex: 0
+    set:
+      networkPolicy.egress.allowExternal: false
+    asserts:
+      - notContains:
+          path: spec.egress
+          content: {}
+
+  - it: renders an HTTPRoute to the gateway Service
+    template: templates/routing.yaml
+    set:
+      gateway.httpRoute.enabled: true
+      gateway.httpRoute.parentRefs:
+        - name: shared
+    asserts:
+      - equal:
+          path: kind
+          value: HTTPRoute
+      - equal:
+          path: spec.rules[0].backendRefs[0]
+          value:
+            name: ps-prompt-shields-gateway
+            port: 8787
+
+  - it: needs metrics for a ServiceMonitor
+    template: templates/servicemonitor.yaml
+    set:
+      gateway.serviceMonitor.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "needs gateway.metrics.enabled"
+
+  - it: sends the metrics token
+    template: templates/servicemonitor.yaml
+    set:
+      gateway.metrics.enabled: true
+      gateway.serviceMonitor.enabled: true
+      gateway.serviceMonitor.bearerTokenSecret:
+        name: ps-gateway
+        key: PS_METRICS_TOKEN
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials.key
+          value: PS_METRICS_TOKEN
+
+  - it: uses the collector metrics token Secret for the ServiceMonitor
+    template: templates/servicemonitor.yaml
+    set:
+      collector.metrics.enabled: true
+      collector.metrics.tokenSecret:
+        name: metrics
+        key: token
+      collector.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: metrics
+            key: token
+
+  - it: uses a chart-created metrics token for the ServiceMonitor
+    template: templates/servicemonitor.yaml
+    set:
+      secrets.create: true
+      secrets.collector.existingSecret: ""
+      secrets.collector.values:
+        PS_DATABASE_URL: postgresql+asyncpg://u:p@db/ps
+        PS_PARTNER_JWT_SECRET: x
+        PS_COLLECTOR_METRICS_TOKEN: t
+      collector.metrics.enabled: true
+      collector.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: ps-prompt-shields-collector
+            key: PS_COLLECTOR_METRICS_TOKEN
+
+  - it: sends no bearer token without a metrics token
+    template: templates/servicemonitor.yaml
+    set:
+      collector.metrics.enabled: true
+      collector.serviceMonitor.enabled: true
+    asserts:
+      - notExists:
+          path: spec.endpoints[0].authorization
