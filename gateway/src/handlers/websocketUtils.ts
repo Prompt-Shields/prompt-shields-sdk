@@ -5,6 +5,7 @@ import { RealtimeLlmEventParser } from '../services/realtimeLlmEventParser';
 import { GatewayError } from '../errors/GatewayError';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
+import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 import { assertProxyURLOrigin } from './services/providerContext';
 
 export const addListeners = (
@@ -72,7 +73,8 @@ export const getOptionsForOutgoingConnection = async (
   headers['Connection'] = 'Keep-Alive';
   headers['Keep-Alive'] = 'timeout=600';
   return {
-    headers,
+    // PS fork (privacy): X-PS-* business metadata never reaches the provider.
+    headers: stripPSInternalHeaders(headers),
     method: 'GET',
     // PS fork (security): never follow an upstream redirect.
     redirect: UPSTREAM_REDIRECT_MODE,

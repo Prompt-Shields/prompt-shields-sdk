@@ -10,7 +10,10 @@ for any application that routes LLM traffic through the gateway.
 
 ### How it works
 
-1. **Before request:** Extracts `X-PS-*` headers for business metadata, strips them before forwarding
+1. **Before request:** Reads `X-PS-*` headers for business metadata from the incoming request. The
+   gateway strips every `X-PS-*` header (any case) from the upstream request where upstream headers
+   are finalised (`stripPSInternalHeaders` in `src/utils/psInternalHeaders.ts`, applied in
+   `constructRequestHeaders` and the realtime handlers), so they never reach the provider
 2. **After response:** Captures vendor, model, token usage, latency, and sends to collector
 3. **Fail-open:** Telemetry failures never block LLM requests
 
@@ -95,10 +98,10 @@ model name is a *soft preference* the router may downgrade to honor `X-PS-Max-Co
 
 ### Response header (gateway → SDK)
 
-- `X-PS-Served-Model` — the concrete model that actually ran. The SDK records
-  it as `served_model` alongside `requested_model` so the collector can prove
-  routing savings. (Providers also echo the served model in the response body's
-  `model` field; the header is the authoritative source when they differ.)
+- `X-PS-Served-Model` — **not implemented.** The gateway does not set this
+  header. The served model is in the response body's `model` field, and the
+  gateway's own telemetry records it as `served_model` alongside
+  `requested_model`.
 
 ### Resolution precedence
 
@@ -110,7 +113,7 @@ X-PS-Route (explicit override)
 
 ### router/ (implemented)
 
-`router/` runs **before** ps-telemetry (which strips `X-PS-*`) and **before**
+`router/` runs **before** ps-telemetry and **before**
 the cache middleware (so the cache key reflects the resolved model). A pluggable
 `RouterStrategy` resolves a `RouteRequest` → `RouteDecision`:
 
