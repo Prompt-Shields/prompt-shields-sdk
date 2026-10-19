@@ -27,6 +27,7 @@ import { embeddingsHandler } from './handlers/embeddingsHandler';
 import { rerankHandler } from './handlers/rerankHandler';
 import { logHandler } from './middlewares/log';
 import { metricsHandler, psMetrics } from './middlewares/psMetrics';
+import { psSecurityEvents } from './middlewares/psSecurityEvents';
 import { version } from '../package.json';
 import { payloadSizeValidatorMiddleware } from './middlewares/payloadSizeValidator';
 import { redactSecrets, redactString } from './utils/redact';
@@ -106,6 +107,11 @@ app.get('/', (c) => c.text('AI Gateway says hey!'));
 app.get('/v1/health', (c) =>
   c.json({ status: 'success', message: 'Server is healthy', version })
 );
+
+// Security events (schema v1): 429s here; guardrail verdicts in the hooks
+// manager; auth failures and payload rejections where they are refused.
+// JSON lines only with PS_SECURITY_EVENTS_LOG; metrics with PS_METRICS_ENABLED.
+app.use('*', psSecurityEvents());
 
 // Prometheus metrics (#61). Opt-in via PS_METRICS_ENABLED=true; set
 // PS_METRICS_TOKEN to require a bearer token on GET /metrics.

@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -11,11 +12,34 @@ from collector.embeddings import get_embedder
 
 engine = create_async_engine(settings.database_url)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+logger = logging.getLogger("prompt_shields.collector")
+
+API_DOCS_WARNING = (
+    "PS_COLLECTOR_API_DOCS_ENABLED is on: /docs, /redoc and /openapi.json are "
+    "served without authentication and list every route, including operator "
+    "routes. Do not enable it on a collector that untrusted clients can reach."
+)
+
+
+def api_docs_urls(enabled: bool) -> dict[str, str | None]:
+    """FastAPI's /docs, /redoc and /openapi.json URLs, or None for each.
+
+    ``app.openapi()`` still builds the schema in-process when they are off.
+    """
+    if enabled:
+        return {
+            "openapi_url": "/openapi.json",
+            "docs_url": "/docs",
+            "redoc_url": "/redoc",
+        }
+    return {"openapi_url": None, "docs_url": None, "redoc_url": None}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_embedder()  # fail fast on a bad PS_EMBEDDINGS_* configuration
+    if settings.collector_api_docs_enabled:
+        logger.warning(API_DOCS_WARNING)
     if settings.rls_required:
         async with engine.connect() as conn:
             await rls.check_required(conn)
@@ -56,6 +80,7 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
+    **api_docs_urls(settings.collector_api_docs_enabled),
 )
 
 

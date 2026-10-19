@@ -18,6 +18,7 @@ import {
   isValidAwsRegion,
 } from '../../utils/awsAuth';
 import { getProviderAndModel } from '.';
+import { stripPSInternalHeaders } from '../../utils/psInternalHeaders';
 import { ANTHROPIC } from '../../globals';
 
 interface BedrockAPIConfigInterface extends Omit<ProviderAPIConfig, 'headers'> {
@@ -204,7 +205,10 @@ const BedrockAPIConfig: BedrockAPIConfigInterface = {
     let headers: Record<string, string> = {};
 
     if (fn === 'proxy' && service !== 'bedrock') {
-      headers = { ...(requestHeaders ?? {}) };
+      // PS fork (privacy): drop X-PS-* before signing. constructRequestHeaders
+      // strips them too, and a signed header removed after signing would
+      // break the SigV4 signature.
+      headers = stripPSInternalHeaders(requestHeaders ?? {});
     } else {
       headers = {
         'content-type': 'application/json',

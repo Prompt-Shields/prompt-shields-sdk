@@ -126,5 +126,8 @@ export class Registry {
   }
 }
 
+/** The registry `/metrics` renders; every gateway metric registers here. */
+export const defaultRegistry = new Registry();
+
 export const PROMETHEUS_CONTENT_TYPE =
   'text/plain; version=0.0.4; charset=utf-8';
