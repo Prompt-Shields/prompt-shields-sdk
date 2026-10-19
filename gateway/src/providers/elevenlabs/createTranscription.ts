@@ -3,6 +3,7 @@ import { ErrorResponse, RequestHandler } from '../types';
 import { generateErrorResponse } from '../utils';
 import { ELEVENLABS_BASE_URL } from './api';
 import { ElevenLabsErrorResponseTransform } from './utils';
+import { upstreamFetch } from '../../utils/fetch';
 
 const DEFAULT_MODEL = 'scribe_v1';
 
@@ -75,7 +76,7 @@ export const ElevenLabsCreateTranscriptionRequestHandler: RequestHandler<
       { status: 400, headers: { 'content-type': 'application/json' } }
     );
   }
-  return fetch(`${ELEVENLABS_BASE_URL}/speech-to-text`, {
+  return upstreamFetch(`${ELEVENLABS_BASE_URL}/speech-to-text`, {
     method: 'POST',
     headers: { 'xi-api-key': providerOptions.apiKey ?? '' },
     body: toElevenLabsTranscriptionForm(requestBody),

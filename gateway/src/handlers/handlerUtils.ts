@@ -59,6 +59,7 @@ import {
   stripIssuedReasoning,
 } from '../adapters/messagesViaResponses';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
+import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
 
 function constructRequestBody(
   requestContext: RequestContext,
@@ -209,6 +210,9 @@ export async function constructRequest(
   const fetchOptions: RequestInit = {
     method: requestContext.method,
     headers,
+    // PS fork (security): a followed redirect would re-send the body and the
+    // provider key headers to the Location host, past the URL checks.
+    redirect: UPSTREAM_REDIRECT_MODE,
     ...(requestContext.endpoint === 'uploadFile' && { duplex: 'half' }),
   };
 

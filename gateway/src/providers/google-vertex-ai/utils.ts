@@ -17,6 +17,7 @@ import { env } from 'hono/adapter';
 import { ContentType, JsonSchema, Tool } from '../../types/requestBody';
 import { logger } from '../../apm';
 import { Environment } from '../../utils/env';
+import { upstreamFetch } from '../../utils/fetch';
 
 /**
  * Encodes an object as a Base64 URL-encoded string.
@@ -138,7 +139,7 @@ export const getAccessToken = async (
       assertion: jwtToken,
     });
 
-    const tokenResponse = await fetch(tokenUrl, {
+    const tokenResponse = await upstreamFetch(tokenUrl, {
       headers: tokenHeaders,
       body: tokenData,
       method: 'POST',

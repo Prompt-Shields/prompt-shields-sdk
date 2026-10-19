@@ -1,6 +1,7 @@
 import { Context, Next } from 'hono';
 import { HEADER_KEYS } from '../globals';
 import { env } from 'hono/adapter';
+import { upstreamFetch } from '../utils/fetch';
 
 /**
  * Handles the models request. Returns a list of models supported by the Ai gateway.
@@ -45,7 +46,7 @@ export const modelsHandler = async (context: Context, next: Next) => {
     [HEADER_KEYS.API_KEY]: apiKey,
   };
 
-  const resp = await fetch(requestRoute, fetchOptions);
+  const resp = await upstreamFetch(requestRoute, fetchOptions);
   return new Response(resp.body, {
     status: resp.status,
     headers: {

@@ -63,8 +63,46 @@ function bodyOf(init: any): any {
   }
 }
 
+/**
+ * Real fetch follows a 3xx unless `redirect` is 'manual' or 'error'. The fake
+ * does the same, as Node 22 does: a cross-origin hop drops only
+ * `authorization`, `cookie` and `proxy-authorization`; a 303 (or a POST 301
+ * or 302) turns into a body-less GET. Followed hops land in upstreamCalls.
+ */
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+const CROSS_ORIGIN_DROPPED = ['authorization', 'cookie', 'proxy-authorization'];
+
 global.fetch = jest.fn(async (input: any, init: any = {}) => {
-  const url = typeof input === 'string' ? input : input.url;
+  let url: string = typeof input === 'string' ? input : input.url;
+  let current = init;
+  for (let hop = 0; ; hop++) {
+    const res = await fakeFetchOnce(url, current);
+    const location = res.headers?.get('location');
+    if (!REDIRECT_STATUSES.includes(res.status) || !location) return res;
+    if (current.redirect === 'manual') return res;
+    if (current.redirect === 'error' || hop >= 20) {
+      throw new TypeError('fetch failed: redirect');
+    }
+    const next = new URL(location, url).toString();
+    const headers = headersOf(current);
+    if (new URL(next).origin !== new URL(url).origin) {
+      CROSS_ORIGIN_DROPPED.forEach((h) => delete headers[h]);
+    }
+    const method = (current.method ?? 'GET').toUpperCase();
+    const toGet =
+      res.status === 303 ||
+      ([301, 302].includes(res.status) && method === 'POST');
+    current = {
+      ...current,
+      method: toGet ? 'GET' : current.method,
+      headers,
+      body: toGet ? undefined : current.body,
+    };
+    url = next;
+  }
+}) as any;
+
+async function fakeFetchOnce(url: string, init: any): Promise<Response> {
   if (url.startsWith(COLLECTOR)) {
     const sent = JSON.parse(init.body);
     collectorMetadata.push(sent.metadata);
@@ -92,7 +130,7 @@ global.fetch = jest.fn(async (input: any, init: any = {}) => {
     });
   }
   return route.respond(call);
-}) as any;
+}
 
 /** Serve `respond` for upstream URLs matching `match` (first match wins). */
 export function upstream(match: RegExp, respond: Responder) {

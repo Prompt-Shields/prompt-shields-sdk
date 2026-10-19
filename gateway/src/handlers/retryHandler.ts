@@ -2,6 +2,11 @@ import retry from 'async-retry';
 import { MAX_RETRY_LIMIT_MS, POSSIBLE_RETRY_STATUS_HEADERS } from '../globals';
 import { redactSecrets, redactString } from '../utils/redact';
 import { AttemptStatus, errorClassOf } from '../middlewares/psAttempts';
+import {
+  isRedirectResponse,
+  rejectUpstreamRedirect,
+  UPSTREAM_REDIRECT_MODE,
+} from '../utils/fetch';
 
 async function fetchWithTimeout(
   url: string,
@@ -13,6 +18,8 @@ async function fetchWithTimeout(
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   const timeoutRequestOptions = {
     ...options,
+    // PS fork (security): never follow an upstream redirect.
+    redirect: UPSTREAM_REDIRECT_MODE,
     signal: controller.signal,
   };
 
@@ -118,9 +125,25 @@ export const retryRequest = async (
           } else if (requestHandler) {
             response = await requestHandler();
           } else {
-            response = await fetch(url, options);
+            // PS fork (security): never follow an upstream redirect.
+            response = await fetch(url, {
+              ...options,
+              redirect: UPSTREAM_REDIRECT_MODE,
+            });
           }
           report(response.status);
+          // PS fork (security): a 3xx (from fetch or a request handler) is
+          // answered with a 502 and not retried (here or by the caller's
+          // status-code retry); its Location is dropped.
+          if (isRedirectResponse(response)) {
+            retrySkipped = true;
+            const blocked = rejectUpstreamRedirect(response);
+            const errorObj: any = new Error(await blocked.text());
+            errorObj.status = blocked.status;
+            errorObj.headers = Object.fromEntries(blocked.headers);
+            bail(errorObj);
+            return;
+          }
           if (statusCodesToRetry.includes(response.status)) {
             const errorObj: any = new Error(await response.text());
             errorObj.status = response.status;
