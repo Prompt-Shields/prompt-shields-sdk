@@ -1,0 +1,105 @@
+name: OpenAPI
+
+# Lints docs/openapi.yaml (collector Partner API) and docs/gateway-openapi.yaml
+# (AI gateway) with .spectral.yaml, and on pull requests fails on breaking
+# changes against the base branch unless the PR carries the `api-breaking`
+# label. The gateway route drift test runs in the gateway jest suite (ci.yml).
+
+on:
+  pull_request:
+    # labeled/unlabeled re-run the breaking-change check when `api-breaking`
+    # is added or removed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - 'docs/openapi.yaml'
+      - 'docs/gateway-openapi.yaml'
+      - '.spectral.yaml'
+      - '.spectral/**'
+      - '.github/workflows/openapi.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/openapi.yaml'
+      - 'docs/gateway-openapi.yaml'
+      - '.spectral.yaml'
+      - '.spectral/**'
+      - '.github/workflows/openapi.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openapi-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SPECTRAL_VERSION: 6.16.3
+  OASDIFF_VERSION: v1.33.0
+  SPECS: docs/openapi.yaml docs/gateway-openapi.yaml
+
+jobs:
+  lint:
+    name: Spectral lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5.1.0
+      - uses: actions/setup-node@v5.0.0
+        with:
+          node-version: "20"
+      - name: Spectral
+        # Errors fail the job (operationId and security on every operation,
+        # plus spectral:oas errors); warnings are reported only.
+        run: npx --yes "@stoplight/spectral-cli@${SPECTRAL_VERSION}" lint --fail-severity error $SPECS
+
+  breaking:
+    name: Breaking changes (oasdiff)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE_REF: ${{ github.base_ref }}
+      ALLOW_BREAKING: ${{ contains(github.event.pull_request.labels.*.name, 'api-breaking') }}
+    steps:
+      - uses: actions/checkout@v5.1.0
+      - uses: actions/setup-go@v5.5.0
+        with:
+          # oasdiff v1.33.0's go.mod needs Go 1.26.
+          go-version: "1.26"
+          cache: false
+      - name: Install oasdiff
+        run: |
+          go install "github.com/oasdiff/oasdiff@${OASDIFF_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Fetch base specs
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          mkdir -p "$RUNNER_TEMP/base"
+          for spec in $SPECS; do
+            if git cat-file -e "FETCH_HEAD:$spec" 2>/dev/null; then
+              git show "FETCH_HEAD:$spec" > "$RUNNER_TEMP/base/$(basename "$spec")"
+            fi
+          done
+      - name: oasdiff breaking
+        run: |
+          set -o pipefail
+          status=0
+          for spec in $SPECS; do
+            base="$RUNNER_TEMP/base/$(basename "$spec")"
+            if [ ! -f "$base" ]; then
+              echo "::notice::$spec is new on this branch; nothing to compare."
+              continue
+            fi
+            echo "## $spec" >> "$GITHUB_STEP_SUMMARY"
+            if ! oasdiff breaking "$base" "$spec" --fail-on ERR | tee -a "$GITHUB_STEP_SUMMARY"; then
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            if [ "$ALLOW_BREAKING" = "true" ]; then
+              echo "::warning::Breaking API changes allowed by the api-breaking label."
+              exit 0
+            fi
+            echo "::error::Breaking API changes. Make them compatible, or add the api-breaking label (and a CHANGELOG entry) if they are intended."
+            exit 1
+          fi

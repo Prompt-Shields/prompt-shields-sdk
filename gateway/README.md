@@ -65,6 +65,8 @@ PS_MAX_CUSTOM_HOST_RESPONSE_BYTES=52428800            # optional; cap on custom-
 TRUSTED_CUSTOM_HOSTS=localhost,127.0.0.1              # optional; hosts exempt from the SSRF checks
 PS_METRICS_ENABLED=true                               # optional; Prometheus metrics at GET /metrics
 PS_METRICS_TOKEN=<random>                             # optional; require Bearer token on /metrics
+PS_SECURITY_EVENTS_LOG=true                           # optional; security events as JSON lines on stdout (or `stderr`); see docs/guides/security-events.mdx
+PS_SECURITY_EVENTS_TENANT=bank-a                      # optional; ps.tenant on every security event
 MAX_JSON_PAYLOAD_SIZE_IN_MB=10                        # optional; 413 for larger JSON bodies
 MAX_FILE_PAYLOAD_SIZE_IN_MB=25                        # optional; 413 for larger multipart uploads (audio, files), 411 without Content-Length
 AWS_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Bedrock/SageMaker callers use this host's AWS identity (serviceRole)
@@ -75,7 +77,7 @@ OAUTH_TOKEN_URL_ALLOWED_HOSTS=login.example.com       # optional; restrict calle
 
 OAuth client credentials (`x-portkey-oauth-*` headers, `openai` provider) take precedence over `x-portkey-api-key` / `Authorization` when supplied. The token URL check is hostname-only and does not resolve DNS, so it cannot stop DNS rebinding; set `OAUTH_TOKEN_URL_ALLOWED_HOSTS` whenever callers are not fully trusted.
 
-Liveness: `GET /v1/health` (no auth, no upstream call). Metrics are labelled with route, status, provider, model and the `X-PS-Business-Unit` / `X-PS-Environment` values; prompt and completion content never appear in metrics.
+Liveness: `GET /v1/health` (no auth, no upstream call). Metrics are labelled with route, status, provider, model and the `X-PS-Business-Unit` / `X-PS-Environment` values; prompt and completion content never appear in metrics. Guardrail verdicts, PII detections (category only), 429s and dropped telemetry are counted too (`ps_gateway_guardrail_verdicts_total`, `ps_gateway_pii_detections_total`, `ps_gateway_rate_limited_total`, `ps_gateway_telemetry_dropped_total`).
 
 Per-request annotations:
 

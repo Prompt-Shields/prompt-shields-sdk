@@ -1,5 +1,6 @@
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
+import { reportPayloadRejected } from './psSecurityEvents';
 
 /**
  * Ported from Portkey gateway 2.0.0 (`src/middlewares/payloadSizeValidator.ts`).
@@ -39,6 +40,7 @@ export const payloadSizeValidatorMiddleware = () => {
     if (limitMb > 0 && contentType === 'application/json') {
       const payloadMb = Number(declared ?? 0) / BYTES_PER_MB;
       if (payloadMb > limitMb) {
+        reportPayloadRejected(c, 'payload_too_large', 413);
         return c.json(
           {
             status: 'failure',
@@ -57,6 +59,7 @@ export const payloadSizeValidatorMiddleware = () => {
     ) {
       const bytes = declared?.trim() ? Number(declared) : NaN;
       if (!Number.isFinite(bytes) || bytes < 0) {
+        reportPayloadRejected(c, 'length_required', 411);
         return c.json(
           {
             status: 'failure',
@@ -66,6 +69,7 @@ export const payloadSizeValidatorMiddleware = () => {
         );
       }
       if (bytes / BYTES_PER_MB > fileLimitMb) {
+        reportPayloadRejected(c, 'payload_too_large', 413);
         return c.json(
           {
             status: 'failure',
