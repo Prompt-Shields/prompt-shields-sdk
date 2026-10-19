@@ -1,5 +1,6 @@
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
+import { reportAuthFailure } from '../psSecurityEvents';
 
 const SESSION_COOKIE_NAME = 'portkey_admin_session';
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 12; // 12 hours
@@ -123,6 +124,13 @@ export const adminAuthMiddleware = async (c: Context, next: Next) => {
   const hasValidBearerToken = tokensMatch(getBearerToken(c), configuredToken);
 
   if (!hasValidSession && !hasValidBearerToken) {
+    reportAuthFailure(
+      c,
+      'admin',
+      getSessionId(c) || c.req.header('authorization')
+        ? 'invalid_credentials'
+        : 'missing_credentials'
+    );
     return c.json(
       {
         status: 'failure',
@@ -176,6 +184,11 @@ export const adminAuthLoginHandler = async (c: Context) => {
   }
 
   if (!tokensMatch(body?.admin_token, configuredToken)) {
+    reportAuthFailure(
+      c,
+      'admin',
+      body?.admin_token ? 'invalid_credentials' : 'missing_credentials'
+    );
     return c.json(
       {
         status: 'failure',
