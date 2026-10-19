@@ -110,6 +110,20 @@
       ]
     },
     {
+      "group": "AI Gateway API",
+      "pages": [
+        "gateway/overview",
+        "gateway/chat-completions",
+        "gateway/messages",
+        "gateway/responses",
+        "gateway/embeddings",
+        "gateway/models",
+        "gateway/proxy",
+        "gateway/health",
+        "gateway/metrics"
+      ]
+    },
+    {
       "group": "SDKs",
       "pages": [
         "sdks/overview",
@@ -127,7 +141,7 @@
       ]
     }
   ],
-  "openapi": "openapi.yaml",
+  "openapi": ["openapi.yaml", "gateway-openapi.yaml"],
   "api": {
     "baseUrl": "https://api.promptshields.io",
     "auth": {

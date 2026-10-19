@@ -1,0 +1,99 @@
+---
+title: AI Gateway API
+description: OpenAPI contract for the Prompt Shields AI Gateway, its headers and errors, and how to import it into Kong
+---
+
+# AI Gateway API
+
+The gateway's HTTP API is described in
+[`docs/gateway-openapi.yaml`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/gateway-openapi.yaml)
+(OpenAPI 3.1). It covers every route the gateway mounts: Chat Completions,
+Completions, Responses, Messages, Embeddings, Rerank, Images, Audio, OCR,
+Files, Batches, Fine-tuning, Models, Realtime, the `/v1/{path}` proxy
+catch-all, `/v1/health` and `/metrics`. A gateway test fails when a route is
+added to or removed from the gateway without the spec.
+
+Request and response bodies are a minimal subset: the fields the gateway
+reads or translates. Every other field passes through to the provider; the
+upstream OpenAI, Anthropic and Cohere specifications describe them in full.
+
+## Authentication
+
+The gateway does not authenticate clients. `Authorization: Bearer <key>` (or
+`x-api-key`) carries the **provider's** key and is forwarded to the provider;
+credentials can also be set in `x-portkey-config`. Put the gateway behind an
+API gateway such as Kong for client authentication. `/v1/health` is public,
+and `/metrics` needs `PS_METRICS_TOKEN` as a bearer token when that is set.
+
+## Headers
+
+| Header | Purpose | Sent to the provider? |
+|--------|---------|-----------------------|
+| `x-portkey-provider` / `x-portkey-config` | Target provider, or a full config (targets, retries, fallbacks, guardrails). One is required. | Never |
+| `x-portkey-custom-host`, `-forward-headers`, `-request-timeout`, `-trace-id`, `-metadata`, `-strict-open-ai-compliance`, `-default-input-guardrails`, `-default-output-guardrails`, `-messages-via-responses` | Per-request gateway options | Never |
+| `x-ps-route`, `x-ps-quality`, `x-ps-max-cost` | Cost-aware routing hints (`PS_ROUTER_ENABLED=true`) | Not on unified endpoints; forwarded on proxy routes |
+| `x-ps-cache` | `on`, `off` or `refresh` | Not on unified endpoints; forwarded on proxy routes |
+| `x-ps-business-unit`, `x-ps-use-case`, `x-ps-owner`, `x-ps-data-classification`, `x-ps-environment` | Business context for telemetry, OTel spans and metrics labels | Not on unified endpoints; forwarded on proxy routes |
+
+Headers named in `x-portkey-forward-headers` are forwarded on every route.
+Provider credential headers (`x-portkey-aws-secret-access-key`,
+`x-portkey-vertex-service-account-json` and similar) are accepted but are
+deliberately not part of the spec.
+
+## Errors
+
+| Status | When | Body |
+|--------|------|------|
+| 400 | Missing or invalid provider, config, custom host or content type | `{"status": "failure", "message": ...}` |
+| 400 | Guardrails are configured and a proxied request cannot be inspected (fail closed, before any upstream call) | `error.code: "unsupported_guardrail"` |
+| 408 | `x-portkey-request-timeout` exceeded | OpenAI-shaped `error` |
+| 411 | `MAX_FILE_PAYLOAD_SIZE_IN_MB` set and a multipart upload has no `content-length` | `{"status": "failure", ...}` |
+| 413 | `content-length` over `MAX_JSON_PAYLOAD_SIZE_IN_MB` (JSON) or `MAX_FILE_PAYLOAD_SIZE_IN_MB` (multipart uploads) | `{"status": "failure", ...}` |
+| 246 | Success, but a non-denying guardrail failed | Normal body plus `hook_results` |
+| 446 | A guardrail with `deny: true` failed | `error.type: "hooks_failed"` plus `hook_results` |
+| 502 | The provider answered with a redirect, which the gateway never follows | `error.type: "upstream_redirect"` |
+| other | Provider errors, passed through | OpenAI-shaped `error` |
+
+## Import into Kong
+
+[decK](https://developer.konghq.com/deck/file/openapi2kong/) turns the spec
+into Kong services and routes, one route per `operationId`:
+
+```bash
+deck file openapi2kong --spec docs/gateway-openapi.yaml --output-file kong-gateway.yaml
+# The generated service points at the spec's server (http://localhost:8787):
+# change its host to your gateway, add plugins, then:
+deck gateway sync kong-gateway.yaml
+```
+
+Things to set on the Kong side:
+
+- **Client authentication.** Add your auth plugin (OIDC, key-auth) to the
+  generated service; the spec's security schemes describe provider keys, not
+  Kong credentials.
+- **Strip credential headers** if clients must not bring their own provider
+  credentials, for example with `request-transformer`:
+
+  ```yaml
+  plugins:
+    - name: request-transformer
+      config:
+        remove:
+          headers:
+            - x-portkey-config
+            - x-portkey-custom-host
+            - x-portkey-aws-access-key-id
+            - x-portkey-aws-secret-access-key
+            - x-portkey-aws-session-token
+            - x-portkey-azure-ad-token
+            - x-portkey-azure-entra-client-secret
+            - x-portkey-vertex-service-account-json
+  ```
+
+  Removing `x-portkey-config` means the gateway's provider comes from
+  `x-portkey-provider` (or a header Kong injects).
+- **Proxy catch-all.** `openapi2kong` turns `/v1/{path}` into a route that
+  matches a single path segment. If clients use multi-segment provider paths
+  through the proxy, add a prefix route for `/v1/` by hand.
+- **Streaming.** Chat, Messages and Responses stream server-sent events;
+  disable response buffering on those routes.
