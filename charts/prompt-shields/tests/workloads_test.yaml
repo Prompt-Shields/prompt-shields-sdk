@@ -142,6 +142,32 @@ tests:
             name: PS_COLLECTOR_RUN_WORKERS
             value: "false"
 
+  - it: keeps the provider usage loop out of the API pods when its CronJob runs it
+    template: templates/collector-deployment.yaml
+    set:
+      cronJobs.jobs.providerUsage.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_COLLECTOR_RUN_WORKERS
+            value: "false"
+
+  - it: leaves PS_COLLECTOR_RUN_WORKERS alone for CronJobs that run no loop
+    template: templates/collector-deployment.yaml
+    set:
+      cronJobs.jobs.auditPurge.enabled: true
+      cronJobs.jobs.retentionPurge.enabled: true
+      cronJobs.jobs.lifecycleSweep.enabled: true
+      cronJobs.jobs.webhooksPurge.enabled: true
+      cronJobs.jobs.leanixAcme:
+        enabled: true
+        schedule: "0 5 * * *"
+        args: ["python", "-m", "collector.leanix", "--tenant", "00000000-0000-0000-0000-000000000001"]
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].env
+
   - it: lets PS_COLLECTOR_RUN_WORKERS be forced
     template: templates/collector-deployment.yaml
     set:

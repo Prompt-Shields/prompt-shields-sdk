@@ -41,7 +41,7 @@ kubectl -n prompt-shields create secret generic prompt-shields-gateway \
 
 # 3. Install
 helm install prompt-shields oci://ghcr.io/prompt-shields/charts/prompt-shields \
-  --version 0.1.0 --namespace prompt-shields \
+  --version 0.1.0 --namespace prompt-shields --timeout 15m \
   --set secrets.migration.existingSecret=prompt-shields-migration \
   --set secrets.collector.existingSecret=prompt-shields-collector \
   --set secrets.gateway.existingSecret=prompt-shields-gateway
@@ -132,6 +132,21 @@ python -m collector.rls enable
 Because hooks run before the release's ordinary
 objects exist, the Job uses no chart ConfigMap or ServiceAccount, and any
 Secret or ExternalSecret the chart makes for it is itself a hook object.
+That hook Secret or ExternalSecret (it holds the owner role's URL) is deleted
+once the migration succeeds; after a failure it is kept, with the Job, for
+debugging, and replaced on the next install or upgrade.
+
+**Use `--timeout 15m` for `helm install` and `helm upgrade`** (or any value
+at least `migration.activeDeadlineSeconds`, 900 s by default). Helm waits
+for the migration hook only for `--timeout`, which defaults to 5 minutes. A
+migration that runs longer (a large table, a pgvector index build) makes the
+release fail while the Job keeps running, and the next install or upgrade
+deletes that Job (`before-hook-creation`) mid-migration.
+
+```shell
+helm upgrade --install prompt-shields oci://ghcr.io/prompt-shields/charts/prompt-shields \
+  --version 0.1.0 --namespace prompt-shields --timeout 15m -f values.yaml
+```
 For GitOps tools that do not run Helm hooks, set `migration.enabled: false`
 and run the same commands from your own pipeline.
 
@@ -209,8 +224,10 @@ worker and a CronJob.
 `PS_COLLECTOR_RUN_WORKERS` (default `true` in the image) lets the API
 process run the loops too. With `collector.runWorkers.value: ""` (the
 default) the chart sets it to `false` on the API pods whenever the worker
-Deployment or any CronJob is enabled, and leaves it unset otherwise; `"true"`
-or `"false"` forces it. `collector.workers` ignores it, so the worker and
+Deployment or the `webhooksDeliver` or `providerUsage` CronJob (the jobs that
+run those loops) is enabled, and leaves it unset otherwise: purges, the
+lifecycle sweep and connector CronJobs do not change it. `"true"` or
+`"false"` forces it, e.g. for a custom CronJob that runs a loop. `collector.workers` ignores it, so the worker and
 the API share one ConfigMap and Secret.
 
 The partner and ingest rate limits are kept per process, so with N collector
@@ -373,7 +390,7 @@ can follow the images if those change.
 | `*.metrics.tokenSecret` / `.tokenEnvName` | `{}` / `PS_METRICS_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN` | Metrics bearer token from a Secret key |
 | `gateway.shutdown.timeoutMs` / `.envName` | `25000` / `PS_SHUTDOWN_TIMEOUT_MS` | Drain on SIGTERM |
 | `collector.rlsRequired` | `true` | `PS_RLS_REQUIRED` |
-| `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `""` (auto) | Background loops in API pods; auto = `false` with the worker or any CronJob |
+| `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `""` (auto) | Background loops in API pods; auto = `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob |
 | `collector.metrics.enabled` / `.envName` / `.path` | `false` / `PS_COLLECTOR_METRICS_ENABLED` / `/metrics` | Collector metrics |
 | `collector.readyzTimeoutSeconds` | `2` | `PS_READYZ_TIMEOUT_SECONDS` |
 | `collector.apiDocs.enabled` / `.envName` | `false` / `PS_COLLECTOR_API_DOCS_ENABLED` | `/docs`, `/redoc`, `/openapi.json` |
@@ -427,7 +444,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_PARTNER_JWT_SECRET` (secret) | development value | Partner token signing key |
 | `PS_ADMIN_TOKEN` (secret) | empty (off) | Operator endpoints `/api/v1/operator/*` |
 | `PS_RLS_REQUIRED` (*chart*) | `true` in the chart | Refuse to start unless RLS binds the role |
-| `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `true`; the chart sets `false` with the worker or a CronJob | Background loops in the API process |
+| `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `true`; the chart sets `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob | Background loops in the API process |
 | `PS_COLLECTOR_METRICS_ENABLED` (*chart*) | `false` | Prometheus `/metrics` |
 | `PS_COLLECTOR_METRICS_TOKEN` (secret, or *chart* from `collector.metrics.tokenSecret`) | empty (no token) | Bearer token for `/metrics` |
 | `PS_READYZ_TIMEOUT_SECONDS` (*chart*) | `2` | `/readyz` database check deadline |

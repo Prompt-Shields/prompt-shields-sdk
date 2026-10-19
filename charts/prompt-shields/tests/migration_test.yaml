@@ -73,6 +73,42 @@ tests:
           value: postgresql+asyncpg://u:p@db/ps
         documentIndex: 2
 
+  - it: deletes the owner-role hook Secret only after every hook succeeded
+    template: templates/secrets.yaml
+    set:
+      secrets.create: true
+      secrets.collector.values:
+        PS_DATABASE_URL: postgresql+asyncpg://u:p@db/ps
+        PS_PARTNER_JWT_SECRET: x
+    asserts:
+      # Created before the weight 0 Job; hook-succeeded runs after all hooks.
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+        documentIndex: 2
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation,hook-succeeded
+        documentIndex: 2
+
+  - it: runs the migration Job after its Secret, as a hook of the same events
+    template: templates/migration-job.yaml
+    set:
+      secrets.create: true
+      secrets.collector.values:
+        PS_DATABASE_URL: postgresql+asyncpg://u:p@db/ps
+        PS_PARTNER_JWT_SECRET: x
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "0"
+      - equal:
+          path: spec.template.spec.containers[0].envFrom[0].secretRef.name
+          value: ps-prompt-shields-migration
+
   - it: needs the required collector values in development mode
     template: templates/secrets.yaml
     set:
@@ -99,6 +135,14 @@ tests:
       - equal:
           path: spec.dataFrom[0].extract.key
           value: ps/collector
+        documentIndex: 1
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+        documentIndex: 1
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation,hook-succeeded
         documentIndex: 1
       - notExists:
           path: metadata.annotations

@@ -271,8 +271,9 @@ collector:
   rlsRequired: true
   # Background loops in the API pods (PS_COLLECTOR_RUN_WORKERS; the image
   # defaults to true). "" (auto): set to "false" when the worker Deployment
-  # or any CronJob is enabled, so background work runs there and not in
-  # every API replica; otherwise not set. "true" / "false" force it.
+  # or the webhooksDeliver / providerUsage CronJob is enabled, so those loops
+  # run there and not in every API replica; otherwise not set (other CronJobs
+  # do not count). "true" / "false" force it.
   runWorkers:
     envName: PS_COLLECTOR_RUN_WORKERS
     value: ""

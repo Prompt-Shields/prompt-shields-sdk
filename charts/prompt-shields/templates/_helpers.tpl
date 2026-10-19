@@ -263,23 +263,28 @@ lifecycle:
 {{- end -}}
 {{- end -}}
 
-{{/* "true" when any CronJob is enabled. */}}
-{{- define "ps.anyCronJob" -}}
-{{- range $name, $job := .Values.cronJobs.jobs -}}
+{{/*
+"true" when a CronJob runs one of the API process's background loops
+(webhooksDeliver, providerUsage). Purges, the lifecycle sweep and
+connectors are not loops of the API process and do not count.
+*/}}
+{{- define "ps.loopCronJob" -}}
+{{- range $name := list "webhooksDeliver" "providerUsage" -}}
+{{- $job := index $.Values.cronJobs.jobs $name -}}
 {{- if and $job (kindIs "map" $job) $job.enabled -}}true{{- end -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
 PS_COLLECTOR_RUN_WORKERS for the API pods: an explicit value wins; "" means
-"false" when the worker Deployment or a CronJob does background work, and
-unset otherwise (the image default, true).
+"false" when the worker Deployment or the webhooksDeliver / providerUsage
+CronJob runs those loops, and unset otherwise (the image default, true).
 */}}
 {{- define "ps.runWorkersValue" -}}
 {{- $v := toString .Values.collector.runWorkers.value -}}
 {{- if $v -}}
 {{- $v -}}
-{{- else if or .Values.worker.enabled (include "ps.anyCronJob" .) -}}
+{{- else if or .Values.worker.enabled (include "ps.loopCronJob" .) -}}
 false
 {{- end -}}
 {{- end -}}
