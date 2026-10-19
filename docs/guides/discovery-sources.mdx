@@ -94,7 +94,7 @@ Outputs: `sarif-file`, `findings` (count) and `failed` (`true` when `fail-on` ma
 
 ## MCP Tool Usage (observe only)
 
-Which MCP servers and tools your services call, how often, and how often they fail. This is Phase 0 of the MCP plan in `gateway/docs/mcp-tool-call-discovery.md`: it observes calls and never sits in their path, so nothing here can block or alter a tool call.
+Which MCP servers and tools your services call, how often, and how often they fail. This is Phase 0 of the MCP plan in `gateway/docs/mcp-tool-call-discovery.md`: it observes calls and never alters them: a tool call's result or exception is unchanged. The SDK sends each call's event before `call_tool` returns, like the provider wrappers, so a slow or unreachable collector adds its round trip (bounded by the sender's 5 s timeouts) to that call.
 
 Two writers feed one aggregate table, `mcp_tool_usage` (one row per tenant, source, server, tool, calling service and environment, with call and error counts, mean latency, first and last seen):
 
