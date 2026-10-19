@@ -450,7 +450,6 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_READYZ_TIMEOUT_SECONDS` (*chart*) | `2` | `/readyz` database check deadline |
 | `PS_COLLECTOR_API_DOCS_ENABLED` (*chart*) | `false` | `/docs`, `/redoc`, `/openapi.json` |
 | `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process) |
-| `PS_KONG_RATE_LIMIT_PER_MINUTE` | `6000` | Per-tenant `/ingest/kong` limit (per process) |
 | `PS_AUDIT_RETENTION_DAYS` | `365` | Partner audit log retention |
 | `PS_RETENTION_DAYS_DEFAULT`, `PS_RETENTION_BATCH_SIZE` | `365`, `5000` | Usage event retention |
 | `PS_ASSET_STALE_AFTER_DAYS`, `PS_ASSET_RETIRE_AFTER_DAYS`, `PS_ASSET_LIFECYCLE_SOURCE_THRESHOLDS` | `30`, `90`, `""` | Lifecycle sweep |
