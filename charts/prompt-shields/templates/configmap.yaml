@@ -1,0 +1,41 @@
+{{- include "ps.validate" . -}}
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ps.fullname" . }}-gateway
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+data:
+  {{- range $k, $v := .Values.gateway.config }}
+  {{ $k }}: {{ toString $v | quote }}
+  {{- end }}
+  {{- with include "ps.collectorUrl" . }}
+  PS_COLLECTOR_URL: {{ . | quote }}
+  {{- end }}
+  PS_METRICS_ENABLED: {{ ternary "true" "false" .Values.gateway.metrics.enabled | quote }}
+  {{- with .Values.gateway.shutdown.envName }}
+  {{ . }}: {{ toString $.Values.gateway.shutdown.timeoutMs | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ps.fullname" . }}-collector
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "collector") | nindent 4 }}
+data:
+  {{- range $k, $v := .Values.collector.config }}
+  {{ $k }}: {{ toString $v | quote }}
+  {{- end }}
+  PS_RLS_REQUIRED: {{ ternary "true" "false" .Values.collector.rlsRequired | quote }}
+  {{- with .Values.collector.metrics.envName }}
+  {{ . }}: {{ ternary "true" "false" $.Values.collector.metrics.enabled | quote }}
+  {{- end }}
+  {{- with .Values.collector.apiDocs.envName }}
+  {{ . }}: {{ ternary "true" "false" $.Values.collector.apiDocs.enabled | quote }}
+  {{- end }}
+  {{- if .Values.collector.embeddingsCache.enabled }}
+  PS_EMBEDDINGS_CACHE_DIR: {{ .Values.collector.embeddingsCache.mountPath | quote }}
+  {{- end }}

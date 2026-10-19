@@ -1,0 +1,108 @@
+suite: migration hook and its Secret
+templates:
+  - templates/migration-job.yaml
+  - templates/secrets.yaml
+  - templates/externalsecrets.yaml
+release:
+  name: ps
+tests:
+  - it: is a pre-install/pre-upgrade hook using the migration Secret
+    template: templates/migration-job.yaml
+    set:
+      secrets.collector.existingSecret: ps-collector
+      secrets.migration.existingSecret: ps-migration
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: spec.template.spec.containers[0].envFrom[0].secretRef.name
+          value: ps-migration
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - notExists:
+          path: spec.template.spec.serviceAccountName
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "alembic upgrade head[\\s\\S]*collector.rls enable"
+
+  - it: skips enabling RLS when asked
+    template: templates/migration-job.yaml
+    set:
+      secrets.collector.existingSecret: ps-collector
+      migration.enableRls: false
+    asserts:
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "collector.rls"
+
+  - it: falls back to the collector Secret
+    template: templates/migration-job.yaml
+    set:
+      secrets.collector.existingSecret: ps-collector
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].envFrom[0].secretRef.name
+          value: ps-collector
+
+  - it: creates a hook Secret with the collector's URL in development mode
+    template: templates/secrets.yaml
+    set:
+      secrets.create: true
+      secrets.collector.values:
+        PS_DATABASE_URL: postgresql+asyncpg://u:p@db/ps
+        PS_PARTNER_JWT_SECRET: x
+    asserts:
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+        documentIndex: 2
+      - equal:
+          path: stringData.PS_DATABASE_URL
+          value: postgresql+asyncpg://u:p@db/ps
+        documentIndex: 2
+
+  - it: needs the required collector values in development mode
+    template: templates/secrets.yaml
+    set:
+      secrets.create: true
+      secrets.collector.values:
+        PS_DATABASE_URL: postgresql+asyncpg://u:p@db/ps
+    asserts:
+      - failedTemplate: {}
+
+  - it: renders a hook ExternalSecret for migrations
+    template: templates/externalsecrets.yaml
+    set:
+      externalSecrets.enabled: true
+      externalSecrets.secretStoreRef.name: vault
+      externalSecrets.collector.dataFrom:
+        - extract: {key: ps/collector}
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+        documentIndex: 1
+      - equal:
+          path: spec.dataFrom[0].extract.key
+          value: ps/collector
+        documentIndex: 1
+      - notExists:
+          path: metadata.annotations
+        documentIndex: 0
+
+  - it: uses the migration image override
+    template: templates/migration-job.yaml
+    set:
+      secrets.collector.existingSecret: ps-collector
+      migration.image.repository: example/migrator
+      migration.image.tag: "1.2.3"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/migrator:1.2.3

@@ -1,0 +1,82 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- if .Values.gateway.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ps.fullname" . }}-gateway
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ps.selectorLabels" (dict "ctx" $ "component" "gateway") | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - port: http
+          protocol: TCP
+      {{- with $np.gateway.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    {{- include "ps.npCommonEgress" . | nindent 4 }}
+    {{- if .Values.collector.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ps.selectorLabels" (dict "ctx" $ "component" "collector") | nindent 14 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
+{{- end }}
+{{- if .Values.collector.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ps.fullname" . }}-collector
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "collector") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ps.selectorLabels" (dict "ctx" $ "component" "collector") | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - port: http
+          protocol: TCP
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "ps.selectorLabels" (dict "ctx" $ "component" "gateway") | nindent 14 }}
+        {{- with $np.collector.extraIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  egress:
+    {{- include "ps.npCommonEgress" . | nindent 4 }}
+{{- end }}
+---
+{{- /* Worker, CronJob and migration pods: no ingress. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ps.fullname" . }}-jobs
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "jobs") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ps.selectorLabels" (dict "ctx" $ "component" "") | nindent 6 }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["worker", "cronjob", "migration"]
+  policyTypes: ["Ingress", "Egress"]
+  egress:
+    {{- include "ps.npCommonEgress" . | nindent 4 }}
+{{- end }}

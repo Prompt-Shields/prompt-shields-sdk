@@ -1,0 +1,219 @@
+suite: gateway and collector workloads
+templates:
+  - templates/gateway-deployment.yaml
+  - templates/collector-deployment.yaml
+  - templates/configmap.yaml
+  - templates/secrets.yaml
+release:
+  name: ps
+  namespace: prompt-shields
+set:
+  secrets.collector.existingSecret: ps-collector
+  secrets.gateway.existingSecret: ps-gateway
+tests:
+  - it: fails without a collector Secret
+    template: templates/collector-deployment.yaml
+    set:
+      secrets.collector.existingSecret: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "The collector needs a Secret"
+
+  - it: runs the gateway as non-root with a read-only root filesystem
+    template: templates/gateway-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
+  - it: runs node directly, headless, on the configured port
+    template: templates/gateway-deployment.yaml
+    set:
+      gateway.port: 9000
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["node", "build/start-server.js"]
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: ["--headless", "--port=9000"]
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9000
+
+  - it: loads the gateway ConfigMap and Secret
+    template: templates/gateway-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].envFrom
+          content:
+            secretRef:
+              name: ps-gateway
+      - contains:
+          path: spec.template.spec.containers[0].envFrom
+          content:
+            configMapRef:
+              name: ps-prompt-shields-gateway
+
+  - it: has no gateway Secret when none is configured
+    template: templates/gateway-deployment.yaml
+    set:
+      secrets.gateway.existingSecret: ""
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers[0].envFrom
+          count: 1
+
+  - it: points the gateway at the in-cluster collector and sets the drain timeout
+    template: templates/configmap.yaml
+    documentIndex: 0
+    set:
+      gateway.shutdown.timeoutMs: 30000
+      gateway.metrics.enabled: true
+    asserts:
+      - equal:
+          path: data.PS_COLLECTOR_URL
+          value: http://ps-prompt-shields-collector:8000
+      - equal:
+          path: data.PS_SHUTDOWN_TIMEOUT_MS
+          value: "30000"
+      - equal:
+          path: data.PS_METRICS_ENABLED
+          value: "true"
+
+  - it: lets the shutdown and metrics env var names change
+    template: templates/configmap.yaml
+    set:
+      gateway.shutdown.envName: PS_GATEWAY_DRAIN_MS
+      collector.metrics.envName: PS_METRICS_ON
+    asserts:
+      - exists:
+          path: data.PS_GATEWAY_DRAIN_MS
+        documentIndex: 0
+      - notExists:
+          path: data.PS_SHUTDOWN_TIMEOUT_MS
+        documentIndex: 0
+      - equal:
+          path: data.PS_METRICS_ON
+          value: "false"
+        documentIndex: 1
+
+  - it: keeps background workers out of the collector pods
+    template: templates/collector-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_COLLECTOR_RUN_WORKERS
+            value: "false"
+
+  - it: requires RLS by default
+    template: templates/configmap.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: data.PS_RLS_REQUIRED
+          value: "true"
+
+  - it: keeps the collector API docs off unless asked
+    template: templates/configmap.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: data.PS_COLLECTOR_API_DOCS_ENABLED
+          value: "false"
+
+  - it: turns the collector API docs on
+    template: templates/configmap.yaml
+    documentIndex: 1
+    set:
+      collector.apiDocs.enabled: true
+    asserts:
+      - equal:
+          path: data.PS_COLLECTOR_API_DOCS_ENABLED
+          value: "true"
+
+  - it: uses /readyz for readiness and the health route for liveness
+    template: templates/collector-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /partner/v1/health
+      - exists:
+          path: spec.template.spec.containers[0].startupProbe
+
+  - it: lets probe paths change
+    template: templates/collector-deployment.yaml
+    set:
+      collector.probes.readiness.path: /partner/v1/health
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /partner/v1/health
+
+  - it: mounts a writable /tmp
+    template: templates/collector-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tmp
+            mountPath: /tmp
+
+  - it: rewrites the registry for air-gapped mirrors
+    template: templates/collector-deployment.yaml
+    set:
+      global.imageRegistry: mirror.example.com/ghcr
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mirror.example.com/ghcr/prompt-shields/prompt-shields-sdk/collector:0.1.0
+
+  - it: pins by digest
+    template: templates/gateway-deployment.yaml
+    set:
+      gateway.image.digest: sha256:abc
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/prompt-shields/prompt-shields-sdk/gateway@sha256:abc
+
+  - it: omits replicas when autoscaling
+    template: templates/gateway-deployment.yaml
+    set:
+      gateway.autoscaling.enabled: true
+    asserts:
+      - notExists:
+          path: spec.replicas
+
+  - it: lets OpenShift assign the UID
+    template: templates/gateway-deployment.yaml
+    set:
+      podSecurityContext.runAsUser: null
+      podSecurityContext.runAsGroup: null
+      podSecurityContext.fsGroup: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext.runAsUser
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true

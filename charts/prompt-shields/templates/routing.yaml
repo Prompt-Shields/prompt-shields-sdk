@@ -1,0 +1,79 @@
+{{- /* Optional Ingress and Gateway API HTTPRoute per component. */ -}}
+{{- range $component := list "gateway" "collector" }}
+{{- $c := index $.Values $component }}
+{{- $svc := printf "%s-%s" (include "ps.fullname" $) $component }}
+{{- if and $c.enabled $c.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $svc }}
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" $component) | nindent 4 }}
+  {{- with $c.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $c.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $c.ingress.tls }}
+  tls:
+    {{- tpl (toYaml .) $ | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $c.ingress.hosts }}
+    - host: {{ tpl .host $ | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ $svc }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}
+{{- if and $c.enabled $c.httpRoute.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $svc }}
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" $component) | nindent 4 }}
+  {{- with $c.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- required (printf "%s.httpRoute.parentRefs is required" $component) $c.httpRoute.parentRefs | toYaml | nindent 4 }}
+  {{- with $c.httpRoute.hostnames }}
+  hostnames:
+    {{- tpl (toYaml .) $ | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $c.httpRoute.rules }}
+    - {{- with .matches }}
+      matches:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .filters }}
+      filters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ $svc }}
+          port: {{ $c.service.port }}
+    {{- end }}
+{{- end }}
+{{- end }}

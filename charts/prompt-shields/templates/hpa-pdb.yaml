@@ -1,0 +1,59 @@
+{{- range $component := list "gateway" "collector" }}
+{{- $c := index $.Values $component }}
+{{- if and $c.enabled $c.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ps.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "ps.fullname" $ }}-{{ $component }}
+  minReplicas: {{ $c.autoscaling.minReplicas }}
+  maxReplicas: {{ $c.autoscaling.maxReplicas }}
+  metrics:
+    {{- with $c.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with $c.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+  {{- with $c.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- $replicas := ternary $c.autoscaling.minReplicas $c.replicaCount $c.autoscaling.enabled }}
+{{- if and $c.enabled $c.podDisruptionBudget.enabled (gt (int $replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ps.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" $component) | nindent 4 }}
+spec:
+  {{- if not (kindIs "invalid" $c.podDisruptionBudget.maxUnavailable) }}
+  maxUnavailable: {{ $c.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ $c.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ps.selectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
+{{- end }}
+{{- end }}
