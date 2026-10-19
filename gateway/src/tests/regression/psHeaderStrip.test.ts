@@ -273,3 +273,44 @@ describe('realtime upstream headers', () => {
     expect(sent.upgrade).toBe('websocket');
   });
 });
+
+/**
+ * Bedrock proxy calls to another AWS service (`aws_service`) copy the client
+ * headers into the SigV4 request. X-PS-* must be dropped before signing:
+ * signing them and stripping later would break the signature.
+ */
+describe('Bedrock SigV4 proxy headers', () => {
+  test('X-PS-* are neither signed nor sent', async () => {
+    const store = new Map<string, unknown>([['method', 'POST']]);
+    const c: any = {
+      req: { method: 'POST' },
+      env: {},
+      get: (k: string) => store.get(k),
+    };
+    const sent = await Providers.bedrock.api.headers({
+      c,
+      fn: 'proxy',
+      providerOptions: {
+        provider: 'bedrock',
+        awsService: 'sagemaker',
+        awsRegion: 'us-east-1',
+        awsAccessKeyId: 'AKIATEST',
+        awsSecretAccessKey: 'secret',
+      },
+      transformedRequestBody: {},
+      transformedRequestUrl:
+        'https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/e/invocations',
+      gatewayRequestBody: { inputs: 'hi' },
+      headers: {
+        'content-type': 'application/json',
+        'X-PS-Owner': 'owner@example.com',
+        ...PS_HEADERS,
+      },
+    } as any);
+    expect(psHeadersSent(sent)).toEqual([]);
+    const auth = String(sent.authorization ?? sent.Authorization);
+    expect(auth).toMatch(/^AWS4-HMAC-SHA256 /);
+    expect(auth).not.toMatch(/x-ps-/i);
+    expect(auth).toMatch(/SignedHeaders=[^,]*content-type/);
+  });
+});
