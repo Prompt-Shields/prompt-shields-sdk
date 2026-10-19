@@ -24,11 +24,11 @@ spec:
       path: {{ $c.metrics.path }}
       interval: {{ $c.serviceMonitor.interval }}
       scrapeTimeout: {{ $c.serviceMonitor.scrapeTimeout }}
-      {{- with $c.serviceMonitor.bearerTokenSecret }}
+      {{- with include "ps.metricsTokenRef" (dict "ctx" $ "component" $component) }}
       authorization:
         type: Bearer
         credentials:
-          {{- toYaml . | nindent 10 }}
+          {{- . | nindent 10 }}
       {{- end }}
 {{- end }}
 {{- end }}

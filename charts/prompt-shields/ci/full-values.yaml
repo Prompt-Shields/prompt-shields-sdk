@@ -64,6 +64,9 @@ gateway:
 collector:
   metrics:
     enabled: true
+    tokenSecret:
+      name: prompt-shields-metrics
+      key: collector-token
   config:
     PS_EMBEDDINGS_BACKEND: local
   embeddingsCache:
@@ -82,9 +85,7 @@ collector:
     enabled: true
 worker:
   enabled: true
-  processes:
-    providerUsage:
-      enabled: true
+  providerUsagePullIntervalSeconds: 86400
 cronJobs:
   defaults:
     timeZone: Europe/Helsinki

@@ -23,9 +23,17 @@ tests:
           value: false
       - notExists:
           path: spec.template.spec.serviceAccountName
-      - matchRegex:
+      - equal:
+          path: spec.template.spec.containers[0].workingDir
+          value: /app
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/bin/sh", "-ec"]
+      - equal:
           path: spec.template.spec.containers[0].args[0]
-          pattern: "alembic upgrade head[\\s\\S]*collector.rls enable"
+          value: |
+            alembic -c packages/db/alembic.ini upgrade head
+            python -m collector.rls enable
 
   - it: skips enabling RLS when asked
     template: templates/migration-job.yaml

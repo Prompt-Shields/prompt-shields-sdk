@@ -71,9 +71,15 @@ spec:
             {{- with $g.extraEnvFrom }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with $g.extraEnv }}
+          {{- $tokenEnv := include "ps.metricsTokenEnv" (dict "ctx" $ "component" "gateway") }}
+          {{- if or $tokenEnv $g.extraEnv }}
           env:
+            {{- with $tokenEnv }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with $g.extraEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- include "ps.containerSecurityContext" . | nindent 10 }}
           {{- with $g.resources }}

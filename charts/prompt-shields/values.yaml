@@ -123,24 +123,31 @@ gateway:
   port: 8787
   replicaCount: 2
   # Kept above preStop sleep + shutdown.timeoutMs + the telemetry flush
-  # (PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS, 5 s by default).
-  terminationGracePeriodSeconds: 60
+  # (PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS, 5 s by default): 5 + 25 + 5 < 40.
+  terminationGracePeriodSeconds: 40
   # Sleep before SIGTERM so endpoints are removed before the server stops
   # accepting connections. 0 disables it. Needs `sleep` in the image.
   preStopSleepSeconds: 5
   shutdown:
     # Drain in-flight (including streaming) requests for up to this long
     # after SIGTERM.
-    timeoutMs: 45000
+    timeoutMs: 25000
     envName: PS_SHUTDOWN_TIMEOUT_MS
   # PS_COLLECTOR_URL. Empty: the in-cluster collector Service (or nothing
   # when collector.enabled is false).
   collectorUrl: ""
   metrics:
-    # PS_METRICS_ENABLED: Prometheus metrics on GET /metrics. Set
-    # PS_METRICS_TOKEN in the gateway Secret to require a bearer token.
+    # PS_METRICS_ENABLED: Prometheus metrics on GET /metrics.
     enabled: false
     path: /metrics
+    # Require a bearer token: a Secret key whose value becomes
+    # PS_METRICS_TOKEN (valueFrom) and the ServiceMonitor's bearer token.
+    # PS_METRICS_TOKEN in the gateway Secret also works; then set
+    # serviceMonitor.bearerTokenSecret.
+    tokenSecret: {}
+    #  name: prompt-shields-gateway
+    #  key: PS_METRICS_TOKEN
+    tokenEnvName: PS_METRICS_TOKEN
   # Plain (non-secret) environment, rendered into a ConfigMap. Any gateway
   # setting works here; README lists them. Examples:
   #   MAX_JSON_PAYLOAD_SIZE_IN_MB: "100"
@@ -188,7 +195,9 @@ gateway:
     annotations: {}
   podAnnotations: {}
   podLabels: {}
-  nodeSelector: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
   tolerations: []
   affinity: {}
   topologySpreadConstraints: []
@@ -233,10 +242,10 @@ gateway:
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
-    # Secret key holding PS_METRICS_TOKEN, sent as the bearer token.
+    # Secret key sent as the bearer token. Defaults to metrics.tokenSecret,
+    # or to the chart-created Secret when secrets.gateway.values has
+    # PS_METRICS_TOKEN.
     bearerTokenSecret: {}
-    #  name: prompt-shields-gateway
-    #  key: PS_METRICS_TOKEN
 
 # ──────────────────────────────────────────────────────────────────────
 # Collector (FastAPI, port 8000)
@@ -260,16 +269,26 @@ collector:
   # `python -m collector.rls enable`) and a non-superuser role without
   # BYPASSRLS.
   rlsRequired: true
-  # Background work is kept out of the API pods: the in-process webhook
-  # worker and provider usage pull are switched off here, and run in the
-  # worker Deployment or CronJobs below instead.
+  # Background loops in the API pods (PS_COLLECTOR_RUN_WORKERS; the image
+  # defaults to true). "" (auto): set to "false" when the worker Deployment
+  # or any CronJob is enabled, so background work runs there and not in
+  # every API replica; otherwise not set. "true" / "false" force it.
   runWorkers:
     envName: PS_COLLECTOR_RUN_WORKERS
-    value: "false"
+    value: ""
   metrics:
     enabled: false
     envName: PS_COLLECTOR_METRICS_ENABLED
     path: /metrics
+    # Require a bearer token: a Secret key whose value becomes
+    # PS_COLLECTOR_METRICS_TOKEN (valueFrom) and the ServiceMonitor's bearer
+    # token. PS_COLLECTOR_METRICS_TOKEN in the collector Secret also works;
+    # then set serviceMonitor.bearerTokenSecret.
+    tokenSecret: {}
+    tokenEnvName: PS_COLLECTOR_METRICS_TOKEN
+  # PS_READYZ_TIMEOUT_SECONDS: deadline of /readyz's database check. Keep it
+  # below probes.readiness.timeoutSeconds.
+  readyzTimeoutSeconds: 2
   # Interactive API docs: /docs, /redoc and /openapi.json.
   apiDocs:
     enabled: false
@@ -322,8 +341,7 @@ collector:
       timeoutSeconds: 3
     readiness:
       enabled: true
-      # Checks the database. Set to /partner/v1/health with a collector
-      # image that predates /readyz.
+      # SELECT 1 against the database (503 when it fails).
       path: /readyz
       periodSeconds: 10
       failureThreshold: 3
@@ -334,7 +352,9 @@ collector:
     annotations: {}
   podAnnotations: {}
   podLabels: {}
-  nodeSelector: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
   tolerations: []
   affinity: {}
   topologySpreadConstraints: []
@@ -375,6 +395,9 @@ collector:
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
+    # Defaults to metrics.tokenSecret, or to the chart-created Secret when
+    # secrets.collector.values has PS_COLLECTOR_METRICS_TOKEN.
+    bearerTokenSecret: {}
 
 # ──────────────────────────────────────────────────────────────────────
 # Database migrations
@@ -383,7 +406,7 @@ collector:
 # as PreSync). It connects with the migration Secret's PS_DATABASE_URL.
 migration:
   enabled: true
-  # Defaults to the collector image. The image needs alembic.
+  # Defaults to the collector image (which includes alembic).
   image: {}
   #  registry: ghcr.io
   #  repository: prompt-shields/prompt-shields-sdk/collector
@@ -391,7 +414,9 @@ migration:
   # Turn row-level security on for every tenant table after migrating
   # (`python -m collector.rls enable`, idempotent).
   enableRls: true
-  # Overrides the generated script (alembic upgrade head, then rls enable).
+  # Overrides the generated script, which runs from /app:
+  #   alembic -c packages/db/alembic.ini upgrade head
+  #   python -m collector.rls enable          (with enableRls)
   command: []
   args: []
   # A ServiceAccount that already exists (the chart's own is created after
@@ -410,24 +435,28 @@ migration:
     limits:
       memory: 512Mi
   podAnnotations: {}
-  nodeSelector: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
   tolerations: []
   affinity: {}
 
 # ──────────────────────────────────────────────────────────────────────
 # Background work (collector image)
 # ──────────────────────────────────────────────────────────────────────
-# A single-replica Deployment for long-running loops. Each enabled process
-# is one container. Use either the worker or the matching CronJob, not both.
+# A single-replica Deployment running `python -m collector.workers`: the
+# webhook delivery loop and/or the provider usage pull, each on when its
+# interval is above 0 (at least one must be). Use either a loop here or the
+# matching CronJob (webhooksDeliver, providerUsage), not both.
 worker:
   enabled: false
-  processes:
-    webhooks:
-      enabled: true
-      args: ["python", "-m", "collector.webhooks", "deliver", "--loop", "--interval", "5"]
-    providerUsage:
-      enabled: false
-      args: ["python", "-m", "collector.provider_usage_admin", "--all-tenants", "--loop", "--interval", "86400"]
+  command: ["python", "-m", "collector.workers"]
+  # PS_WEBHOOK_WORKER_INTERVAL_SECONDS; 0 turns delivery off here.
+  webhookIntervalSeconds: 5
+  # PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS; 0 (off) or at least 3600.
+  # 86400 matches the providers' daily usage buckets.
+  providerUsagePullIntervalSeconds: 0
+  extraEnv: []
   terminationGracePeriodSeconds: 30
   resources:
     requests:
@@ -436,7 +465,9 @@ worker:
     limits:
       memory: 512Mi
   podAnnotations: {}
-  nodeSelector: {}
+  # The images are amd64 only for now.
+  nodeSelector:
+    kubernetes.io/arch: amd64
   tolerations: []
   affinity: {}
 

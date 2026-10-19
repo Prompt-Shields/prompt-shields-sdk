@@ -120,16 +120,16 @@ the migrations then find them and carry on.
 ### Migration Job
 
 A Helm `pre-install,pre-upgrade` hook (Argo CD runs it as `PreSync`) that runs,
-in the collector image:
+in the collector image (which ships alembic) from its WORKDIR `/app`:
 
 ```shell
-cd /app/packages/db && python -m alembic upgrade head
-cd /app && python -m collector.rls enable && python -m collector.rls status
+alembic -c packages/db/alembic.ini upgrade head
+python -m collector.rls enable
 ```
 
 `migration.enableRls: false` skips the RLS step; `migration.command` /
-`migration.args` replace the script; `migration.image` overrides the image
-(it needs `alembic`). Because hooks run before the release's ordinary
+`migration.args` replace the script; `migration.image` overrides the image.
+Because hooks run before the release's ordinary
 objects exist, the Job uses no chart ConfigMap or ServiceAccount, and any
 Secret or ExternalSecret the chart makes for it is itself a hook object.
 For GitOps tools that do not run Helm hooks, set `migration.enabled: false`
@@ -147,7 +147,7 @@ variable names**. For each component the chart uses the first of:
 
 | Component | Keys |
 |---|---|
-| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
+| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
 | `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`. Callers send their own provider credentials with each request |
 
@@ -176,16 +176,18 @@ Secrets Store CSI volume works for them: mount it with
 
 ## Background work
 
-The collector API pods run no background loops: the chart sets
-`PS_COLLECTOR_RUN_WORKERS=false` (`collector.runWorkers`) and leaves the
-in-process webhook worker and provider usage pull at their default of off.
-Run them in exactly one place:
+The collector has two background loops, webhook delivery and the provider
+usage pull, each on when its interval is above 0
+(`PS_WEBHOOK_WORKER_INTERVAL_SECONDS`, `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS`;
+both 0 by default). Run each in exactly one place, not in every API replica:
 
-- `worker.enabled: true` — one Deployment (one replica, `Recreate`) with a
-  container per enabled process: `webhooks` (`collector.webhooks deliver
-  --loop`) and `providerUsage` (`collector.provider_usage_admin
-  --all-tenants --loop`).
-- `cronJobs.jobs.*` — one CronJob each, all off by default:
+- `worker.enabled: true`: one Deployment (one replica, `Recreate`) running
+  `python -m collector.workers`. The chart sets both intervals on it from
+  `worker.webhookIntervalSeconds` (default 5) and
+  `worker.providerUsagePullIntervalSeconds` (default 0, off; at least 3600,
+  usually 86400). At least one must be above 0, since the process exits
+  with status 2 when no loop is on; the chart refuses to render otherwise.
+- `cronJobs.jobs.*`: one CronJob each, all off by default:
 
 | Job | Command | Default schedule |
 |---|---|---|
@@ -203,6 +205,13 @@ Add per-tenant connector syncs as extra entries, e.g.
 run with `kubectl create job --from=cronjob/...` or a temporary pod. The
 chart refuses to render webhook delivery or the provider pull in both the
 worker and a CronJob.
+
+`PS_COLLECTOR_RUN_WORKERS` (default `true` in the image) lets the API
+process run the loops too. With `collector.runWorkers.value: ""` (the
+default) the chart sets it to `false` on the API pods whenever the worker
+Deployment or any CronJob is enabled, and leaves it unset otherwise; `"true"`
+or `"false"` forces it. `collector.workers` ignores it, so the worker and
+the API share one ConfigMap and Secret.
 
 The partner and ingest rate limits are kept per process, so with N collector
 replicas a tenant can reach N times `PS_RATE_LIMIT_PER_MINUTE`. Divide the
@@ -224,10 +233,14 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
 - The gateway runs `node build/start-server.js --headless` directly (no npm
   in front of it, no local UI), so SIGTERM reaches the server. On SIGTERM it
   drains in-flight requests for up to `gateway.shutdown.timeoutMs`
-  (`PS_SHUTDOWN_TIMEOUT_MS`), after a `preStop` sleep that lets endpoints
-  update. Keep `terminationGracePeriodSeconds` above preStop + drain +
-  telemetry flush (`PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS`, 5 s).
+  (`PS_SHUTDOWN_TIMEOUT_MS`, 25000), after a 5 s `preStop` sleep that lets
+  endpoints update. `terminationGracePeriodSeconds` (40) covers preStop +
+  drain + telemetry flush (`PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS`, 5 s); raise
+  it with the drain timeout.
 - Pin images by digest with `gateway.image.digest` / `collector.image.digest`.
+- The images are **amd64 only** for now, so every workload defaults to
+  `nodeSelector: {kubernetes.io/arch: amd64}` (CronJobs use
+  `collector.nodeSelector`). Replacing a `nodeSelector` drops that entry.
 
 ## Networking
 
@@ -253,14 +266,20 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
 ## Observability
 
 - Gateway: `gateway.metrics.enabled` sets `PS_METRICS_ENABLED=true` and
-  serves Prometheus metrics on `/metrics`; put `PS_METRICS_TOKEN` in the
-  gateway Secret to require a bearer token, and reference it from
-  `gateway.serviceMonitor.bearerTokenSecret`.
+  serves Prometheus metrics on `/metrics`.
 - Collector: `collector.metrics.enabled` sets
-  `PS_COLLECTOR_METRICS_ENABLED=true` (`/metrics`). Readiness uses `/readyz`
-  (checks the database); liveness uses `/partner/v1/health`. With a collector
-  image older than `/readyz`, set `collector.probes.readiness.path` to
-  `/partner/v1/health`.
+  `PS_COLLECTOR_METRICS_ENABLED=true` (`/metrics`, 404 when off).
+- Metrics tokens: point `*.metrics.tokenSecret` (`{name, key}`) at a Secret
+  key. The chart sets `PS_METRICS_TOKEN` (gateway) or
+  `PS_COLLECTOR_METRICS_TOKEN` (collector) from it, and the ServiceMonitor
+  sends it as the bearer token. If you put the token in the component's
+  Secret instead, set `*.serviceMonitor.bearerTokenSecret` to the same key;
+  with `secrets.create` the chart finds it there itself. Without a token the
+  endpoint is open to anything the NetworkPolicy lets in.
+- Probes: the collector's readiness is `/readyz` (`SELECT 1` within
+  `collector.readyzTimeoutSeconds`, `PS_READYZ_TIMEOUT_SECONDS`, default 2;
+  the probe's `timeoutSeconds` must be larger) and its liveness
+  `/partner/v1/health`; the gateway uses `/v1/health` for both.
 - `*.serviceMonitor.enabled` renders a Prometheus Operator ServiceMonitor.
 - OpenTelemetry traces from the gateway: `PS_OTEL_ENDPOINT` in
   `gateway.config`.
@@ -340,20 +359,23 @@ can follow the images if those change.
 | `*.extraEnv` / `extraEnvFrom` / `extraVolumes` / `extraVolumeMounts` | `[]` | Extra container config |
 | `*.resources` | see values | Requests and limits |
 | `*.probes.{startup,liveness,readiness}` | see values | `enabled`, `path`, `periodSeconds`, `failureThreshold`, `timeoutSeconds` |
-| `*.terminationGracePeriodSeconds` / `*.preStopSleepSeconds` | 60/5 (gateway), 30/5 (collector) | Shutdown |
+| `*.terminationGracePeriodSeconds` / `*.preStopSleepSeconds` | 40/5 (gateway), 30/5 (collector) | Shutdown |
 | `*.service.type` / `.port` / `.annotations` | `ClusterIP` / 8787, 8000 | Services |
 | `*.autoscaling.*` | off; min 2, CPU 70% | HPA (`autoscaling/v2`) |
 | `*.podDisruptionBudget.*` | on, `minAvailable: 1` | PDB, rendered only with more than one replica |
 | `*.ingress.*` | off | Ingress |
 | `*.httpRoute.*` | off | Gateway API HTTPRoute (`parentRefs` required) |
-| `*.serviceMonitor.*` | off | ServiceMonitor (needs `*.metrics.enabled`) |
-| `*.podAnnotations` / `podLabels` / `nodeSelector` / `tolerations` / `affinity` / `topologySpreadConstraints` / `priorityClassName` | empty | Scheduling |
+| `*.serviceMonitor.*` | off | ServiceMonitor (needs `*.metrics.enabled`); `bearerTokenSecret` defaults to `*.metrics.tokenSecret` |
+| `*.nodeSelector` | `kubernetes.io/arch: amd64` | The images are amd64 only |
+| `*.podAnnotations` / `podLabels` / `tolerations` / `affinity` / `topologySpreadConstraints` / `priorityClassName` | empty | Scheduling |
 | `gateway.collectorUrl` | in-cluster collector | `PS_COLLECTOR_URL` |
 | `gateway.metrics.enabled` / `.path` | `false` / `/metrics` | `PS_METRICS_ENABLED` |
-| `gateway.shutdown.timeoutMs` / `.envName` | `45000` / `PS_SHUTDOWN_TIMEOUT_MS` | Drain on SIGTERM |
+| `*.metrics.tokenSecret` / `.tokenEnvName` | `{}` / `PS_METRICS_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN` | Metrics bearer token from a Secret key |
+| `gateway.shutdown.timeoutMs` / `.envName` | `25000` / `PS_SHUTDOWN_TIMEOUT_MS` | Drain on SIGTERM |
 | `collector.rlsRequired` | `true` | `PS_RLS_REQUIRED` |
-| `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `"false"` | In-process workers in API pods |
+| `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `""` (auto) | Background loops in API pods; auto = `false` with the worker or any CronJob |
 | `collector.metrics.enabled` / `.envName` / `.path` | `false` / `PS_COLLECTOR_METRICS_ENABLED` / `/metrics` | Collector metrics |
+| `collector.readyzTimeoutSeconds` | `2` | `PS_READYZ_TIMEOUT_SECONDS` |
 | `collector.apiDocs.enabled` / `.envName` | `false` / `PS_COLLECTOR_API_DOCS_ENABLED` | `/docs`, `/redoc`, `/openapi.json` |
 | `collector.tmpSizeLimit` | `256Mi` | `/tmp` emptyDir |
 | `collector.embeddingsCache.*` | off; `/var/cache/fastembed` | fastembed cache (`PS_EMBEDDINGS_CACHE_DIR`) |
@@ -361,7 +383,8 @@ can follow the images if those change.
 | `migration.image` / `.command` / `.args` | collector image / generated | Overrides |
 | `migration.serviceAccountName` | `""` | An existing ServiceAccount for the Job |
 | `migration.backoffLimit` / `.activeDeadlineSeconds` / `.ttlSecondsAfterFinished` / `.hookDeletePolicy` / `.annotations` | `1` / `900` / `86400` / `before-hook-creation,hook-succeeded` / `{}` | Job settings |
-| `worker.enabled` / `.processes.*` | `false` | Singleton worker Deployment |
+| `worker.enabled` / `.command` | `false` / `python -m collector.workers` | Singleton worker Deployment |
+| `worker.webhookIntervalSeconds` / `.providerUsagePullIntervalSeconds` | `5` / `0` | Loop intervals; at least one above 0 |
 | `cronJobs.defaults` | see values | Applied to every CronJob (`timeZone`, history, deadlines, resources) |
 | `cronJobs.jobs.<name>` | all off | `enabled`, `schedule`, `args`, and any default override |
 | `networkPolicy.enabled` | `true` | NetworkPolicies |
@@ -381,7 +404,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_COLLECTOR_URL` (*chart*) | Collector base URL for telemetry |
 | `PS_API_KEY` (secret) | Tenant API key sent to the collector (and as the OTLP bearer token) |
 | `PS_GATEWAY_ADMIN_TOKEN` (secret) | Admin token for the local UI (not served with `--headless`) |
-| `PS_METRICS_ENABLED` (*chart*), `PS_METRICS_TOKEN` (secret) | Prometheus `/metrics` and its bearer token |
+| `PS_METRICS_ENABLED` (*chart*), `PS_METRICS_TOKEN` (secret, or *chart* from `gateway.metrics.tokenSecret`) | Prometheus `/metrics` and its bearer token |
 | `PS_SHUTDOWN_TIMEOUT_MS` (*chart*) | Drain deadline on SIGTERM |
 | `PS_TELEMETRY_MAX_ATTEMPTS`, `PS_TELEMETRY_RETRY_BASE_MS`, `PS_TELEMETRY_MAX_PENDING`, `PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS` | Telemetry delivery to the collector |
 | `PS_OTEL_ENDPOINT`, `PS_OTEL_HEADERS`, `PS_OTEL_CAPTURE_CONTENT`, `PS_OTEL_MAX_BATCH`, `PS_OTEL_FLUSH_MS`, `PS_OTEL_MAX_QUEUE` | OpenTelemetry GenAI spans |
@@ -404,8 +427,10 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_PARTNER_JWT_SECRET` (secret) | development value | Partner token signing key |
 | `PS_ADMIN_TOKEN` (secret) | empty (off) | Operator endpoints `/api/v1/operator/*` |
 | `PS_RLS_REQUIRED` (*chart*) | `true` in the chart | Refuse to start unless RLS binds the role |
-| `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `false` in the chart | In-process background loops |
+| `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `true`; the chart sets `false` with the worker or a CronJob | Background loops in the API process |
 | `PS_COLLECTOR_METRICS_ENABLED` (*chart*) | `false` | Prometheus `/metrics` |
+| `PS_COLLECTOR_METRICS_TOKEN` (secret, or *chart* from `collector.metrics.tokenSecret`) | empty (no token) | Bearer token for `/metrics` |
+| `PS_READYZ_TIMEOUT_SECONDS` (*chart*) | `2` | `/readyz` database check deadline |
 | `PS_COLLECTOR_API_DOCS_ENABLED` (*chart*) | `false` | `/docs`, `/redoc`, `/openapi.json` |
 | `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process) |
 | `PS_AUDIT_RETENTION_DAYS` | `365` | Partner audit log retention |
@@ -415,9 +440,9 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `OPENAI_API_KEY` (secret) | — | Embeddings with the `openai` / `auto` backend |
 | `PS_WEBHOOK_SECRET_KEYS`, `PS_WEBHOOK_SECRET_KEY` (secret) | — | Keyring for webhook and provider credential secrets |
 | `PS_WEBHOOK_TIMEOUT_SECONDS`, `PS_WEBHOOK_MAX_ATTEMPTS`, `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `10`, `8`, `30` | Webhook delivery |
-| `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` | `0` | In-process delivery loop (leave 0; use the worker) |
+| `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` (*chart* on the worker) | `0` | Webhook delivery loop (set by `worker.webhookIntervalSeconds`) |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | Development only |
-| `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS`, `PS_PROVIDER_USAGE_PULL_DAYS` | `0`, `3` | In-process provider usage pull (leave 0) |
+| `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS` (*chart* on the worker), `PS_PROVIDER_USAGE_PULL_DAYS` | `0`, `3` | Provider usage pull loop (set by `worker.providerUsagePullIntervalSeconds`) |
 | `PS_PROVIDER_ADMIN_KEYS` (secret) | — | Operator-held provider admin keys per tenant (JSON) |
 | `PS_LEANIX`, `PS_LEANIX_ALLOWED_HOST_SUFFIXES` | — | LeanIX connector (JSON config is secret) |
 | `PS_SERVICENOW`, `PS_SERVICENOW_ALLOWED_HOST_SUFFIXES` | — | ServiceNow connector |

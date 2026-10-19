@@ -43,6 +43,7 @@ spec:
         - name: migrate
           image: {{ include "ps.migrationImage" . }}
           imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          workingDir: /app
           {{- if $m.command }}
           command:
             {{- toYaml $m.command | nindent 12 }}
@@ -54,12 +55,9 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              cd /app/packages/db
-              python -m alembic upgrade head
+              alembic -c packages/db/alembic.ini upgrade head
               {{- if $m.enableRls }}
-              cd /app
               python -m collector.rls enable
-              python -m collector.rls status
               {{- end }}
           {{- end }}
           env:

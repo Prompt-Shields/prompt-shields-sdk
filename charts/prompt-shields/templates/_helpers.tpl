@@ -240,12 +240,76 @@ lifecycle:
 {{- if and .Values.externalSecrets.enabled (not .Values.externalSecrets.secretStoreRef.name) -}}
 {{- fail "externalSecrets.enabled needs externalSecrets.secretStoreRef.name" -}}
 {{- end -}}
-{{- if and .Values.worker.enabled .Values.worker.processes.webhooks.enabled .Values.cronJobs.jobs.webhooksDeliver.enabled -}}
-{{- fail "Webhook delivery is enabled in both the worker and cronJobs.jobs.webhooksDeliver; enable one" -}}
+{{- $w := .Values.worker -}}
+{{- if $w.enabled -}}
+{{- $hook := float64 (default 0 $w.webhookIntervalSeconds) -}}
+{{- $pull := float64 (default 0 $w.providerUsagePullIntervalSeconds) -}}
+{{- if and (le $hook 0.0) (le $pull 0.0) -}}
+{{- fail "worker.enabled needs worker.webhookIntervalSeconds or worker.providerUsagePullIntervalSeconds above 0 (python -m collector.workers exits when no loop is on)" -}}
 {{- end -}}
-{{- if and .Values.worker.enabled .Values.worker.processes.providerUsage.enabled .Values.cronJobs.jobs.providerUsage.enabled -}}
-{{- fail "The provider usage pull is enabled in both the worker and cronJobs.jobs.providerUsage; enable one" -}}
+{{- if and (gt $pull 0.0) (lt $pull 3600.0) -}}
+{{- fail "worker.providerUsagePullIntervalSeconds must be 0 (off) or at least 3600" -}}
 {{- end -}}
+{{- if and (gt $hook 0.0) .Values.cronJobs.jobs.webhooksDeliver.enabled -}}
+{{- fail "Webhook delivery is enabled in both the worker (webhookIntervalSeconds) and cronJobs.jobs.webhooksDeliver; enable one" -}}
+{{- end -}}
+{{- if and (gt $pull 0.0) .Values.cronJobs.jobs.providerUsage.enabled -}}
+{{- fail "The provider usage pull is enabled in both the worker (providerUsagePullIntervalSeconds) and cronJobs.jobs.providerUsage; enable one" -}}
+{{- end -}}
+{{- end -}}
+{{- $c := .Values.collector -}}
+{{- if and $c.enabled $c.probes.readiness.enabled (le (float64 $c.probes.readiness.timeoutSeconds) (float64 $c.readyzTimeoutSeconds)) -}}
+{{- fail "collector.probes.readiness.timeoutSeconds must be above collector.readyzTimeoutSeconds" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* "true" when any CronJob is enabled. */}}
+{{- define "ps.anyCronJob" -}}
+{{- range $name, $job := .Values.cronJobs.jobs -}}
+{{- if and $job (kindIs "map" $job) $job.enabled -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+PS_COLLECTOR_RUN_WORKERS for the API pods: an explicit value wins; "" means
+"false" when the worker Deployment or a CronJob does background work, and
+unset otherwise (the image default, true).
+*/}}
+{{- define "ps.runWorkersValue" -}}
+{{- $v := toString .Values.collector.runWorkers.value -}}
+{{- if $v -}}
+{{- $v -}}
+{{- else if or .Values.worker.enabled (include "ps.anyCronJob" .) -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
+The Secret key ({name, key}) a ServiceMonitor sends as the bearer token, as
+YAML, or "". Call with (dict "ctx" $ "component" "gateway").
+*/}}
+{{- define "ps.metricsTokenRef" -}}
+{{- $c := index .ctx.Values .component -}}
+{{- $s := index .ctx.Values.secrets .component -}}
+{{- if $c.serviceMonitor.bearerTokenSecret -}}
+{{- toYaml $c.serviceMonitor.bearerTokenSecret -}}
+{{- else if $c.metrics.tokenSecret -}}
+{{- toYaml $c.metrics.tokenSecret -}}
+{{- else if and .ctx.Values.secrets.create (not $s.existingSecret) (hasKey $s.values $c.metrics.tokenEnvName) -}}
+{{- toYaml (dict "name" (printf "%s-%s" (include "ps.fullname" .ctx) .component) "key" $c.metrics.tokenEnvName) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* env entry from metrics.tokenSecret, or nothing. */}}
+{{- define "ps.metricsTokenEnv" -}}
+{{- $c := index .ctx.Values .component -}}
+{{- with $c.metrics.tokenSecret }}
+- name: {{ $c.metrics.tokenEnvName }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ required (printf "%s.metrics.tokenSecret.name is required" $.component) .name }}
+      key: {{ required (printf "%s.metrics.tokenSecret.key is required" $.component) .key }}
+{{- end }}
 {{- end -}}
 
 {{/* Egress rules every pod gets when networkPolicy.enabled. */}}

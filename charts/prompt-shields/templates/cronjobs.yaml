@@ -44,14 +44,10 @@ spec:
               command:
                 {{- required (printf "cronJobs.jobs.%s.args is required" $name) $j.args | toYaml | nindent 16 }}
               {{- include "ps.collectorEnvFrom" (dict "ctx" $ "secretName" $secret) | nindent 14 }}
+              {{- with $c.extraEnv }}
               env:
-                {{- with $c.runWorkers.envName }}
-                - name: {{ . }}
-                  value: "false"
-                {{- end }}
-                {{- with $c.extraEnv }}
                 {{- toYaml . | nindent 16 }}
-                {{- end }}
+              {{- end }}
               {{- include "ps.containerSecurityContext" $ | nindent 14 }}
               {{- with $j.resources }}
               resources:

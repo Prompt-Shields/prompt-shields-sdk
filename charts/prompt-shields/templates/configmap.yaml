@@ -33,6 +33,7 @@ data:
   {{- with .Values.collector.metrics.envName }}
   {{ . }}: {{ ternary "true" "false" $.Values.collector.metrics.enabled | quote }}
   {{- end }}
+  PS_READYZ_TIMEOUT_SECONDS: {{ toString .Values.collector.readyzTimeoutSeconds | quote }}
   {{- with .Values.collector.apiDocs.envName }}
   {{ . }}: {{ ternary "true" "false" $.Values.collector.apiDocs.enabled | quote }}
   {{- end }}

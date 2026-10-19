@@ -49,7 +49,39 @@ tests:
       - failedTemplate:
           errorPattern: "enable one"
 
-  - it: runs the worker as a single Recreate replica
+  - it: lets the CronJob deliver webhooks while the worker pulls usage
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+      worker.webhookIntervalSeconds: 0
+      worker.providerUsagePullIntervalSeconds: 86400
+      cronJobs.jobs.webhooksDeliver.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS
+            value: "86400"
+
+  - it: refuses a worker with no loop on
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+      worker.webhookIntervalSeconds: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "exits when no loop is on"
+
+  - it: refuses a provider usage interval under an hour
+    template: templates/worker-deployment.yaml
+    set:
+      worker.enabled: true
+      worker.providerUsagePullIntervalSeconds: 600
+    asserts:
+      - failedTemplate:
+          errorPattern: "at least 3600"
+
+  - it: runs collector.workers as a single Recreate replica
     template: templates/worker-deployment.yaml
     set:
       worker.enabled: true
@@ -61,8 +93,18 @@ tests:
           path: spec.strategy.type
           value: Recreate
       - equal:
-          path: spec.template.spec.containers[0].name
-          value: webhooks
+          path: spec.template.spec.containers[0].command
+          value: ["python", "-m", "collector.workers"]
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_WEBHOOK_WORKER_INTERVAL_SECONDS
+            value: "5"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS
+            value: "0"
 
   - it: renders PDBs only with more than one replica
     template: templates/hpa-pdb.yaml
@@ -141,3 +183,45 @@ tests:
       - equal:
           path: spec.endpoints[0].authorization.credentials.key
           value: PS_METRICS_TOKEN
+
+  - it: uses the collector metrics token Secret for the ServiceMonitor
+    template: templates/servicemonitor.yaml
+    set:
+      collector.metrics.enabled: true
+      collector.metrics.tokenSecret:
+        name: metrics
+        key: token
+      collector.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: metrics
+            key: token
+
+  - it: uses a chart-created metrics token for the ServiceMonitor
+    template: templates/servicemonitor.yaml
+    set:
+      secrets.create: true
+      secrets.collector.existingSecret: ""
+      secrets.collector.values:
+        PS_DATABASE_URL: postgresql+asyncpg://u:p@db/ps
+        PS_PARTNER_JWT_SECRET: x
+        PS_COLLECTOR_METRICS_TOKEN: t
+      collector.metrics.enabled: true
+      collector.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: ps-prompt-shields-collector
+            key: PS_COLLECTOR_METRICS_TOKEN
+
+  - it: sends no bearer token without a metrics token
+    template: templates/servicemonitor.yaml
+    set:
+      collector.metrics.enabled: true
+      collector.serviceMonitor.enabled: true
+    asserts:
+      - notExists:
+          path: spec.endpoints[0].authorization

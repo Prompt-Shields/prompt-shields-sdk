@@ -1,8 +1,12 @@
 {{- if .Values.worker.enabled }}
 {{- $w := .Values.worker }}
 {{- $c := .Values.collector }}
-{{- $secret := include "ps.collectorSecretName" . }}
-{{- /* Singleton: Recreate, so two delivery loops never overlap a rollout. */}}
+{{- /*
+`python -m collector.workers`: the webhook delivery loop and the provider
+usage pull, each on when its interval is above 0 (ps.validate checks one is).
+It ignores PS_COLLECTOR_RUN_WORKERS. Singleton with Recreate, so two loops
+never overlap during a rollout.
+*/}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,31 +40,30 @@ spec:
       {{- include "ps.podSecurityContext" . | nindent 6 }}
       terminationGracePeriodSeconds: {{ $w.terminationGracePeriodSeconds }}
       containers:
-        {{- range $name, $p := $w.processes }}
-        {{- if $p.enabled }}
-        - name: {{ $name | kebabcase }}
+        - name: worker
           image: {{ include "ps.image" (dict "ctx" $ "image" $c.image) }}
           imagePullPolicy: {{ $c.image.pullPolicy }}
           command:
-            {{- toYaml $p.args | nindent 12 }}
-          {{- include "ps.collectorEnvFrom" (dict "ctx" $ "secretName" $secret) | nindent 10 }}
+            {{- toYaml $w.command | nindent 12 }}
+          {{- include "ps.collectorEnvFrom" (dict "ctx" $ "secretName" (include "ps.collectorSecretName" .)) | nindent 10 }}
           env:
-            {{- with $c.runWorkers.envName }}
-            - name: {{ . }}
-              value: "false"
-            {{- end }}
+            - name: PS_WEBHOOK_WORKER_INTERVAL_SECONDS
+              value: {{ toString (default 0 $w.webhookIntervalSeconds) | quote }}
+            - name: PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS
+              value: {{ toString (default 0 $w.providerUsagePullIntervalSeconds) | quote }}
             {{- with $c.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- include "ps.containerSecurityContext" $ | nindent 10 }}
+            {{- with $w.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- include "ps.containerSecurityContext" . | nindent 10 }}
           {{- with $w.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            {{- include "ps.collectorVolumeMounts" $ | nindent 12 }}
-        {{- end }}
-        {{- end }}
+            {{- include "ps.collectorVolumeMounts" . | nindent 12 }}
       volumes:
         {{- include "ps.collectorVolumes" . | nindent 8 }}
       {{- with $w.nodeSelector }}

@@ -84,7 +84,7 @@ tests:
     template: templates/configmap.yaml
     documentIndex: 0
     set:
-      gateway.shutdown.timeoutMs: 30000
+      gateway.shutdown.timeoutMs: 20000
       gateway.metrics.enabled: true
     asserts:
       - equal:
@@ -92,7 +92,7 @@ tests:
           value: http://ps-prompt-shields-collector:8000
       - equal:
           path: data.PS_SHUTDOWN_TIMEOUT_MS
-          value: "30000"
+          value: "20000"
       - equal:
           path: data.PS_METRICS_ENABLED
           value: "true"
@@ -114,14 +114,106 @@ tests:
           value: "false"
         documentIndex: 1
 
-  - it: keeps background workers out of the collector pods
+  - it: leaves PS_COLLECTOR_RUN_WORKERS to the image without a worker or CronJob
     template: templates/collector-deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].env
+
+  - it: keeps background loops out of the API pods when the worker runs them
+    template: templates/collector-deployment.yaml
+    set:
+      worker.enabled: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: PS_COLLECTOR_RUN_WORKERS
             value: "false"
+
+  - it: keeps background loops out of the API pods when a CronJob is enabled
+    template: templates/collector-deployment.yaml
+    set:
+      cronJobs.jobs.webhooksDeliver.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_COLLECTOR_RUN_WORKERS
+            value: "false"
+
+  - it: lets PS_COLLECTOR_RUN_WORKERS be forced
+    template: templates/collector-deployment.yaml
+    set:
+      collector.runWorkers.value: "true"
+      worker.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_COLLECTOR_RUN_WORKERS
+            value: "true"
+
+  - it: takes the collector metrics token from a Secret
+    template: templates/collector-deployment.yaml
+    set:
+      collector.metrics.tokenSecret:
+        name: metrics
+        key: token
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_COLLECTOR_METRICS_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: metrics
+                key: token
+
+  - it: takes the gateway metrics token from a Secret
+    template: templates/gateway-deployment.yaml
+    set:
+      gateway.metrics.tokenSecret:
+        name: metrics
+        key: token
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_METRICS_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: metrics
+                key: token
+
+  - it: sets the /readyz deadline and checks it against the probe
+    template: templates/configmap.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: data.PS_READYZ_TIMEOUT_SECONDS
+          value: "2"
+
+  - it: refuses a readiness probe timeout at or below the /readyz deadline
+    # ps.validate runs from configmap.yaml and secrets.yaml; the error is
+    # reported against secrets.yaml.
+    template: templates/secrets.yaml
+    set:
+      collector.readyzTimeoutSeconds: 5
+    asserts:
+      - failedTemplate:
+          errorPattern: "readiness.timeoutSeconds must be above"
+
+  - it: uses the gateway's drain contract by default
+    template: templates/gateway-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 40
+      - equal:
+          path: spec.template.spec.nodeSelector
+          value:
+            kubernetes.io/arch: amd64
 
   - it: requires RLS by default
     template: templates/configmap.yaml

@@ -60,11 +60,16 @@ spec:
               containerPort: {{ $c.port }}
               protocol: TCP
           {{- include "ps.collectorEnvFrom" (dict "ctx" $ "secretName" (include "ps.collectorSecretName" .)) | nindent 10 }}
-          {{- if or $c.runWorkers.envName $c.extraEnv }}
+          {{- $runWorkers := include "ps.runWorkersValue" . }}
+          {{- $tokenEnv := include "ps.metricsTokenEnv" (dict "ctx" $ "component" "collector") }}
+          {{- if or (and $c.runWorkers.envName $runWorkers) $tokenEnv $c.extraEnv }}
           env:
-            {{- with $c.runWorkers.envName }}
-            - name: {{ . }}
-              value: {{ toString $c.runWorkers.value | quote }}
+            {{- if and $c.runWorkers.envName $runWorkers }}
+            - name: {{ $c.runWorkers.envName }}
+              value: {{ $runWorkers | quote }}
+            {{- end }}
+            {{- with $tokenEnv }}
+            {{- . | nindent 12 }}
             {{- end }}
             {{- with $c.extraEnv }}
             {{- toYaml . | nindent 12 }}
