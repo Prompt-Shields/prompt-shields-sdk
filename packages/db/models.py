@@ -215,6 +215,53 @@ class ProviderKeyFingerprint(Base):
     )
 
 
+class McpToolUsage(Base):
+    """Observed MCP tool calls, aggregated (#63, Phase 0: observe only).
+
+    One row per (tenant, source, server, tool, calling service, environment)
+    with call and error counts and first/last seen. Names only: tool
+    arguments, results, descriptions and server URLs are never stored.
+
+    ``server_name`` is the server's identity: the name it reports
+    (``serverInfo.name``, SDK), the OTel ``server.address`` host (client
+    spans) or the server's ``service.name`` (server spans); "unknown" when
+    none is known. ``source`` is ``sdk``, ``otel``, ``gateway`` or ``scan``.
+    ``calling_service`` and ``environment`` are "" when not reported, so the
+    upsert key has no NULLs. Separate from ``ai_assets`` on purpose: an MCP
+    server is not an AI model. Rows not seen within the tenant's retention
+    period are purged (collector/retention.py).
+    """
+
+    __tablename__ = "mcp_tool_usage"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    source = Column(Text, nullable=False)
+    server_name = Column(Text, nullable=False)
+    tool_name = Column(Text, nullable=False)
+    calling_service = Column(Text, nullable=False, default="", server_default="")
+    environment = Column(Text, nullable=False, default="", server_default="")
+    transport = Column(Text)
+    call_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    error_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    # Sum over calls that reported a latency, and how many did (for a mean).
+    latency_ms_total = Column(BigInteger, nullable=False, default=0, server_default="0")
+    latency_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    first_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    last_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        # Upsert key.
+        Index(
+            "ux_mcp_tool_usage_key",
+            "tenant_id", "source", "server_name", "tool_name", "calling_service",
+            "environment",
+            unique=True,
+        ),
+        Index("ix_mcp_tool_usage_tenant_last_seen", "tenant_id", "last_seen"),
+    )
+
+
 class DataFlow(Base):
     __tablename__ = "data_flows"
 

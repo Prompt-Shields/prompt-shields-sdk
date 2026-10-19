@@ -29,6 +29,7 @@ from db.models import (
     AssetAttestation,
     Base,
     DataFlow,
+    McpToolUsage,
     PartnerAuditLog,
     PartnerCredential,
     ProviderCredential,
@@ -119,6 +120,13 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     provider="openai",
                     api_key_id=f"key_{name}",
                     api_key_fingerprint="0123456789abcdef",
+                ),
+                McpToolUsage(
+                    tenant_id=tenant_id,
+                    source="sdk",
+                    server_name=f"server-{name}",
+                    tool_name="search",
+                    call_count=1,
                 ),
             ]
         )
@@ -382,6 +390,53 @@ async def test_extended_usage_fields_ingest_under_rls(rls_db):
     )
 
 
+async def test_mcp_tool_usage_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    head_a = {"Authorization": f"Bearer {KEY_A}"}
+    head_b = {"Authorization": f"Bearer {KEY_B}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/ingest/mcp", headers=head_a,
+            json={"events": [{"server_name": "jira", "tool_name": "create"}] * 2},
+        )
+        assert resp.status_code == 200, resp.text
+        span = {
+            "name": "tools/call search", "kind": 3,
+            "attributes": [
+                {"key": "mcp.method.name", "value": {"stringValue": "tools/call"}},
+                {"key": "gen_ai.tool.name", "value": {"stringValue": "search"}},
+            ],
+        }
+        resp = await c.post(
+            "/ingest/otel/v1/traces",
+            headers={**head_a, "Content-Type": "application/json"},
+            content=json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": [span]}]}]}),
+        )
+        assert resp.status_code == 200, resp.text
+
+        seen = {}
+        for me, head in (("a", head_a), ("b", head_b)):
+            resp = await c.get("/api/v1/registry/mcp-tools", headers=head)
+            assert resp.status_code == 200, resp.text
+            seen[me] = {(d["server_name"], d["tool_name"], d["call_count"])
+                        for d in resp.json()["data"]}
+    assert seen["a"] == {("server-a", "search", 1), ("jira", "create", 2),
+                         ("unknown", "search", 1)}
+    assert seen["b"] == {("server-b", "search", 1)}
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        s.add(McpToolUsage(tenant_id=b, source="sdk", server_name="evil",
+                           tool_name="t"))
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        hit = await s.execute(text("UPDATE mcp_tool_usage SET call_count = 0"))
+        assert hit.rowcount == 3  # only tenant a's rows
+        await s.rollback()
+
+
 async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, caplog):
     monkeypatch.setattr(settings, "admin_token", TOKEN)
     a, b = rls_db["a"], rls_db["b"]
@@ -401,6 +456,7 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         assert resp.json()["rows_deleted"]["asset_attestations"] == 1
         assert resp.json()["rows_deleted"]["webhook_deliveries"] == 1
         assert resp.json()["rows_deleted"]["webhook_subscriptions"] == 1
+        assert resp.json()["rows_deleted"]["mcp_tool_usage"] == 1
 
     assert any(
         "rls bypass granted reason=operator:POST /api/v1/operator/retention/purge"

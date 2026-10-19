@@ -21,12 +21,15 @@ from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
 from collector.loss_accounting import OtelCounts, otel_client_id, record_otel
+from collector.mcp_usage import McpCall, record_calls
 from collector.otel_mapping import (
     GenAISpan,
     count_spans,
     invalid_attributes,
     is_genai_span,
+    is_mcp_span,
     iter_spans,
+    map_mcp_span,
     map_span,
     safe_attributes,
 )
@@ -178,10 +181,16 @@ async def ingest_otel_traces(request: Request):
             413, "Payload Too Large", f"More than {MAX_SPANS} spans in one request"
         )
 
-    mapped, counts = classify_spans(payload)
-    if mapped:
+    mcp_calls: list[McpCall] = []
+    mapped, counts = classify_spans(payload, mcp_calls=mcp_calls)
+    if mapped or mcp_calls:
         try:
-            await write_spans(db, tenant_id, mapped)
+            if mcp_calls:
+                await record_calls(db, tenant_id, mcp_calls)
+            if mapped:
+                await write_spans(db, tenant_id, mapped)  # commits
+            else:
+                await db.commit()
         except Exception:
             with contextlib.suppress(Exception):
                 await db.rollback()
@@ -213,16 +222,29 @@ NO_VENDOR = "no_vendor"
 
 def classify_spans(
     payload: dict,
+    *,
+    mcp_calls: list[McpCall] | None = None,
 ) -> tuple[list[GenAISpan], dict[str, OtelCounts]]:
     """Map every span and count, per OTLP client (service), what is stored,
     rejected (GenAI span without a vendor), ignored (non-GenAI span) and
-    which values were dropped as invalid (#87)."""
+    which values were dropped as invalid (#87).
+
+    MCP ``tools/call`` spans are tool calls, not usage events: they are
+    appended to ``mcp_calls`` (when given) and left out of the usage-event
+    counts. Other MCP spans are classified like any span."""
     mapped: list[GenAISpan] = []
     counts: dict[str, OtelCounts] = {}
     for span, resource_attrs in iter_spans(payload):
         client_id = otel_client_id(resource_attrs)
         c = counts.setdefault(client_id, OtelCounts())
-        if not is_genai_span(safe_attributes(span.get("attributes"))):
+        attrs = safe_attributes(span.get("attributes"))
+        if is_mcp_span(attrs):
+            call = map_mcp_span(span, resource_attrs)
+            if call is not None:
+                if mcp_calls is not None:
+                    mcp_calls.append(call)
+                continue
+        if not is_genai_span(attrs):
             c.ignore({"span:non_genai": 1})
             continue
         result = map_span(span, resource_attrs)

@@ -48,6 +48,7 @@ TENANT_TABLES: dict[str, str] = {
     "webhook_deliveries": "tenant_id",
     "provider_credentials": "tenant_id",
     "provider_key_fingerprints": "tenant_id",
+    "mcp_tool_usage": "tenant_id",
 }
 
 

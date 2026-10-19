@@ -7,6 +7,8 @@ description: How long raw usage events are kept, how to purge them, and how to e
 
 Raw usage events (`ai_usage_events`) can include session ids and prompt hashes, so the collector keeps them for a limited time. Assets in the registry, with their first-seen and last-seen dates, are kept. Purging old events does not remove an asset.
 
+MCP tool usage (`mcp_tool_usage`: per server and tool call counts, first and last seen) follows the same retention period: the purge deletes rows not seen since the cutoff, since they only summarise calls older than it. The purge result reports them as `mcp_tool_usage_deleted`.
+
 ## Retention period
 
 Each tenant keeps usage events for `retention_days` days:
@@ -58,7 +60,7 @@ These endpoints act across tenants, so a tenant API key cannot call them. Set `P
 
 ## Erasing a tenant
 
-`DELETE /api/v1/operator/tenants/{tenant_id}` removes everything the tenant owns: usage events, data flows, risk mappings, partner audit log, partner credentials, assets, and finally the tenant row. The `confirm` query parameter must repeat the tenant id.
+`DELETE /api/v1/operator/tenants/{tenant_id}` removes everything the tenant owns: usage events, data flows, risk mappings, partner audit log, partner credentials, assets, MCP tool usage, and finally the tenant row. The `confirm` query parameter must repeat the tenant id.
 
 Erasure runs in batches, child tables first. If it stops part-way, run it again: it is idempotent and reports `tenant_existed: false` once the tenant row is gone. Every erasure is recorded in `retention_audit_log` with per-table counts. That table has no foreign key to `tenants`, so the record survives the erasure. It stores counts only, never the deleted data.
 
