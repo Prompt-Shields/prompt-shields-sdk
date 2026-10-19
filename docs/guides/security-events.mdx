@@ -1,0 +1,172 @@
+---
+title: Security Events
+description: Guardrail, PII, injection, auth, rate-limit and payload events from the gateway, as JSON lines for Splunk and other SIEMs
+---
+
+# Security Events
+
+The Prompt Shields gateway can write a **security-event stream**: one JSON line per guardrail verdict, PII detection, prompt-injection detection, gateway auth failure, rate-limit hit and rejected payload. Your existing log pipeline (Splunk Universal Forwarder, Splunk OTel Collector, Fluent Bit, Vector) can ship it to your SIEM unchanged.
+
+Field names follow OpenTelemetry (`http.*`, `gen_ai.*`), ECS (`event.*`, `log.logger`) and the Splunk CIM (`action`, `signature`, `severity`, `vendor_product`), so no field extraction is needed.
+
+## Enable
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PS_SECURITY_EVENTS_LOG` | unset (off) | `true` or `stdout`: JSON lines on stdout. `stderr`: on stderr. Anything else: off. |
+| `PS_SECURITY_EVENTS_TENANT` | unset | Sets `ps.tenant` on every event (one gateway deployment serves one tenant). |
+| `PS_METRICS_ENABLED` | `false` | Also exposes the security metrics below on `GET /metrics`. |
+
+With `PS_SECURITY_EVENTS_LOG` unset the gateway's log output is unchanged.
+
+Every line carries `"log.logger":"ps.security"`. The lines are written by a dedicated writer, not through the gateway's `console` logging, so you can route them by that field (or by sending them to stderr) apart from everything else.
+
+## Privacy
+
+Events **never** contain prompt or response content, PII values, guardrail explanations or excerpts, credentials or tokens, client IP addresses, or the `X-PS-Owner` email. PII is reported as a **category and a count** only. Identifiers that are not short, structured tokens (hook ids, model names, categories) are replaced with `other`. Tests enforce this.
+
+## Schema (v1)
+
+The JSON Schema is [`docs/security-events.schema.json`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/security-events.schema.json); the TypeScript types are in `gateway/src/middlewares/psSecurityEvents/schema.ts`. Within v1, fields may be added but are never renamed, removed or given a new meaning; `ps.schema_version` is `1.0.0`.
+
+### Fields on every event
+
+| Field | Example | Meaning |
+|---|---|---|
+| `@timestamp` | `2026-10-19T09:12:03.512Z` | Time recorded (UTC) |
+| `ps.schema_version` | `1.0.0` | Schema version |
+| `event.id` | UUID | Unique per event |
+| `event.name` | `guardrail.verdict` | Event type (below) |
+| `event.kind` | `alert` / `event` | `alert` for detections and denials |
+| `event.category` | `["intrusion_detection"]` | ECS category |
+| `event.outcome` | `success` / `failure` | ECS outcome |
+| `log.logger` | `ps.security` | Route on this |
+| `service.name` | `prompt-shields-gateway` | |
+| `vendor_product` | `Prompt Shields Gateway` | CIM |
+| `severity` | `informational` … `high` | CIM |
+| `action` | `allowed` / `blocked` / `failure` | CIM |
+| `signature` | `portkey.pii` | Check id, PII category or rejection reason |
+| `ps.request_id` | `trace-abc-123` | `x-portkey-trace-id` when it is a short token, else generated; shared by all events of one request |
+| `http.route` | `/v1/chat/completions` | Matched route pattern |
+| `http.request.method` | `POST` | |
+| `ps.tenant` | `bank-a` | From `PS_SECURITY_EVENTS_TENANT` (optional) |
+| `ps.business_unit` | `Retail` | Workspace: the `X-PS-Business-Unit` header (optional) |
+| `ps.environment` | `production` | `X-PS-Environment` header (optional) |
+| `gen_ai.provider.name` | `openai` | Provider (optional) |
+| `gen_ai.request.model` | `gpt-4o-mini` | Requested model (optional) |
+
+### Event types
+
+| `event.name` | CIM data model | When | Extra fields |
+|---|---|---|---|
+| `guardrail.verdict` | Intrusion Detection / Alerts | Once per guardrail or mutator check run, input or output | `ps.guardrail.hook_id`, `ps.guardrail.hook_type`, `ps.guardrail.check_id`, `ps.guardrail.stage` (`input`/`output`), `ps.guardrail.verdict` (`allow`/`deny`/`flag`/`error`), `ps.guardrail.deny`, `ps.guardrail.duration_ms` |
+| `pii.detected` | DLP | A PII check (`portkey.pii`, `azure.pii`, `patronus.pii`, `patronus.phi`, `promptfoo.pii`, `pangea.pii`, `qualifire.pii`) found PII; one event per category | guardrail fields plus `ps.pii.category`, `ps.pii.count` |
+| `injection.detected` | Intrusion Detection | A prompt-injection check (`qualifire.promptInjections`, `azure.shieldPrompt`, `promptfoo.guard`, `sydelabs.sydeguard`) failed | guardrail fields |
+| `auth.failure` | Authentication | Wrong or missing admin token (console, `/log/stream`) or `/metrics` bearer token | `ps.auth.realm` (`admin`/`metrics`), `ps.auth.reason` (`missing_credentials`/`invalid_credentials`), `http.response.status_code` |
+| `rate_limit.hit` | Alerts | A response with status 429 | `ps.rate_limit.source` (`upstream` = a provider, `gateway`), `http.response.status_code` |
+| `payload.rejected` | Network | The gateway refused the body before any provider call: over `MAX_JSON_PAYLOAD_SIZE_IN_MB` / `MAX_FILE_PAYLOAD_SIZE_IN_MB` (413), multipart without `Content-Length` (411), or a proxied request guardrails cannot inspect (400) | `ps.payload.reason` (`payload_too_large`/`length_required`/`unsupported_guardrail`), `http.response.status_code`, `http.request.body.size` |
+
+Verdicts: `allow` the check passed; `deny` it failed and the hook denies (the client got a 446); `flag` it failed and the request continued (246); `error` the check itself errored.
+
+Guardrail events come from one place in the gateway (the hooks manager), so they cover unified routes, `/v1/responses`, Messages routed via Responses and proxied model calls alike.
+
+### Example
+
+```json
+{"@timestamp":"2026-10-19T09:12:03.512Z","ps.schema_version":"1.0.0","event.id":"5d0c…","event.name":"guardrail.verdict","log.logger":"ps.security","service.name":"prompt-shields-gateway","vendor_product":"Prompt Shields Gateway","event.kind":"alert","event.category":["intrusion_detection"],"event.outcome":"failure","severity":"high","action":"blocked","signature":"default.contains","ps.request_id":"trace-abc-123","http.route":"/v1/chat/completions","http.request.method":"POST","ps.tenant":"bank-a","ps.business_unit":"Retail","ps.environment":"production","gen_ai.provider.name":"openai","gen_ai.request.model":"gpt-4o-mini","ps.guardrail.hook_id":"block-secrets","ps.guardrail.hook_type":"guardrail","ps.guardrail.check_id":"default.contains","ps.guardrail.stage":"input","ps.guardrail.verdict":"deny","ps.guardrail.deny":true,"ps.guardrail.duration_ms":1}
+{"@timestamp":"2026-10-19T09:12:04.020Z","ps.schema_version":"1.0.0","event.id":"9a41…","event.name":"pii.detected","log.logger":"ps.security","service.name":"prompt-shields-gateway","vendor_product":"Prompt Shields Gateway","event.kind":"alert","event.category":["intrusion_detection"],"event.outcome":"failure","severity":"medium","action":"allowed","signature":"EMAIL_ADDRESS","ps.request_id":"0f3e…","http.route":"/v1/chat/completions","http.request.method":"POST","ps.guardrail.hook_id":"pii","ps.guardrail.hook_type":"guardrail","ps.guardrail.check_id":"portkey.pii","ps.guardrail.stage":"input","ps.guardrail.verdict":"flag","ps.pii.category":"EMAIL_ADDRESS","ps.pii.count":2}
+```
+
+## Metrics
+
+With `PS_METRICS_ENABLED=true`, `GET /metrics` also exposes:
+
+| Metric | Labels | Notes |
+|---|---|---|
+| `ps_gateway_guardrail_verdicts_total` | `hook`, `check`, `verdict`, `stage` | `check` is a known plugin id or `other`. Shorthand `input_guardrails` / `output_guardrails` without an `id` count as `input_guardrail` / `output_guardrail`; after 100 distinct hook ids, new ones are `other`. |
+| `ps_gateway_pii_detections_total` | `category` | Entities found; after 200 distinct categories, new ones are `other`. |
+| `ps_gateway_rate_limited_total` | `source` | `upstream` or `gateway` |
+| `ps_gateway_telemetry_dropped_total` | `sink`, `reason` | `otel` (`queue_full`, `http_error`, `send_failed`): OTLP span batches the exporter dropped. `ps_telemetry`: collector events dropped (the reasons of `GET /telemetry/loss`). `security_events` (`queue_full`, `write_error`): event lines dropped. |
+
+## Delivery guarantees
+
+The stream is **best effort**. Lines are queued in memory and written on the next event-loop turn, so logging never delays a request. If stdout cannot keep up, the gateway waits for it; past 10,000 queued lines the oldest are dropped and counted in `ps_gateway_telemetry_dropped_total{sink="security_events"}`. Lines still queued when the process is killed are lost.
+
+This makes the stream right for detection and dashboards, not on its own a regulatory audit trail (for example under DORA). Alert on `ps_gateway_telemetry_dropped_total` so gaps are visible, keep clocks in sync (NTP), and use your collector's persistent queue for durability. A durable, tamper-evident audit export from the collector is planned separately.
+
+Once exported, the copy in your SIEM follows **your** retention policy; Prompt Shields does not control it.
+
+## Send to Splunk
+
+### Splunk OTel Collector (`filelog` receiver)
+
+Run the gateway with `PS_SECURITY_EVENTS_LOG=true` and let the Collector read the container log, keep only security events and send them to HEC. Adapt paths to your runtime; with the Splunk OTel Collector for Kubernetes Helm chart, container logs are already collected and you only need the filter and sourcetype.
+
+```yaml
+receivers:
+  filelog/ps_security:
+    include: [/var/log/pods/*_prompt-shields-gateway-*/*/*.log]
+    start_at: end
+    operators:
+      - type: container          # unwraps the Docker / CRI log line
+      - type: filter             # drop everything that is not a security event
+        expr: 'not (body contains "\"log.logger\":\"ps.security\"")'
+  prometheus/ps_gateway:
+    config:
+      scrape_configs:
+        - job_name: prompt-shields-gateway
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["prompt-shields-gateway:8787"]
+          # authorization: { credentials: <PS_METRICS_TOKEN> }   # if set
+
+exporters:
+  splunk_hec/ps_security:
+    endpoint: https://splunk.example.internal:8088/services/collector
+    token: ${env:SPLUNK_HEC_TOKEN}
+    index: ps_security
+    source: prompt-shields-gateway
+    sourcetype: "promptshields:gateway:security"
+
+service:
+  pipelines:
+    logs/ps_security:
+      receivers: [filelog/ps_security]
+      exporters: [splunk_hec/ps_security]
+    metrics/ps_gateway:
+      receivers: [prometheus/ps_gateway]
+      exporters: [signalfx]       # or your metrics backend
+```
+
+### Universal Forwarder or any log shipper
+
+Point the forwarder at the gateway's stdout (container log file or journald) and assign the sourcetype to lines containing `"log.logger":"ps.security"`. A minimal `props.conf` for that sourcetype:
+
+```ini
+[promptshields:gateway:security]
+KV_MODE = json
+SHOULD_LINEMERGE = false
+TIME_PREFIX = "@timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%Z
+MAX_TIMESTAMP_LOOKAHEAD = 32
+```
+
+Writing the events to stderr (`PS_SECURITY_EVENTS_LOG=stderr`) is an alternative way to separate them, if your runtime keeps stdout and stderr apart.
+
+On Cloudflare Workers the lines go to the Workers console; ship them with Workers Logpush.
+
+### Example searches
+
+```spl
+index=ps_security event.name=guardrail.verdict ps.guardrail.verdict=deny
+| stats count by ps.guardrail.check_id, ps.business_unit
+
+index=ps_security event.name=pii.detected
+| timechart sum(ps.pii.count) by ps.pii.category
+```
+
+### Coming later
+
+- **Native Splunk HEC sink** in the gateway (env-configured, with retries and loss accounting), for installs that run no log agent.
+- **OTel log export**: the same events as OTLP log records (`/v1/logs`) next to the existing traces, for the Splunk OTel Collector's `otlp` receiver.
+- A Splunk Technology Add-on with CIM tags and dashboards.

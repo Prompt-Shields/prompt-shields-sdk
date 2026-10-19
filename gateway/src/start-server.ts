@@ -16,6 +16,7 @@ import {
   readAdminToken,
 } from './middlewares/adminAuth';
 import { psTelemetrySender } from './middlewares/ps-telemetry';
+import { flushSecurityEvents } from './middlewares/psSecurityEvents';
 
 // Extract the port number from the command line arguments
 const defaultPort = 8787;
@@ -214,7 +215,10 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) process.exit(1);
     shuttingDown = true;
     server.close();
-    psTelemetrySender.shutdown().finally(() => process.exit(0));
+    psTelemetrySender.shutdown().finally(() => {
+      flushSecurityEvents(true);
+      process.exit(0);
+    });
   });
 }
 

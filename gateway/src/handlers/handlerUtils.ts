@@ -360,7 +360,7 @@ export async function tryPost(
       requestHeaders
     );
     if (decision.kind === 'unsupported') {
-      return proxyGuardrailsUnsupportedResponse(decision.reason);
+      return proxyGuardrailsUnsupportedResponse(decision.reason, c);
     }
     if (decision.kind === 'hooks' && decision.fn === 'createModelResponse') {
       const unsupported = responsesUnsupportedChecks(targetHooks);
