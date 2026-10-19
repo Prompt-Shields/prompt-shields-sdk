@@ -54,7 +54,7 @@ export async function proxyHandler(c: Context): Promise<Response> {
         requestHeaders
       );
       if (decision.kind === 'unsupported') {
-        return proxyGuardrailsUnsupportedResponse(decision.reason);
+        return proxyGuardrailsUnsupportedResponse(decision.reason, c);
       }
     }
 

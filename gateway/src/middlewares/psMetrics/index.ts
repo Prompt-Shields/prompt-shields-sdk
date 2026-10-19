@@ -4,10 +4,14 @@ import { providerFromHeaders, reportsOwnUsage } from '../ps-telemetry';
 import { inputTokensOf, observeStream } from '../psStreamObserver';
 import {
   Counter,
+  defaultRegistry,
   Histogram,
   PROMETHEUS_CONTENT_TYPE,
-  Registry,
 } from './registry';
+import { isMetricsEnabled, labelValue, routeOf } from './labels';
+// Security and telemetry-health metrics register in the same registry.
+import './security';
+import { reportAuthFailure } from '../psSecurityEvents';
 
 /**
  * PS gateway Prometheus metrics (#61). Opt-in with PS_METRICS_ENABLED=true;
@@ -17,7 +21,7 @@ import {
  * X-PS business context (business unit, environment) only. Prompt and
  * completion content never reach a label.
  */
-export const registry = new Registry();
+export const registry = defaultRegistry;
 
 const LABELS = [
   'route',
@@ -54,26 +58,6 @@ export const streamsTotal = registry.register(
   )
 );
 
-// Bounded, printable label values; anything else collapses to "other".
-const labelValue = (raw: unknown, fallback = 'none'): string => {
-  if (typeof raw !== 'string' || !raw) return fallback;
-  const v = raw.trim().slice(0, 64);
-  return /^[A-Za-z0-9 _.:\/@-]+$/.test(v) ? v : 'other';
-};
-
-const routeOf = (c: Context): string => {
-  // The first concrete route that matched is the one that handled the
-  // request (later catch-alls such as /v1/* also match). Using its pattern,
-  // e.g. /v1/files/:id, keeps the label low-cardinality for paths with ids.
-  const matched = (c.req as any).matchedRoutes as
-    | { path: string; method: string }[]
-    | undefined;
-  const route = matched?.find(
-    (r) => r.method !== 'ALL' && r.path !== '*' && r.path !== '/*'
-  )?.path;
-  return route ?? 'unmatched';
-};
-
 const usageOf = (body: any): { input?: number; output?: number } => {
   const u = body?.usage;
   if (!u || typeof u !== 'object') return {};
@@ -82,9 +66,6 @@ const usageOf = (body: any): { input?: number; output?: number } => {
     output: u.completion_tokens ?? u.output_tokens,
   };
 };
-
-export const isMetricsEnabled = (c: Context) =>
-  env<Record<string, string | undefined>>(c).PS_METRICS_ENABLED === 'true';
 
 export function psMetrics() {
   return async (c: Context, next: Next) => {
@@ -181,11 +162,20 @@ export function psMetrics() {
   };
 }
 
+export { isMetricsEnabled, labelValue, routeOf };
+
 export function metricsHandler(c: Context) {
   if (!isMetricsEnabled(c))
     return c.json({ message: 'Not Found', ok: false }, 404);
   const token = env<Record<string, string | undefined>>(c).PS_METRICS_TOKEN;
   if (token && c.req.header('authorization') !== `Bearer ${token}`) {
+    reportAuthFailure(
+      c,
+      'metrics',
+      c.req.header('authorization')
+        ? 'invalid_credentials'
+        : 'missing_credentials'
+    );
     return c.json({ status: 'failure', message: 'Unauthorized' }, 401);
   }
   c.header('Content-Type', PROMETHEUS_CONTENT_TYPE);
