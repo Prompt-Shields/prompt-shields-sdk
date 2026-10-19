@@ -19,6 +19,7 @@ import {
   traceIdOf,
 } from './psAttempts';
 import { PSTelemetrySender } from './psTelemetrySender';
+import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 
 interface PSConfig {
   collectorUrl: string;
@@ -360,12 +361,10 @@ export function psTelemetryMiddleware() {
       (request as any)._psHeaders = extractPSHeaders(request.headers);
       (request as any)._psProvider = provider;
 
-      // Strip PS headers before forwarding to upstream provider
-      const cleaned = { ...request.headers };
-      Object.keys(cleaned).forEach((k) => {
-        if (k.toLowerCase().startsWith('x-ps-')) delete cleaned[k];
-      });
-      request.headers = cleaned;
+      // Strip PS headers from this request object. Note: this does not reach
+      // the real upstream call; the gateway strips X-PS-* centrally where
+      // upstream headers are finalised (utils/psInternalHeaders.ts).
+      request.headers = stripPSInternalHeaders(request.headers);
 
       return request;
     },
