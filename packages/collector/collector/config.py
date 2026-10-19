@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     retention_batch_size: int = 5000
     # Operator token for /api/v1/operator/*. Empty disables those endpoints.
     admin_token: str = ""
+    # Serve FastAPI's /docs, /redoc and /openapi.json
+    # (PS_COLLECTOR_API_DOCS_ENABLED). Off by default: they are
+    # unauthenticated and list every route, including operator routes.
+    # docs/openapi.yaml is the published Partner API spec.
+    collector_api_docs_enabled: bool = False
     # Row-level security (#83). The collector always sets the tenant context;
     # with this on it also refuses to start unless RLS is enforced on every
     # tenant table for its database role. See collector/rls.py.
