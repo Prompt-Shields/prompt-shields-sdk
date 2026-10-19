@@ -70,6 +70,7 @@ DiscoverySource = Literal[
     "survey",
     "otel",
     "code_scan",
+    "kong",
 ]
 
 

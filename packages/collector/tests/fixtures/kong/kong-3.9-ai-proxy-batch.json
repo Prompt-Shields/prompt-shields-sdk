@@ -1,0 +1,117 @@
+[
+  {
+    "request": {
+      "id": "1f2e3d4c5b6a79880011223344556677",
+      "uri": "/openai/llm/v1/chat/good",
+      "url": "http://kong.bank.example:8000/openai/llm/v1/chat/good",
+      "querystring": {},
+      "method": "POST",
+      "headers": {
+        "host": "kong.bank.example:8000",
+        "content-type": "application/json",
+        "authorization": "REDACTED",
+        "apikey": "kong-consumer-key-SECRETKEY",
+        "x-ps-business-unit": "Retail Banking",
+        "x-ps-use-case": "customer-support",
+        "x-ps-environment": "production"
+      },
+      "size": 380
+    },
+    "upstream_uri": "/v1/chat/completions",
+    "upstream_status": "200",
+    "response": {"status": 200, "headers": {"content-type": "application/json"}, "size": 900},
+    "latencies": {"kong": 2, "proxy": 640, "request": 650, "receive": 0},
+    "tries": [{"ip": "127.0.0.1", "port": 9001, "balancer_latency": 0}],
+    "route": {"id": "r-1", "name": "openai-chat", "paths": ["/openai/llm/v1/chat/good"]},
+    "service": {"id": "s-1", "name": "openai", "host": "api.openai.com"},
+    "consumer": {"id": "c-1", "username": "support-bot"},
+    "client_ip": "127.0.0.1",
+    "started_at": 1730000000000,
+    "source": "upstream",
+    "workspace": "0dc6f45b-8f8d-40d2-a504-473544ee190b",
+    "workspace_name": "default",
+    "ai": {
+      "payload": {"original_request": "{\"messages\":[{\"role\":\"user\",\"content\":\"my social security number is 123-45-6789\"}]}"},
+      "proxy": {
+        "meta": {
+          "plugin_id": "6e7c40f6-ce96-48e4-a366-d109c169e444",
+          "provider_name": "openai",
+          "request_model": "gpt-3.5-turbo",
+          "response_model": "gpt-3.5-turbo-0613",
+          "llm_latency": 618
+        },
+        "usage": {
+          "prompt_tokens": 25,
+          "completion_tokens": 12,
+          "total_tokens": 37,
+          "time_per_token": 51.5,
+          "cost": 0.00037
+        },
+        "payload": {
+          "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"my social security number is 123-45-6789\"}]}",
+          "response": "{\"choices\":[{\"message\":{\"content\":\"my social security number is 123-45-6789\"}}]}"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": "aa00bb11cc22dd33ee44ff5566778899",
+      "uri": "/azure/chat",
+      "url": "https://kong.bank.example:8443/azure/chat",
+      "querystring": {},
+      "method": "POST",
+      "headers": {"host": "kong.bank.example:8443", "api-key": "azure-SECRETKEY", "content-type": "application/json"},
+      "size": 300
+    },
+    "upstream_uri": "/openai/deployments/gpt4o-prod/chat/completions?api-version=2024-02-01",
+    "upstream_status": "200",
+    "response": {"status": 200, "headers": {}, "size": 700},
+    "latencies": {"kong": 1, "proxy": 900, "request": 905, "receive": 0},
+    "route": {"id": "r-2", "name": "payments-assistant"},
+    "service": {"id": "s-2", "name": "azure-openai"},
+    "client_ip": "10.1.2.3",
+    "started_at": 1730000001000,
+    "workspace_name": "default",
+    "ai": {
+      "proxy": {
+        "meta": {
+          "plugin_id": "0b3f3a52-6f0e-4d3c-9b8c-6a0f6a7c1d2e",
+          "provider_name": "azure",
+          "request_model": "gpt-4o",
+          "response_model": "gpt-4o-2024-05-13",
+          "llm_latency": 870,
+          "azure_instance_id": "bank-openai-weu",
+          "azure_deployment_id": "gpt4o-prod",
+          "azure_api_version": "2024-02-01"
+        },
+        "usage": {
+          "prompt_tokens": 400,
+          "completion_tokens": 100,
+          "total_tokens": 500,
+          "time_per_token": 8.7
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": "00000000000000000000000000000001",
+      "uri": "/accounts/v1/balance",
+      "url": "https://kong.bank.example:8443/accounts/v1/balance",
+      "querystring": {},
+      "method": "GET",
+      "headers": {"host": "kong.bank.example:8443", "authorization": "REDACTED"},
+      "size": 120
+    },
+    "upstream_uri": "/balance",
+    "upstream_status": "200",
+    "response": {"status": 200, "headers": {}, "size": 80},
+    "latencies": {"kong": 1, "proxy": 20, "request": 22, "receive": 0},
+    "route": {"id": "r-3", "name": "accounts"},
+    "service": {"id": "s-3", "name": "core-banking"},
+    "client_ip": "10.9.8.7",
+    "started_at": 1730000002000,
+    "workspace_name": "default"
+  }
+]

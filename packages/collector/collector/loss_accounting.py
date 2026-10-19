@@ -31,7 +31,11 @@ counters of their own, so for "otel" what the collector rejected (GenAI
 spans it could not map, oversized requests, failed writes) is the loss:
 OTLP/HTTP exporters do not retry those responses. For SDK and gateway
 clients a rejection is retried by the client and shows up later as
-received or as a client-reported drop, so it is not counted twice.
+received or as a client-reported drop, so it is not counted twice. "kong"
+(Kong's http-log plugin through /ingest/kong, one client per tenant) sends
+no counters either. Kong retries any non-2xx response, so only the entries
+of an accepted request that could not be mapped (KONG_FINAL_REJECTIONS)
+count as lost.
 GET /telemetry/loss, /api/v1/registry/telemetry/coverage and
 /partner/v1/telemetry/coverage report coverage per source.
 """
@@ -60,13 +64,16 @@ UNIDENTIFIED_CLIENT = "unidentified"
 GATEWAY_SDK = "gateway"
 OTEL_SDK = "otel"
 OTEL_CLIENT_PREFIX = "otel:"
+KONG_SDK = "kong"
+# Rejections sent back in a 2xx response, which Kong does not retry.
+KONG_FINAL_REJECTIONS = frozenset({"no_vendor", "not_an_object", "invalid"})
 # service.name is client-controlled: past this many distinct OTLP services per
 # tenant, new services are counted under the shared "otel" client instead of
 # growing the table without bound. A soft cap (concurrent requests may each
 # add one more).
 MAX_OTEL_CLIENTS = 200
 # Reporting order of the sources.
-SOURCES = ("sdk", "gateway", "otel", "unidentified")
+SOURCES = ("sdk", "gateway", "otel", "kong", "unidentified")
 _MAX_ID_LEN = 128
 _MAX_KEY_LEN = 64
 _MAX_KEYS = 32  # per counter map, so a client cannot grow a row without bound
@@ -324,6 +331,36 @@ async def _bound_otel_clients(
     return bounded
 
 
+async def record_kong(
+    db: AsyncSession,
+    tenant_id: UUID,
+    received: int = 0,
+    rejected: dict[str, int] | None = None,
+    ignored: dict[str, int] | None = None,
+) -> None:
+    """Add one /ingest/kong request's outcome to the tenant's "kong" client,
+    in its own transaction (the events are already committed or rolled
+    back). Never raises."""
+    if not (received or rejected or ignored):
+        return
+    try:
+        row = await _locked_row(db, tenant_id, KONG_SDK, KONG_SDK)
+        row.sdk = KONG_SDK
+        if received:
+            row.received_events += received
+            row.received_batches += 1
+        if rejected:
+            row.collector_rejected = _merge(row.collector_rejected, rejected)
+        if ignored:
+            row.ignored_fields = _merge(row.ignored_fields, ignored)
+        row.last_seen = datetime.now(UTC)
+        await db.commit()
+    except Exception:  # accounting must never mask the real response
+        logger.exception("could not record Kong loss accounting")
+        with contextlib.suppress(Exception):
+            await db.rollback()
+
+
 # --- reporting -----------------------------------------------------------------
 
 
@@ -334,6 +371,8 @@ def source_of(client_id: str, sdk: str | None) -> str:
         return "otel"
     if sdk == GATEWAY_SDK:
         return "gateway"
+    if sdk == KONG_SDK:
+        return "kong"
     return "sdk"
 
 
@@ -347,7 +386,11 @@ def _summary(row: TelemetryClientStats) -> dict:
     source = source_of(row.client_id, row.sdk)
     rejected = dict(row.collector_rejected or {})
     # OTLP rejections are final (see the module docstring).
-    lost = dropped_total + (sum(rejected.values()) if source == "otel" else 0)
+    lost = dropped_total
+    if source == "otel":
+        lost += sum(rejected.values())
+    elif source == "kong":
+        lost += sum(n for k, n in rejected.items() if k in KONG_FINAL_REJECTIONS)
     identified = row.client_id != UNIDENTIFIED_CLIENT and row.last_seq > 0
     unaccounted = (
         max(0, row.sdk_enqueued_total - row.received_events - dropped_total)

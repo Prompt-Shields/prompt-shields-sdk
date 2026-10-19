@@ -1,0 +1,106 @@
+[
+  {
+    "request": {
+      "id": "b7c1e0f2a3d44e5f8a9b0c1d2e3f4a5b",
+      "uri": "/genai/claude",
+      "url": "https://ai-gw.bank.example/genai/claude",
+      "querystring": {},
+      "method": "POST",
+      "headers": {
+        "host": "ai-gw.bank.example",
+        "content-type": "application/json",
+        "authorization": "REDACTED",
+        "proxy-authorization": "REDACTED",
+        "apikey": "kong-consumer-key-SECRETKEY",
+        "x-ps-business-unit": ["Payments", "Ignored Second Value"],
+        "X-PS-Owner": "payments-ai@bank.example",
+        "x-ps-data-classification": "restricted"
+      },
+      "size": 700
+    },
+    "upstream_uri": "/model/anthropic.claude-sonnet-4-20250514-v1:0/converse-stream",
+    "upstream_status": "200",
+    "response": {"status": 200, "headers": {"content-type": "text/event-stream"}, "size": 4096},
+    "latencies": {"kong": 4, "proxy": 2300, "request": 2310, "receive": 1},
+    "tries": [{"ip": "52.94.0.10", "port": 443, "balancer_latency": 0}],
+    "authenticated_entity": {"id": "cred-1", "consumer_id": "c-9"},
+    "route": {"id": "r-9", "name": "payments-genai"},
+    "service": {"id": "s-9", "name": "bedrock"},
+    "consumer": {"id": "c-9", "custom_id": "payments-fraud-explainer"},
+    "client_ip": "2001:db8::42",
+    "started_at": 1760000000000,
+    "source": "upstream",
+    "workspace": "5e3c7b1a-0f2d-4a6b-9c8d-7e6f5a4b3c2d",
+    "workspace_name": "payments",
+    "ai": {
+      "payload": {"request": "{\"messages\":[{\"role\":\"user\",\"content\":\"my social security number is 123-45-6789\"}]}"},
+      "proxy": {
+        "meta": {
+          "plugin_id": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+          "provider_name": "bedrock",
+          "request_model": "anthropic.claude-sonnet-4-20250514-v1:0",
+          "response_model": "anthropic.claude-sonnet-4-20250514-v1:0",
+          "request_mode": "stream",
+          "llm_latency": 2250
+        },
+        "usage": {
+          "prompt_tokens": 1200,
+          "completion_tokens": 300,
+          "total_tokens": 1500,
+          "time_per_token": 7.5,
+          "time_to_first_token": 410,
+          "cost": 0.0081
+        },
+        "cache": {
+          "cache_status": "Miss",
+          "vector_db": "redis",
+          "embeddings_provider": "openai",
+          "embeddings_model": "text-embedding-3-small",
+          "fetch_latency": 3,
+          "embeddings_latency": 40
+        },
+        "tried_targets": [
+          {"ip": "52.94.0.10", "port": 443, "host": "bedrock-runtime.eu-west-1.amazonaws.com", "upstream_scheme": "https", "upstream_uri": "/model/x/converse-stream"}
+        ],
+        "payload": {
+          "response": "data: {\"delta\":\"my social security number is 123-45-6789\"}"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": "c8d2f1a3b4e55f6a9b0c1d2e3f4a5b6c",
+      "uri": "/genai/gemini",
+      "method": "POST",
+      "headers": {"x-ps-environment": "staging", "x-goog-api-key": "AIza-SECRETKEY"}
+    },
+    "latencies": {"kong": 2, "proxy": -1, "request": 5, "receive": 0},
+    "route": {"name": "gemini-sandbox"},
+    "service": {"name": "vertex"},
+    "client_ip": "10.0.0.5",
+    "workspace_name": "payments",
+    "ai": {
+      "proxy": {
+        "meta": {
+          "plugin_id": "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d",
+          "provider_name": "gemini",
+          "request_model": "gemini-2.5-flash",
+          "response_model": "UNSPECIFIED"
+        },
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+      }
+    }
+  },
+  {
+    "request": {"id": "d9e3", "uri": "/genai/unknown", "method": "POST", "headers": {}},
+    "route": {"name": "mystery"},
+    "client_ip": "10.0.0.6",
+    "ai": {
+      "proxy": {
+        "meta": {"plugin_id": "p", "provider_name": "UNSPECIFIED", "request_model": "UNSPECIFIED", "response_model": "UNSPECIFIED"},
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+      }
+    }
+  }
+]

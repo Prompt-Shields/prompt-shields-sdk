@@ -137,7 +137,8 @@
         "integrations/overview",
         "integrations/ardoq",
         "integrations/leanix",
-        "integrations/servicenow"
+        "integrations/servicenow",
+        "integrations/kong"
       ]
     }
   ],

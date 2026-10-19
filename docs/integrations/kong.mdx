@@ -1,0 +1,243 @@
+---
+title: Prompt Shields with Kong
+description: Feed Kong AI Gateway traffic into the AI asset registry with Kong's stock http-log plugin
+---
+
+# Prompt Shields with Kong
+
+If your LLM traffic already goes through Kong AI Gateway (`ai-proxy` or
+`ai-proxy-advanced`), you can add it to the Prompt Shields registry without
+writing code or installing a plugin. Kong's own `http-log` plugin posts each
+request's log entry to the collector's `POST /ingest/kong` route. The
+collector reads Kong's AI analytics (provider, models, tokens, cost, latency)
+and the request context (consumer, route, `X-PS-*` headers), and records an
+AI usage event with source `kong`.
+
+<Info>
+  This is a first slice. It has been tested against log entries built from
+  Kong's source (3.6 and the 3.9 OSS line) and documented Enterprise fields
+  (3.10 to 3.14), not yet against a live Kong Enterprise or Konnect data
+  plane. Kong's AI log format changes between versions, and Kong has said it
+  may change again in 4.0.
+</Info>
+
+## Before you start
+
+- Kong Gateway 3.6 or later, with `ai-proxy` or `ai-proxy-advanced` on the
+  routes you want to cover.
+- On those AI plugins, `config.logging.log_statistics: true`. Without it Kong
+  writes no AI analytics, and the collector ignores the entry. Since Kong 3.8
+  the default is `false`.
+- Leave `config.logging.log_payloads` at `false`. The collector never stores
+  prompts or responses, but with payloads on they still leave Kong and make
+  batches large (see [Limits](#limits)).
+- A Prompt Shields tenant API key (`ps-...`), and a network path from the
+  Kong data plane to the collector.
+- For costs, set `config.model.options.input_cost` and `output_cost` (per
+  million tokens) on the AI plugin. Kong only reports a cost when they are
+  set.
+
+## Configure http-log
+
+Store the full `Authorization` value in a Kong vault. The http-log `headers`
+values accept a vault reference, but the reference must be the whole value,
+so the secret includes `Bearer `. With the `env` vault, set this on every data
+plane node:
+
+```bash
+export PS_INGEST_AUTHORIZATION="Bearer ps-your-tenant-key"
+```
+
+### decK
+
+```yaml
+_format_version: "3.0"
+plugins:
+  - name: http-log
+    # Global here; scope it with `route:` or `service:` to cover fewer routes.
+    config:
+      http_endpoint: https://collector.promptshields.io/ingest/kong
+      method: POST
+      content_type: application/json
+      timeout: 10000
+      keepalive: 60000
+      headers:
+        Authorization: "{vault://env/ps-ingest-authorization}"
+      queue:
+        # Send arrays of up to 200 entries, at most every 5 seconds.
+        max_batch_size: 200
+        max_coalescing_delay: 5
+        max_entries: 10000
+        max_retry_time: 300
+      custom_fields_by_lua:
+        # Defence in depth: the collector drops these anyway.
+        ai.payload: "return nil"
+        ai.proxy.payload: "return nil"
+        request.headers.apikey: "return nil"
+        request.querystring: "return nil"
+```
+
+The `ai-proxy` side, for reference:
+
+```yaml
+  - name: ai-proxy
+    route: hr-chat
+    config:
+      route_type: llm/v1/chat
+      logging:
+        log_statistics: true
+        log_payloads: false
+      model:
+        provider: openai
+        name: gpt-4o
+        options:
+          input_cost: 2.5
+          output_cost: 10
+      auth:
+        header_name: Authorization
+        header_value: "{vault://env/openai-authorization}"
+```
+
+### Admin API
+
+```bash
+curl -sS -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "name": "http-log",
+    "config": {
+      "http_endpoint": "https://collector.promptshields.io/ingest/kong",
+      "method": "POST",
+      "content_type": "application/json",
+      "headers": {"Authorization": "{vault://env/ps-ingest-authorization}"},
+      "queue": {"max_batch_size": 200, "max_coalescing_delay": 5, "max_retry_time": 300},
+      "custom_fields_by_lua": {
+        "ai.payload": "return nil",
+        "ai.proxy.payload": "return nil",
+        "request.headers.apikey": "return nil",
+        "request.querystring": "return nil"
+      }
+    }
+  }'
+```
+
+In a workspace, use `http://localhost:8001/<workspace>/plugins`. On Konnect,
+add the same configuration to the control plane.
+
+Always batch. With `max_batch_size: 1` (Kong's default) Kong sends one
+request to the collector per LLM call, and the collector checks the tenant
+key on every request.
+
+## Add business context
+
+The collector reads these request headers when Kong logs them, the same
+contract as the Prompt Shields gateway:
+
+| Header | Registry field |
+|--------|----------------|
+| `X-PS-Business-Unit` | `business_unit` |
+| `X-PS-Use-Case` | `use_case_name` |
+| `X-PS-Owner` | `owner_email` |
+| `X-PS-Data-Classification` | `data_classification` |
+| `X-PS-Environment` | `environment` |
+
+Clients can send them. To tag a whole route from Kong instead, add a
+route-scoped http-log (it replaces the global one on that route) that sets
+the header in the log entry only:
+
+```yaml
+      custom_fields_by_lua:
+        request.headers.x-ps-business-unit: "return 'Payments'"
+        request.headers.x-ps-use-case: "return 'fraud-explainer'"
+```
+
+Kong forwards client-sent `X-PS-*` headers to the LLM provider. They hold no
+secrets. Removing them with `request-transformer` would also remove them from
+the log entry, so the collector would not see them.
+
+## How entries are mapped
+
+| Kong log field | Prompt Shields |
+|----------------|----------------|
+| `ai.<namespace>.meta.provider_name` | `vendor` (`azure` is stored as `azure_openai` and `gemini` as `google`, as the SDK reports them) |
+| `ai.<namespace>.meta.request_model` | asset `model` and `requested_model` |
+| `ai.<namespace>.meta.response_model` | `served_model` |
+| `ai.<namespace>.usage.prompt_tokens` / `completion_tokens` | `tokens_in` / `tokens_out` |
+| `ai.<namespace>.usage.cost` | `cost` (`cost_source: kong_model_options`) |
+| `ai.<namespace>.meta.llm_latency` (3.8+), else `latencies.proxy` | `latency_ms` |
+| `consumer.username`, else `consumer.custom_id`, else `route.name`, else `service.name` | `calling_service` |
+| `request.headers.x-ps-*` | business context (table above) |
+
+Kong 3.6 and 3.7 key the analytics by plugin name (`ai["ai-proxy"]`,
+`ai["ai-request-transformer"]`); later versions use `ai.proxy`. Each AI
+namespace with a provider is one usage event, so a request through
+`ai-proxy` and `ai-request-transformer` records two LLM calls. Kong's
+placeholder `UNSPECIFIED` counts as missing.
+
+**Never stored:** prompt and response bodies (`ai.*.payload`), every request
+and response header other than the five `X-PS-*` headers above (so
+`authorization`, `apikey`, `x-api-key`, `api-key` and cookies are never
+read), the query string, and the client IP. Kong's `workspace_name`, the
+Kong service, `plugin_id`, Azure deployment ids, cache and balancer details
+are read for nothing yet.
+
+## Confidence and deduplication
+
+`kong` is a runtime source, like `sdk`, `gateway` and `otel`: an asset seen
+only by Kong has `high` confidence, and one that the SDK (or another source)
+also reports is `verified`. Assets are merged on vendor, model, use case,
+business unit and environment as for every other source.
+
+<Warning>
+  Use one path per route: either http-log to `/ingest/kong` or Kong
+  forwarding to the Prompt Shields gateway (below), not both. With both,
+  each call is recorded twice, once as `kong` and once as `gateway`, and its
+  asset is marked `verified` on the strength of a single call.
+</Warning>
+
+## Responses, retries and limits
+
+| Status | When | Kong |
+|--------|------|------|
+| `200` | Accepted. Body: `{"ingested", "assets_created", "ignored", "rejected"}` | done |
+| `400` | Body is not JSON, or not an object or array | retries until `max_retry_time`, then drops |
+| `401` | Missing or wrong tenant key | retries, then drops |
+| `413` | Body over 4 MiB or more than 1,000 entries | retries, then drops |
+| `415` | Content type is not `application/json` | retries, then drops |
+| `429` | Over the tenant's Kong limit, `PS_KONG_RATE_LIMIT_PER_MINUTE` (default 6,000 requests/minute per collector process, `0` disables; counted apart from `/ingest/events`) | retries |
+| `5xx` | Write failed | retries |
+
+Entries without AI analytics (non-AI routes, or `log_statistics` off) are
+`ignored`. AI entries without a provider are `rejected`; they are in a `200`
+response, so Kong does not resend them. The collector's telemetry loss and
+coverage reports (`GET /telemetry/loss`, `GET /partner/v1/telemetry/coverage`)
+show Kong as source `kong`, with ignored entries as `entry:non_ai` and
+rejected ones as `no_vendor`.
+
+## Alternative: Kong forwards to the Prompt Shields gateway
+
+If you would rather not configure logging, point a Kong service at the
+Prompt Shields AI gateway and let it call the provider. Kong keeps auth, rate
+limits and routing; the gateway records telemetry with source `gateway`, and
+`X-PS-*` headers work as usual. Do not enable `ai-proxy` on these routes.
+
+```yaml
+_format_version: "3.0"
+services:
+  - name: prompt-shields-gateway
+    url: http://ps-gateway.internal:8787
+    routes:
+      - name: llm
+        paths: [/llm]
+        strip_path: true
+    plugins:
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "x-portkey-provider:openai"
+```
+
+Clients then call `https://kong.example.com/llm/v1/chat/completions` with
+their provider key. This adds a second proxy hop, and the gateway must hold
+or receive the provider credentials.

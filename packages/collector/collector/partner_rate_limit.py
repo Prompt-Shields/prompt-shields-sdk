@@ -94,3 +94,11 @@ _INGEST_LIMITER = FixedWindowRateLimiter()
 
 def get_ingest_rate_limiter() -> FixedWindowRateLimiter:
     return _INGEST_LIMITER
+
+
+# /ingest/kong counts apart from /ingest/events (PS_KONG_RATE_LIMIT_PER_MINUTE).
+_KONG_LIMITER = FixedWindowRateLimiter()
+
+
+def get_kong_rate_limiter() -> FixedWindowRateLimiter:
+    return _KONG_LIMITER

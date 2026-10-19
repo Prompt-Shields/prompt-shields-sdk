@@ -33,6 +33,11 @@ uses the same headers and `429` response as the Partner API. The SDK is
 fail-open: a `429` keeps the batch buffered for the next flush and never blocks
 the model call.
 
+`POST /ingest/kong` has its own per-tenant limit, counted separately:
+`PS_KONG_RATE_LIMIT_PER_MINUTE`, default 6,000 requests/minute (`0` turns it
+off). Kong's http-log plugin sends one request per proxied call unless
+batching is on, and retries a `429`.
+
 <Info>
   The limiter is in-process, so each collector worker counts separately.
   Running N workers allows up to N times the configured limit.

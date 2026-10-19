@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields"
     # Per-tenant /ingest/events requests per minute; 0 or less disables it.
     rate_limit_per_minute: int = 100
+    # Per-tenant /ingest/kong requests per minute, counted apart from the
+    # limit above (Kong's http-log sends one request per call unless
+    # batching is on); 0 or less disables it.
+    kong_rate_limit_per_minute: int = 6000
     # Rows in partner_audit_log older than this are deleted by
     # `python -m collector.audit purge`.
     audit_retention_days: int = 365

@@ -160,7 +160,7 @@ components:
           type: array
           items:
             type: string
-            enum: [sdk, gateway, browser_extension, macos_app, platform_signal, survey]
+            enum: [sdk, gateway, browser_extension, macos_app, platform_signal, survey, otel, code_scan, kong]
           description: How this asset was discovered (multiple sources = higher confidence)
           example: ["sdk", "browser_extension"]
         confidence:
@@ -543,12 +543,13 @@ components:
       description: |
         Telemetry delivery for one source. `sdk` is the Prompt Shields SDKs,
         `gateway` the AI gateway, `otel` the OTLP GenAI receiver (one client
-        per `service.name`) and `unidentified` events sent without delivery
-        metadata (older clients).
+        per `service.name`), `kong` Kong's http-log plugin through
+        `/ingest/kong` (one client) and `unidentified` events sent without
+        delivery metadata (older clients).
       properties:
         source:
           type: string
-          enum: [sdk, gateway, otel, unidentified]
+          enum: [sdk, gateway, otel, kong, unidentified]
         clients:
           type: integer
           description: Distinct clients (SDK processes, gateway processes, OTel services) seen
@@ -563,14 +564,16 @@ components:
             Events known to be lost: dropped by the client (buffer overflow,
             failed sends, unserialisable events) as it reported, and for
             `otel` the GenAI spans the collector rejected (no vendor,
-            oversized request, failed write).
+            oversized request, failed write), and for `kong` the AI log
+            entries of an accepted request that could not be mapped (Kong
+            retries rejected requests, so those are not counted).
           example: 12
         unaccounted_events:
           type: integer
           description: >-
             Events a client reported queueing that neither arrived nor were
             reported dropped (in flight, or lost silently). Always 0 for
-            `otel` and `unidentified`, which report no counters.
+            `otel`, `kong` and `unidentified`, which report no counters.
           example: 3
         coverage:
           type: number
@@ -1151,7 +1154,7 @@ components:
       in: query
       schema:
         type: string
-        enum: [sdk, gateway, browser_extension, macos_app, platform_signal, survey]
+        enum: [sdk, gateway, browser_extension, macos_app, platform_signal, survey, otel, code_scan, kong]
       description: Filter by discovery source
 
     SinceParam:
