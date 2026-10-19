@@ -89,7 +89,7 @@ export interface GuardrailVerdictEvent
   extends SecurityEventBase,
     GuardrailFields {
   'event.name': 'guardrail.verdict';
-  /** True when the hook denies on failure (the request got a 446). */
+  /** True when this check made the hook deny the request (446): it failed, or errored with `failOnError`, in a `deny` hook. */
   'ps.guardrail.deny': boolean;
   'ps.guardrail.duration_ms'?: number;
 }

@@ -83,9 +83,12 @@ const schedule = () => {
   else setTimeout(run, 0);
 };
 
-/** Write everything queued now. Never throws. Exported for tests and shutdown. */
-export function flushSecurityEvents(): void {
-  if (waitingForDrain || !queue.length) return;
+/**
+ * Write everything queued now. Never throws. Exported for tests and shutdown;
+ * `force` writes even while waiting for `drain` (the stream buffers it).
+ */
+export function flushSecurityEvents(force = false): void {
+  if ((waitingForDrain && !force) || !queue.length) return;
   const batch = queue;
   queue = [];
   for (const target of ['stdout', 'stderr'] as Target[]) {
@@ -336,7 +339,12 @@ export function recordHookResults(
 
       for (const check of result.checks) {
         const verdict = verdictOf(check, hook);
-        const blocked = verdict === 'deny';
+        // Whether this check made the hook deny the request (446): as in
+        // executeEachHook, a failed check, or an errored one with failOnError.
+        const blocked =
+          !!hook.deny &&
+          !check.verdict &&
+          (!check.error || !!check.fail_on_error);
         const checkId = safeId(check.id);
 
         if (metrics) {
@@ -386,7 +394,7 @@ export function recordHookResults(
             'event.kind': verdict === 'allow' ? 'event' : 'alert',
             'event.category': ['intrusion_detection'],
             'event.outcome': outcome,
-            severity: VERDICT_SEVERITY[verdict],
+            severity: blocked ? 'high' : VERDICT_SEVERITY[verdict],
             action,
             signature: checkId,
           }),

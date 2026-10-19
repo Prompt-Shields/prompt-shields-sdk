@@ -417,6 +417,43 @@ describe('PII and injection detections', () => {
     expect(after).not.toContain(PII_VALUE);
   });
 
+  test('an errored check blocks only with failOnError in a deny hook', async () => {
+    const errored = (failOnError: boolean) => ({
+      id: 'h',
+      verdict: !failOnError,
+      checks: [
+        {
+          id: 'default.webhook',
+          verdict: false,
+          data: null,
+          error: { name: 'Error', message: 'boom' },
+          fail_on_error: failOnError,
+          execution_time: 3,
+          created_at: new Date(),
+        },
+      ],
+    });
+    await record([errored(true)], [hook('fail-closed', 'default.webhook')]);
+    await record([errored(false)], [hook('fail-open', 'default.webhook')]);
+
+    const events = await securityEvents();
+    const byHook = (id: string) =>
+      events.find((e) => e['ps.guardrail.hook_id'] === id);
+    expect(byHook('fail-closed')).toMatchObject({
+      'ps.guardrail.verdict': 'error',
+      'ps.guardrail.deny': true,
+      action: 'blocked',
+      severity: 'high',
+    });
+    expect(byHook('fail-open')).toMatchObject({
+      'ps.guardrail.verdict': 'error',
+      'ps.guardrail.deny': false,
+      action: 'allowed',
+      severity: 'low',
+    });
+    expect(written.join('')).not.toContain('boom');
+  });
+
   test('a failed PII check without categories counts as unspecified', async () => {
     await record(
       [result('portkey.pii', false, null)],

@@ -136,7 +136,7 @@
         },
         "ps.guardrail.deny": {
           "type": "boolean",
-          "description": "True when the hook denies on failure (the request got a 446)."
+          "description": "True when this check made the hook deny the request (446): it failed, or errored with failOnError, in a deny hook."
         },
         "ps.guardrail.duration_ms": {
           "type": "number",
