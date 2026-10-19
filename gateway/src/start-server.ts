@@ -16,6 +16,7 @@ import {
   readAdminToken,
 } from './middlewares/adminAuth';
 import { psTelemetrySender } from './middlewares/ps-telemetry';
+import { createDrain, shutdownTimeoutMs } from './psShutdown';
 
 // Extract the port number from the command line arguments
 const defaultPort = 8787;
@@ -159,14 +160,43 @@ app.get(
   upgradeWebSocket(realTimeHandlerNode)
 );
 
+// Prompt Shields: 503 + Connection: close for requests that arrive while
+// draining on SIGTERM (see psShutdown.ts).
+const drain = createDrain();
+
 const server = serve({
-  fetch: app.fetch,
+  fetch: drain.wrapFetch(app.fetch),
   port: port,
 });
 
 const url = `http://localhost:${port}`;
 
 injectWebSocket(server);
+
+// Prompt Shields: on SIGTERM/SIGINT, stop accepting connections and wait for
+// in-flight requests, streams included (bounded by PS_SHUTDOWN_TIMEOUT_MS,
+// default 25000; connections still open then are closed), then flush pending
+// ps-telemetry (bounded by PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS; what is left is
+// counted as `shutdown`) and exit. A second signal exits at once.
+// Installed as soon as the server listens: as PID 1 in a container, a
+// SIGTERM that arrives before a handler exists is ignored.
+let shuttingDown = false;
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => {
+    if (shuttingDown) process.exit(1);
+    shuttingDown = true;
+    const timeoutMs = shutdownTimeoutMs();
+    console.log(`${signal}: draining (up to ${timeoutMs} ms)`);
+    drain
+      .drain(server, timeoutMs)
+      .then((result) => {
+        if (result === 'timeout')
+          console.warn('Shutdown deadline reached; open connections closed');
+      })
+      .then(() => psTelemetrySender.shutdown())
+      .finally(() => process.exit(0));
+  });
+}
 
 // Loading animation function
 async function showLoadingAnimation() {
@@ -204,19 +234,6 @@ if (!isHeadless) {
 
 // Single-line ready message
 console.log('\n\x1b[32m✨ Ready for connections!\x1b[0m');
-
-// Prompt Shields: on SIGTERM/SIGINT, flush pending ps-telemetry (bounded by
-// PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS; what is left is counted as `shutdown`),
-// then exit. A second signal exits at once.
-let shuttingDown = false;
-for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(signal, () => {
-    if (shuttingDown) process.exit(1);
-    shuttingDown = true;
-    server.close();
-    psTelemetrySender.shutdown().finally(() => process.exit(0));
-  });
-}
 
 process.on('uncaughtException', (err) => {
   console.error('Unhandled exception', err);
