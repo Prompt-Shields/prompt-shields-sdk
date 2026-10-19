@@ -69,6 +69,7 @@ async def db_session_middleware(request: Request, call_next):
 
 # Internal collector + registry surface
 from collector.ingest import router as ingest_router
+from collector.kong_ingest import router as kong_ingest_router
 from collector.lifecycle import router as lifecycle_router
 from collector.loss_accounting import router as loss_accounting_router
 from collector.otel_ingest import router as otel_ingest_router
@@ -79,6 +80,7 @@ app.include_router(ingest_router)
 app.include_router(registry_router)
 app.include_router(lifecycle_router)
 app.include_router(otel_ingest_router)
+app.include_router(kong_ingest_router)
 app.include_router(loss_accounting_router)
 app.include_router(risk_suggestions_router)
 

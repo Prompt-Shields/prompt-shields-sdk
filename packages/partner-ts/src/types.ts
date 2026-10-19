@@ -23,6 +23,7 @@ export type DiscoverySource = OpenString<
   | 'survey'
   | 'otel'
   | 'code_scan'
+  | 'kong'
 >;
 export type Confidence = OpenString<'low' | 'medium' | 'high' | 'verified'>;
 export type ChangeType = OpenString<'created' | 'updated' | 'deactivated'>;
@@ -213,7 +214,7 @@ export interface UsageSummary {
 }
 
 /** A telemetry source. `unidentified`: events sent without delivery metadata. */
-export type TelemetrySource = OpenString<'sdk' | 'gateway' | 'otel' | 'unidentified'>;
+export type TelemetrySource = OpenString<'sdk' | 'gateway' | 'otel' | 'kong' | 'unidentified'>;
 
 /** Telemetry delivery for one source. */
 export interface SourceCoverage {

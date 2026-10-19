@@ -13,7 +13,7 @@ Every AI asset has a `confidence` field that indicates how certain Prompt Shield
 |-------|----------|---------|
 | `low` | Single survey response only | Self-reported, no technical verification |
 | `medium` | Single detection from browser extension, macOS app, platform signal or code scan | Detected automatically, but no individual LLM call observed |
-| `high` | Single detection from SDK, gateway or OTel GenAI spans | Observed runtime LLM calls |
+| `high` | Single detection from SDK, gateway, OTel GenAI spans or Kong AI Gateway logs | Observed runtime LLM calls |
 | `verified` | Multiple independent sources corroborate | Highest certainty — detected by 2+ channels |
 
 ## How It's Computed
@@ -22,7 +22,7 @@ Every AI asset has a `confidence` field that indicates how certain Prompt Shield
 graph TD
     A{How many sources?} -->|2+| B[verified]
     A -->|1| C{Which source?}
-    C -->|sdk, gateway or otel| D[high]
+    C -->|sdk, gateway, otel or kong| D[high]
     C -->|browser_extension<br>macos_app<br>platform_signal<br>code_scan| E[medium]
     C -->|survey or unknown| F[low]
 ```

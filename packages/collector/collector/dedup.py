@@ -16,13 +16,14 @@ CLASSIFICATION_ORDER = {"public": 0, "internal": 1, "confidential": 2, "restrict
 
 # Single-source confidence. Runtime observation of real LLM calls is "high":
 # the SDK and gateway see them directly, and ``otel`` GenAI spans are the same
-# evidence emitted by third-party instrumentation (#92). Signals that show AI
+# evidence emitted by third-party instrumentation (#92), as are ``kong``
+# http-log entries with AI analytics (Kong proxied the call). Signals that show AI
 # is reachable or configured, but not that a given call happened, are
 # "medium": endpoint and platform signals, and ``code_scan`` (#95), which
 # proves the code references a provider/model but not that it runs in
 # production. Self-reported sources (``survey``) and anything unknown are "low".
 # Two or more distinct sources corroborate each other: "verified".
-HIGH_CONFIDENCE_SOURCES = frozenset({"sdk", "gateway", "otel"})
+HIGH_CONFIDENCE_SOURCES = frozenset({"sdk", "gateway", "otel", "kong"})
 MEDIUM_CONFIDENCE_SOURCES = frozenset(
     {"browser_extension", "macos_app", "platform_signal", "code_scan"}
 )

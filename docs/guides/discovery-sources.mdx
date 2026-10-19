@@ -17,6 +17,7 @@ Prompt Shields uses multiple independent channels to discover AI usage. When the
 | **Gateway** | All LLM API traffic (zero code change) | Proxy intercepts and logs requests |
 | **Platform Signal** | Enterprise platform audit logs | Pulls from Microsoft Purview, Defender, Azure |
 | **OTel** (`otel`) | Apps already instrumented with OpenTelemetry GenAI | Collector OTLP/HTTP receiver maps `gen_ai.*` spans to usage events |
+| **Kong** (`kong`) | LLM traffic through Kong AI Gateway (ai-proxy) | Kong's stock `http-log` plugin posts to `/ingest/kong`; see [Prompt Shields with Kong](/integrations/kong) |
 | **Code Scan** (`code_scan`) | AI SDKs, models and endpoints referenced in source, before they run | `ps-scan` CLI or GitHub Action scans the repository locally |
 | **Survey** | Self-reported AI usage | Human Input Agent conducts interviews |
 

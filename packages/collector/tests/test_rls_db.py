@@ -382,6 +382,57 @@ async def test_extended_usage_fields_ingest_under_rls(rls_db):
     )
 
 
+async def test_kong_ingest_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    entry = {
+        "route": {"name": "hr-chat"},
+        "ai": {
+            "proxy": {
+                "meta": {"provider_name": "kong-test-vendor", "request_model": "m1"},
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+            }
+        },
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/ingest/kong", headers={"Authorization": f"Bearer {KEY_A}"},
+            json=[entry, entry],
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["ingested"] == 2
+        mine = await c.get(
+            "/api/v1/registry/assets", headers={"Authorization": f"Bearer {KEY_A}"}
+        )
+        theirs = await c.get(
+            "/api/v1/registry/assets", headers={"Authorization": f"Bearer {KEY_B}"}
+        )
+    assert "kong-test-vendor" in {x["vendor"] for x in mine.json()["data"]}
+    assert "kong-test-vendor" not in {x["vendor"] for x in theirs.json()["data"]}
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        assert (
+            await s.execute(select(AIUsageEvent).where(AIUsageEvent.source == "kong"))
+        ).scalars().all() == []
+        assert (
+            await s.execute(
+                select(TelemetryClientStats).where(TelemetryClientStats.client_id == "kong")
+            )
+        ).scalars().all() == []
+        await s.rollback()
+        await rls.set_tenant(s, a)
+        events = (
+            await s.execute(select(AIUsageEvent).where(AIUsageEvent.source == "kong"))
+        ).scalars().all()
+        stats = (
+            await s.execute(
+                select(TelemetryClientStats).where(TelemetryClientStats.client_id == "kong")
+            )
+        ).scalar_one()
+    assert [e.tenant_id for e in events] == [a, a]
+    assert (stats.tenant_id, stats.received_events, stats.sdk) == (a, 2, "kong")
+
+
 async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, caplog):
     monkeypatch.setattr(settings, "admin_token", TOKEN)
     a, b = rls_db["a"], rls_db["b"]
