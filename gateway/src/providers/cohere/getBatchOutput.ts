@@ -6,6 +6,31 @@ import avro from 'avsc';
 import { CohereEmbedResponseTransformBatch } from './embed';
 import { COHERE } from '../../globals';
 import { externalServiceFetch } from '../../utils/fetch';
+import { isSafeUpstreamURL } from '../../middlewares/requestValidator';
+
+/**
+ * PS fork (security): dataset part URLs come from the Cohere response and are
+ * usually presigned storage URLs, so the Cohere API key goes only to the
+ * Cohere API origin; any other https host is fetched without it.
+ */
+export const cohereDatasetPartRequest = (
+  rawUrl: string,
+  cohereBaseURL: string,
+  headers: Record<string, string>,
+  c: Context
+): RequestInit | null => {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || !isSafeUpstreamURL(rawUrl, c)) return null;
+  if (url.origin === new URL(cohereBaseURL).origin) {
+    return { method: 'GET', headers };
+  }
+  return { method: 'GET' };
+};
 
 export const CohereGetBatchOutputHandler = async ({
   c,
@@ -18,7 +43,7 @@ export const CohereGetBatchOutputHandler = async ({
 }) => {
   try {
     // get the base url and endpoint for retrieveBatch
-    const baseURL = CohereAPIConfig.getBaseURL({
+    const baseURL = await CohereAPIConfig.getBaseURL({
       providerOptions,
       fn: 'retrieveBatch',
       c,
@@ -91,10 +116,20 @@ export const CohereGetBatchOutputHandler = async ({
       start: async (controller) => {
         const fileParts = retrieveFileResponseJson.dataset.dataset_parts;
         for (const filePart of fileParts) {
-          const filePartResponse = await externalServiceFetch(filePart.url, {
-            method: 'GET',
+          const filePartRequest = cohereDatasetPartRequest(
+            filePart.url,
+            baseURL,
             headers,
-          });
+            c
+          );
+          if (!filePartRequest) {
+            controller.error(new Error('Unexpected dataset part location'));
+            return;
+          }
+          const filePartResponse = await externalServiceFetch(
+            filePart.url,
+            filePartRequest
+          );
           const arrayBuffer = await filePartResponse.arrayBuffer();
           const buf = Buffer.from(arrayBuffer);
           const decoder = new avro.streams.BlockDecoder({
