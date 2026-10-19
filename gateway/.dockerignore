@@ -9,7 +9,8 @@ coverage
 .github
 .husky
 conf.json
-.creds.json
-.env
-.env.*
+**/.creds.json
+**/creds.json
+**/.env
+**/.env.*
 *.log

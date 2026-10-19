@@ -9,5 +9,6 @@ demo
 **/__pycache__
 **/*.pyc
 **/.pytest_cache
-.env
-.env.*
+**/.env
+**/.env.*
+**/.creds.json

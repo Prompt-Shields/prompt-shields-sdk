@@ -108,6 +108,18 @@ async def test_metrics_count_requests_by_route_template(monkeypatch):
     assert 'route="/metrics"' not in body
 
 
+async def test_metrics_unknown_methods_share_one_label(monkeypatch):
+    monkeypatch.setattr(settings, "collector_metrics_enabled", True)
+    monkeypatch.setattr(settings, "collector_metrics_token", "")
+    before = _requests("/partner/v1/health", "OTHER", "405")
+    async with _client() as c:
+        await c.request("FOO123", "/partner/v1/health")
+        await c.request("BAR456", "/partner/v1/health")
+        body = (await c.get("/metrics")).text
+    assert _requests("/partner/v1/health", "OTHER", "405") == before + 2
+    assert "FOO123" not in body and "BAR456" not in body
+
+
 async def test_metrics_token_is_required_when_set(monkeypatch):
     monkeypatch.setattr(settings, "collector_metrics_enabled", True)
     monkeypatch.setattr(settings, "collector_metrics_token", "s3cret-token")

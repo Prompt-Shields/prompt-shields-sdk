@@ -62,6 +62,17 @@ assets_created_total = Counter(
 
 UNMATCHED = "unmatched"
 
+# uvicorn's default HTTP parser (h11) accepts any token as a method, so the
+# raw method would let unauthenticated clients mint unbounded label values.
+_KNOWN_METHODS = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"}
+)
+
+
+def _method(scope: Scope) -> str:
+    method = scope.get("method", "")
+    return method if method in _KNOWN_METHODS else "OTHER"
+
 
 def record_ingest(endpoint: str, outcome: str, count: int) -> None:
     if count > 0:
@@ -108,7 +119,7 @@ class MetricsMiddleware:
             await self.app(scope, receive, send_wrapper)
         finally:
             route = _route_template(scope)
-            method = scope.get("method", "")
+            method = _method(scope)
             requests_total.labels(route=route, method=method, status=str(status)).inc()
             request_duration.labels(route=route, method=method).observe(
                 time.perf_counter() - start
