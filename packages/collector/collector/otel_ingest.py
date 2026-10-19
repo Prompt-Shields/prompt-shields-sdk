@@ -16,6 +16,7 @@ from db.models import AIUsageEvent
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import metrics
 from collector.auth import resolve_tenant
 from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
@@ -182,16 +183,18 @@ async def ingest_otel_traces(request: Request):
         )
 
     mcp_calls: list[McpCall] = []
+    assets_created = 0
     mapped, counts = classify_spans(payload, mcp_calls=mcp_calls)
     if mapped or mcp_calls:
         try:
             if mcp_calls:
                 await record_calls(db, tenant_id, mcp_calls)
             if mapped:
-                await write_spans(db, tenant_id, mapped)  # commits
+                assets_created = await write_spans(db, tenant_id, mapped)  # commits
             else:
                 await db.commit()
         except Exception:
+            metrics.record_ingest("otel", "write_failed", len(mapped))
             with contextlib.suppress(Exception):
                 await db.rollback()
             for c in counts.values():
@@ -205,6 +208,10 @@ async def ingest_otel_traces(request: Request):
     # spans are ignored, not rejected; GenAI spans that cannot be mapped are
     # rejected and reported in partialSuccess (OTLP/HTTP spec).
     rejected = sum(c.rejected.get(NO_VENDOR, 0) for c in counts.values())
+    if mapped:
+        metrics.record_ingest("otel", "accepted", len(mapped))
+        metrics.record_assets_created("otel", assets_created)
+    metrics.record_ingest("otel", "rejected", rejected)
     if rejected:
         return {
             "partialSuccess": {

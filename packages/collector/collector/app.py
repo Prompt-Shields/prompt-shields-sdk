@@ -1,14 +1,17 @@
 import asyncio
-import contextlib
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from collector import rls
 from collector.config import settings
 from collector.embeddings import get_embedder
+from collector.metrics import MetricsMiddleware, metrics_endpoint
+from collector.workers import start_workers, stop_workers
 
 engine = create_async_engine(settings.database_url)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -43,32 +46,12 @@ async def lifespan(app: FastAPI):
     if settings.rls_required:
         async with engine.connect() as conn:
             await rls.check_required(conn)
-    tasks: list[asyncio.Task] = []
-    if settings.webhook_worker_interval_seconds > 0:
-        from collector.webhooks import run_worker
-
-        tasks.append(
-            asyncio.create_task(
-                run_worker(SessionLocal, settings.webhook_worker_interval_seconds)
-            )
-        )
-    if settings.provider_usage_pull_interval_seconds > 0:
-        from collector.provider_usage_admin import run_schedule
-
-        tasks.append(
-            asyncio.create_task(
-                run_schedule(
-                    SessionLocal,
-                    settings.provider_usage_pull_interval_seconds,
-                    settings.provider_usage_pull_days,
-                )
-            )
-        )
+    # Background loops (collector/workers.py); off here with
+    # PS_COLLECTOR_RUN_WORKERS=false when `python -m collector.workers` or
+    # CronJobs run them instead.
+    tasks = start_workers(SessionLocal) if settings.collector_run_workers else []
     yield
-    for task in tasks:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    await stop_workers(tasks)
     await engine.dispose()
 
 
@@ -90,6 +73,30 @@ async def db_session_middleware(request: Request, call_next):
         request.state.db = session
         response = await call_next(request)
         return response
+
+
+# Prometheus metrics (PS_COLLECTOR_METRICS_ENABLED); outermost, so it times
+# the whole request. A no-op while metrics are off.
+app.add_middleware(MetricsMiddleware)
+app.add_api_route("/metrics", metrics_endpoint, methods=["GET"], include_in_schema=False)
+
+
+async def _ping_db() -> None:
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+
+
+@app.get("/readyz", include_in_schema=False)
+async def readyz():
+    """Readiness: the database answers SELECT 1 within
+    PS_READYZ_TIMEOUT_SECONDS. Liveness stays /partner/v1/health, which never
+    touches the database (a database outage must not restart every pod)."""
+    try:
+        await asyncio.wait_for(_ping_db(), settings.readyz_timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 - any failure means not ready
+        logger.warning("readiness check failed: %s", type(exc).__name__)
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+    return {"status": "ready"}
 
 
 # Internal collector + registry surface

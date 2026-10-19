@@ -122,6 +122,19 @@ class Settings(BaseSettings):
     # days overwrite the same rows.
     provider_usage_pull_days: int = 3
 
+    # Kubernetes / replicas. PS_COLLECTOR_RUN_WORKERS=false keeps the
+    # background loops above (webhook delivery, provider usage pull) out of
+    # the API process even when their intervals are set, so API replicas can
+    # scale while one `python -m collector.workers` process (or CronJobs) runs
+    # them. Default true: unchanged behaviour.
+    collector_run_workers: bool = True
+    # GET /readyz runs SELECT 1 with this deadline; 503 when it fails.
+    readyz_timeout_seconds: float = 2.0
+    # Prometheus metrics at GET /metrics (404 when off). With a token set,
+    # the endpoint requires `Authorization: Bearer <token>`.
+    collector_metrics_enabled: bool = False
+    collector_metrics_token: str = ""
+
     model_config = {"env_prefix": "PS_"}
 
     @field_validator("provider_usage_pull_interval_seconds")
