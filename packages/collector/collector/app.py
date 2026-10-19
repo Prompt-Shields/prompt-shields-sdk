@@ -71,6 +71,7 @@ async def db_session_middleware(request: Request, call_next):
 from collector.ingest import router as ingest_router
 from collector.lifecycle import router as lifecycle_router
 from collector.loss_accounting import router as loss_accounting_router
+from collector.mcp_usage import router as mcp_usage_router
 from collector.otel_ingest import router as otel_ingest_router
 from collector.registry import router as registry_router
 from collector.risk_suggestions import router as risk_suggestions_router
@@ -81,6 +82,7 @@ app.include_router(lifecycle_router)
 app.include_router(otel_ingest_router)
 app.include_router(loss_accounting_router)
 app.include_router(risk_suggestions_router)
+app.include_router(mcp_usage_router)
 
 # Partner API surface (read-only, OAuth + API key)
 from collector.oauth import router as oauth_router

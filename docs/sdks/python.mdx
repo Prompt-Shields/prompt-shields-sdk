@@ -151,6 +151,7 @@ startup. It patches whichever of these SDKs are installed, sync and async:
 | `mistral` | mistralai `chat.complete`, `chat.complete_async` | not yet |
 | `cohere` | `Client.chat` (v1), `ClientV2.chat` (v2), and async clients | not yet |
 | `bedrock` | boto3 `bedrock-runtime` `converse`, `invoke_model` | not yet |
+| `mcp` | the `mcp` package's `ClientSession.call_tool` (client-side MCP tool calls) | n/a |
 
 Azure calls are tagged `azure_openai` and recorded under the deployment name.
 To price them, pass `azure_deployments={"prod-chat": "gpt-4o"}`; an unmapped
@@ -180,7 +181,21 @@ instrument Azure without plain OpenAI.
 - Missing packages are skipped. Telemetry errors never affect the call.
 - Calls made through `ShieldsClient` are not counted twice. To skip other calls, wrap them in `with prompt_shields.suppress_instrumentation():`.
 - `.with_raw_response` calls, and positional-argument calls, are not instrumented.
-- MCP tools the provider calls for you (OpenAI Responses `mcp` tool, Anthropic MCP connector) appear in `tool_calls_used` as `{"name": ..., "type": "mcp", "server": ...}`. Tool arguments, results and server URLs are never recorded. Tools your own code calls through an MCP client library are not captured.
+- MCP tools the provider calls for you (OpenAI Responses `mcp` tool, Anthropic MCP connector) appear in `tool_calls_used` as `{"name": ..., "type": "mcp", "server": ...}`. Tool arguments, results and server URLs are never recorded.
+
+### MCP tool calls your code makes
+
+When the official [`mcp`](https://pypi.org/project/mcp/) package is installed, `instrument()` also patches `mcp.ClientSession.call_tool` (it is patched when your app imports `mcp`, so `instrument()` does not import it). This covers MCP servers your own code calls, over stdio or HTTP, including through `mcp.Client` and `ClientSessionGroup`. Each tool call sends one event to the collector's `POST /ingest/mcp`:
+
+```json
+{"server_name": "github", "tool_name": "create_issue", "outcome": "ok",
+ "latency_ms": 41, "source": "sdk", "calling_service": "billing-agent", "environment": "prod"}
+```
+
+- **Names only.** The server name is the one the server reports about itself (`serverInfo.name`); a URL-shaped value is reduced to its host. Tool arguments, results, tool descriptions, transport URLs, commands, headers and environment are never read. A session whose server never identified itself is reported as `unknown`.
+- `outcome` is `error` when the tool returns `isError` or the call raises. The exception still reaches your code unchanged; cancellations are not recorded.
+- Fail-open, like the provider wrappers. `vendors=("openai",)` (or `PS_INSTRUMENT_VENDORS`) without `"mcp"` leaves MCP alone, and calls inside `suppress_instrumentation()` are not recorded.
+- Not covered: desktop clients (Claude Desktop, Cursor, VS Code) and non-official MCP clients. For servers you run, export their OTel spans to the collector instead (see the OTLP receiver).
 
 ### Without a code change: `prompt-shields-instrument`
 

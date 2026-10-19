@@ -17,6 +17,7 @@ Prompt Shields uses multiple independent channels to discover AI usage. When the
 | **Gateway** | All LLM API traffic (zero code change) | Proxy intercepts and logs requests |
 | **Platform Signal** | Enterprise platform audit logs | Pulls from Microsoft Purview, Defender, Azure |
 | **OTel** (`otel`) | Apps already instrumented with OpenTelemetry GenAI | Collector OTLP/HTTP receiver maps `gen_ai.*` spans to usage events |
+| **MCP tool calls** | MCP servers and tools your services call | SDK `instrument()` wraps `mcp.ClientSession.call_tool`; MCP `tools/call` spans on the OTLP receiver. Names, counts and outcome only. Read with `GET /api/v1/registry/mcp-tools` |
 | **Code Scan** (`code_scan`) | AI SDKs, models and endpoints referenced in source, before they run | `ps-scan` CLI or GitHub Action scans the repository locally |
 | **Survey** | Self-reported AI usage | Human Input Agent conducts interviews |
 
@@ -90,6 +91,26 @@ jobs:
 | `python-version` | `3.12` | Python used to run ps-scan. The action runs `actions/setup-python`, so later steps in the job see this interpreter as `python`. |
 
 Outputs: `sarif-file`, `findings` (count) and `failed` (`true` when `fail-on` matched).
+
+## MCP Tool Usage (observe only)
+
+Which MCP servers and tools your services call, how often, and how often they fail. This is Phase 0 of the MCP plan in `gateway/docs/mcp-tool-call-discovery.md`: it observes calls and never sits in their path, so nothing here can block or alter a tool call.
+
+Two writers feed one aggregate table, `mcp_tool_usage` (one row per tenant, source, server, tool, calling service and environment, with call and error counts, mean latency, first and last seen):
+
+- **SDK**: `instrument()` wraps `mcp.ClientSession.call_tool` and posts to `POST /ingest/mcp` (see the Python SDK guide). Any client with a tenant ingest key can post there too:
+
+  ```bash
+  curl -X POST $COLLECTOR/ingest/mcp -H "Authorization: Bearer $PS_API_KEY" \
+    -d '{"events": [{"server_name": "github", "tool_name": "create_issue",
+                     "outcome": "ok", "latency_ms": 41, "calling_service": "billing-agent"}]}'
+  # {"ingested": 1, "skipped": 0}
+  ```
+
+  `tool_name` is required. `outcome` is `ok` (default) or `error`, `source` is `sdk` (default), `gateway` or `scan`. Other fields are ignored, so arguments and results are never stored. Names longer than 200 characters are refused, not cut, and a URL given as `server_name` is reduced to its host. An event that cannot be stored is skipped and counted in `skipped`; the rest of the batch is kept. A request holds at most 1,000 events and 1 MiB, or gets `413`. Same auth and rate limit as `/ingest/events`.
+- **OTel**: the OTLP receiver (`/ingest/otel/v1/traces`) stores MCP `tools/call` spans (OTel MCP semantic conventions) as `source: "otel"`: the tool from `gen_ai.tool.name` (or the span name), the server from `server.address` on client spans or the server's own `service.name` on server spans, an error from span status `ERROR` or `error.type`, and the transport from `network.transport` / `network.protocol.name`. `gen_ai.tool.call.arguments` and `.result` are dropped like all content. Other MCP methods (`tools/list`, `initialize`, ...) are not stored. If both a client and its server export spans, the call is counted once under each identity.
+
+Read the tenant's servers and tools with `GET /api/v1/registry/mcp-tools` (tenant API key; filters `server_name`, `source`, `limit`). Server and tool names come from MCP servers and apps: escape them when rendering and never put them in an LLM prompt. The Partner API does not expose MCP usage yet; that comes with the MCP server registry (Phase 2). Rows follow the tenant's retention period and are removed on erasure (see Data Retention).
 
 ## Cloud AI Inventory (Platform Signal)
 
