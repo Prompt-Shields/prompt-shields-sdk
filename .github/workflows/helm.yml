@@ -40,17 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           # ct compares against the target branch.
           fetch-depth: 0
-      - uses: azure/setup-helm@v4.3.0
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
         with:
           version: ${{ env.HELM_VERSION }}
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: helm/chart-testing-action@v2.7.0
+      - uses: helm/chart-testing-action@0d28d3144d3a25ea2cc349d6e59901c4ff469b3b # v2.7.0
 
       - name: helm lint
         run: |
@@ -104,13 +104,13 @@ jobs:
       # cosign keyless signing.
       id-token: write
     steps:
-      - uses: actions/checkout@v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
-      - uses: azure/setup-helm@v4.3.0
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
         with:
           version: ${{ env.HELM_VERSION }}
-      - uses: sigstore/cosign-installer@v3.8.1
+      - uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
 
       - name: Check the tag matches Chart.yaml
         env:
