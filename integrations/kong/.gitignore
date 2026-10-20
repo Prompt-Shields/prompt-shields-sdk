@@ -1,0 +1,4 @@
+# Pongo / Kong test prefix and coverage output
+servroot/
+luacov.*.out
+*.rock
