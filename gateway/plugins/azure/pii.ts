@@ -7,7 +7,11 @@ import {
 } from '../types';
 import { post, getCurrentContentPart, setCurrentContentPart } from '../utils';
 import { AzureCredentials } from './types';
-import { AzureHostIdentityDisabledError, getAccessToken } from './utils';
+import {
+  assertAzureResourceName,
+  AzureHostIdentityDisabledError,
+  getAccessToken,
+} from './utils';
 
 const redact = async (
   documents: any[],
@@ -76,6 +80,9 @@ const redact = async (
   const requestOptions: Record<string, any> = { headers };
   if (agent) {
     requestOptions.dispatcher = agent;
+  }
+  if (!credentials?.customHost) {
+    assertAzureResourceName(credentials?.resourceName);
   }
   const response = await post(url, body, requestOptions, timeout);
   return response;

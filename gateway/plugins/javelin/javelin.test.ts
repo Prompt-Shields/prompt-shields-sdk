@@ -54,10 +54,9 @@ describe('Javelin Guardrails Tests', () => {
         ],
       };
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockResponse),
-      });
+      (global.fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify(mockResponse))
+      );
 
       const context = {
         request: {
@@ -123,10 +122,9 @@ describe('Javelin Guardrails Tests', () => {
         ],
       };
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockResponse),
-      });
+      (global.fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify(mockResponse))
+      );
 
       const context = {
         request: {
@@ -191,10 +189,9 @@ describe('Javelin Guardrails Tests', () => {
         ],
       };
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockResponse),
-      });
+      (global.fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify(mockResponse))
+      );
 
       const context = {
         request: {
@@ -277,10 +274,9 @@ describe('Javelin Guardrails Tests', () => {
         ],
       };
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockResponse),
-      });
+      (global.fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify(mockResponse))
+      );
 
       const context = {
         request: {
@@ -393,10 +389,9 @@ describe('Javelin Guardrails Tests', () => {
         ],
       };
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockResponse),
-      });
+      (global.fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify(mockResponse))
+      );
 
       const context = {
         request: {
@@ -445,10 +440,9 @@ describe('Javelin Guardrails Tests', () => {
         ],
       };
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockResponse),
-      });
+      (global.fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify(mockResponse))
+      );
 
       const context = {
         request: {
