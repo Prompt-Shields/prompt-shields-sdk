@@ -17,6 +17,7 @@ import {
 } from './middlewares/adminAuth';
 import { psTelemetrySender } from './middlewares/ps-telemetry';
 import { flushSecurityEvents } from './middlewares/psSecurityEvents';
+import { flushSecurityLogsExporter } from './middlewares/psSecurityEvents/otlp';
 import { createDrain, shutdownTimeoutMs } from './psShutdown';
 
 // Extract the port number from the command line arguments
@@ -195,6 +196,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
           console.warn('Shutdown deadline reached; open connections closed');
       })
       .then(() => psTelemetrySender.shutdown())
+      .then(() => flushSecurityLogsExporter())
       .finally(() => {
         flushSecurityEvents(true);
         process.exit(0);
