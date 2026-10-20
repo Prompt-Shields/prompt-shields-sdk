@@ -30,22 +30,27 @@ from collector.audit import bearer_key_prefix, record_read
 from collector.auth import resolve_tenant
 from collector.partner_auth import PartnerPrincipal, require_scope
 from collector.partner_registry import _audit, _enforce_rate_limit
+from collector.sanitize import BoundedJsonRoute, StorableStr
 
 WRITE_SCOPE = "attestations:write"
 _READ_SCOPE = Depends(require_scope("assets:read"))
 _WRITE_SCOPE = Depends(require_scope(WRITE_SCOPE))
 
-tenant_router = APIRouter(prefix="/api/v1/registry", tags=["Registry"])
-partner_router = APIRouter(prefix="/partner/v1", tags=["Partner API"])
+tenant_router = APIRouter(
+    prefix="/api/v1/registry", tags=["Registry"], route_class=BoundedJsonRoute
+)
+partner_router = APIRouter(
+    prefix="/partner/v1", tags=["Partner API"], route_class=BoundedJsonRoute
+)
 
 
 class AttestationBody(BaseModel):
-    field: str = Field(..., min_length=1, max_length=64)
+    field: StorableStr = Field(..., min_length=1, max_length=64)
     state: AttestationState
-    attested_by: str = Field(
+    attested_by: StorableStr = Field(
         ..., min_length=1, max_length=320, description="The person signing off, e.g. an email"
     )
-    comment: str | None = Field(default=None, max_length=4000)
+    comment: StorableStr | None = Field(default=None, max_length=4000)
 
 
 def _problem(status: int, title: str, detail: str) -> HTTPException:

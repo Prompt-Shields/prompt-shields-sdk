@@ -18,8 +18,9 @@ from sqlalchemy import select
 
 from collector import retention, rls
 from collector.config import settings
+from collector.sanitize import BoundedJsonRoute
 
-router = APIRouter(prefix="/api/v1/operator", tags=["Operator"])
+router = APIRouter(prefix="/api/v1/operator", tags=["Operator"], route_class=BoundedJsonRoute)
 
 
 def _problem(status: int, title: str, detail: str) -> HTTPException:

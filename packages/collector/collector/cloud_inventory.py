@@ -73,6 +73,7 @@ from collector import rls
 from collector.dedup import compute_confidence
 from collector.lifecycle import lock_assets, reactivate
 from collector.provider_usage_admin import require_operator
+from collector.sanitize import BoundedJsonRoute
 from collector.webhooks import AssetChanges
 
 logger = logging.getLogger("prompt_shields.cloud_inventory")
@@ -1828,7 +1829,7 @@ async def pull_cloud_inventory(
     return {"tenant_id": str(tenant_id), "clouds": result}
 
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+router = APIRouter(prefix="/api/v1/admin", tags=["Admin"], route_class=BoundedJsonRoute)
 
 
 class CloudInventoryPullBody(BaseModel):

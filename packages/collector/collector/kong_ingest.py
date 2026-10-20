@@ -30,7 +30,6 @@ reversible, and the registry has no use for it).
 from __future__ import annotations
 
 import contextlib
-import json
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
@@ -48,6 +47,12 @@ from collector.ingest import (
 )
 from collector.otel_ingest import _problem, _read_bounded_body
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_kong_rate_limiter
+from collector.sanitize import (
+    BodyTooDeep,
+    loads_bounded,
+    storable_text,
+    too_deep_problem,
+)
 
 router = APIRouter()
 
@@ -83,20 +88,15 @@ NOT_AN_OBJECT = "not_an_object"
 
 
 def _text(value: Any, max_length: int = MAX_NAME_LENGTH) -> str | None:
-    if not isinstance(value, str):
+    # A value the database cannot store (NUL, lone surrogate) would fail the
+    # whole batch's write with a 500, which Kong retries until it drops every
+    # entry in the batch. The model name comes from the caller's request
+    # body, so any client behind Kong could send one (collector/sanitize.py).
+    value = storable_text(value)
+    if value is None:
         return None
     value = value.strip()
     if not value or len(value) > max_length or value.lower() == _UNSPECIFIED:
-        return None
-    # Postgres text cannot hold NUL, and a lone surrogate cannot be encoded.
-    # Either would fail the whole batch's write with a 500, which Kong retries
-    # until it drops every entry in the batch. The model name comes from the
-    # caller's request body, so any client behind Kong could send one.
-    if "\x00" in value:
-        return None
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
         return None
     return value
 
@@ -283,8 +283,10 @@ async def ingest_kong(
 
     raw = await _read_bounded_body(request)
     try:
-        payload = json.loads(raw)
-    except (ValueError, UnicodeDecodeError, RecursionError):  # deep nesting
+        payload = loads_bounded(raw)
+    except BodyTooDeep:
+        raise too_deep_problem() from None
+    except ValueError:  # UnicodeDecodeError included
         raise _problem(400, "Bad Request", "Body is not valid JSON") from None
     if not isinstance(payload, (dict, list)):
         raise _problem(

@@ -286,7 +286,7 @@ business unit and environment as for every other source.
 | Status | When | http-log | prompt-shields plugin |
 |--------|------|----------|-----------------------|
 | `200` | Accepted. Body: `{"ingested", "assets_created", "ignored", "rejected"}` | done | done |
-| `400` | Body is not JSON, or not an object or array | retries until `max_retry_time`, then drops | drops, logs the status |
+| `400` | Body is not JSON, not an object or array, or nested deeper than 64 levels | retries until `max_retry_time`, then drops | drops, logs the status |
 | `401` | Missing or wrong tenant key | retries, then drops | drops, logs the status |
 | `413` | Body over 4 MiB or more than 1,000 entries | retries, then drops | drops (its schema caps `queue.max_batch_size` at 1,000) |
 | `415` | Content type is not `application/json` | retries, then drops | drops |
