@@ -33,7 +33,7 @@ export const rateLimitedTotal = defaultRegistry.register(
 export const telemetryDroppedTotal = defaultRegistry.register(
   new Counter(
     'ps_gateway_telemetry_dropped_total',
-    'Telemetry items dropped before delivery, by sink (otel, ps_telemetry, security_events) and reason.',
+    'Telemetry items dropped before delivery, by sink (otel, otel_logs, ps_telemetry, security_events) and reason.',
     ['sink', 'reason']
   )
 );
