@@ -43,5 +43,20 @@
         }
       ]
     }
-  ]
+  ],
+  "mcp_servers": {
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "auth": { "type": "bearer", "token_env": "GITHUB_MCP_TOKEN" },
+      "tools": { "allow": ["search_issues", "get_issue"] },
+      "pinned_tools": {},
+      "on_description_change": "block",
+      "input_guardrails": [
+        {
+          "default.regexMatch": { "rule": "[Pp]assword|[Ss]ecret", "not": true }
+        }
+      ],
+      "output_guardrails": []
+    }
+  }
 }

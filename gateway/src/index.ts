@@ -47,6 +47,7 @@ import { messagesHandler } from './handlers/messagesHandler';
 import { imageEditsHandler } from './handlers/imageEditsHandler';
 import { messagesCountTokensHandler } from './handlers/messagesCountTokensHandler';
 import modelResponsesHandler from './handlers/modelResponsesHandler';
+import { mcpHandler } from './mcp/handler';
 
 // utils
 import { logger } from './apm';
@@ -368,6 +369,13 @@ app.post('/v1/prompts/*', requestValidator, (c) => {
     message: 'prompt completions error: Something went wrong',
   });
 });
+
+// PS fork (#63): enforcing MCP proxy (Streamable HTTP) to the servers in
+// `mcp_servers` (gateway/docs/mcp-proxy.md). Mounted before the /v1 proxy
+// catch-alls; GET and DELETE are the 2025-11-25 stream and session end.
+app.post('/v1/mcp/:server', mcpHandler);
+app.get('/v1/mcp/:server', mcpHandler);
+app.delete('/v1/mcp/:server', mcpHandler);
 
 // WebSocket route
 if (runtime === 'workerd') {

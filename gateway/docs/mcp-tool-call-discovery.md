@@ -137,6 +137,35 @@ The observe-only work (option C part 2, option D and the collector schema above)
 - Collector: `mcp_tool_usage`, as specified above, plus `latency_ms_total`/`latency_count` and `environment` in the key. `POST /ingest/mcp`, MCP `tools/call` spans on the OTLP receiver (`source: "otel"`), and a tenant read route `GET /api/v1/registry/mcp-tools`.
 - Not yet: the Partner API scope (`mcp:read`), AI-BOM `services`, MCP config scanning in `ps-scan` (option E), and the TypeScript MCP client.
 
+## Enforcement approved: option B (2026-10-20)
+
+The user approved building our own enforcing MCP proxy (option B above, the
+"thin MCP proxy", as Phase 1 of the plan) as the next step. This answers
+question 2 under _Decision needed_ for the proxy; the _Status_ field above is
+left for the user to update.
+
+The first slice is implemented in `src/mcp/` and documented in
+[`mcp-proxy.md`](mcp-proxy.md):
+
+- `/v1/mcp/:server`: Streamable HTTP pass-through for 2026-07-28 and
+  2025-11-25, to servers configured in `mcp_servers` with per-server outbound
+  credentials. The client's token is never forwarded.
+- Upstream URLs checked with `isSafeUpstreamURL`; redirects never followed.
+- Tool allowlist or denylist per server, `tools/list` filtering, `Mcp-Name` /
+  `Mcp-Method` checked against the body, tool names and descriptions capped
+  and stripped of invisible characters, tool definitions pinned by hash
+  (block or flag).
+- Guardrails on tool arguments and results through the hooks manager, fail
+  closed, with the security events of #211.
+- `mcp_tool_call` events to `/ingest/mcp` (`source: "gateway"`, names only)
+  and bounded Prometheus metrics.
+- Client auth: a static bearer token (`PS_MCP_TOKEN`), as for `/metrics`.
+
+It shares no code with upstream `src/mcp/`; nothing of upstream's MCP Gateway
+is ported. Still to do: inbound OAuth 2.1 (RFC 9728), per-consumer policy and
+rate limits, the collector-side MCP registry, and the other items listed in
+`mcp-proxy.md`.
+
 ## First slice (this change)
 
 Observe-only, no new dependency, no collector change:
