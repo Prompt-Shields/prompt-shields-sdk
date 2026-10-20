@@ -145,6 +145,12 @@ local function copy_fields(src, fields)
   local out
   for _, key in ipairs(fields) do
     local value = scalar(src[key])
+    -- request_model can come from the client's request body. Drop long
+    -- strings (the collector drops them too) so one request cannot grow a
+    -- batch past the collector's body limit and get the whole batch refused.
+    if type(value) == "string" then
+      value = short_string(value, event.MAX_NAME_LENGTH)
+    end
     if value ~= nil then
       out = out or {}
       out[key] = value
@@ -311,8 +317,14 @@ local SERIALIZE_OPTS = { __skip_fetch_headers__ = true }
 -- others.
 local MAX_HEADERS = 1000
 
--- Statuses that will never succeed on retry: drop the batch instead of
--- retrying it until queue.max_retry_time.
+-- Statuses worth retrying with the queue's backoff: timeouts, rate limits
+-- and server errors. Any other non-2xx status will never succeed on retry,
+-- so the batch is dropped instead of retried until queue.max_retry_time.
+local function retryable(status)
+  return status == 408 or status == 429 or status >= 500
+end
+
+-- Reasons logged for the common drop statuses.
 local DROP_STATUSES = {
   [400] = "bad request",
   [401] = "invalid ingest key",
@@ -359,16 +371,16 @@ local function send_batch(conf, entries)
     return true
   end
 
-  local reason = DROP_STATUSES[status]
-  if reason then
-    -- Never logs the key or the body: only the status.
-    kong.log.err("collector returned ", status, " (", reason, "); dropping ",
-                 #entries, " event(s)")
-    return true
+  if retryable(status) then
+    -- Let the queue back off and retry.
+    return nil, "collector returned " .. status
   end
 
-  -- 408, 429 and 5xx: let the queue back off and retry.
-  return nil, "collector returned " .. status
+  -- Never logs the key or the body: only the status.
+  kong.log.err("collector returned ", status, " (",
+               DROP_STATUSES[status] or "not retryable", "); dropping ",
+               #entries, " event(s)")
+  return true
 end
 PromptShieldsHandler._send_batch = send_batch -- for tests
 PromptShieldsHandler._event = event        -- for tests

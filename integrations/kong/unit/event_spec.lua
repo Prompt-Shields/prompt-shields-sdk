@@ -192,7 +192,8 @@ describe("prompt-shields event", function()
 
     it("drops non-scalar and oversized values", function()
       local built = event.build({
-        ai = { proxy = { meta = { provider_name = "openai", request_model = { "x" } },
+        ai = { proxy = { meta = { provider_name = "openai", request_model = { "x" },
+                                  response_model = string.rep("m", 257) },
                          usage = { prompt_tokens = "12", cost = { 1 } } } },
         route = { name = string.rep("r", 257) },
         consumer = { username = 7, custom_id = "app" },

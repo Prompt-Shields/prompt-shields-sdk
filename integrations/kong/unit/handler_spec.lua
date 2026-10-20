@@ -171,7 +171,7 @@ describe("prompt-shields handler", function()
       assert.matches("connection refused", err)
     end)
 
-    for _, status in ipairs({ 400, 401, 403, 404, 413, 415, 422 }) do
+    for _, status in ipairs({ 302, 400, 401, 403, 404, 405, 409, 413, 415, 422 }) do
       it("drops the batch on " .. status .. " without logging the key", function()
         load({})
         state.http_response = { status = status, body = "nope" }
