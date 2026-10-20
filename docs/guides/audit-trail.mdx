@@ -58,7 +58,7 @@ row_hash = sha256( prev_hash + "\n" + canonical_json(row) )
 - `canonical_json` is a JSON object of `id`, `tenant_id`, `seq`, `created_at`, `action`, `outcome`, `actor_type`, `actor_id`, `target_type`, `target_id`, `request_id`, `status_code`, `details` and `"v": 1`. Keys are sorted, there is no whitespace, the encoding is UTF-8, and `created_at` is written as `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
 - Writers take a per-tenant Postgres advisory lock before they read the chain head, so concurrent requests append one after another. A unique `(tenant_id, seq)` constraint backs this up.
 - The audit row is written in the same transaction as the change it describes, so both commit or neither does.
-- On Postgres, triggers reject any `UPDATE` and any `DELETE` that does not come from the audit purge.
+- On Postgres, triggers reject any `UPDATE` and any `DELETE` that does not come from the audit purge. They stop accidents and casual edits, not someone who holds the collector's database credentials: the purge runs as the collector's role, so that role can enable the purge setting (`prompt_shields.audit_purge`) and delete rows, and the table's owner (often the same role, since it runs the migrations) can disable the triggers. Integrity rests on the hash chain plus a copy kept outside the database (see **Limits** below).
 
 The reference implementation is `packages/db/audit_chain.py`.
 
