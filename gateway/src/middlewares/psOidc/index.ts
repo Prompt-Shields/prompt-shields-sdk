@@ -1,6 +1,6 @@
 import { Context, Next } from 'hono';
 import { reportAuthFailure } from '../psSecurityEvents';
-import { providerFromHeaders } from '../ps-telemetry';
+import { constructConfigFromRequestHeaders } from '../../handlers/handlerUtils';
 import { oidcSettings } from './config';
 import {
   errorBody,
@@ -8,6 +8,7 @@ import {
   OidcIdentity,
   oidcTargetDenied,
   policyDeniedResponse,
+  targetModels,
 } from './identity';
 import { TokenError, verifyToken } from './jwks';
 import {
@@ -33,8 +34,9 @@ import {
  *    header pass-through, not through `forward_headers`. When
  *    PS_OIDC_PROVIDER_KEYS has a key for the `x-portkey-provider`, it is set
  *    as the provider credential instead (header mode only; never with
- *    `x-portkey-config` or `x-portkey-custom-host`, so a caller cannot send
- *    the gateway's key to a host of their choosing). `x-ps-auth-subject`
+ *    `x-portkey-config`, `x-portkey-custom-host` or any other header that
+ *    can move the upstream host, see gatewayKeyAllowed, so a caller cannot
+ *    send the gateway's key to a host of their choosing). `x-ps-auth-subject`
  *    (the subject hash) is set for the cache scope, so cached responses are
  *    per user; `x-ps-*` headers are never sent upstream.
  * 4. The provider/model allowlist is enforced per target, on the provider and
@@ -56,6 +58,41 @@ export type { OidcIdentity } from './identity';
 /** Routes that need a token when OIDC is on. */
 export const isProtectedPath = (path: string): boolean =>
   path.startsWith('/v1/') && path !== '/v1/health';
+
+/**
+ * `x-portkey-*` headers whose values never become part of an upstream URL.
+ * Every other `x-portkey-*` header may (`x-portkey-huggingface-base-url`,
+ * `x-portkey-azure-foundry-url`, `x-portkey-azure-resource-name`,
+ * `x-portkey-vertex-region`, ... are interpolated into the provider's base
+ * URL), so it must look like a plain name for the gateway key to be used.
+ */
+const NON_URL_HEADERS = new Set([
+  'x-portkey-provider',
+  'x-portkey-metadata',
+  'x-portkey-trace-id',
+  'x-portkey-forward-headers',
+  'x-portkey-openai-beta',
+  'x-portkey-anthropic-beta',
+]);
+const PLAIN_NAME = /^[A-Za-z0-9._-]*$/;
+
+/**
+ * Whether the gateway's own provider key (PS_OIDC_PROVIDER_KEYS) may be
+ * attached to this request: header mode only, with no caller config or
+ * custom host, and every other `x-portkey-*` value a plain name (letters,
+ * digits, `.`, `_`, `-`). A name can only fill its slot in the provider's
+ * URL template (`<resource>.openai.azure.com`), never replace the host the
+ * way a URL, `/`, `?`, `#` or `@` can.
+ */
+export function gatewayKeyAllowed(headers: Headers): boolean {
+  if (headers.has('x-portkey-config') || headers.has('x-portkey-custom-host'))
+    return false;
+  for (const [name, value] of headers) {
+    if (!name.startsWith('x-portkey-') || NON_URL_HEADERS.has(name)) continue;
+    if (!PLAIN_NAME.test(value.trim())) return false;
+  }
+  return true;
+}
 
 const bearerToken = (header: string | undefined): string | undefined => {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header ?? '');
@@ -156,16 +193,24 @@ export function psOidc() {
 
     const headers = new Headers(c.req.raw.headers);
 
-    // Realtime is a WebSocket that never reaches tryPost: check it here.
+    // Realtime is a WebSocket that never reaches tryPost: check it here, on
+    // the provider options the realtime handlers build (a config wins over
+    // x-portkey-provider there, so it must here too).
     if (c.req.path === '/v1/realtime') {
-      const provider = providerFromHeaders(
-        Object.fromEntries(headers) as Record<string, string>
-      );
-      const response = oidcTargetDenied(
-        c,
-        provider,
-        c.req.query('model') || undefined
-      );
+      let options: any;
+      try {
+        options = constructConfigFromRequestHeaders(
+          Object.fromEntries(headers)
+        );
+      } catch {
+        options = undefined;
+      }
+      const provider =
+        typeof options?.provider === 'string' ? options.provider : undefined;
+      const response = oidcTargetDenied(c, provider, [
+        c.req.query('model') || undefined,
+        ...targetModels(options, undefined),
+      ]);
       if (response) return response;
     }
 
@@ -191,12 +236,11 @@ export function psOidc() {
     headers.set(SUBJECT_HEADER, identity.subjectHash);
     if (identity.group) headers.set(GROUP_HEADER, identity.group.name);
     const provider = headers.get('x-portkey-provider')?.trim().toLowerCase();
-    const providerKey = provider && config.providerKeys[provider];
-    if (
-      providerKey &&
-      !headers.has('x-portkey-config') &&
-      !headers.has('x-portkey-custom-host')
-    ) {
+    const providerKey =
+      provider && Object.hasOwn(config.providerKeys, provider)
+        ? config.providerKeys[provider]
+        : undefined;
+    if (providerKey && gatewayKeyAllowed(headers)) {
       headers.set('authorization', `Bearer ${providerKey}`);
     }
     c.req.raw = new Request(c.req.raw, { headers });

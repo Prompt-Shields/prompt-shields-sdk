@@ -616,6 +616,90 @@ describe('the IdP token is never forwarded upstream', () => {
     expectNeverSent(jwt);
   });
 
+  test.each([
+    [
+      'a Hugging Face base URL',
+      'huggingface',
+      { 'x-portkey-huggingface-base-url': 'https://evil.example/hf' },
+    ],
+    [
+      'an Azure AI Foundry URL',
+      'azure-ai',
+      { 'x-portkey-azure-foundry-url': 'https://evil.example/foundry' },
+    ],
+    [
+      'an Azure resource name that moves the host',
+      'azure-openai',
+      {
+        'x-portkey-azure-resource-name': 'evil.example/x?',
+        'x-portkey-azure-deployment-id': 'gpt-4o-mini',
+        'x-portkey-azure-api-version': '2024-10-21',
+      },
+    ],
+    [
+      'a Vertex region that moves the host',
+      'vertex-ai',
+      {
+        'x-portkey-vertex-region': 'evil.example/#',
+        'x-portkey-vertex-project-id': 'p',
+      },
+    ],
+  ])(
+    'the gateway key is not attached with %s',
+    async (_what, provider, headers) => {
+      const GATEWAY_KEY = `gw-key-for-${provider}`;
+      process.env.PS_OIDC_PROVIDER_KEYS = JSON.stringify({
+        [provider]: GATEWAY_KEY,
+      });
+      process.env.PS_OIDC_POLICY = JSON.stringify({
+        default: 'allow',
+        groups: [],
+      });
+      upstream(/evil\.example|azure\.com|googleapis\.com/, () => chatOk());
+      const jwt = await token();
+      await post(app, '/v1/chat/completions', chatBody(), {
+        ...bearer(jwt),
+        'x-portkey-provider': provider,
+        ...headers,
+      });
+      expectNeverSent(GATEWAY_KEY);
+      expectNeverSent(jwt);
+    }
+  );
+
+  test('the gateway key is still used with plain Azure resource and deployment names', async () => {
+    const AZURE_KEY = 'gw-azure-key';
+    process.env.PS_OIDC_PROVIDER_KEYS = JSON.stringify({
+      'azure-openai': AZURE_KEY,
+    });
+    process.env.PS_OIDC_POLICY = JSON.stringify({
+      default: 'allow',
+      groups: [],
+    });
+    upstream(/my-resource\.openai\.azure\.com/, () => chatOk());
+    const res = await post(app, '/v1/chat/completions', chatBody(), {
+      ...bearer(await token()),
+      'x-portkey-provider': 'azure-openai',
+      'x-portkey-azure-resource-name': 'my-resource',
+      'x-portkey-azure-deployment-id': 'gpt-4o-mini',
+      'x-portkey-azure-api-version': '2024-10-21',
+      'x-portkey-trace-id': 'trace/with:odd#chars',
+    });
+    expect(res.status).toBe(200);
+    const [call] = providerCalls();
+    expect(new URL(call.url).host).toBe('my-resource.openai.azure.com');
+    expect(call.headers['api-key']).toBe(AZURE_KEY);
+  });
+
+  test('a provider name that is an Object prototype key gets no gateway key', async () => {
+    const res = await post(app, '/v1/chat/completions', chatBody(), {
+      ...bearer(await token({ claims: { groups: ['staff'] } })),
+      'x-portkey-provider': 'constructor',
+    });
+    expect(res.status).toBe(400);
+    expect(providerCalls()).toHaveLength(0);
+  });
+
   test('cached responses are scoped per user', async () => {
     const asUser = async (sub: string) =>
       chat({ ...bearer(await token({ sub })), 'x-ps-cache': 'on' });
@@ -766,6 +850,71 @@ describe('group policy', () => {
     );
     expect(res.status).toBe(403);
     expect(providerCalls()).toHaveLength(0);
+  });
+
+  test('Azure OpenAI: the deployment is checked, not only the body model', async () => {
+    process.env.PS_OIDC_POLICY = JSON.stringify({
+      groups: [
+        {
+          name: 'staff',
+          match: ['quants'],
+          providers: ['azure-openai'],
+          models: ['gpt-4o-mini'],
+        },
+      ],
+    });
+    upstream(/my-resource\.openai\.azure\.com/, () => chatOk());
+    const azure = (deployment: string) =>
+      post(app, '/v1/chat/completions', chatBody('gpt-4o-mini'), {
+        ...bearer(jwt),
+        'x-portkey-provider': 'azure-openai',
+        'x-portkey-azure-resource-name': 'my-resource',
+        'x-portkey-azure-deployment-id': deployment,
+        'x-portkey-azure-api-version': '2024-10-21',
+      });
+    const jwt = await token();
+    expect((await azure('gpt-4o-mini')).status).toBe(200);
+    const res = await azure('o3-pro');
+    expect(res.status).toBe(403);
+    expect(providerCalls()).toHaveLength(1);
+    expect((await securityEvents()).pop()).toMatchObject({
+      'ps.policy.reason': 'model_not_allowed',
+      'gen_ai.request.model': 'o3-pro',
+    });
+  });
+
+  test('a request without a model is denied when the group restricts models', async () => {
+    // The provider transform would otherwise fill in its default model.
+    const res = await post(
+      app,
+      '/v1/chat/completions',
+      { messages: [{ role: 'user', content: 'hi' }] },
+      { 'x-portkey-provider': 'openai', ...bearer(await token()) }
+    );
+    expect(res.status).toBe(403);
+    expect(providerCalls()).toHaveLength(0);
+    expect((await securityEvents()).pop()['ps.policy.reason']).toBe(
+      'model_not_allowed'
+    );
+  });
+
+  test('realtime: the config provider is checked, not x-portkey-provider', async () => {
+    const res = await app.request('/v1/realtime?model=gpt-4o-mini', {
+      method: 'GET',
+      headers: {
+        ...bearer(await token()),
+        'x-portkey-provider': 'openai',
+        'x-portkey-config': JSON.stringify({
+          provider: 'azure-openai',
+          api_key: 'k',
+        }),
+      },
+    });
+    expect(res.status).toBe(403);
+    expect((await securityEvents()).pop()).toMatchObject({
+      'ps.policy.reason': 'provider_not_allowed',
+      'gen_ai.provider.name': 'azure-openai',
+    });
   });
 
   test('a fallback config skips a denied target', async () => {

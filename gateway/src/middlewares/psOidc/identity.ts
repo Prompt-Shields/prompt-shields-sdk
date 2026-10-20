@@ -52,8 +52,12 @@ export function policyDeniedResponse(
         ? 'your token lists no groups (Entra ID groups overage: use app roles or groups assigned to the application)'
         : 'your identity provider groups are not mapped to any gateway policy'
       : reason === 'provider_not_allowed'
-        ? `provider "${provider}" is not allowed for your group`
-        : `model "${model}" is not allowed for your group`;
+        ? provider
+          ? `provider "${provider}" is not allowed for your group`
+          : 'your group has a provider allowlist and the request names no provider'
+        : model
+          ? `model "${model}" is not allowed for your group`
+          : 'your group has a model allowlist and the request names no model';
   return new Response(
     JSON.stringify(
       errorBody(
@@ -67,20 +71,87 @@ export function policyDeniedResponse(
 }
 
 /**
- * Policy check for one upstream target (called from tryPost). Returns the
- * 403 to send instead of calling the target, or undefined to proceed.
+ * Policy check for one upstream target (called from tryPost and, for
+ * realtime, from psOidc). Every name in `models` must be allowed (see
+ * targetModels). With `requireModel`, a group with a model allowlist is
+ * denied when there is no model at all, because the provider transform would
+ * otherwise fill in its default model. Returns the 403 to send instead of
+ * calling the target, or undefined to proceed.
  */
 export function oidcTargetDenied(
   c: Context,
   provider: string | undefined,
-  model: string | undefined
+  models: string | undefined | (string | undefined)[],
+  requireModel = false
 ): Response | undefined {
   const identity = oidcIdentityOf(c);
   if (!identity?.group) return undefined;
-  const reason = checkTarget(identity.group, provider, model);
+  const names = (Array.isArray(models) ? models : [models]).filter(
+    (m): m is string => typeof m === 'string' && m !== ''
+  );
+  let model = names[0];
+  let reason = checkTarget(identity.group, provider, model);
+  for (const m of names.slice(1)) {
+    if (reason) break;
+    model = m;
+    reason = checkTarget(identity.group, provider, m);
+  }
+  if (!reason && requireModel && identity.group.models && !names.length)
+    reason = 'model_not_allowed';
   return reason
     ? policyDeniedResponse(c, identity, reason, provider, model)
     : undefined;
+}
+
+/**
+ * Endpoints whose provider transform may fill in a default model when the
+ * request has none (e.g. Anthropic chat), so a missing model is denied when
+ * the group restricts models. Files, batches, proxied calls and the like
+ * have no model and are checked on the provider alone.
+ */
+export const MODEL_ENDPOINTS = new Set<string>([
+  'complete',
+  'chatComplete',
+  'stream-complete',
+  'stream-chatComplete',
+  'stream-messages',
+  'messages',
+  'messagesCountTokens',
+  'createModelResponse',
+  'countResponseInputTokens',
+  'embed',
+  'rerank',
+  'moderate',
+  'imageGenerate',
+  'imageEdit',
+  'createSpeech',
+  'createTranscription',
+  'createTranslation',
+  'ocr',
+]);
+
+/**
+ * The model names that decide what a target runs: `override_params.model`
+ * or else the body's model, plus the deployment for Azure, which runs the
+ * deployment named in the URL whatever the body says.
+ */
+export function targetModels(
+  providerOption: Record<string, any> | undefined,
+  requestBody: unknown
+): string[] {
+  const override = providerOption?.overrideParams?.model;
+  const models = [
+    typeof override === 'string' && override
+      ? override
+      : requestModel(requestBody),
+  ];
+  if (providerOption?.provider === 'azure-openai')
+    models.push(providerOption.deploymentId);
+  if (providerOption?.provider === 'azure-ai')
+    models.push(providerOption.azureDeploymentName);
+  return models.filter(
+    (m): m is string => typeof m === 'string' && m.trim() !== ''
+  );
 }
 
 /** The model of a request body, if it names one. */

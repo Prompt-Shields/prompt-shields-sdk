@@ -64,10 +64,13 @@ export function checkTarget(
   model: string | undefined
 ): PolicyDenyReason | undefined {
   if (!group) return undefined;
-  if (group.providers && provider !== undefined) {
-    if (!group.providers.includes(provider.toLowerCase()))
-      return 'provider_not_allowed';
-  }
+  // A target that names no provider is denied too: with a provider
+  // allowlist, "unknown" must not mean "any".
+  if (
+    group.providers &&
+    !(provider && group.providers.includes(provider.toLowerCase()))
+  )
+    return 'provider_not_allowed';
   if (group.models && model) {
     if (!modelAllowed(group.models, model)) return 'model_not_allowed';
   }

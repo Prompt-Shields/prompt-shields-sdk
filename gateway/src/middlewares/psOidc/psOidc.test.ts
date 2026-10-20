@@ -188,6 +188,9 @@ describe('policy helpers', () => {
     // No model (files, batches, proxied GETs): provider only.
     expect(checkTarget(g, 'openai', undefined)).toBeUndefined();
     expect(checkTarget(undefined, 'anything', 'x')).toBeUndefined();
+    // No provider with a provider allowlist: denied, not "any".
+    expect(checkTarget(g, undefined, 'm')).toBe('provider_not_allowed');
+    expect(checkTarget(g, '', 'm')).toBe('provider_not_allowed');
   });
 
   test('Cache-Control TTL', () => {

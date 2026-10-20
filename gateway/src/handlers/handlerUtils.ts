@@ -62,7 +62,11 @@ import {
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
-import { oidcTargetDenied, requestModel } from '../middlewares/psOidc/identity';
+import {
+  MODEL_ENDPOINTS,
+  oidcTargetDenied,
+  targetModels,
+} from '../middlewares/psOidc/identity';
 
 function constructRequestBody(
   requestContext: RequestContext,
@@ -343,10 +347,8 @@ export async function tryPost(
   const policyDenied = oidcTargetDenied(
     c,
     providerOption.provider,
-    typeof providerOption.overrideParams?.model === 'string' &&
-      providerOption.overrideParams.model
-      ? providerOption.overrideParams.model
-      : requestModel(requestBody)
+    targetModels(providerOption, requestBody),
+    MODEL_ENDPOINTS.has(fn)
   );
   if (policyDenied) return policyDenied;
   const isRawBody =

@@ -40,7 +40,7 @@ An invalid configuration never falls back to "open": every protected route answe
 | `PS_OIDC_POLICY` | unset | The group policy (JSON, below), or the path of a file containing it. Unset: authentication only, every valid token is allowed. |
 | `PS_OIDC_PROVIDER_KEYS` | unset | **Secret.** JSON object of provider to API key, e.g. `{"openai":"sk-...","anthropic":"sk-ant-..."}`, or a file path. See [Provider credentials](#provider-credentials). |
 | `PS_OIDC_TELEMETRY_SUBJECT` | `hash` | What identifies the user in telemetry: `hash` (pseudonym), `raw` (the `sub` claim) or `off`. |
-| `PS_OIDC_SUBJECT_SALT` | unset | **Secret.** Key for the subject pseudonym (HMAC-SHA-256). Recommended; without it the pseudonym is a plain SHA-256 of issuer and subject. |
+| `PS_OIDC_SUBJECT_SALT` | unset | **Secret.** Key for the subject pseudonym (HMAC-SHA-256). Recommended; without it the pseudonym is a plain SHA-256 of issuer and subject, which anyone who can guess a subject (an email address, an employee id) can recompute and match. |
 
 On Cloudflare Workers set these as bindings (secrets for the two marked secret); the file-path forms are Node only. With the Helm chart, use the `gateway.oidc` values and put `PS_OIDC_PROVIDER_KEYS` and `PS_OIDC_SUBJECT_SALT` in the gateway Secret (see the [chart README](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/charts/prompt-shields/README.md)).
 
@@ -69,18 +69,18 @@ On Cloudflare Workers set these as bindings (secrets for the two marked secret);
 
 - **Entries are checked in order; the first entry with a `match` value in the user's groups claim applies.** List the most privileged entries first. Matching is exact and case-sensitive.
 - `name`: your label (`[A-Za-z0-9_.:-]`, up to 64 characters). It appears in telemetry (`user_group`) and events (`ps.policy.group`); the IdP group values do not.
-- `providers`: allowed providers (gateway provider names, e.g. `openai`, `azure-openai`, `anthropic`, `bedrock`). Omitted: any provider.
-- `models`: allowed models, exact or with a trailing `*` as a prefix wildcard. Omitted: any model.
+- `providers`: allowed providers (gateway provider names, e.g. `openai`, `azure-openai`, `anthropic`, `bedrock`). Omitted: any provider. A request that names no provider is denied when this is set.
+- `models`: allowed models, exact or with a trailing `*` as a prefix wildcard. Omitted: any model. For `azure-openai` the deployment (`x-portkey-azure-deployment-id`) must be allowed as well as the body's `model`, so list your deployment names. A chat, completion, embedding, Messages or Responses request without a model is denied when this is set, because some providers would otherwise fill in a default model.
 - `rate_limit.requests_per_minute`: requests per fixed one-minute window; `per` is `user` (default: each user has the budget) or `group` (shared by everyone in the entry).
 - `default`: `deny` (default) refuses users who match no entry; `allow` lets them through without restrictions.
 
-The provider and model are checked **for every target the gateway actually calls**, after `x-portkey-config`, `override_params` and cost-aware routing have been applied, and before guardrails, the cache and the upstream call. In a fallback config, a denied target counts as a failed target, so the next target is tried. Requests that name no model (files, batches, most proxied `GET`s) are checked on the provider only.
+The provider and model are checked **for every target the gateway actually calls**, after `x-portkey-config`, `override_params` and cost-aware routing have been applied, and before guardrails, the cache and the upstream call. In a fallback config, a denied target counts as a failed target, so the next target is tried. Requests that name no model (files, batches, most proxied `GET`s) are checked on the provider only. A batch runs the models named inside its input file, which the gateway does not read, so give a group with a model allowlist no provider that it may run batches against, or accept that limit.
 
 ### Provider credentials
 
 With OIDC on, the `Authorization` header holds the IdP token, so it cannot also carry a provider key. The gateway always removes it, together with any client-sent `x-ps-auth-*` header, before anything else runs. Provider credentials then come from one of:
 
-- **`PS_OIDC_PROVIDER_KEYS`** (recommended): when the request names its provider with `x-portkey-provider` and sends neither `x-portkey-config` nor `x-portkey-custom-host`, the gateway uses its own key for that provider. The key is never used with a caller-supplied config or custom host, so a caller cannot send it to a host of their choosing.
+- **`PS_OIDC_PROVIDER_KEYS`** (recommended): when the request names its provider with `x-portkey-provider` and sends neither `x-portkey-config` nor `x-portkey-custom-host`, the gateway uses its own key for that provider. The key is never used with a caller-supplied config or custom host, nor when any other `x-portkey-*` header that can end up in the upstream URL holds more than a plain name (letters, digits, `.`, `_`, `-`): a URL in `x-portkey-huggingface-base-url` or `x-portkey-azure-foundry-url`, or a `/`, `?` or `#` in `x-portkey-azure-resource-name` or `x-portkey-vertex-region`. A caller therefore cannot send it to a host of their choosing.
 - **Keyless provider auth**: AWS, Azure and GCP workload identity, or OAuth client credentials, configured on the gateway.
 - **`x-portkey-config`** with `api_key` per target, if your callers hold provider keys themselves.
 
