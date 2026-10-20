@@ -132,6 +132,95 @@ def test_large_backlog_goes_out_in_max_batch_requests(senders):
     assert [len(b) for b in transport.batches] == [500, 500]
 
 
+def test_backlog_is_chunked_under_the_body_size_limit(senders):
+    """500 events with long non-ASCII names are over /ingest/mcp's 1 MiB:
+    the MCP sender splits by size as well as by count."""
+    transport = _Transport()
+    s = _sender(transport, flush_size=10_000, flush_interval=60, max_batch=500,
+                max_batch_bytes=inst._MCP_MAX_BATCH_BYTES)
+    senders.append(s)
+    name = "\U0001F600" * 200  # the SDK's cap on a name, 4 bytes per char
+    for i in range(1000):
+        s.enqueue({"server_name": name, "tool_name": name, "calling_service": name,
+                   "environment": name, "outcome": "ok", "latency_ms": i})
+    s.flush_sync()
+    assert len(transport.events) == 1000
+    assert len(transport.batches) > 2
+    for batch in transport.batches:
+        body = json.dumps({"events": batch}, ensure_ascii=False,
+                          separators=(",", ":")).encode()
+        assert len(body) <= 1024 * 1024
+        assert len(batch) <= 500
+
+
+def test_failing_sends_retry_on_the_interval_not_per_event(senders):
+    """A failing collector is retried every flush_interval, not on each new
+    event once flush_size are buffered (that would resend the backlog per
+    tool call)."""
+    transport = _Transport(status=503)
+    s = _sender(transport, flush_size=1, flush_interval=60)
+    senders.append(s)
+    s.enqueue({"i": 0})
+    assert _wait_for(lambda: s._backlog_reason == "send_failed")
+    posts = len(transport.batches)
+    for i in range(1, 50):
+        s.enqueue({"i": i})
+    time.sleep(0.3)
+    assert len(transport.batches) == posts
+    assert s.stats()["buffered"] == 50
+
+
+def test_rate_limited_sends_back_off_without_a_hot_loop(senders):
+    calls = []
+
+    def limited(request):
+        calls.append(time.monotonic())
+        return httpx.Response(429, headers={"Retry-After": "30"})
+
+    s = _sender(limited, flush_size=1, flush_interval=0.05)
+    senders.append(s)
+    s.enqueue({"i": 0})
+    assert _wait_for(lambda: calls)
+    for i in range(1, 20):
+        s.enqueue({"i": i})
+    time.sleep(0.5)  # ~10 intervals: all inside the 30 s Retry-After
+    assert len(calls) == 1
+    assert s.stats()["rate_limited_responses"] == 1
+    assert s.stats()["buffered"] == 20
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded")
+def test_forked_child_starts_its_own_thread_and_drops_the_parents_events(
+        senders, collector):
+    s = BackgroundTelemetrySender(collector, "ps_key", path="/ingest/mcp",
+                                  report_loss=False, flush_size=1000,
+                                  flush_interval=60)
+    senders.append(s)
+    s.enqueue({"tool_name": "parent"})
+    parent_thread = s._thread
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # child: report, then exit without running test teardown
+        ok = False
+        try:
+            fresh = s._thread is None and s.stats()["buffered"] == 0
+            s.enqueue({"tool_name": "child"})
+            s.flush_sync()
+            ok = fresh and s._thread is not None and s._thread.is_alive()
+        finally:
+            os.write(w, b"1" if ok else b"0")
+            os._exit(0)
+    os.close(w)
+    with os.fdopen(r, "rb") as f:
+        assert f.read() == b"1"
+    os.waitpid(pid, 0)
+    assert parent_thread.is_alive()
+    s.flush_sync()
+    assert sorted(e["tool_name"] for _, b in _Collector.received for e in b) == [
+        "child", "parent"]
+
+
 def test_full_buffer_drops_the_oldest_and_counts_it(senders):
     transport = _Transport()
     s = _sender(transport, flush_size=10_000, flush_interval=60)
@@ -346,6 +435,7 @@ def test_batch_mode_call_latency_ignores_a_slow_collector(mcp_session):
     assert elapsed < 0.5  # five ~2 ms calls; the collector takes 1 s per POST
     sender = inst._state.mcp_telemetry
     assert isinstance(sender, BackgroundTelemetrySender)
+    assert sender._max_batch_bytes == inst._MCP_MAX_BATCH_BYTES
     sender.stop(final_flush=True)  # send now instead of in 2 s
     assert _wait_for(lambda: len(_mcp_events()) == 5, timeout=5)
     assert [e["tool_name"] for e in _mcp_events()] == [f"tool{i}" for i in range(5)]

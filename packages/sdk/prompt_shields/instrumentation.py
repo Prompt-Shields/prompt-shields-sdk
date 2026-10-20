@@ -198,6 +198,9 @@ _LAZY_VENDORS = ("google", "mistral", "cohere", "bedrock", "mcp")
 
 # Largest batch the MCP sender posts (the collector accepts up to 1000).
 _MCP_MAX_BATCH = 500
+# Largest request body it posts, in bytes (the collector accepts 1 MiB):
+# 500 events with long non-ASCII names can exceed it.
+_MCP_MAX_BATCH_BYTES = 1_000_000
 
 # How MCP tool call events are sent (`mcp_telemetry_mode`,
 # PS_MCP_TELEMETRY_MODE): "batch" (default) only buffers them on the call
@@ -464,6 +467,7 @@ class _State:
         with _lock:
             if self.mcp_telemetry is None:
                 kwargs = {"path": "/ingest/mcp", "max_batch": _MCP_MAX_BATCH,
+                          "max_batch_bytes": _MCP_MAX_BATCH_BYTES,
                           "report_loss": False}
                 if self.mcp_mode == "sync":
                     self.mcp_telemetry = TelemetrySender(

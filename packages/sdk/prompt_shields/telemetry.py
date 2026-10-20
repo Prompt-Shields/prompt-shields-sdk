@@ -1,6 +1,7 @@
 import atexit
 import contextlib
 import hashlib
+import json
 import logging
 import math
 import os
@@ -122,6 +123,16 @@ def parse_retry_after(value: str | None) -> float | None:
     return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
 
 
+def _encoded_size(event: dict) -> int:
+    """Upper bound on an event's bytes in a request body: ASCII-escaped
+    JSON with default separators is never shorter than the compact UTF-8
+    that httpx sends, whichever httpx version (0.27 escapes, 0.28 does not)."""
+    try:
+        return len(json.dumps(event, default=str)) + 1  # + the comma
+    except (TypeError, ValueError):
+        return 0  # unsendable anyway: the request itself fails
+
+
 def _warn_unsent_at_exit(buffer: deque, url: str) -> None:
     # weakref.finalize callback: runs at interpreter exit (or when the sender
     # is collected) and must not hold a reference to the sender itself.
@@ -172,6 +183,7 @@ class TelemetrySender:
         path: str = "/ingest/events",
         headers: dict[str, str] | None = None,
         max_batch: int | None = None,
+        max_batch_bytes: int | None = None,
         report_loss: bool = True,
     ):
         self._url = f"{collector_url.rstrip('/')}{path}"
@@ -181,6 +193,7 @@ class TelemetrySender:
             else {"Authorization": f"Bearer {api_key}"}
         )
         self._max_batch = max_batch
+        self._max_batch_bytes = max_batch_bytes
         self._report_loss = report_loss
         self._buffer: deque[dict] = deque(maxlen=MAX_BUFFER_SIZE)
         self._sync_client = httpx.Client(timeout=5.0)
@@ -296,16 +309,35 @@ class TelemetrySender:
         for ev in events:
             self._append(ev)
 
-    def _drain_chunks(self) -> list[list[dict]]:
-        """Drain the buffer into request-sized chunks (one chunk when unlimited)."""
+    def _take_buffered(self) -> list[dict]:
         events = list(self._buffer)
         self._buffer.clear()
-        if self._max_batch is None:
+        return events
+
+    def _drain_chunks(self) -> list[list[dict]]:
+        """Drain the buffer into request-sized chunks: at most `max_batch`
+        events and about `max_batch_bytes` of JSON each (one chunk when
+        unlimited)."""
+        events = self._take_buffered()
+        if self._max_batch is None and self._max_batch_bytes is None:
             return [events]
-        return [
-            events[i:i + self._max_batch]
-            for i in range(0, len(events), self._max_batch)
-        ]
+        chunks: list[list[dict]] = []
+        chunk: list[dict] = []
+        size = 0
+        for ev in events:
+            n = _encoded_size(ev) if self._max_batch_bytes is not None else 0
+            if chunk and (
+                (self._max_batch is not None and len(chunk) >= self._max_batch)
+                or (self._max_batch_bytes is not None
+                    and size + n > self._max_batch_bytes)
+            ):
+                chunks.append(chunk)
+                chunk, size = [], 0
+            chunk.append(ev)
+            size += n
+        if chunk:
+            chunks.append(chunk)
+        return chunks
 
     async def flush(self) -> None:
         """Async flush: send all buffered events. Swallows errors (fail-open).
@@ -475,9 +507,13 @@ class BackgroundTelemetrySender(TelemetrySender):
 
     def _reset_after_fork(self) -> None:
         # The parent's thread does not exist in the child, and its locks
-        # may have been held at fork time: start over with fresh ones.
+        # may have been held at fork time: start over with fresh ones. The
+        # parent's pooled connections are its own (its thread keeps using
+        # them): give the child a client of its own, without closing them.
         self._init_thread_state()
         super()._reset_after_fork()
+        with contextlib.suppress(Exception):
+            self._sync_client = httpx.Client(timeout=5.0)
 
     # --- caller side: no I/O ---------------------------------------------
 
@@ -489,7 +525,9 @@ class BackgroundTelemetrySender(TelemetrySender):
                 full = len(self._buffer) >= self._flush_size
                 if self._thread is None and not self._stopping:
                     self._start_thread()
-            if full and not self._backing_off():
+            # While sends fail or are rate limited, retry on the interval
+            # only: a new event must not trigger a resend of the backlog.
+            if full and self._backlog_reason is None and not self._backing_off():
                 self._wake.set()
         except Exception as e:  # noqa: BLE001 - fail-open: never raise
             logger.debug(f"Telemetry enqueue error: {e}")
@@ -567,9 +605,10 @@ class BackgroundTelemetrySender(TelemetrySender):
         with self._lock:
             super()._append(event)
 
-    def _drain_chunks(self) -> list[list[dict]]:
+    def _take_buffered(self) -> list[dict]:
+        # Only the take holds the lock; sizing the chunks does not.
         with self._lock:
-            return super()._drain_chunks()
+            return super()._take_buffered()
 
     def _payload(self, chunk: list[dict]) -> dict:
         with self._lock:
