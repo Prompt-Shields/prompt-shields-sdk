@@ -618,6 +618,43 @@ describe('gateway refusals', () => {
     });
     expect(written.join('')).not.toContain('SECRET');
   });
+
+  test.each([
+    ['/v1/responses', { model: 'gpt-5', input: SECRET_PROMPT }],
+    [
+      '/v1/messages',
+      {
+        model: 'gpt-5-codex',
+        max_tokens: 16,
+        messages: [{ role: 'user', content: SECRET_PROMPT }],
+      },
+    ],
+  ])(
+    'a Responses request with checks that cannot run on it is payload.rejected (%s)',
+    async (path, body) => {
+      const res = await post(
+        app,
+        path,
+        body,
+        openai({
+          input_mutators: [{ 'default.addPrefix': { prefix: 'PREFIX-X ' } }],
+        })
+      );
+      expect(res.status).toBe(400);
+      const events = await securityEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        'event.name': 'payload.rejected',
+        'ps.payload.reason': 'unsupported_guardrail',
+        signature: 'unsupported_guardrail',
+        'http.response.status_code': 400,
+      });
+      const out = written.join('');
+      expect(out).not.toContain('SECRET');
+      expect(out).not.toContain('PREFIX-X');
+      expect(out).not.toContain('addPrefix');
+    }
+  );
 });
 
 describe('metric label bounds and telemetry drops', () => {

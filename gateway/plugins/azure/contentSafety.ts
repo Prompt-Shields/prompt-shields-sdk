@@ -7,7 +7,7 @@ import {
 } from '../types';
 import { post, getText } from '../utils';
 import { AzureCredentials } from './types';
-import { getAccessToken } from './utils';
+import { assertAzureResourceName, getAccessToken } from './utils';
 
 const defaultCategories = ['Hate', 'SelfHarm', 'Sexual', 'Violence'];
 
@@ -120,6 +120,9 @@ export const handler: PluginHandler<{
   }
   let response;
   try {
+    if (!credentials.customHost) {
+      assertAzureResourceName(credentials.resourceName);
+    }
     response = await post(url, request, requestOptions, timeout);
   } catch (e) {
     return { error: e, verdict: true, data };

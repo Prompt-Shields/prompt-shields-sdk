@@ -277,6 +277,15 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
   `networkPolicy.egress.extra`; set `HTTPS_PROXY` for the gateway in
   `gateway.config`. FQDN-based egress needs a CNI with FQDN policies (Cilium,
   Calico Enterprise) and is not templated.
+- `gateway.config.TRUSTED_CUSTOM_HOSTS` defaults to `none`: no host is
+  exempt from the gateway's SSRF checks. Unset, the gateway would trust
+  `localhost`, `127.0.0.1`, `::1` and `host.docker.internal` for provider
+  custom hosts, which in a pod reach the gateway itself and its sidecars.
+  Guardrail egress (webhook and log URLs, vendor base-URL overrides) never
+  trusts localhost unless it is listed. To reach an internal LLM or
+  guardrail endpoint, replace `none` with those host names (comma-separated).
+  The check is hostname-only; keep `allowExternal: false` or an egress proxy
+  for names that resolve to private addresses.
 - With more than one gateway replica, set `REDIS_CONNECTION_STRING` in the
   gateway Secret so the cache and rate limits are shared.
 
