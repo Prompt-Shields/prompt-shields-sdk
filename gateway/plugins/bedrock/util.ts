@@ -2,6 +2,20 @@ import { Sha256 } from '@aws-crypto/sha256-js';
 import { SignatureV4 } from '@smithy/signature-v4';
 import { BedrockBody, BedrockResponse, PIIFilter } from './type';
 import { post } from '../utils';
+import { pluginRequest, PluginEgressError } from '../egress';
+
+const AWS_REGION = /^[a-z]{2}(-[a-z0-9]+)+-\d+$/;
+
+/**
+ * PS fork (security): the region is interpolated into the vendor host
+ * (`bedrock-runtime.<region>.amazonaws.com`, `sts.<region>.amazonaws.com`),
+ * so a caller value with `.`, `/`, `@` or `#` could swap in another host.
+ */
+function assertAWSRegion(region?: string): void {
+  if (!AWS_REGION.test(region ?? '')) {
+    throw new PluginEgressError(`Invalid AWS region for the Bedrock guardrail`);
+  }
+}
 
 export const generateAWSHeaders = async (
   body: Record<string, any>,
@@ -52,6 +66,7 @@ export const bedrockPost = async (
   body: BedrockBody,
   timeout?: number
 ) => {
+  assertAWSRegion(credentials?.awsRegion);
   const url = `https://bedrock-runtime.${credentials?.awsRegion}.amazonaws.com/guardrail/${credentials?.guardrailId}/version/${credentials?.guardrailVersion}/apply`;
 
   const headers = await generateAWSHeaders(
@@ -214,18 +229,17 @@ export async function getAssumedRoleCredentials(
 
   let credentials: any;
   try {
-    const response = await fetch(url, {
+    assertAWSRegion(region);
+    const { response, text: xmlData } = await pluginRequest(url, {
       method: 'GET',
       headers: headers,
     });
 
     if (!response.ok) {
-      const resp = await response.text();
-      console.error({ message: resp });
+      console.error({ message: xmlData });
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    const xmlData = await response.text();
     credentials = parseXml(xmlData);
     if (putInCacheWithValue) {
       putInCacheWithValue(env, cacheKey, credentials, 60); //1 minute

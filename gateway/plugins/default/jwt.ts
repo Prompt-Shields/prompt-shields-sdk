@@ -1,5 +1,6 @@
 import { PluginContext, PluginHandler, PluginParameters } from '../types';
 import { jwtVerify, importJWK, JWTHeaderParameters, JWK } from 'jose';
+import { pluginRequest } from '../egress';
 
 interface JWKSCacheOptions {
   maxAge: number; // seconds
@@ -23,9 +24,12 @@ async function fetchAndCacheJWKS(
   maxAge: number,
   putInCacheWithValue?: Function
 ) {
-  const res = await fetch(jwksUri);
+  // PS fork (security): `jwksUri` is caller-set; SSRF-safe egress.
+  const { response: res, text } = await pluginRequest(jwksUri, {
+    method: 'GET',
+  });
   if (!res.ok) throw new Error(`Failed to fetch JWKS from ${jwksUri}`);
-  const jwks = await res.json();
+  const jwks = JSON.parse(text);
   await putInCacheWithValue?.(cacheKey, jwks, maxAge);
   return jwks;
 }
