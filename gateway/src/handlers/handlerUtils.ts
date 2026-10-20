@@ -62,6 +62,11 @@ import {
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
+import {
+  MODEL_ENDPOINTS,
+  oidcTargetDenied,
+  targetModels,
+} from '../middlewares/psOidc/identity';
 
 function constructRequestBody(
   requestContext: RequestContext,
@@ -337,6 +342,15 @@ export async function tryPost(
   currentIndex: number | string,
   method: string = 'POST'
 ): Promise<Response> {
+  // PS fork: OIDC group policy (psOidc), on the provider and model this
+  // target is actually sent (after override_params), before hooks or cache.
+  const policyDenied = oidcTargetDenied(
+    c,
+    providerOption.provider,
+    targetModels(providerOption, requestBody),
+    MODEL_ENDPOINTS.has(fn)
+  );
+  if (policyDenied) return policyDenied;
   const isRawBody =
     requestBody instanceof FormData ||
     requestBody instanceof ReadableStream ||
