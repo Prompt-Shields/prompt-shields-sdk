@@ -1,0 +1,150 @@
+---
+title: Observability
+description: Metrics, Grafana dashboards, Prometheus alerts and the Splunk OpenTelemetry Collector recipe for the gateway and collector
+---
+
+# Observability
+
+Prompt Shields exposes four kinds of telemetry. All are off by default.
+
+| Signal | Source | Turn on | Goes to |
+|---|---|---|---|
+| Prometheus metrics | gateway `GET /metrics` | `PS_METRICS_ENABLED=true` (`PS_METRICS_TOKEN` for a bearer token) | Prometheus, an OTel Collector `prometheus` receiver |
+| Prometheus metrics | collector `GET /metrics` | `PS_COLLECTOR_METRICS_ENABLED=true` (`PS_COLLECTOR_METRICS_TOKEN`) | same |
+| Security events | gateway | `PS_SECURITY_EVENTS_LOG=true` (JSON lines on stdout) and/or `PS_SECURITY_EVENTS_OTLP=true` (OTLP log records) | a log shipper, an OTel Collector, your SIEM |
+| GenAI spans | gateway | `PS_OTEL_ENDPOINT` | an OTel Collector, the Prompt Shields collector |
+
+The event schema, privacy contract and OTLP log mapping are on [Security Events](/guides/security-events).
+
+Everything below lives in the repository:
+
+| Path | What |
+|---|---|
+| `deploy/grafana/dashboards/` | Three Grafana dashboards (JSON) |
+| `deploy/prometheus/alerts.yaml` | Alert rules; `alerts.test.yaml` holds their `promtool` unit tests |
+| `deploy/otel-collector/splunk/` | OpenTelemetry Collector config for Splunk HEC, a docker-compose override and a local Splunk app |
+| `charts/prompt-shields` | `grafanaDashboards.enabled` and `prometheusRule.enabled` ship the same dashboards and rules |
+
+CI (`.github/workflows/observability.yml`) runs `promtool check rules`, the rule unit tests and `otelcol-contrib validate` on the recipe, and checks that every `ps_*` metric the dashboards and rules use is registered in the code.
+
+## Metrics
+
+### Gateway
+
+| Metric | Type | Labels |
+|---|---|---|
+| `ps_gateway_requests_total` | counter | `route`, `method`, `status`, `provider`, `business_unit`, `environment` |
+| `ps_gateway_request_duration_seconds` | histogram | `route`, `status`, `provider` |
+| `ps_gateway_tokens_total` | counter | `provider`, `model`, `direction` (`input`/`output`), `business_unit` |
+| `ps_gateway_streams_total` | counter | `route`, `provider`, `outcome` (`complete`/`truncated`/`cancelled`) |
+| `ps_gateway_guardrail_verdicts_total` | counter | `hook`, `check`, `verdict` (`allow`/`deny`/`flag`/`error`), `stage` |
+| `ps_gateway_pii_detections_total` | counter | `category` |
+| `ps_gateway_rate_limited_total` | counter | `source` (`upstream`/`gateway`) |
+| `ps_gateway_telemetry_dropped_total` | counter | `sink` (`otel`, `otel_logs`, `ps_telemetry`, `security_events`), `reason` |
+
+A request a deny guardrail refuses is `status="446"`. Each metric keeps at most 1000 label sets; further ones are folded into one `__overflow__` series.
+
+### Collector
+
+| Metric | Type | Labels |
+|---|---|---|
+| `ps_collector_requests_total` | counter | `route` (template), `method`, `status` |
+| `ps_collector_request_duration_seconds` | histogram | `route`, `method` |
+| `ps_collector_ingest_events_total` | counter | `endpoint` (`events`/`otel`), `outcome` (`accepted`, `rate_limited`, `write_failed`, `rejected`) |
+| `ps_collector_assets_created_total` | counter | `endpoint` |
+
+Readiness has no metric of its own: the `/readyz` probe is an ordinary request, so `ps_collector_requests_total{route="/readyz"}` by `status` shows it, as long as something (the kubelet's readiness probe in the Helm chart) calls it.
+
+### Cost
+
+There is no cost metric. The gateway counts **tokens**; spend per business unit and model is computed by the collector from ingested usage. The traffic dashboard shows tokens by business unit, provider and model, and says so.
+
+## Grafana dashboards
+
+| File | UID | Panels |
+|---|---|---|
+| `prompt-shields-gateway-traffic.json` | `ps-gateway-traffic` | Request rate, 5xx and 446 ratios, latency percentiles by provider, requests by status / provider / route / business unit, tokens by direction / model / business unit, stream outcomes |
+| `prompt-shields-guardrails-security.json` | `ps-guardrails-security` | Deny ratio, verdicts by outcome / check / stage, top denying hooks, 446s by business unit, PII entities by category, 429s by source and provider, telemetry drops by sink |
+| `prompt-shields-collector-health.json` | `ps-collector-health` | Scrape targets up, `/readyz` success, ingest by endpoint and outcome, assets created, readiness by instance, request rate, latency percentiles, 5xx by route |
+
+Each dashboard has a `datasource` variable, so it imports into any Grafana with a Prometheus data source: *Dashboards → New → Import*, upload the file, pick the data source.
+
+With the Helm chart and the Grafana sidecar (kube-prometheus-stack):
+
+```yaml
+grafanaDashboards:
+  enabled: true
+  labels:
+    grafana_dashboard: "1"            # the sidecar's label / labelValue
+  annotations:
+    grafana_folder: Prompt Shields    # with sidecar.dashboards.folderAnnotation
+gateway:
+  metrics: { enabled: true }
+  serviceMonitor: { enabled: true }
+collector:
+  metrics: { enabled: true }
+  serviceMonitor: { enabled: true }
+```
+
+## Prometheus alerts
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `PromptShieldsGuardrailDenyRateHigh` | Over 25% of guardrail checks deny for 15 minutes (with more than 0.05 checks/s) | warning |
+| `PromptShieldsGateway5xxRateHigh` | Over 5% of gateway requests are 5xx for 10 minutes | warning |
+| `PromptShieldsTelemetryDropped` | A sink dropped 100+ items in 30 minutes, or kept dropping for 10 minutes, per `sink` and `reason` (an isolated drop does not alert) | warning |
+| `PromptShieldsCollectorNotReady` | An instance's `/readyz` calls all failed for 5 minutes | critical |
+| `PromptShieldsCollector5xxRateHigh` | Over 5% of collector requests (probes excluded) are 5xx for 10 minutes | warning |
+| `PromptShieldsIngestStalled` | The gateway serves traffic but the collector accepted no events for 15 minutes; only while the collector's metrics are scraped | critical |
+| `PromptShieldsIngestFailing` | Over 10% of ingested events are rate limited, rejected or fail to write, with at least 60 events in 10 minutes | warning |
+
+`PromptShieldsIngestStalled` assumes the gateway sends telemetry to this collector (`PS_API_KEY`); drop it otherwise. Thresholds are starting points.
+
+Plain Prometheus: add the file to `rule_files:` in `prometheus.yml`. Prometheus Operator: set `prometheusRule.enabled: true` in the chart and put the label your Prometheus `ruleSelector` matches in `prometheusRule.labels` (kube-prometheus-stack: `release: <its release name>`).
+
+Run the unit tests after changing a rule:
+
+```bash
+promtool check rules deploy/prometheus/alerts.yaml
+promtool test rules deploy/prometheus/alerts.test.yaml
+cp deploy/prometheus/alerts.yaml charts/prompt-shields/files/prometheus/alerts.yaml
+python3 scripts/check-observability-metrics.py
+```
+
+## Splunk: OpenTelemetry Collector recipe
+
+`deploy/otel-collector/splunk/otel-collector.yaml` runs on the OpenTelemetry Collector contrib distribution (tested with 0.116.0) or the Splunk OTel Collector:
+
+- `otlp` receiver (4318 HTTP, 4317 gRPC): security-event log records and GenAI spans from the gateway;
+- `prometheus` receiver: scrapes the gateway and collector `/metrics`;
+- `filter` keeps only log records with the `ps.security` scope, and `transform` trims the attributes sent as HEC indexed fields to `event.name`, `severity`, `ps.tenant` and `ps.business_unit` (the event body already has every field);
+- `splunk_hec` exporters: security events to an event index with sourcetype `promptshields:gateway:security`, metrics to a metrics index, spans with sourcetype `promptshields:gateway:span`. Each has a sending queue and retries.
+
+Set `SPLUNK_HEC_ENDPOINT`, `SPLUNK_HEC_TOKEN` (a secret), `SPLUNK_EVENTS_INDEX`, `SPLUNK_METRICS_INDEX`, `SPLUNK_HEC_INSECURE_SKIP_VERIFY`, `PS_GATEWAY_METRICS_TARGET` and `PS_COLLECTOR_METRICS_TARGET`, then on the gateway:
+
+```bash
+PS_SECURITY_EVENTS_OTLP=true
+PS_SECURITY_EVENTS_OTLP_ENDPOINT=http://otel-collector:4318/v1/logs
+PS_OTEL_ENDPOINT=http://otel-collector:4318/v1/traces    # optional: spans too
+PS_METRICS_ENABLED=true
+```
+
+Splunk receives the v1 event JSON as the event body; with `KV_MODE = json` on the sourcetype (`splunk-app/default/props.conf`) every field is searchable:
+
+```spl
+index=ps_security sourcetype="promptshields:gateway:security" event.name=guardrail.verdict ps.guardrail.verdict=deny
+| stats count by ps.guardrail.check_id, ps.business_unit
+```
+
+### Try it locally
+
+```bash
+docker compose -f docker-compose.yml \
+  -f deploy/otel-collector/splunk/docker-compose.splunk.yml up --build
+```
+
+This adds the gateway (8787), the OpenTelemetry Collector (4318) and Splunk (Web on 18000, HEC on 8088) to the database and collector, with the `ps_security` and `ps_metrics` indexes from `splunk-app/`. The Splunk password and HEC token are development defaults (`SPLUNK_PASSWORD`, `SPLUNK_HEC_TOKEN` override them). Splunk takes a minute or two to start; the OpenTelemetry Collector retries until HEC answers.
+
+## Delivery and retention
+
+Gateway telemetry is best effort: bounded in-memory queues, no retry for OTLP batches, every loss counted in `ps_gateway_telemetry_dropped_total`, and sustained or large losses alerted on by `PromptShieldsTelemetryDropped`. For durability across Splunk outages, give the OpenTelemetry Collector a persistent sending queue (`file_storage` extension). Data you export follows your own retention policy.

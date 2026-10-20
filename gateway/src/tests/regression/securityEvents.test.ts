@@ -24,6 +24,10 @@ import {
 } from '../../middlewares/psSecurityEvents';
 import { HookType } from '../../middlewares/hooks/types';
 import { OtlpJsonExporter } from '../../middlewares/psOtel';
+import {
+  _setSecurityLogsExporterForTests,
+  OtlpLogsExporter,
+} from '../../middlewares/psSecurityEvents/otlp';
 import { adminAuthMiddleware } from '../../middlewares/adminAuth';
 
 const CHAT_URL = /api\.openai\.com\/v1\/chat\/completions$/;
@@ -614,6 +618,43 @@ describe('gateway refusals', () => {
     });
     expect(written.join('')).not.toContain('SECRET');
   });
+
+  test.each([
+    ['/v1/responses', { model: 'gpt-5', input: SECRET_PROMPT }],
+    [
+      '/v1/messages',
+      {
+        model: 'gpt-5-codex',
+        max_tokens: 16,
+        messages: [{ role: 'user', content: SECRET_PROMPT }],
+      },
+    ],
+  ])(
+    'a Responses request with checks that cannot run on it is payload.rejected (%s)',
+    async (path, body) => {
+      const res = await post(
+        app,
+        path,
+        body,
+        openai({
+          input_mutators: [{ 'default.addPrefix': { prefix: 'PREFIX-X ' } }],
+        })
+      );
+      expect(res.status).toBe(400);
+      const events = await securityEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        'event.name': 'payload.rejected',
+        'ps.payload.reason': 'unsupported_guardrail',
+        signature: 'unsupported_guardrail',
+        'http.response.status_code': 400,
+      });
+      const out = written.join('');
+      expect(out).not.toContain('SECRET');
+      expect(out).not.toContain('PREFIX-X');
+      expect(out).not.toContain('addPrefix');
+    }
+  );
 });
 
 describe('metric label bounds and telemetry drops', () => {
@@ -672,5 +713,55 @@ describe('metric label bounds and telemetry drops', () => {
     expect(counter(after, line('send_failed'))).toBe(
       counter(before, line('send_failed')) + 1
     );
+  });
+});
+
+describe('OTLP log records (PS_SECURITY_EVENTS_OTLP)', () => {
+  test('events reach /v1/logs without the stdout sink, content-free', async () => {
+    delete process.env.PS_SECURITY_EVENTS_LOG;
+    const sent: any[] = [];
+    const exporter = new OtlpLogsExporter(
+      {
+        endpoint: 'http://otel-logs.test/v1/logs',
+        headers: {},
+        serviceName: 'gw',
+        maxBatch: 100,
+        flushMs: 60_000,
+        maxQueue: 100,
+      },
+      async (_url, init) => {
+        sent.push(JSON.parse(String(init.body)));
+        return new Response('{}', { status: 200 });
+      }
+    );
+    _setSecurityLogsExporterForTests(exporter);
+
+    upstream(CHAT_URL, () => chatOk());
+    const res = await post(
+      app,
+      '/v1/chat/completions',
+      chatBody(SECRET_PROMPT),
+      {
+        ...openai({ input_guardrails: blockWord('SECRET', true) }),
+        'x-ps-owner': 'owner@bank.example',
+      }
+    );
+    expect(res.status).toBe(446);
+    expect(await securityEvents()).toHaveLength(0);
+
+    await exporter.flush();
+    expect(sent).toHaveLength(1);
+    const records = sent[0].resourceLogs[0].scopeLogs[0].logRecords;
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      eventName: 'guardrail.verdict',
+      severityText: 'high',
+      severityNumber: 17,
+    });
+    expectConforms(JSON.parse(records[0].body.stringValue));
+    const raw = JSON.stringify(sent);
+    expect(raw).not.toContain('SECRET');
+    expect(raw).not.toContain('owner@bank.example');
+    expect(raw).not.toContain('sk-regression');
   });
 });

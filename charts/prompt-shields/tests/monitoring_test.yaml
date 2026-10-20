@@ -1,0 +1,124 @@
+suite: dashboards and alert rules
+templates:
+  - templates/prometheusrule.yaml
+  - templates/grafana-dashboards.yaml
+release:
+  name: ps
+  namespace: prompt-shields
+set:
+  secrets.collector.existingSecret: ps-collector
+tests:
+  - it: renders no PrometheusRule by default
+    template: templates/prometheusrule.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no dashboards ConfigMap by default
+    template: templates/grafana-dashboards.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the alert rules as a PrometheusRule
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.labels:
+        release: kube-prometheus-stack
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PrometheusRule
+      - isAPIVersion:
+          of: monitoring.coreos.com/v1
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+      - equal:
+          path: spec.groups[0].name
+          value: prompt-shields-gateway
+      - equal:
+          path: spec.groups[1].name
+          value: prompt-shields-collector
+      - contains:
+          path: spec.groups[0].rules
+          content:
+            alert: PromptShieldsGuardrailDenyRateHigh
+          any: true
+      - contains:
+          path: spec.groups[0].rules
+          content:
+            alert: PromptShieldsTelemetryDropped
+          any: true
+      - contains:
+          path: spec.groups[0].rules
+          content:
+            alert: PromptShieldsGateway5xxRateHigh
+          any: true
+      - contains:
+          path: spec.groups[1].rules
+          content:
+            alert: PromptShieldsCollectorNotReady
+          any: true
+      - contains:
+          path: spec.groups[1].rules
+          content:
+            alert: PromptShieldsIngestStalled
+          any: true
+      # Alert templates reach Prometheus untouched, not rendered by Helm.
+      - matchRegex:
+          path: spec.groups[0].rules[2].annotations.summary
+          pattern: '\{\{ \$labels\.sink \}\}'
+
+  - it: ships the three dashboards with the sidecar label
+    template: templates/grafana-dashboards.yaml
+    set:
+      grafanaDashboards.enabled: true
+      grafanaDashboards.annotations:
+        grafana_folder: Prompt Shields
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields-dashboards
+      - equal:
+          path: metadata.labels.grafana_dashboard
+          value: "1"
+      - equal:
+          path: metadata.annotations.grafana_folder
+          value: Prompt Shields
+      - exists:
+          path: data["prompt-shields-gateway-traffic.json"]
+      - exists:
+          path: data["prompt-shields-guardrails-security.json"]
+      - exists:
+          path: data["prompt-shields-collector-health.json"]
+      - matchRegex:
+          path: data["prompt-shields-gateway-traffic.json"]
+          pattern: '"uid": "ps-gateway-traffic"'
+
+  - it: puts the dashboards in another namespace and uses a custom label
+    template: templates/grafana-dashboards.yaml
+    set:
+      grafanaDashboards.enabled: true
+      grafanaDashboards.namespace: monitoring
+      grafanaDashboards.labels:
+        grafana_dashboard: null
+        dashboards: prompt-shields
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: monitoring
+      - equal:
+          path: metadata.labels.dashboards
+          value: prompt-shields
+      - notExists:
+          path: metadata.labels.grafana_dashboard

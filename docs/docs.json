@@ -70,7 +70,8 @@
         "guides/confidence-scoring",
         "guides/data-retention",
         "guides/terraform",
-        "guides/security-events"
+        "guides/security-events",
+        "guides/observability"
       ]
     },
     {
