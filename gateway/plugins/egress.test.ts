@@ -68,6 +68,9 @@ describe('isSafePluginEgressURL', () => {
       'http://0x7f000001/',
       'http://redis.cache.svc.local/',
       'http://kube.internal/',
+      'http://redis:6379/',
+      'http://prompt-shields-collector:8000/partner/v1/health',
+      'http://kubernetes.default.svc/',
       'http://user:pw@example.com/',
       'file:///etc/passwd',
     ]) {
@@ -87,6 +90,11 @@ describe('isSafePluginEgressURL', () => {
     expect(isSafePluginEgressURL('http://localhost:11434/v1')).toBe(true);
     expect(isSafePluginEgressURL('http://guard.internal/check')).toBe(true);
     expect(isSafePluginEgressURL('http://169.254.169.254/')).toBe(false);
+
+    env.TRUSTED_CUSTOM_HOSTS = 'guardrails,::1';
+    expect(isSafePluginEgressURL('http://guardrails:8080/check')).toBe(true);
+    expect(isSafePluginEgressURL('http://[::1]:8080/check')).toBe(true);
+    expect(isSafePluginEgressURL('http://redis:6379/')).toBe(false);
   });
 
   test('TRUSTED_CUSTOM_HOSTS=none trusts no host at all', () => {

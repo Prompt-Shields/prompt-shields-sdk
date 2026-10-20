@@ -365,13 +365,17 @@ export function isSafePluginEgressURL(rawUrl: string, c?: Context): boolean {
   const trustedHosts = configuredTrustedCustomHosts(c);
   if (!isSafeURLForTrustedHosts(rawUrl, trustedHosts)) return false;
   try {
-    const host = new URL(rawUrl).hostname.toLowerCase();
+    const host = new URL(rawUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (
       trustedHosts.has(host) ||
       (trustedHosts.has('localhost') && host.endsWith('.localhost'))
     ) {
       return true;
     }
+    // Single-label names (`redis`, `prompt-shields-collector`) and `*.svc`
+    // resolve to in-cluster services through the resolver's search domains;
+    // a public guardrail endpoint always has a dotted, public name.
+    if (!host.includes('.') || host.endsWith('.svc')) return false;
     return !BLOCKED_TLDS.some((tld) => host.endsWith(tld));
   } catch {
     return false;
