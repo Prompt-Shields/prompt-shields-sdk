@@ -15,6 +15,7 @@ Field names follow OpenTelemetry (`http.*`, `gen_ai.*`), ECS (`event.*`, `log.lo
 |---|---|---|
 | `PS_SECURITY_EVENTS_LOG` | unset (off) | `true` or `stdout`: JSON lines on stdout. `stderr`: on stderr. Anything else: off. |
 | `PS_SECURITY_EVENTS_TENANT` | unset | Sets `ps.tenant` on every event (one gateway deployment serves one tenant). |
+| `PS_SECURITY_EVENTS_OTLP` | unset (off) | `true`: also export every event as an OTLP log record to `/v1/logs` ([below](#opentelemetry-log-records)). Independent of `PS_SECURITY_EVENTS_LOG`. |
 | `PS_METRICS_ENABLED` | `false` | Also exposes the security metrics below on `GET /metrics`. |
 
 With `PS_SECURITY_EVENTS_LOG` unset the gateway's log output is unchanged.
@@ -86,17 +87,52 @@ With `PS_METRICS_ENABLED=true`, `GET /metrics` also exposes:
 | `ps_gateway_guardrail_verdicts_total` | `hook`, `check`, `verdict`, `stage` | `check` is a known plugin id or `other`. Shorthand `input_guardrails` / `output_guardrails` without an `id` count as `input_guardrail` / `output_guardrail`; after 100 distinct hook ids, new ones are `other`. |
 | `ps_gateway_pii_detections_total` | `category` | Entities found; after 200 distinct categories, new ones are `other`. |
 | `ps_gateway_rate_limited_total` | `source` | `upstream` or `gateway` |
-| `ps_gateway_telemetry_dropped_total` | `sink`, `reason` | `otel` (`queue_full`, `http_error`, `send_failed`): OTLP span batches the exporter dropped. `ps_telemetry`: collector events dropped (the reasons of `GET /telemetry/loss`). `security_events` (`queue_full`, `write_error`): event lines dropped. |
+| `ps_gateway_telemetry_dropped_total` | `sink`, `reason` | `otel` (`queue_full`, `http_error`, `send_failed`): OTLP span batches the exporter dropped. `ps_telemetry`: collector events dropped (the reasons of `GET /telemetry/loss`). `security_events` (`queue_full`, `write_error`): event lines dropped. `otel_logs` (`queue_full`, `http_error`, `send_failed`): OTLP log records dropped. |
 
 ## Delivery guarantees
 
 The stream is **best effort**. Lines are queued in memory and written on the next event-loop turn, so logging never delays a request. If stdout cannot keep up, the gateway waits for it; past 10,000 queued lines the oldest are dropped and counted in `ps_gateway_telemetry_dropped_total{sink="security_events"}`. Lines still queued when the process is killed are lost.
 
+The OTLP export is best effort in the same way: records wait in a bounded in-memory queue (`PS_OTEL_MAX_QUEUE`, oldest dropped first), at most four batches are in flight, and a batch the receiver refuses or cannot be reached for is dropped, not retried. Every dropped record is counted in `ps_gateway_telemetry_dropped_total{sink="otel_logs"}`. Give your OpenTelemetry Collector a persistent sending queue if Splunk outages must not lose events.
+
 This makes the stream right for detection and dashboards, not on its own a regulatory audit trail (for example under DORA). Alert on `ps_gateway_telemetry_dropped_total` so gaps are visible, keep clocks in sync (NTP), and use your collector's persistent queue for durability. A durable, tamper-evident audit export from the collector is planned separately.
 
 Once exported, the copy in your SIEM follows **your** retention policy; Prompt Shields does not control it.
 
+## OpenTelemetry log records
+
+With `PS_SECURITY_EVENTS_OTLP=true` the gateway also sends each event as an OTLP/HTTP JSON log record, so an OpenTelemetry Collector (or the Splunk OTel Collector) can receive it on its `otlp` receiver without reading container logs.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PS_SECURITY_EVENTS_OTLP` | unset (off) | `true` turns the export on. |
+| `PS_SECURITY_EVENTS_OTLP_ENDPOINT` | derived | Full URL, e.g. `http://otel-collector:4318/v1/logs`. When unset: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, then `PS_OTEL_ENDPOINT` with `/v1/traces` replaced by `/v1/logs`, then `OTEL_EXPORTER_OTLP_ENDPOINT` + `/v1/logs`. The Prompt Shields collector's `/ingest/otel/` path is never used (it takes traces only). |
+| `PS_SECURITY_EVENTS_OTLP_HEADERS` | the endpoint's headers | `k1=v1,k2=v2`. Otherwise the headers that belong to the chosen endpoint (`OTEL_EXPORTER_OTLP_LOGS_HEADERS` / `OTEL_EXPORTER_OTLP_HEADERS`, or `PS_OTEL_HEADERS`). `PS_API_KEY` is never sent. |
+| `PS_OTEL_MAX_BATCH`, `PS_OTEL_FLUSH_MS`, `PS_OTEL_MAX_QUEUE` | 64, 5000, 2048 | Batching, shared with the trace exporter. |
+| `OTEL_SERVICE_NAME` | `prompt-shields-gateway` | Resource `service.name`. |
+
+The endpoint must pass the gateway's upstream egress check: cloud metadata, private and loopback addresses are refused unless listed in `TRUSTED_CUSTOM_HOSTS` (in-cluster DNS names such as `otel-collector.monitoring.svc` are fine). Redirects are never followed. A refused endpoint turns the export off with a warning at start-up.
+
+Mapping of each event to a LogRecord:
+
+| LogRecord | Value |
+|---|---|
+| `timeUnixNano` | `@timestamp` |
+| `severityText` | `severity` (`informational`, `low`, `medium`, `high`) |
+| `severityNumber` | informational → 9 (INFO), low → 13 (WARN), medium → 15 (WARN3), high → 17 (ERROR) |
+| `eventName` | `event.name` |
+| `body` | The event as a JSON string, identical to the stdout line |
+| `attributes` | Every event field except `@timestamp` and `service.name`, same keys (`event.category` as a string array) |
+| scope | `ps.security`, version = `ps.schema_version` |
+| resource | `service.name` |
+
+The privacy contract above applies unchanged: the records carry exactly the fields of the JSON line.
+
 ## Send to Splunk
+
+### OTLP to an OpenTelemetry Collector with `splunk_hec`
+
+Turn on `PS_SECURITY_EVENTS_OTLP` and point it at a Collector that exports to HEC. A complete, validated config (OTLP logs and spans plus a Prometheus scrape of both `/metrics` endpoints, out to `splunk_hec`) and a docker-compose stack with a local Splunk are in [`deploy/otel-collector/splunk`](https://github.com/Prompt-Shields/prompt-shields-sdk/tree/main/deploy/otel-collector/splunk); see [Observability](/guides/observability).
 
 ### Splunk OTel Collector (`filelog` receiver)
 
@@ -168,5 +204,4 @@ index=ps_security event.name=pii.detected
 ### Coming later
 
 - **Native Splunk HEC sink** in the gateway (env-configured, with retries and loss accounting), for installs that run no log agent.
-- **OTel log export**: the same events as OTLP log records (`/v1/logs`) next to the existing traces, for the Splunk OTel Collector's `otlp` receiver.
 - A Splunk Technology Add-on with CIM tags and dashboards.

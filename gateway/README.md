@@ -68,6 +68,7 @@ PS_METRICS_TOKEN=<random>                             # optional; require Bearer
 PS_SHUTDOWN_TIMEOUT_MS=25000                          # optional; on SIGTERM, wait this long for in-flight requests (streams included) before exiting
 PS_SECURITY_EVENTS_LOG=true                           # optional; security events as JSON lines on stdout (or `stderr`); see docs/guides/security-events.mdx
 PS_SECURITY_EVENTS_TENANT=bank-a                      # optional; ps.tenant on every security event
+PS_SECURITY_EVENTS_OTLP=true                          # optional; security events as OTLP log records (/v1/logs); see docs/guides/observability.mdx
 MAX_JSON_PAYLOAD_SIZE_IN_MB=10                        # optional; 413 for larger JSON bodies
 MAX_FILE_PAYLOAD_SIZE_IN_MB=25                        # optional; 413 for larger multipart uploads (audio, files), 411 without Content-Length
 AWS_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Bedrock/SageMaker callers use this host's AWS identity (serviceRole)

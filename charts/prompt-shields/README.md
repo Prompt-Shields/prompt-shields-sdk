@@ -299,7 +299,16 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
   `/partner/v1/health`; the gateway uses `/v1/health` for both.
 - `*.serviceMonitor.enabled` renders a Prometheus Operator ServiceMonitor.
 - OpenTelemetry traces from the gateway: `PS_OTEL_ENDPOINT` in
-  `gateway.config`.
+  `gateway.config`. Security events as OTLP log records:
+  `PS_SECURITY_EVENTS_OTLP: "true"` (sent to `PS_OTEL_ENDPOINT`'s `/v1/logs`
+  unless `PS_SECURITY_EVENTS_OTLP_ENDPOINT` is set).
+- `grafanaDashboards.enabled` ships the gateway traffic, guardrails and
+  security, and collector health dashboards as a ConfigMap labelled for the
+  Grafana sidecar (`grafana_dashboard: "1"` by default).
+- `prometheusRule.enabled` renders the alert rules as a PrometheusRule; add
+  the label your Prometheus `ruleSelector` matches to `prometheusRule.labels`.
+- Both are copies of `deploy/grafana/dashboards` and
+  `deploy/prometheus/alerts.yaml`; see `docs/guides/observability.mdx`.
 
 The probe paths and the env var names the chart sets
 (`collector.runWorkers.envName`, `collector.metrics.envName`,
@@ -407,6 +416,8 @@ can follow the images if those change.
 | `networkPolicy.enabled` | `true` | NetworkPolicies |
 | `networkPolicy.gateway.ingressFrom` / `.collector.extraIngressFrom` | `[]` | Ingress peers |
 | `networkPolicy.egress.dns` / `.database.cidrs` / `.database.port` / `.allowExternal` / `.extra` | `true` / `[]` / `5432` / `true` / `[]` | Egress |
+| `grafanaDashboards.enabled` / `.labels` / `.annotations` / `.namespace` | `false` / `grafana_dashboard: "1"` / `{}` / release namespace | Dashboards ConfigMap for the Grafana sidecar |
+| `prometheusRule.enabled` / `.labels` | `false` / `{}` | Alert rules as a PrometheusRule |
 | `extraObjects` | `[]` | Extra manifests (templated) |
 
 ## Environment variables
@@ -425,6 +436,8 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_SHUTDOWN_TIMEOUT_MS` (*chart*) | Drain deadline on SIGTERM |
 | `PS_TELEMETRY_MAX_ATTEMPTS`, `PS_TELEMETRY_RETRY_BASE_MS`, `PS_TELEMETRY_MAX_PENDING`, `PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS` | Telemetry delivery to the collector |
 | `PS_OTEL_ENDPOINT`, `PS_OTEL_HEADERS`, `PS_OTEL_CAPTURE_CONTENT`, `PS_OTEL_MAX_BATCH`, `PS_OTEL_FLUSH_MS`, `PS_OTEL_MAX_QUEUE` | OpenTelemetry GenAI spans |
+| `PS_SECURITY_EVENTS_LOG`, `PS_SECURITY_EVENTS_TENANT` | Security events as JSON lines on stdout |
+| `PS_SECURITY_EVENTS_OTLP`, `PS_SECURITY_EVENTS_OTLP_ENDPOINT`, `PS_SECURITY_EVENTS_OTLP_HEADERS` | Security events as OTLP log records |
 | `PS_ROUTER_ENABLED`, `PS_CACHE_DEFAULT`, `PS_CACHE_MAX_ENTRIES` | Router and response cache |
 | `PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`, `TRUSTED_CUSTOM_HOSTS`, `OAUTH_TOKEN_URL_ALLOWED_HOSTS` | Custom upstream hosts |
 | `MAX_JSON_PAYLOAD_SIZE_IN_MB`, `MAX_FILE_PAYLOAD_SIZE_IN_MB` | Request size limits |
