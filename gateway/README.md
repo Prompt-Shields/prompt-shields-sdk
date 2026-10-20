@@ -27,13 +27,13 @@ Docs:
 | Feature | In this fork | Notes |
 |---------|--------------|-------|
 | **Provider abstraction** | Kept | 90 provider ids in `src/providers/index.ts`, including the ones this fork added (see [Supported Providers](#supported-providers-inherited-from-portkey)) |
-| **API surface** | Kept, extended | OpenAI-compatible routes, Anthropic `/v1/messages` and the Responses API. `/v1/messages` for OpenAI codex models is served via the Responses API |
+| **API surface** | Kept, extended | OpenAI-compatible routes, Anthropic `/v1/messages` and the Responses API. `/v1/messages` for OpenAI models that only have a Responses API (codex, `-pro`, deep research) is served via the Responses API |
 | **Streaming (SSE)** | Kept | Telemetry is sent when the stream ends, with the usage from its last events |
 | **Multi-modal** (vision, audio, images, OCR) | Kept | Telemetry records the modality and non-token usage (audio seconds, OCR pages, speech characters) |
 | **Realtime** (WebSocket) | Kept | Upstream URLs are checked before connecting. Realtime sessions produce no `ps-telemetry` events |
 | **Retries, fallbacks, load balancing, conditional routing** | Kept (upstream) | Configured with `strategy` / `retry` in `x-portkey-config`. Telemetry records the upstream attempts of each request. A provider redirect is never followed or retried (502 `upstream_redirect`) |
-| **Guardrails and mutators** | Kept, enforced in more places | The hooks engine and checks in `plugins/` (68 checks under 19 plugin ids). They run on unified routes as upstream, and also on Responses API requests and on proxied model calls (`/v1/proxy/*` and the `/v1/*` catch-all), where upstream skipped them. A request they cannot inspect is refused with a 400 `unsupported_guardrail` before any upstream call. New guardrails from upstream are not merged |
-| **Caching** | Replaced | Portkey's simple and semantic caches are not used. PS has its own in-memory, exact-match cache, off by default (see [Exact-match cache](#exact-match-cache)) |
+| **Guardrails and mutators** | Kept, enforced in more places | The hooks engine and checks in `plugins/` (68 checks under 20 plugin ids; partner checks send the text they inspect to that vendor's API). They run on unified routes as upstream, on Responses API requests (the upstream version this fork is based on skipped them), and on proxied model calls (`/v1/proxy/*` and the `/v1/*` catch-all), which upstream skips. A request they cannot inspect is refused with a 400 `unsupported_guardrail` before any upstream call. Output checks do not inspect streamed responses. New guardrails from upstream are not merged |
+| **Caching** | Replaced | Portkey's simple and semantic caches are not used. PS has its own in-memory, exact-match cache, scoped to the caller's credentials and off unless turned on (see [Exact-match cache](#exact-match-cache)) |
 | **Cost-aware routing** | PS addition, opt-in | `PS_ROUTER_ENABLED=true` and `X-PS-Quality` / `X-PS-Max-Cost` / `X-PS-Route` hints. See [`src/middlewares/PS_README.md`](./src/middlewares/PS_README.md) |
 | **Security events and metrics** | PS addition, opt-in | `PS_SECURITY_EVENTS_LOG` writes JSON lines (guardrail verdicts, PII and injection detections, auth failures, 429s, rejected payloads) without prompt content. `PS_METRICS_ENABLED` exposes Prometheus metrics on `/metrics` |
 | **OpenTelemetry GenAI spans** | PS addition, opt-in | `PS_OTEL_ENDPOINT`; see [`PS_README.md`](./src/middlewares/PS_README.md#psotelts-opentelemetry-genai-spans-70) |
@@ -93,7 +93,7 @@ X-PS-Environment: production
 Prompt Shields owns an **exact-match** response cache in this fork (Portkey's simple/semantic caching is disabled). It short-circuits identical requests to the same endpoint and reports hit/miss telemetry through `ps-telemetry` (`cache_status`, `est_tokens_saved`).
 
 ```bash
-PS_CACHE_DEFAULT=off        # on | off — behavior when the request header is omitted (default off)
+PS_CACHE_DEFAULT=off        # on | off — behavior when the request header is omitted (unset: the config's `cache` setting decides; none means off)
 PS_CACHE_MAX_ENTRIES=1000   # cap on the in-memory LRU cache
 ```
 
@@ -105,7 +105,7 @@ X-PS-Cache: off       # bypass entirely
 X-PS-Cache: refresh   # skip the read, repopulate the entry with the fresh response
 ```
 
-Notes: exact-match only (SHA-256 of request body + endpoint) — semantic caching is out of scope and planned as a separate sub-project; the cache is in-memory and per-instance (not shared across replicas); only non-streaming responses are cached; and cache failures fail open (the request still proceeds to the provider).
+Notes: exact-match only (SHA-256 of the request body, the upstream URL and a digest of the caller's credentials and identity headers, so callers with different keys never share entries) — semantic caching is out of scope and planned as a separate sub-project; the cache is in-memory and per-instance (not shared across replicas); only non-streaming responses are cached; and cache failures fail open (the request still proceeds to the provider).
 
 ---
 
