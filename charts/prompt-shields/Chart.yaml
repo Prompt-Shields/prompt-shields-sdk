@@ -6,7 +6,7 @@ description: >-
 type: application
 # Chart version. Released by pushing a `chart-v<version>` tag that matches it
 # (.github/workflows/helm.yml).
-version: 0.3.0
+version: 0.4.0
 # Default image tag for the gateway and collector images.
 appVersion: "0.1.0"
 kubeVersion: ">=1.25.0-0"
