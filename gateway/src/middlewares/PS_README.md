@@ -91,7 +91,7 @@ with a per-route override.**
 | `X-PS-Quality` | `draft` \| `balanced` \| `critical` | Intent, not a model name. Gateway maps it to a model group. |
 | `X-PS-Max-Cost` | USD float, e.g. `0.02` | Per-call ceiling. The router downgrades to stay under it. |
 | `X-PS-Route` | group name, e.g. `frontier` | Explicit override — bypasses the router and pins a group. |
-| `X-PS-Cache` | `off` | Opt this call out of the semantic cache (creative/non-deterministic). |
+| `X-PS-Cache` | `on` \| `off` \| `refresh` | The exact-match response cache (`PS_CACHE_DEFAULT` applies when absent); not part of routing. |
 
 A request whose model is `auto` signals "gateway, you choose." A concrete
 model name is a *soft preference* the router may downgrade to honor `X-PS-Max-Cost`.
@@ -138,9 +138,10 @@ the cache middleware (so the cache key reflects the resolved model). A pluggable
 leaves the request unchanged.
 
 Model groups (`cheap` / `balanced` / `frontier`) and the `defaultGroup` are
-config-driven via `RoutePolicy`, overridable per virtual-key — this is where
-"transparent-by-default" and "per-route override" live. `defaultPolicy` pricing
-mirrors the SDK's `pricing.py`.
+defined by a `RoutePolicy`. The mounted router uses `defaultPolicy`; there is
+no per-deployment or per-key policy configuration yet (`psRouter(policy)`
+takes one in code). The per-request override is `X-PS-Route`.
+`defaultPolicy` pricing mirrors the SDK's `pricing.py`.
 
 **Wiring (done):** `router/hono.ts` exports `psRouter()`, a Hono middleware
 mounted in `src/index.ts` via `app.use('*', psRouter())`, gated on
@@ -156,8 +157,9 @@ context as `c.get('psRoute')` for a telemetry middleware to read.
 `src/index.ts` (`app.use('*', psTelemetry())`) **after** `psRouter`, gated on
 `PS_API_KEY` being set. After the response is produced it:
 
-- parses token usage + served model from a non-streaming JSON body (streaming
-  responses still emit an event, without usage);
+- parses token usage + served model from a non-streaming JSON body; for a
+  streamed response it reads them from the stream's final events and sends the
+  event once the stream has ended (`psStreamObserver.ts`);
 - merges business `X-PS-*` headers (`extractPSHeaders`);
 - folds in the routing decision from `c.get('psRoute')` →
   `requested_model` / `served_model` / `route_group` / `route_reason` / `route_est_cost`.
