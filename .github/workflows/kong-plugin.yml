@@ -48,7 +48,7 @@ jobs:
           luarocks install busted 2.2.0-1
           luarocks install luacheck 1.2.0-1
           luarocks install luasocket 3.1.0-1
-          luarocks install lua-cjson
+          luarocks install lua-cjson 2.1.0.10-1
       - name: luacheck
         run: luacheck .
       - name: busted (unit, mocked PDK)
@@ -66,16 +66,26 @@ jobs:
         kong_version:
           - "3.10.0.x" # LTS
           - "3.14.0.x"
+    env:
+      KONG_VERSION: ${{ matrix.kong_version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - uses: Kong/kong-pongo-action@5972effad7a566aed12b879b559bbff07d258d51 # v1.0.3
-        with:
-          pongo_version: "2.29.0"
-          kong_version: ${{ matrix.kong_version }}
-          # Pongo is started from the plugin directory below, not the repo root.
-          start_environment: "false"
+      # Pongo is fetched by commit and checked, rather than through
+      # Kong/kong-pongo-action, which checks it out by tag with an unpinned
+      # actions/checkout@v3.
+      - name: Install Pongo 2.29.0
+        working-directory: ${{ runner.temp }}
+        env:
+          PONGO_SHA: d4a5b9a22e2a27addcd7d5081607b052198b62f7 # 2.29.0
+        run: |
+          git init -q kong-pongo
+          git -C kong-pongo fetch -q --depth 1 https://github.com/Kong/kong-pongo.git "$PONGO_SHA"
+          git -C kong-pongo checkout -q FETCH_HEAD
+          test "$(git -C kong-pongo rev-parse HEAD)" = "$PONGO_SHA"
+          ln -s "$PWD/kong-pongo/pongo.sh" "$PWD/kong-pongo/pongo"
+          echo "$PWD/kong-pongo" >> "$GITHUB_PATH"
       - name: Start Pongo
         run: pongo up
       - name: Run the Pongo specs
