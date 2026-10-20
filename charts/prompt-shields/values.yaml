@@ -533,6 +533,32 @@ cronJobs:
     # cloudInventoryAcme: ["python", "-m", "collector.cloud_inventory", "--tenant", "<uuid>"]
 
 # ──────────────────────────────────────────────────────────────────────
+# Dashboards and alerts
+# ──────────────────────────────────────────────────────────────────────
+# Copies of deploy/grafana/dashboards and deploy/prometheus/alerts.yaml,
+# shipped as Kubernetes objects. They chart gateway.metrics and
+# collector.metrics, so turn those (and the ServiceMonitors) on too.
+grafanaDashboards:
+  # A ConfigMap holding the three dashboards, for the Grafana sidecar
+  # (kube-prometheus-stack's grafana.sidecar.dashboards).
+  enabled: false
+  # The label the sidecar watches (its `label` / `labelValue`).
+  labels:
+    grafana_dashboard: "1"
+  # E.g. grafana_folder: "Prompt Shields" with the sidecar's folderAnnotation.
+  annotations: {}
+  # Namespace for the ConfigMap. Empty: the release namespace (the sidecar
+  # must search it, or all namespaces).
+  namespace: ""
+
+prometheusRule:
+  # A Prometheus Operator PrometheusRule (monitoring.coreos.com/v1) with the
+  # alert rules.
+  enabled: false
+  # Labels your Prometheus ruleSelector matches, e.g. release: kube-prometheus-stack.
+  labels: {}
+
+# ──────────────────────────────────────────────────────────────────────
 # NetworkPolicy
 # ──────────────────────────────────────────────────────────────────────
 networkPolicy:

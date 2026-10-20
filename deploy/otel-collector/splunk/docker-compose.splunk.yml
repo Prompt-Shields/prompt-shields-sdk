@@ -1,0 +1,77 @@
+# Local Splunk recipe: gateway + collector + OpenTelemetry Collector + Splunk.
+# For trying the pipeline on a laptop, not for production.
+#
+# From the repository root:
+#   docker compose -f docker-compose.yml \
+#     -f deploy/otel-collector/splunk/docker-compose.splunk.yml up --build
+#
+# Then send a request with a guardrail through the gateway
+# (http://localhost:8787). Splunk Web is on http://localhost:18000 (port 8000
+# is the collector's), user admin, password SPLUNK_PASSWORD. Search:
+#   index=ps_security sourcetype="promptshields:gateway:security"
+#   | mcatalog values(metric_name) WHERE index=ps_metrics
+# Splunk takes a minute or two to start; the OpenTelemetry Collector retries
+# until HEC answers.
+#
+# Paths below are relative to the project directory (the repository root,
+# where docker-compose.yml is). The Splunk password and HEC token are local
+# development values; override them with environment variables.
+
+services:
+  collector:
+    environment:
+      PS_COLLECTOR_METRICS_ENABLED: "true"
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8787:8787"
+    environment:
+      PS_METRICS_ENABLED: "true"
+      # Security events as OTLP log records, plus GenAI spans, to the
+      # OpenTelemetry Collector below. PS_SECURITY_EVENTS_OTLP alone would
+      # also work: it derives /v1/logs from PS_OTEL_ENDPOINT.
+      PS_SECURITY_EVENTS_OTLP: "true"
+      PS_SECURITY_EVENTS_OTLP_ENDPOINT: http://otel-collector:4318/v1/logs
+      PS_OTEL_ENDPOINT: http://otel-collector:4318/v1/traces
+      PS_OTEL_FLUSH_MS: "1000"
+      PS_SECURITY_EVENTS_TENANT: local-dev
+    depends_on:
+      - otel-collector
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector/splunk/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    environment:
+      SPLUNK_HEC_ENDPOINT: https://splunk:8088/services/collector
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN:-00000000-0000-4000-8000-000000000000}
+      SPLUNK_EVENTS_INDEX: ps_security
+      SPLUNK_METRICS_INDEX: ps_metrics
+      # The Splunk container's HEC uses a self-signed certificate.
+      SPLUNK_HEC_INSECURE_SKIP_VERIFY: "true"
+      PS_GATEWAY_METRICS_TARGET: gateway:8787
+      PS_COLLECTOR_METRICS_TARGET: collector:8000
+    ports:
+      - "4318:4318"
+      - "13133:13133"
+    depends_on:
+      - splunk
+
+  splunk:
+    image: splunk/splunk:9.3.2
+    environment:
+      SPLUNK_START_ARGS: --accept-license
+      SPLUNK_GENERAL_TERMS: --accept-sgt-current-at-splunk-com
+      SPLUNK_PASSWORD: ${SPLUNK_PASSWORD:-ps-local-dev-1}
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN:-00000000-0000-4000-8000-000000000000}
+    volumes:
+      # ps_security (events) and ps_metrics (metrics) indexes, and the
+      # sourcetype's JSON extraction.
+      - ./deploy/otel-collector/splunk/splunk-app:/opt/splunk/etc/apps/prompt_shields_local:ro
+    ports:
+      - "18000:8000"
+      - "8088:8088"
