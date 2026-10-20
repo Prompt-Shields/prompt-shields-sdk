@@ -60,18 +60,17 @@ export function canonicalJson(value: unknown): string {
 }
 
 /**
- * sha256 hex of what a model reads about a tool: name, title, description
- * and input/output schemas (parameter descriptions included), as received
- * from the upstream, before sanitising.
+ * sha256 hex of the whole tool definition as received from the upstream,
+ * before sanitising, except `_meta`: what a model reads (name, title,
+ * description, schemas with their parameter descriptions) and what a client
+ * acts on (`annotations` such as `readOnlyHint`, `execution`, `icons`, and
+ * any field a later revision adds).
  */
 export async function toolDefinitionHash(tool: any): Promise<string> {
-  const definition = canonicalJson({
-    name: tool?.name,
-    title: tool?.title,
-    description: tool?.description,
-    inputSchema: tool?.inputSchema,
-    outputSchema: tool?.outputSchema,
-  });
+  const rest: any =
+    tool && typeof tool === 'object' && !Array.isArray(tool) ? { ...tool } : {};
+  delete rest._meta;
+  const definition = canonicalJson(rest);
   const digest = await crypto.subtle.digest(
     'SHA-256',
     new TextEncoder().encode(definition)
@@ -145,7 +144,9 @@ export async function filterToolsList(
   const removed: FilteredList['removed'] = [];
   const flagged: FilteredList['flagged'] = [];
   if (!result || typeof result !== 'object' || !Array.isArray(result.tools)) {
-    return { result, removed, flagged };
+    // Fail closed: nothing the gateway could not read as a tool list.
+    const base = result && typeof result === 'object' ? result : {};
+    return { result: { ...base, tools: [] }, removed, flagged };
   }
   const seen = new Set<string>();
   const kept: any[] = [];
@@ -190,14 +191,40 @@ export async function filterToolsList(
     if (typeof clean.title === 'string')
       clean.title = sanitizeText(clean.title, MAX_TITLE_LENGTH);
     else delete clean.title;
+    // Parameter descriptions are read by the model too.
+    for (const key of ['inputSchema', 'outputSchema'])
+      if (clean[key] !== undefined)
+        clean[key] = sanitizeSchema(clean[key], server.maxDescriptionLength);
     kept.push(clean);
   }
   return { result: { ...result, tools: kept }, removed, flagged };
 }
 
+/**
+ * `description` and `title` strings anywhere in a JSON Schema, sanitised like
+ * the tool's own. Other keywords (enums, patterns, defaults) are unchanged.
+ */
+function sanitizeSchema(value: any, max: number, depth = 0): any {
+  if (depth > 64) return value;
+  if (Array.isArray(value))
+    return value.map((v) => sanitizeSchema(v, max, depth + 1));
+  if (!value || typeof value !== 'object') return value;
+  // No prototype: a `__proto__` key stays an ordinary key.
+  const out: any = Object.create(null);
+  for (const [key, v] of Object.entries(value)) {
+    out[key] =
+      (key === 'description' || key === 'title') && typeof v === 'string'
+        ? sanitizeText(v, max)
+        : sanitizeSchema(v, max, depth + 1);
+  }
+  return out;
+}
+
 function toolAllowedByList(server: McpServerConfig, name: string) {
-  const listed = server.tools.names.has(name);
-  return server.tools.mode === 'allow' ? listed : !listed;
+  if (server.tools.mode === 'allow') return server.tools.names.has(name);
+  // A denylist matches case-insensitively: an upstream that resolves tool
+  // names without regard to case must not reach a denied tool as `Delete`.
+  return !server.tools.denyLower.has(name.toLowerCase());
 }
 
 // ---------------------------------------------------------------------------

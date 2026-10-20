@@ -20,10 +20,21 @@ export interface RecordedRequest {
   body: any;
 }
 
+/**
+ * A test's own upstream behaviour (a hostile server): called for every
+ * authenticated request; returns true when it has answered.
+ */
+export type FakeOverride = (ctx: {
+  req: IncomingMessage;
+  res: ServerResponse;
+  body: any;
+}) => boolean | Promise<boolean>;
+
 export interface FakeMcpServer {
   url: (path?: string) => string;
   requests: RecordedRequest[];
   tools: any[];
+  override: FakeOverride | undefined;
   release: () => void;
   close: () => Promise<void>;
 }
@@ -73,7 +84,10 @@ const sse = (message: unknown) =>
 
 export async function startFakeMcpServer(): Promise<FakeMcpServer> {
   const requests: RecordedRequest[] = [];
-  const state = { tools: defaultTools() };
+  const state: { tools: any[]; override: FakeOverride | undefined } = {
+    tools: defaultTools(),
+    override: undefined,
+  };
   let releaseSlow: () => void = () => {};
   let slowGate = new Promise<void>((r) => (releaseSlow = r));
 
@@ -110,6 +124,7 @@ export async function startFakeMcpServer(): Promise<FakeMcpServer> {
         }
       );
     }
+    if (state.override && (await state.override({ req, res, body }))) return;
     const version = req.headers['mcp-protocol-version'];
     const legacy = version === '2025-11-25';
     const session = req.headers['mcp-session-id'];
@@ -230,6 +245,12 @@ export async function startFakeMcpServer(): Promise<FakeMcpServer> {
     },
     set tools(value: any[]) {
       state.tools = value;
+    },
+    get override() {
+      return state.override;
+    },
+    set override(value: FakeOverride | undefined) {
+      state.override = value;
     },
     release: () => {
       releaseSlow();

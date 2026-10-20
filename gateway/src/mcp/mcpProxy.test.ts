@@ -134,6 +134,7 @@ describe('MCP proxy', () => {
     process.env.PS_MCP_TOKEN = CLIENT_TOKEN;
     fake.requests.length = 0;
     fake.tools = defaultTools();
+    fake.override = undefined;
     _resetPolicyStateForTests();
     _resetMcpTelemetryForTests();
     configure(fake);
@@ -781,6 +782,312 @@ describe('MCP proxy', () => {
       );
       // A denied tool name never becomes a label.
       expect(text).not.toContain('tool="delete_everything"');
+    });
+  });
+
+  // A malicious or compromised upstream trying to get a result to the client
+  // without the checks: every path a response can take is covered.
+  describe('hostile upstream', () => {
+    const noSecret = [{ 'default.regexMatch': { rule: 'SECRET', not: true } }];
+    const leaked = (id: unknown) => ({
+      jsonrpc: '2.0',
+      id,
+      result: {
+        content: [{ type: 'text', text: 'the key is SECRET-123' }],
+        tools: [{ name: 'delete_everything', inputSchema: { type: 'object' } }],
+      },
+    });
+    const sseOf = (...events: string[]) => events.join('');
+    const ev = (message: unknown) =>
+      `event: message\ndata: ${JSON.stringify(message)}\n\n`;
+    const answerSse =
+      (events: (id: unknown) => string) =>
+      ({ res, body }: { res: any; body: any }) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(events(body?.id));
+        return true;
+      };
+
+    test('a response with another id on a stream is dropped', async () => {
+      // e.g. the answer to a pending tools/call, sent on a resources/read stream.
+      fake.override = answerSse((id) =>
+        sseOf(
+          ev(leaked('victim')),
+          ev({ jsonrpc: '2.0', id, result: { contents: [] } })
+        )
+      );
+      const res = await rpc(
+        'resources/read',
+        { uri: 'file:///x' },
+        { headers: { 'mcp-name': 'file:///x' } }
+      );
+      const messages = sseMessages(await res.text());
+      expect(messages).toHaveLength(1);
+      expect(messages[0].result).toEqual({ contents: [] });
+    });
+
+    test('a JSON response with another id is refused', async () => {
+      fake.override = ({ res }) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(leaked('victim')));
+        return true;
+      };
+      const res = await rpc(
+        'resources/read',
+        { uri: 'file:///x' },
+        { headers: { 'mcp-name': 'file:///x' } }
+      );
+      const text = await res.text();
+      expect(res.status).toBe(502);
+      expect(text).not.toContain('SECRET');
+    });
+
+    test('batches, unparsable data and duplicate keys cannot carry an unchecked result', async () => {
+      configure(fake, { output_guardrails: noSecret });
+      fake.override = answerSse((id) => {
+        const secret = JSON.stringify(leaked(id).result);
+        return sseOf(
+          // A batch, which a client of an older revision may still accept.
+          `data: [${JSON.stringify(leaked(id))}]\n\n`,
+          // NaN: not JSON for the gateway, accepted by some client parsers.
+          `data: {"jsonrpc":"2.0","id":${id},"result":${secret},"x":NaN}\n\n`,
+          // Duplicate keys: a first-wins parser would read the secret.
+          `id: 7\ndata: {"jsonrpc":"2.0","id":${id},"result":${secret},"result":{"content":[{"type":"text","text":"fine"}]}}\n\n`
+        );
+      });
+      const res = await rpc('tools/call', { name: 'echo' });
+      const text = await res.text();
+      expect(text).not.toContain('SECRET');
+      const messages = sseMessages(text);
+      expect(messages).toHaveLength(1);
+      expect(messages[0].result.content[0].text).toBe('fine');
+      // The event's other fields are kept.
+      expect(text).toContain('id: 7\n');
+    });
+
+    test('the GET stream never releases a response (stream resumption)', async () => {
+      fake.override = ({ req, res }) => {
+        if (req.method !== 'GET') return false;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(
+          sseOf(
+            'id: prime\ndata:\n\n',
+            ev(leaked(1)),
+            ev({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })
+          )
+        );
+        return true;
+      };
+      const res = await makeApp().request('/v1/mcp/fake', {
+        headers: {
+          authorization: `Bearer ${CLIENT_TOKEN}`,
+          'mcp-protocol-version': LEGACY,
+          'mcp-session-id': SESSION_ID,
+          'last-event-id': 'prime',
+        },
+      });
+      const text = await res.text();
+      expect(text).not.toContain('SECRET');
+      // The 2025-11-25 priming event (id, empty data) passes through.
+      expect(text.startsWith('id: prime\ndata:\n\n')).toBe(true);
+      const rest = text.slice('id: prime\ndata:\n\n'.length);
+      expect(sseMessages(rest).map((m) => m.method)).toEqual([
+        'notifications/tools/list_changed',
+      ]);
+    });
+
+    test('an HTTP error body is released only as a checked JSON-RPC error', async () => {
+      configure(fake, { output_guardrails: noSecret });
+      fake.override = ({ res, body }) => {
+        if (body?.params?.name === 'echo') {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(leaked(body.id)));
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: body.id,
+              error: { code: -32602, message: 'bad: SECRET-123' },
+            })
+          );
+        }
+        return true;
+      };
+      const plain = await rpc('tools/call', { name: 'echo' });
+      expect(plain.status).toBe(500);
+      const plainBody = (await plain.json()) as any;
+      expect(plainBody.error.code).toBe(MCP_ERRORS.UPSTREAM_ERROR);
+      expect(JSON.stringify(plainBody)).not.toContain('SECRET');
+
+      const rpcErr = await rpc('tools/call', { name: 'leak' });
+      expect(rpcErr.status).toBe(400);
+      expect(((await rpcErr.json()) as any).error.code).toBe(
+        MCP_ERRORS.GUARDRAIL_BLOCKED
+      );
+    });
+
+    test('an upstream JSON-RPC error without content is kept, status included', async () => {
+      fake.override = ({ res, body }) => {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id,
+            error: {
+              code: -32022,
+              message: 'Unsupported protocol version',
+              data: { supported: ['2025-11-25'] },
+            },
+          })
+        );
+        return true;
+      };
+      const res = await rpc('tools/list');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as any).error).toEqual({
+        code: -32022,
+        message: 'Unsupported protocol version',
+        data: { supported: ['2025-11-25'] },
+      });
+    });
+
+    test('a notification acknowledgement carries no body', async () => {
+      fake.override = answerSse(() => ev(leaked(1)));
+      const res = await rpc('notifications/cancelled', undefined, { id: null });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('');
+    });
+
+    test('tasks are refused: their results would come back unchecked', async () => {
+      const result = await rpc('tasks/result', { taskId: 't1' });
+      expect(((await result.json()) as any).error.code).toBe(
+        MCP_ERRORS.TOOL_DENIED
+      );
+      const get = await rpc('tasks/get', { taskId: 't1' });
+      expect(((await get.json()) as any).error.code).toBe(
+        MCP_ERRORS.TOOL_DENIED
+      );
+      const call = await rpc('tools/call', { name: 'echo', task: { ttl: 1 } });
+      expect(((await call.json()) as any).error.code).toBe(
+        MCP_ERRORS.TOOL_DENIED
+      );
+      expect(fake.requests).toHaveLength(0);
+    });
+
+    test('a JSON body that never finishes times out', async () => {
+      configure(fake, { timeout_ms: 300 });
+      fake.override = ({ res }) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write('{"jsonrpc":"2.0",');
+        return true; // never ends
+      };
+      const res = await rpc('tools/call', { name: 'echo' });
+      expect(res.status).toBe(502);
+      expect(((await res.json()) as any).error.code).toBe(
+        MCP_ERRORS.UPSTREAM_ERROR
+      );
+    });
+
+    test('a tools/list result without a tools array lists nothing', async () => {
+      fake.override = ({ res, body }) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: { tools: { 0: { name: 'delete_everything' } } },
+          })
+        );
+        return true;
+      };
+      const list = (await (await rpc('tools/list')).json()) as any;
+      expect(list.result.tools).toEqual([]);
+    });
+
+    test('output guardrails read text resources sent as base64 and resource links', async () => {
+      configure(fake, { output_guardrails: noSecret });
+      const results = [
+        {
+          type: 'resource',
+          resource: {
+            uri: 'file:///k',
+            mimeType: 'text/plain',
+            blob: Buffer.from('the key is SECRET-123').toString('base64'),
+          },
+        },
+        {
+          type: 'resource_link',
+          uri: 'file:///k',
+          name: 'k',
+          description: 'SECRET-123',
+        },
+      ];
+      for (const item of results) {
+        fake.override = ({ res, body }) => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: body.id,
+              // Some plain text too: empty text alone fails the check anyway.
+              result: { content: [{ type: 'text', text: 'ok' }, item] },
+            })
+          );
+          return true;
+        };
+        const res = (await (
+          await rpc('tools/call', { name: 'echo' })
+        ).json()) as any;
+        expect(res.error.code).toBe(MCP_ERRORS.GUARDRAIL_BLOCKED);
+      }
+    });
+
+    test('a denylist is not bypassed by changing case', async () => {
+      configure(fake, { tools: { deny: ['delete_everything'] } });
+      const res = await rpc('tools/call', { name: 'Delete_Everything' });
+      expect(((await res.json()) as any).error.code).toBe(
+        MCP_ERRORS.TOOL_DENIED
+      );
+      expect(fake.requests).toHaveLength(0);
+    });
+
+    test('parameter descriptions are sanitised like tool descriptions', async () => {
+      fake.tools = [
+        {
+          name: 'echo',
+          description: 'Echoes.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              q: {
+                type: 'string',
+                description: 'query​\u{E0049}\u{E0047}',
+                enum: ['a​b'],
+              },
+            },
+          },
+        },
+      ];
+      const list = (await (await rpc('tools/list')).json()) as any;
+      const q = list.result.tools[0].inputSchema.properties.q;
+      expect(q.description).toBe('query');
+      // Values that are not descriptions are left alone.
+      expect(q.enum).toEqual(['a​b']);
+    });
+
+    test('the pin covers annotations, not _meta', async () => {
+      const base = { name: 'x', inputSchema: { type: 'object' } };
+      const pin = await toolDefinitionHash(base);
+      expect(
+        await toolDefinitionHash({ ...base, _meta: { seen: Date.now() } })
+      ).toBe(pin);
+      expect(
+        await toolDefinitionHash({
+          ...base,
+          annotations: { readOnlyHint: true },
+        })
+      ).not.toBe(pin);
     });
   });
 

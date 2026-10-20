@@ -1,24 +1,36 @@
 /**
- * PS fork (#63, MCP Phase 1): inspect one JSON-RPC response inside an SSE
- * response stream without buffering the stream.
+ * PS fork (#63, MCP Phase 1): filter every SSE stream from an upstream MCP
+ * server without buffering the stream.
  *
- * Events are forwarded as they complete. Only the event that carries the
- * response to the proxied request (same `id`, with `result` or `error`) is
- * held while `onResponse` runs, and replaced when it returns a new message.
- * Notifications, server requests and comments pass through byte for byte.
+ * Events are forwarded as they complete. A client matches a JSON-RPC response
+ * to its request by `id`, whatever stream it arrives on, so a response is
+ * released only where the gateway checked it:
+ * - on the stream of a POST, only the response to that request (same `id`),
+ *   after `onResponse` has checked it; responses with any other `id` are
+ *   dropped (the spec requires a stream's messages to relate to its request);
+ * - on a GET stream (2025-11-25), no response at all. Resuming a stream with
+ *   `Last-Event-ID` would replay a `tools/call` or `tools/list` response the
+ *   gateway never saw, so responses there are dropped.
  *
- * Fail closed: an event larger than `maxEventBytes` ends the stream with a
- * JSON-RPC error for the request instead of being forwarded unread, and an
- * incomplete event at the end of the stream is still inspected.
+ * Every forwarded message is the JSON the gateway parsed, re-serialised, so a
+ * client cannot read a different message (duplicate keys, `NaN`, batches).
+ * Data the gateway cannot parse as one JSON-RPC message is dropped. Events
+ * without data (comments, `retry`, the 2025-11-25 priming event with an `id`
+ * and empty data) pass through.
+ *
+ * Fail closed: an event larger than `maxEventBytes` ends the stream (with
+ * `tooLarge()`'s message, when given), and an incomplete event at the end of
+ * the stream is still checked.
  */
 
-export interface SseInspectOptions {
-  requestId: string | number;
+export interface SseFilterOptions {
+  /** The POST's request id; undefined for a GET stream (no response allowed). */
+  requestId?: string | number;
   maxEventBytes: number;
-  /** Returns a replacement message, or undefined to forward the event unchanged. */
-  onResponse: (message: any) => Promise<any | undefined>;
+  /** Checks the response; returns a replacement message, or undefined to keep it. */
+  onResponse?: (message: any) => Promise<any | undefined>;
   /** The error message sent when an event is too large. */
-  tooLarge: () => any;
+  tooLarge?: () => any;
   /** Called when the upstream stream has ended (not when the client cancels). */
   onEnd?: () => void;
 }
@@ -39,19 +51,37 @@ function eventData(lines: string[]): string | undefined {
   return data.length ? data.join('\n') : undefined;
 }
 
+const isDataLine = (line: string) =>
+  line === 'data' || line.startsWith('data:');
+
+const isMessageObject = (v: unknown): v is Record<string, any> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** A JSON-RPC response (has `result` or `error`). */
+export const isResponse = (message: any): boolean =>
+  isMessageObject(message) && ('result' in message || 'error' in message);
+
 export function isResponseTo(message: any, id: string | number): boolean {
-  return (
-    !!message &&
-    typeof message === 'object' &&
-    !Array.isArray(message) &&
-    message.id === id &&
-    ('result' in message || 'error' in message)
-  );
+  return isResponse(message) && message.id === id;
 }
 
-export function inspectSseResponse(
+/** One JSON-RPC message, or undefined when `data` is not one. */
+function parseMessage(data: string): Record<string, any> | undefined {
+  let message: unknown;
+  try {
+    message = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  if (!isMessageObject(message) || message.jsonrpc !== '2.0') return undefined;
+  if (!isResponse(message) && typeof message.method !== 'string')
+    return undefined;
+  return message;
+}
+
+export function filterSseStream(
   body: ReadableStream<Uint8Array>,
-  opts: SseInspectOptions
+  opts: SseFilterOptions
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let buffer = ''; // text not yet split into lines
@@ -61,33 +91,40 @@ export function inspectSseResponse(
 
   const fail = (controller: TransformStreamDefaultController<Uint8Array>) => {
     failed = true;
-    controller.enqueue(sseEvent(opts.tooLarge()));
+    if (opts.tooLarge) controller.enqueue(sseEvent(opts.tooLarge()));
     controller.terminate();
   };
+
+  /** The event with its data replaced by `message`, other fields kept. */
+  const rebuilt = (fields: string[], message: unknown) =>
+    encoder.encode(
+      [...fields, `data: ${JSON.stringify(message)}`, '', ''].join('\n')
+    );
 
   const dispatch = async (
     controller: TransformStreamDefaultController<Uint8Array>
   ) => {
     const text = raw;
-    const data = eventData(lines);
+    const eventLines = lines;
     raw = '';
     lines = [];
-    if (data !== undefined) {
-      let message: any;
-      try {
-        message = JSON.parse(data);
-      } catch {
-        message = undefined;
-      }
-      if (isResponseTo(message, opts.requestId)) {
-        const replacement = await opts.onResponse(message);
-        if (replacement !== undefined) {
-          controller.enqueue(sseEvent(replacement));
-          return;
-        }
-      }
+    const data = eventData(eventLines);
+    if (data === undefined || data === '') {
+      if (text) controller.enqueue(encoder.encode(text));
+      return;
     }
-    if (text) controller.enqueue(encoder.encode(text));
+    const message = parseMessage(data);
+    if (!message) return; // not one JSON-RPC message: dropped
+    const fields = eventLines.filter((l) => !isDataLine(l));
+    if (!isResponse(message)) {
+      controller.enqueue(rebuilt(fields, message));
+      return;
+    }
+    if (opts.requestId === undefined || message.id !== opts.requestId) return;
+    const replacement = opts.onResponse
+      ? await opts.onResponse(message)
+      : undefined;
+    controller.enqueue(rebuilt(fields, replacement ?? message));
   };
 
   const consume = async (

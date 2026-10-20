@@ -35,7 +35,12 @@ export interface McpServerConfig {
   url: string;
   /** Outbound credential header the gateway adds (never the client's). */
   authHeader?: { name: string; value: string };
-  tools: { mode: 'allow' | 'deny'; names: Set<string> };
+  tools: {
+    mode: 'allow' | 'deny';
+    names: Set<string>;
+    /** Lower-cased names, for the case-insensitive denylist match. */
+    denyLower: Set<string>;
+  };
   /** Tool name -> sha256 hex of its definition (see `toolDefinitionHash`). */
   pinnedTools: Map<string, string>;
   onDescriptionChange: DescriptionChangeAction;
@@ -190,6 +195,7 @@ export function parseServer(
   if ((tools.allow === undefined) === (tools.deny === undefined))
     fail(id, 'tools needs exactly one of "allow" or "deny"');
   const mode = tools.allow !== undefined ? 'allow' : 'deny';
+  const names = stringList(id, `tools.${mode}`, tools[mode]);
 
   const pinned = new Map<string, string>();
   if (raw.pinned_tools !== undefined) {
@@ -216,7 +222,10 @@ export function parseServer(
     authHeader: parseAuth(id, raw.auth, env),
     tools: {
       mode,
-      names: new Set(stringList(id, `tools.${mode}`, tools[mode])),
+      names: new Set(names),
+      denyLower: new Set(
+        mode === 'deny' ? names.map((n) => n.toLowerCase()) : []
+      ),
     },
     pinnedTools: pinned,
     onDescriptionChange: onChange,

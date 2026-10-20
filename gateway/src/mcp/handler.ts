@@ -18,6 +18,12 @@
  * 5. `tools/list` results are filtered and sanitised; `tools/call` results go
  *    through the output guardrails. SSE responses stream: only the event that
  *    carries the response is held while it is checked.
+ * 6. A response reaches the client only where it was checked: the response to
+ *    the request itself (same `id`) on its own POST. Responses with another
+ *    `id`, responses on the GET stream (stream resumption would replay them),
+ *    HTTP error bodies other than a JSON-RPC error, and the bodies of
+ *    notification acknowledgements are never released. `tasks/*` (results
+ *    fetched later, by task id) is refused.
  *
  * The body forwarded upstream is the JSON the gateway checked, re-serialised,
  * so the upstream cannot parse a different message (duplicate keys).
@@ -34,7 +40,7 @@ import {
   headerMismatch,
   toolCallDecision,
 } from './policy';
-import { inspectSseResponse, isResponseTo } from './sse';
+import { filterSseStream, isResponseTo } from './sse';
 import {
   McpOutcome,
   mcpToolDefinitionChangesTotal,
@@ -48,6 +54,7 @@ import { isMetricsEnabled } from '../middlewares/psMetrics/labels';
 export const MCP_ERRORS = {
   PARSE_ERROR: -32700,
   INVALID_REQUEST: -32600,
+  /** A tool outside the policy, or a method that would bypass it (`tasks/*`). */
   TOOL_DENIED: -32010,
   GUARDRAIL_BLOCKED: -32011,
   TOOL_DEFINITION_CHANGED: -32012,
@@ -139,24 +146,43 @@ function clientHeaders(upstream: Response, streaming: boolean): Headers {
 const contentTypeOf = (r: Response) =>
   (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
 
-/** Body text, or undefined once it is larger than `max` bytes. */
+/**
+ * Body text, or undefined once it is larger than `max` bytes or, with
+ * `timeoutMs`, once reading it takes longer than that.
+ */
 async function readLimited(
   body: ReadableStream<Uint8Array> | null,
-  max: number
+  max: number,
+  timeoutMs?: number
 ): Promise<string | undefined> {
   if (!body) return '';
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) {
-      reader.cancel().catch(() => {});
-      return undefined;
+  let timedOut = false;
+  const timer =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          reader.cancel().catch(() => {});
+        }, timeoutMs);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (timedOut) return undefined;
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        reader.cancel().catch(() => {});
+        return undefined;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
   }
   const all = new Uint8Array(size);
   let offset = 0;
@@ -229,13 +255,65 @@ function upstreamFailure(
   );
 }
 
-/** Pass the upstream response through, streaming, with filtered headers. */
-function passThrough(upstream: Response): Response {
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: clientHeaders(upstream, contentTypeOf(upstream) === SSE_TYPE),
-  });
+/** The upstream's status and headers, without its body. */
+function withoutBody(upstream: Response): Response {
+  upstream.body?.cancel().catch(() => {});
+  const headers = clientHeaders(upstream, false);
+  headers.delete('content-type');
+  return new Response(null, { status: upstream.status, headers });
 }
+
+const isErrorObject = (e: any) =>
+  !!e &&
+  typeof e === 'object' &&
+  Number.isInteger(e.code) &&
+  typeof e.message === 'string';
+
+/**
+ * The JSON-RPC error in the body of an upstream HTTP error, re-serialised
+ * with the request's id; undefined when the body is anything else.
+ */
+async function upstreamErrorMessage(
+  upstream: Response,
+  server: McpServerConfig,
+  id: RpcId
+): Promise<any | undefined> {
+  if (contentTypeOf(upstream) !== JSON_TYPE) {
+    upstream.body?.cancel().catch(() => {});
+    return undefined;
+  }
+  const raw = await readLimited(
+    upstream.body,
+    server.maxResponseBytes,
+    server.timeoutMs
+  );
+  let parsed: any;
+  try {
+    parsed = raw === undefined ? undefined : JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    'result' in parsed ||
+    !isErrorObject(parsed.error) ||
+    (parsed.id !== id && parsed.id !== null)
+  )
+    return undefined;
+  const { code, message, data } = parsed.error;
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: { code, message, ...(data === undefined ? {} : { data }) },
+  };
+}
+
+const jsonResponse = (message: unknown, status: number, upstream: Response) =>
+  new Response(JSON.stringify(message), {
+    status,
+    headers: clientHeaders(upstream, false),
+  });
 
 export async function mcpHandler(c: Context): Promise<Response> {
   const started = Date.now();
@@ -259,7 +337,23 @@ export async function mcpHandler(c: Context): Promise<Response> {
       return upstreamFailure(null, upstream.error);
     }
     recordRequest(c, server.id, c.req.method, upstream.ok ? 'ok' : 'error');
-    return credentialRejection(upstream, null) ?? passThrough(upstream);
+    const rejected = credentialRejection(upstream, null);
+    if (rejected) return rejected;
+    if (
+      c.req.method === 'GET' &&
+      upstream.ok &&
+      upstream.body &&
+      contentTypeOf(upstream) === SSE_TYPE
+    ) {
+      // Requests and notifications only: no response is released here.
+      return new Response(
+        filterSseStream(upstream.body, {
+          maxEventBytes: server.maxResponseBytes,
+        }),
+        { status: upstream.status, headers: clientHeaders(upstream, true) }
+      );
+    }
+    return withoutBody(upstream);
   }
 
   // ---- Parse and validate the message ----
@@ -363,8 +457,22 @@ export async function mcpHandler(c: Context): Promise<Response> {
     );
   }
 
-  // ---- tools/call: policy and input guardrails ----
+  // ---- Tasks: a result fetched later by task id is never checked ----
   const isToolCall = method === 'tools/call';
+  if (
+    (typeof method === 'string' && method.startsWith('tasks/')) ||
+    (isToolCall && message.params?.task !== undefined)
+  ) {
+    recordRequest(c, server.id, method, 'denied');
+    return rpcError(
+      200,
+      id,
+      MCP_ERRORS.TOOL_DENIED,
+      'Tasks are not supported by the MCP proxy'
+    );
+  }
+
+  // ---- tools/call: policy and input guardrails ----
   const toolName: string = isToolCall ? message.params?.name : '';
   if (isToolCall) {
     const decision = toolCallDecision(server, toolName);
@@ -433,12 +541,25 @@ export async function mcpHandler(c: Context): Promise<Response> {
     return rejected;
   }
 
-  const inspect = method === 'tools/list' || isToolCall;
-  if (!inspect || !upstream.ok || id === null || upstream.status === 202) {
-    // An HTTP error, or a 202 where a tools/call needed a result.
-    finish(upstream.ok && !isToolCall ? 'ok' : 'error');
-    return passThrough(upstream);
+  // A notification or a client's response: the upstream only acknowledges it.
+  // (A request's id was checked above, so `id === null` means no request.)
+  if (method === undefined || id === null) {
+    finish(upstream.ok ? 'ok' : 'error');
+    return withoutBody(upstream);
   }
+  if (upstream.status === 202) {
+    // A request needs a response; a 202 has none.
+    upstream.body?.cancel().catch(() => {});
+    finish('upstream_error');
+    return rpcError(
+      502,
+      id,
+      MCP_ERRORS.UPSTREAM_ERROR,
+      'The MCP server sent no response'
+    );
+  }
+
+  const inspect = method === 'tools/list' || isToolCall;
 
   // The response to tools/list or tools/call, checked before it is released.
   const onResponse = async (response: any): Promise<any | undefined> => {
@@ -473,19 +594,41 @@ export async function mcpHandler(c: Context): Promise<Response> {
     return undefined;
   };
 
+  // An HTTP error: only a JSON-RPC error in its body reaches the client,
+  // checked like a response. The status is kept: 404 ends a 2025-11-25
+  // session, 400 carries version negotiation.
+  if (!upstream.ok) {
+    const error = await upstreamErrorMessage(upstream, server, id);
+    if (!error) {
+      finish('error');
+      return rpcError(
+        upstream.status,
+        id,
+        MCP_ERRORS.UPSTREAM_ERROR,
+        `The MCP server answered with HTTP ${upstream.status}`
+      );
+    }
+    const replacement = inspect ? await onResponse(error) : undefined;
+    if (!inspect) finish('error');
+    return jsonResponse(replacement ?? error, upstream.status, upstream);
+  }
+
   const type = contentTypeOf(upstream);
   if (type === SSE_TYPE && upstream.body) {
     let answered = false;
-    const body = inspectSseResponse(upstream.body, {
+    if (!inspect) finish('ok');
+    const body = filterSseStream(upstream.body, {
       requestId: id,
       maxEventBytes: server.maxResponseBytes,
-      onResponse: async (response) => {
-        answered = true;
-        return onResponse(response);
-      },
+      onResponse: inspect
+        ? async (response) => {
+            answered = true;
+            return onResponse(response);
+          }
+        : undefined,
       tooLarge: () => {
+        if (inspect && !answered) finish('upstream_error');
         answered = true;
-        finish('upstream_error');
         return errorMessage(
           id,
           MCP_ERRORS.UPSTREAM_ERROR,
@@ -493,7 +636,7 @@ export async function mcpHandler(c: Context): Promise<Response> {
         );
       },
       onEnd: () => {
-        if (!answered) finish('upstream_error');
+        if (inspect && !answered) finish('upstream_error');
       },
     });
     return new Response(body, {
@@ -502,7 +645,11 @@ export async function mcpHandler(c: Context): Promise<Response> {
     });
   }
   if (type === JSON_TYPE) {
-    const raw = await readLimited(upstream.body, server.maxResponseBytes);
+    const raw = await readLimited(
+      upstream.body,
+      server.maxResponseBytes,
+      server.timeoutMs
+    );
     let response: any;
     try {
       response = raw === undefined ? undefined : JSON.parse(raw);
@@ -516,15 +663,13 @@ export async function mcpHandler(c: Context): Promise<Response> {
         id,
         MCP_ERRORS.UPSTREAM_ERROR,
         raw === undefined
-          ? 'The MCP server response is too large'
+          ? 'The MCP server response is too large or too slow'
           : 'The MCP server sent an invalid response'
       );
     }
-    const replacement = await onResponse(response);
-    return new Response(JSON.stringify(replacement ?? response), {
-      status: upstream.status,
-      headers: clientHeaders(upstream, false),
-    });
+    const replacement = inspect ? await onResponse(response) : undefined;
+    if (!inspect) finish(response.error ? 'error' : 'ok');
+    return jsonResponse(replacement ?? response, upstream.status, upstream);
   }
   // Fail closed: a result the gateway cannot read is not released.
   upstream.body?.cancel().catch(() => {});

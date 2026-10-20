@@ -22,6 +22,24 @@ import type { HookObject, HookResult } from '../middlewares/hooks/types';
 
 export type GuardrailStage = 'input' | 'output';
 
+const isTextMimeType = (mime: unknown): boolean =>
+  typeof mime === 'string' &&
+  /^(text\/|application\/([\w.+-]*\+)?(json|xml|yaml|javascript|x-sh)\b)/i.test(
+    mime.trim()
+  );
+
+function decodeBase64Text(blob: string): string {
+  try {
+    const bytes = Uint8Array.from(atob(blob.replace(/\s+/g, '')), (ch) =>
+      ch.charCodeAt(0)
+    );
+    return new TextDecoder().decode(bytes);
+  } catch {
+    // Not base64: checked as it is.
+    return blob;
+  }
+}
+
 /** Text of a tools/call response for the output checks. */
 export function toolResultText(message: any): string {
   if (message?.error) {
@@ -38,9 +56,36 @@ export function toolResultText(message: any): string {
   const parts: string[] = [];
   if (Array.isArray(result.content)) {
     for (const item of result.content) {
-      if (typeof item?.text === 'string') parts.push(item.text);
-      else if (typeof item?.resource?.text === 'string')
-        parts.push(item.resource.text);
+      if (!item || typeof item !== 'object') continue;
+      if (typeof item.text === 'string') parts.push(item.text);
+      const resource = item.resource;
+      if (resource && typeof resource === 'object') {
+        if (typeof resource.text === 'string') parts.push(resource.text);
+        // A text resource sent as base64 is still text to the client.
+        else if (
+          typeof resource.blob === 'string' &&
+          isTextMimeType(resource.mimeType)
+        )
+          parts.push(decodeBase64Text(resource.blob));
+      }
+      // Anything else a client may show the model (resource_link names,
+      // descriptions and URIs, unknown item types), without binary data.
+      if (
+        item.type !== 'text' &&
+        item.type !== 'image' &&
+        item.type !== 'audio'
+      )
+        parts.push(
+          JSON.stringify({
+            ...item,
+            text: undefined,
+            data: undefined,
+            resource:
+              resource && typeof resource === 'object'
+                ? { ...resource, text: undefined, blob: undefined }
+                : resource,
+          })
+        );
     }
   }
   if (result.structuredContent !== undefined)
