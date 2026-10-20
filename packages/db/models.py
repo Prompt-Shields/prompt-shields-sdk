@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -43,10 +44,14 @@ class Tenant(Base):
     name = Column(Text, nullable=False)
     domain = Column(Text)
     settings = Column(JSONB, default=dict)
-    # Ingest key: SHA-256 lookup prefix + bcrypt hash, never plaintext.
-    # See db/api_keys.py.
+    # Legacy single ingest key: SHA-256 lookup prefix + bcrypt hash, never
+    # plaintext. See db/api_keys.py. Keys issued through the admin API live
+    # in tenant_api_keys; migration 022 (and the first key API call for a
+    # tenant) moves a key found here into that table and clears these.
     api_key_prefix = Column(Text)
     api_key_hash = Column(Text)
+    # Set by the operator API: the tenant's keys and tokens stop working.
+    disabled_at = Column(TIMESTAMP(timezone=True))
     created_at = Column(TIMESTAMP(timezone=True), default=utcnow)
 
     assets = relationship("AIAsset", back_populates="tenant")
@@ -164,6 +169,95 @@ class AIUsageEvent(Base):
         Index("ix_usage_events_tenant_ts", "tenant_id", "timestamp"),
         Index("ix_usage_events_asset_ts", "asset_id", "timestamp"),
         Index("ix_usage_events_tenant_key_fp", "tenant_id", "api_key_fingerprint"),
+    )
+
+
+class TenantApiKey(Base):
+    """A tenant ingest key issued through the admin API.
+
+    Hashed like the legacy key on ``tenants`` (db/api_keys.py): ``key_prefix``
+    is the SHA-256 lookup prefix, ``key_hash`` the bcrypt hash. The plaintext
+    is returned once, on create and on rotate. ``id`` is stable across
+    rotations: a rotation moves the old hash to ``previous_key_*``, which
+    keeps authenticating until ``previous_expires_at`` (the grace window).
+    DELETE revokes (``revoked_at``); the row stays so audit rows still
+    resolve. See collector/tenant_keys.py.
+    """
+
+    __tablename__ = "tenant_api_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    key_prefix = Column(Text, nullable=False)
+    key_hash = Column(Text, nullable=False)
+    # Last four characters; NULL for a moved legacy key (never known here).
+    key_hint = Column(Text)
+    previous_key_prefix = Column(Text)
+    previous_key_hash = Column(Text)
+    previous_expires_at = Column(TIMESTAMP(timezone=True))
+    # 'api' (issued here) or 'legacy' (moved from tenants.api_key_*).
+    origin = Column(Text, nullable=False, default="api", server_default="api")
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    rotated_at = Column(TIMESTAMP(timezone=True))
+    expires_at = Column(TIMESTAMP(timezone=True))
+    revoked_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        Index("ux_tenant_api_keys_prefix", "key_prefix", unique=True),
+        Index(
+            "ux_tenant_api_keys_previous_prefix",
+            "previous_key_prefix",
+            unique=True,
+            postgresql_where=text("previous_key_prefix IS NOT NULL"),
+        ),
+        # One live key per name; a revoked name can be reused.
+        Index(
+            "ux_tenant_api_keys_tenant_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        Index("ix_tenant_api_keys_tenant", "tenant_id", "created_at"),
+    )
+
+
+class AdminToken(Base):
+    """A tenant-scoped automation token for /api/v1/admin (Terraform, CI).
+
+    Carries explicit scopes (collector/admin_auth.py ADMIN_SCOPES) instead
+    of the full access a tenant ingest key has. Hashed like the ingest keys
+    and shown once. ``expires_at`` and ``revoked_at`` end it; DELETE
+    revokes and keeps the row.
+    """
+
+    __tablename__ = "admin_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    scopes = Column(ARRAY(Text), nullable=False)
+    token_prefix = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False)
+    token_hint = Column(Text, nullable=False)
+    # Who issued it: "operator", or the SHA-256 prefix of the tenant key /
+    # admin token that called the API. Never a secret.
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    expires_at = Column(TIMESTAMP(timezone=True))
+    revoked_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        Index("ux_admin_tokens_prefix", "token_prefix", unique=True),
+        Index(
+            "ux_admin_tokens_tenant_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        Index("ix_admin_tokens_tenant", "tenant_id", "created_at"),
     )
 
 

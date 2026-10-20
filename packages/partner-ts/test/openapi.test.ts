@@ -169,6 +169,28 @@ const UNMAPPED_SCHEMAS = new Set([
   'AdminKeyRequest',
   'ProviderKeyFingerprintLink',
   'FingerprintRequest',
+  // Tenant admin automation (admin tokens, ingest keys, partner
+  // credentials) and operator tenant routes: documented for Terraform and
+  // other automation, not wrapped by the partner SDK.
+  'AdminScope',
+  'CredentialStatus',
+  'AdminToken',
+  'AdminTokenWithSecret',
+  'CreateAdminTokenRequest',
+  'BootstrapAdminTokenRequest',
+  'TenantApiKey',
+  'TenantApiKeyWithSecret',
+  'CreateTenantApiKeyRequest',
+  'RotateTenantApiKeyRequest',
+  'PartnerCredential',
+  'PartnerCredentialWithSecrets',
+  'IssuePartnerCredentialRequest',
+  'UpdatePartnerCredentialRequest',
+  'Tenant',
+  'TenantCreated',
+  'CreateTenantRequest',
+  'UpdateTenantRequest',
+  'ConnectorSyncRequest',
 ]);
 
 interface Operation {
@@ -180,7 +202,10 @@ interface Operation {
   body?: string;
 }
 
-/** Provider credential routes: in the spec, not wrapped by the client. */
+/**
+ * In the spec, not wrapped by the client: provider credentials, the rest of
+ * the tenant admin API and the operator routes.
+ */
 const NOT_WRAPPED: Operation = { methods: [] };
 
 /** Every operation in the spec, by `METHOD path`. */
@@ -243,6 +268,42 @@ const OPERATIONS: Record<string, Operation> = {
     params: 'ListWebhookDeliveriesParams',
   },
   'POST /api/v1/admin/webhooks/deliveries/{delivery_id}/redeliver': { methods: ['webhooks.deliveries.redeliver'] },
+  // Tenant admin automation and operator routes (not wrapped).
+  'GET /api/v1/admin/token-scopes': NOT_WRAPPED,
+  'GET /api/v1/admin/tokens': NOT_WRAPPED,
+  'POST /api/v1/admin/tokens': NOT_WRAPPED,
+  'GET /api/v1/admin/tokens/{token_id}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/tokens/{token_id}': NOT_WRAPPED,
+  'GET /api/v1/admin/api-keys': NOT_WRAPPED,
+  'POST /api/v1/admin/api-keys': NOT_WRAPPED,
+  'GET /api/v1/admin/api-keys/{key_id}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/api-keys/{key_id}': NOT_WRAPPED,
+  'POST /api/v1/admin/api-keys/{key_id}/rotate': NOT_WRAPPED,
+  'GET /api/v1/admin/partner-scopes': NOT_WRAPPED,
+  'GET /api/v1/admin/partner-credentials': NOT_WRAPPED,
+  'POST /api/v1/admin/partner-credentials': NOT_WRAPPED,
+  'GET /api/v1/admin/partner-credentials/{credential_id}': NOT_WRAPPED,
+  'PATCH /api/v1/admin/partner-credentials/{credential_id}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/partner-credentials/{credential_id}': NOT_WRAPPED,
+  'POST /api/v1/admin/asset-lifecycle/sweep': NOT_WRAPPED,
+  'POST /api/v1/admin/risk-suggestions/run': NOT_WRAPPED,
+  'POST /api/v1/admin/risk-mappings/{risk_id}/review': NOT_WRAPPED,
+  'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,
+  'POST /api/v1/admin/cloud-inventory/pull': NOT_WRAPPED,
+  'POST /api/v1/admin/connectors/leanix/sync': NOT_WRAPPED,
+  'GET /api/v1/admin/connectors/leanix/status': NOT_WRAPPED,
+  'POST /api/v1/admin/connectors/servicenow/sync': NOT_WRAPPED,
+  'GET /api/v1/admin/connectors/servicenow/status': NOT_WRAPPED,
+  'GET /api/v1/operator/tenants': NOT_WRAPPED,
+  'POST /api/v1/operator/tenants': NOT_WRAPPED,
+  'GET /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,
+  'PATCH /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,
+  'DELETE /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,
+  'POST /api/v1/operator/tenants/{tenant_id}/admin-tokens': NOT_WRAPPED,
+  'GET /api/v1/operator/tenants/{tenant_id}/retention': NOT_WRAPPED,
+  'PUT /api/v1/operator/tenants/{tenant_id}/retention': NOT_WRAPPED,
+  'POST /api/v1/operator/retention/purge': NOT_WRAPPED,
+  'GET /api/v1/operator/audit/verify': NOT_WRAPPED,
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];
@@ -305,6 +366,7 @@ describe('docs/openapi.yaml drift check', () => {
       const fn = method.split('.').reduce((obj: Json, part) => obj?.[part], client);
       expect([method, typeof fn]).toEqual([method, 'function']);
     }
+    if (op.methods.length === 0) return; // not wrapped by the client
 
     const operation = specOperations().get(key);
     const queryParams = [...operation.shared, ...(operation.parameters ?? [])]

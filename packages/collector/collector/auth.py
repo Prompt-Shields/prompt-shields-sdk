@@ -1,15 +1,13 @@
 import asyncio
 from uuid import UUID
 
-from db.api_keys import api_key_lookup_prefix, hash_api_key, verify_api_key
-from db.models import Tenant
+from db.api_keys import hash_api_key, verify_api_key
 from fastapi import HTTPException, Request
-from sqlalchemy import select
 
-from collector import audit_trail, rls
+from collector import audit_trail, rls, tenant_keys
 
-# Checked when no tenant matches the key's lookup prefix, so an unknown key
-# costs the same bcrypt work as a known key with a wrong secret.
+# Checked when no key matches the lookup prefix, so an unknown key costs the
+# same bcrypt work as a known key with a wrong secret.
 _DUMMY_HASH = hash_api_key("ps-dummy-key-for-constant-time-miss")
 
 
@@ -21,6 +19,18 @@ def _unauthorized(detail: str) -> HTTPException:
             "title": "Unauthorized",
             "status": 401,
             "detail": detail,
+        },
+    )
+
+
+def tenant_disabled() -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail={
+            "type": "about:blank",
+            "title": "Forbidden",
+            "status": 403,
+            "detail": "Tenant is disabled",
         },
     )
 
@@ -37,36 +47,44 @@ async def _audit_admin_failure(request: Request, reason: str) -> None:
         )
 
 
-async def resolve_tenant(request: Request) -> UUID:
-    """Extract Bearer token, resolve to tenant_id.
-
-    The key is found by its SHA-256 lookup prefix and checked against the
-    stored bcrypt hash. Unknown and wrong keys get the same 401 after the
-    same bcrypt work.
-
-    On success the request's session is scoped to the tenant for Postgres
-    row-level security (collector/rls.py).
-    """
+async def bearer_token(request: Request) -> str:
+    """The Bearer token, or 401 (an audit trail auth.failure on admin routes)."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         await _audit_admin_failure(request, "missing_credentials")
         raise _unauthorized("Missing or invalid Authorization header")
-    api_key = auth.removeprefix("Bearer ").strip()
+    return auth.removeprefix("Bearer ").strip()
+
+
+async def resolve_tenant(request: Request) -> UUID:
+    """Extract Bearer token, resolve to tenant_id.
+
+    The key is found by its SHA-256 lookup prefix (in tenant_api_keys, then
+    the legacy key on the tenant row; see collector/tenant_keys.py) and
+    checked against the stored bcrypt hash. Unknown and wrong keys get the
+    same 401 after the same bcrypt work. A revoked or expired key, or a
+    rotated-out key past its grace window, is refused after the check.
+
+    On success the request's session is scoped to the tenant for Postgres
+    row-level security (collector/rls.py).
+    """
+    api_key = await bearer_token(request)
 
     db = request.state.db
-    stmt = select(Tenant.id, Tenant.api_key_hash).where(
-        Tenant.api_key_prefix == api_key_lookup_prefix(api_key),
-        Tenant.api_key_hash.is_not(None),
-    )
     async with rls.auth_lookup(db):
-        row = (await db.execute(stmt)).one_or_none()
+        candidate = await tenant_keys.find_candidate(db, api_key)
 
-    stored_hash = row.api_key_hash if row is not None else _DUMMY_HASH
+    stored_hash = candidate.stored_hash if candidate is not None else _DUMMY_HASH
     # bcrypt takes tens of ms; keep it off the event loop.
     valid = await asyncio.to_thread(verify_api_key, api_key, stored_hash)
 
-    if row is None or not valid:
+    if candidate is None or not valid:
         await _audit_admin_failure(request, "invalid_credentials")
         raise _unauthorized("Invalid API key")
-    await rls.set_tenant(db, row.id)
-    return row.id
+    if not candidate.live:
+        await _audit_admin_failure(request, "invalid_credentials")
+        raise _unauthorized("API key revoked or expired")
+    if candidate.tenant_disabled:
+        raise tenant_disabled()
+    await rls.set_tenant(db, candidate.tenant_id)
+    return candidate.tenant_id

@@ -125,16 +125,23 @@ def current_request_id() -> str | None:
 class Actor:
     """Who acted. ``id`` identifies a credential, never contains one."""
 
-    type: str  # tenant_key | partner | operator | system
+    type: str  # tenant_key | admin_token | partner | operator | system | anonymous
     id: str | None = None
 
 
 OPERATOR = Actor("operator", "operator-api")
 
+# Scoped admin tokens (collector.admin_auth) start with this.
+ADMIN_TOKEN_PREFIX = "ps-at-"
+
 
 def tenant_key_actor(request: Request) -> Actor:
-    """The tenant API key's SHA-256 lookup prefix (db.api_keys)."""
-    return Actor("tenant_key", bearer_key_prefix(request))
+    """The caller's tenant API key, or scoped admin token, by its SHA-256
+    lookup prefix (db.api_keys; for a token, ``admin_tokens.token_prefix``)."""
+    auth = request.headers.get("Authorization", "")
+    token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+    kind = "admin_token" if token.startswith(ADMIN_TOKEN_PREFIX) else "tenant_key"
+    return Actor(kind, bearer_key_prefix(request))
 
 
 def partner_actor(partner_id: UUID) -> Actor:

@@ -87,12 +87,12 @@ from typing import Literal
 from uuid import UUID
 
 from db.models import AIAsset
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import TIMESTAMP, and_, case, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import audit_trail
-from collector.auth import resolve_tenant
+from collector.admin_auth import AdminPrincipal, require_admin
 from collector.config import parse_source_thresholds, settings
 from collector.webhooks import enqueue_lifecycle_events
 
@@ -403,6 +403,8 @@ async def sweep_asset_lifecycle(
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
+_REGISTRY = Depends(require_admin("admin:registry"))
+
 
 @router.post(
     "/asset-lifecycle/sweep",
@@ -417,8 +419,9 @@ async def run_sweep(
     request: Request,
     stale_after_days: int | None = Query(default=None, ge=1),
     retire_after_days: int | None = Query(default=None, ge=2),
+    principal: AdminPrincipal = _REGISTRY,
 ) -> dict:
-    tenant_id = await resolve_tenant(request)
+    tenant_id = principal.tenant_id
     db = request.state.db
     now = datetime.now(UTC)
     try:

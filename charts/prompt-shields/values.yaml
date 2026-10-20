@@ -345,6 +345,7 @@ collector:
   #   PS_AUDIT_RETENTION_DAYS: "365"
   #   PS_RETENTION_DAYS_DEFAULT: "365"
   #   PS_WEBHOOK_TIMEOUT_SECONDS: "10"
+  #   PS_ADMIN_REQUIRE_SCOPED_TOKENS: "true"  # /api/v1/admin: admin tokens only
   config:
     PYTHONDONTWRITEBYTECODE: "1"
     PYTHONUNBUFFERED: "1"

@@ -5,8 +5,10 @@ info:
   description: |
     The Prompt Shields Partner API provides read access to the AI Asset Registry.
     A few write routes (attestations, provider credentials) need scopes that
-    are never granted by default. The tenant admin routes for webhooks and
-    provider credentials (`/api/v1/admin`) take the tenant API key instead.
+    are never granted by default. The tenant admin routes (`/api/v1/admin`)
+    take a scoped admin token or the tenant API key instead, and the
+    operator routes (`/api/v1/operator`) take the operator's
+    `PS_ADMIN_TOKEN`.
 
     Enterprise Architecture tools (Ardoq, LeanIX, ServiceNow) use this API to pull
     discovered AI assets, data flows, risk mappings, and usage metadata into their
@@ -50,6 +52,19 @@ tags:
       Tenant admin API (`/api/v1/admin/webhooks`, tenant API key) for
       partner change webhooks: subscriptions, secret rotation and the
       delivery (dead-letter) view.
+  - name: Admin
+    description: |
+      Tenant admin API (`/api/v1/admin`): scoped admin tokens, tenant ingest
+      keys, Partner API credentials and registry jobs. Each operation names
+      its scope in `x-admin-scope`; GET operations also accept `admin:read`.
+      Changes are audited. Conventions for keys, tokens and credentials:
+      stable UUID ids, secrets returned once, POST with a name an unrevoked
+      row already has is 409, and DELETE revokes (204, the row stays
+      readable by id with `status: revoked`, a repeated DELETE is 204).
+  - name: Operator
+    description: |
+      Cross-tenant operator routes (`PS_ADMIN_TOKEN`): tenants, retention,
+      erasure, and the operator-triggered pulls and syncs.
 
 components:
   securitySchemes:
@@ -92,6 +107,32 @@ components:
       description: |
         The tenant's own API key (the one the SDK ingests with), for the
         tenant admin routes under `/api/v1/admin`. Partners never hold it.
+
+    AdminToken:
+      type: http
+      scheme: bearer
+      description: |
+        A tenant-scoped automation token (`ps-at-...`) for the tenant admin
+        routes under `/api/v1/admin`, for Terraform, CI and other
+        automation. Each operation names the scope it needs in
+        `x-admin-scope`; GET operations also accept `admin:read`. Issue one
+        with `POST /api/v1/admin/tokens` or, for a tenant's first token,
+        `POST /api/v1/operator/tenants/{tenant_id}/admin-tokens`.
+
+        Every operation that takes an admin token also takes the tenant API
+        key (`TenantApiKey`), which has every admin scope. A collector
+        started with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` refuses tenant
+        API keys on `/api/v1/admin` (403), so only admin tokens get in.
+
+    OperatorToken:
+      type: http
+      scheme: bearer
+      description: |
+        The collector operator's `PS_ADMIN_TOKEN`, for the cross-tenant
+        operator routes (`/api/v1/operator`, and the operator-triggered
+        pulls and syncs under `/api/v1/admin`). With `PS_ADMIN_TOKEN` unset
+        those routes answer 404. Never put it in automation that manages a
+        single tenant; use an admin token.
 
   schemas:
     AIAsset:
@@ -965,7 +1006,483 @@ components:
             First 16 hex characters of sha256(api key), as the SDK sends it.
             Anything else (a raw key, for example) is refused with a 400.
 
+    # ── Tenant admin automation: admin tokens and ingest keys ──────────
+
+    AdminScope:
+      type: string
+      description: |
+        Admin token scope. `admin:read` grants every GET under
+        `/api/v1/admin`; the others grant one resource family. While
+        `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off an ingest key reaches every
+        admin route, so issuing or rotating one needs every admin scope.
+      enum:
+        - admin:read
+        - admin:keys
+        - admin:tokens
+        - admin:provider-credentials
+        - admin:webhooks
+        - admin:partners
+        - admin:registry
+
+    CredentialStatus:
+      type: string
+      description: |
+        `revoked` after DELETE (the row is kept and stays readable by id),
+        `expired` past `expires_at`, else `active`.
+      enum: [active, expired, revoked]
+
+    AdminToken:
+      type: object
+      description: An admin token's metadata. The token and its hash are never included.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Unique among the tenant's unrevoked tokens
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminScope'
+        token_hint:
+          type: string
+          description: Last four characters of the token
+        status:
+          $ref: '#/components/schemas/CredentialStatus'
+        created_by:
+          type: string
+          description: >-
+            `operator`, or `key:<prefix>` / `token:<prefix>`: the SHA-256 lookup
+            prefix of the tenant key or admin token that issued it
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, name, scopes, token_hint, status, created_by, created_at, expires_at, revoked_at]
+
+    AdminTokenWithSecret:
+      description: Returned once, on creation. Store the token now.
+      allOf:
+        - $ref: '#/components/schemas/AdminToken'
+        - type: object
+          properties:
+            token:
+              type: string
+              description: The token (`ps-at-...`), shown only in this response
+            warning:
+              type: string
+          required: [token, warning]
+
+    CreateAdminTokenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+        scopes:
+          type: array
+          minItems: 1
+          description: >-
+            With an admin token, only scopes the caller holds can be granted
+            (403 otherwise).
+          items:
+            $ref: '#/components/schemas/AdminScope'
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: Must be in the future. Omit for a token that does not expire.
+      required: [name, scopes]
+
+    BootstrapAdminTokenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AdminScope'
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+      required: [name, scopes]
+
+    TenantApiKey:
+      type: object
+      description: A tenant ingest key's metadata. The key and its hashes are never included.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Stable across rotations
+        name:
+          type: string
+          description: Unique among the tenant's unrevoked keys
+        key_hint:
+          type: [string, 'null']
+          description: Last four characters; null for a moved legacy key
+        origin:
+          type: string
+          enum: [api, legacy]
+          description: >-
+            `legacy` for the key that lived on the tenant row before this API,
+            moved here by migration 022 or by the first key API call
+        status:
+          $ref: '#/components/schemas/CredentialStatus'
+        rotation_grace_ends_at:
+          type: [string, 'null']
+          format: date-time
+          description: Set while the secret replaced by the last rotation still authenticates
+        created_at:
+          type: string
+          format: date-time
+        rotated_at:
+          type: [string, 'null']
+          format: date-time
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+      required:
+        - id
+        - name
+        - key_hint
+        - origin
+        - status
+        - rotation_grace_ends_at
+        - created_at
+        - rotated_at
+        - expires_at
+        - revoked_at
+
+    TenantApiKeyWithSecret:
+      description: Returned once, on creation and rotation. Store the key now.
+      allOf:
+        - $ref: '#/components/schemas/TenantApiKey'
+        - type: object
+          properties:
+            key:
+              type: string
+              description: The ingest key (`ps-ik-...`), shown only in this response
+            warning:
+              type: string
+          required: [key, warning]
+
+    CreateTenantApiKeyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: Must be in the future. Omit for a key that does not expire.
+      required: [name]
+
+    RotateTenantApiKeyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        grace_period_seconds:
+          type: integer
+          minimum: 0
+          maximum: 604800
+          default: 0
+          description: >-
+            Keep accepting the old secret for this long (at most 7 days) so
+            senders can switch without dropping events. 0 ends it at once.
+
+    # ── Partner credentials (tenant admin) ──────────────────────────────
+
+    PartnerCredential:
+      type: object
+      description: A Partner API credential. The client secret and API key are never included.
+      properties:
+        id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        client_id:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        rate_limit:
+          type: integer
+          description: Requests per minute, from the tier or the custom limit
+        rate_limit_tier:
+          type: [string, 'null']
+        is_active:
+          type: string
+          enum: ['true', 'false']
+          description: Kept for older clients; use `status`
+        status:
+          $ref: '#/components/schemas/CredentialStatus'
+        has_api_key:
+          type: boolean
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: [string, 'null']
+          format: date-time
+      required:
+        - id
+        - partner_name
+        - client_id
+        - scopes
+        - rate_limit
+        - rate_limit_tier
+        - is_active
+        - status
+        - has_api_key
+        - expires_at
+        - created_at
+
+    PartnerCredentialWithSecrets:
+      type: object
+      description: Returned once, on creation. Store the client secret and API key now.
+      properties:
+        id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        api_key:
+          type: [string, 'null']
+        scopes:
+          type: array
+          items:
+            type: string
+        rate_limit:
+          type: integer
+        rate_limit_tier:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        warning:
+          type: string
+      required:
+        - id
+        - partner_name
+        - client_id
+        - client_secret
+        - api_key
+        - scopes
+        - rate_limit
+        - rate_limit_tier
+        - created_at
+        - expires_at
+        - warning
+
+    IssuePartnerCredentialRequest:
+      type: object
+      properties:
+        partner_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        scopes:
+          type: array
+          description: Defaults to the read scopes. See `GET /api/v1/admin/partner-scopes`.
+          items:
+            type: string
+        issue_api_key:
+          type: boolean
+          default: true
+        rate_limit_tier:
+          type: [string, 'null']
+        rate_limit:
+          type: [integer, 'null']
+          minimum: 1
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        metadata:
+          type: [object, 'null']
+      required: [partner_name]
+
+    UpdatePartnerCredentialRequest:
+      type: object
+      description: Fields left out are unchanged. Setting `rate_limit` clears the tier.
+      properties:
+        scopes:
+          type: [array, 'null']
+          items:
+            type: string
+        rate_limit_tier:
+          type: [string, 'null']
+        rate_limit:
+          type: [integer, 'null']
+          minimum: 1
+
+    # ── Operator: tenants ───────────────────────────────────────────────
+
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Display name; unique (case-insensitive)
+        domain:
+          type: [string, 'null']
+        settings:
+          type: object
+          description: Tenant settings, e.g. `retention_days`
+        status:
+          type: string
+          enum: [active, disabled]
+        disabled_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: [string, 'null']
+          format: date-time
+        links:
+          type: object
+          description: Related operator routes. Erasure is `DELETE` on the `erase` link.
+          properties:
+            retention:
+              type: string
+            erase:
+              type: string
+          required: [retention, erase]
+      required: [id, name, domain, settings, status, disabled_at, created_at, links]
+
+    TenantCreated:
+      allOf:
+        - $ref: '#/components/schemas/Tenant'
+        - type: object
+          properties:
+            api_key:
+              description: The first ingest key, shown once; null when `issue_api_key` was false
+              anyOf:
+                - allOf:
+                    - $ref: '#/components/schemas/TenantApiKey'
+                    - type: object
+                      properties:
+                        key:
+                          type: string
+                      required: [key]
+                - type: 'null'
+            warning:
+              type: [string, 'null']
+          required: [api_key, warning]
+
+    CreateTenantRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        domain:
+          type: [string, 'null']
+          maxLength: 253
+        settings:
+          type: object
+          description: >-
+            Free-form settings. `retention_days` must be an integer between 1
+            and 36500; `api_key` is refused.
+        issue_api_key:
+          type: boolean
+          default: true
+          description: Issue a first ingest key and return it once
+        api_key_name:
+          type: string
+          default: default
+          minLength: 1
+          maxLength: 100
+      required: [name]
+
+    UpdateTenantRequest:
+      type: object
+      additionalProperties: false
+      description: Fields to change; omitted fields keep their value. Give at least one.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        domain:
+          type: [string, 'null']
+          maxLength: 253
+        settings:
+          type: object
+          description: Merged into the stored settings; a key set to null is removed.
+        disabled:
+          type: boolean
+          description: >-
+            true disables the tenant: its ingest keys, admin tokens and
+            Partner API credentials are refused (403) and its data is kept.
+            false enables it again.
+
+    ConnectorSyncRequest:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        full:
+          type: boolean
+          default: false
+          description: Ignore the cursor and push the whole registry
+      required: [tenant_id]
+
   responses:
+    AdminForbidden:
+      description: >-
+        The admin token lacks the operation's `x-admin-scope` (or `admin:read`
+        on a GET), the collector refuses tenant API keys on admin routes
+        (`PS_ADMIN_REQUIRE_SCOPED_TOKENS`), or the tenant is disabled. Audited.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: about:blank
+            title: Forbidden
+            status: 403
+            detail: "Token lacks required scope: admin:keys"
+    OperatorNotFound:
+      description: Not found, or `PS_ADMIN_TOKEN` is not set on this collector (every operator route is then 404)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     Forbidden:
       description: The credential lacks the scope this endpoint requires
       content:
@@ -1091,6 +1608,37 @@ components:
             $ref: '#/components/schemas/FingerprintRequest'
 
   parameters:
+    CredentialStatusParam:
+      name: status
+      in: query
+      description: Only rows with this status; omit for all
+      schema:
+        $ref: '#/components/schemas/CredentialStatus'
+
+    KeyIdPathParam:
+      name: key_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    TenantIdPathParam:
+      name: tenant_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    TenantIdQueryParam:
+      name: tenant_id
+      in: query
+      required: true
+      schema:
+        type: string
+        format: uuid
+
     ProviderPathParam:
       name: provider
       in: path
@@ -2057,11 +2605,15 @@ paths:
       description: Same as `GET /partner/v1/provider-credentials`, with the tenant API key.
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       responses:
         '200':
           $ref: '#/components/responses/ProviderCredentialList'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
 
   /api/v1/admin/provider-credentials/{provider}:
     parameters:
@@ -2072,11 +2624,15 @@ paths:
       summary: Get a stored provider admin key (masked, tenant admin)
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       responses:
         '200':
           $ref: '#/components/responses/ProviderCredential'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     post:
@@ -2086,6 +2642,8 @@ paths:
       description: Same as `POST /partner/v1/provider-credentials/{provider}`, with the tenant API key.
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       requestBody:
         $ref: '#/components/requestBodies/AdminKey'
       responses:
@@ -2095,6 +2653,8 @@ paths:
           $ref: '#/components/responses/InvalidAdminKey'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '409':
           description: A key is already stored for this provider
         '503':
@@ -2105,11 +2665,15 @@ paths:
       summary: Delete a stored provider admin key (tenant admin)
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       responses:
         '204':
           description: Deleted
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -2122,6 +2686,8 @@ paths:
       summary: Replace a stored provider admin key (tenant admin)
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       requestBody:
         $ref: '#/components/requestBodies/AdminKey'
       responses:
@@ -2131,6 +2697,8 @@ paths:
           $ref: '#/components/responses/InvalidAdminKey'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '503':
@@ -2143,11 +2711,15 @@ paths:
       summary: List provider key id to api_key_fingerprint links (tenant admin)
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       responses:
         '200':
           $ref: '#/components/responses/FingerprintLinkList'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
 
   /api/v1/admin/provider-key-fingerprints/{provider}/{api_key_id}:
     parameters:
@@ -2160,6 +2732,8 @@ paths:
       description: Same as `PUT /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}`, with the tenant API key.
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       requestBody:
         $ref: '#/components/requestBodies/Fingerprint'
       responses:
@@ -2171,17 +2745,23 @@ paths:
           description: Not a 16-hex-character fingerprint, or an invalid key id
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
     delete:
       operationId: adminDeleteProviderKeyFingerprint
       tags: [Provider Credentials]
       summary: Delete a fingerprint link (tenant admin)
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:provider-credentials
       responses:
         '204':
           description: Deleted
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -2198,6 +2778,8 @@ paths:
         secret is returned once, in this response.
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       requestBody:
         required: true
         content:
@@ -2213,6 +2795,8 @@ paths:
             expired or missing a scope), or the per-partner subscription limit
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           description: Partner credential not found in this tenant
         '503':
@@ -2223,6 +2807,8 @@ paths:
       summary: List webhook subscriptions
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       parameters:
         - name: partner_id
           in: query
@@ -2245,6 +2831,8 @@ paths:
                 required: [data]
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
 
   /api/v1/admin/webhooks/subscriptions/{subscription_id}:
     parameters:
@@ -2255,11 +2843,15 @@ paths:
       summary: Get a webhook subscription
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       responses:
         '200':
           $ref: '#/components/responses/WebhookSubscription'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     patch:
@@ -2273,6 +2865,8 @@ paths:
         changed fields (not their values).
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       requestBody:
         required: true
         content:
@@ -2286,6 +2880,8 @@ paths:
           description: Invalid URL, or a partner that cannot receive these events
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '422':
@@ -2296,11 +2892,15 @@ paths:
       summary: Delete a subscription and its queued and past deliveries
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       responses:
         '204':
           description: Deleted
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -2318,6 +2918,8 @@ paths:
         The body is optional.
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       requestBody:
         required: false
         content:
@@ -2329,6 +2931,8 @@ paths:
           $ref: '#/components/responses/WebhookSubscriptionWithSecret'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -2343,6 +2947,8 @@ paths:
       summary: List webhook deliveries (dead letters by default)
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       parameters:
         - name: status
           in: query
@@ -2377,6 +2983,8 @@ paths:
                 required: [data]
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
 
   /api/v1/admin/webhooks/deliveries/{delivery_id}/redeliver:
     parameters:
@@ -2393,6 +3001,8 @@ paths:
       description: Resets the attempt count and queues the delivery for the next worker run.
       security:
         - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:webhooks
       responses:
         '200':
           description: The delivery, now `pending`
@@ -2402,7 +3012,1136 @@ paths:
                 $ref: '#/components/schemas/WebhookDelivery'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           description: The delivery is already queued
+
+  # ── Admin tokens and tenant ingest keys (tenant admin) ────────────────
+
+  /api/v1/admin/token-scopes:
+    get:
+      operationId: listAdminTokenScopes
+      tags: [Admin]
+      summary: List the admin token scopes
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:tokens
+      responses:
+        '200':
+          description: Every admin scope with what it grants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          $ref: '#/components/schemas/AdminScope'
+                        description:
+                          type: string
+                      required: [name, description]
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/tokens:
+    post:
+      operationId: createAdminToken
+      tags: [Admin]
+      summary: Issue a scoped admin token
+      description: |
+        The token is returned once, in this response; only its hash is
+        stored. An admin token can only grant scopes it holds itself.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAdminTokenRequest'
+      responses:
+        '201':
+          description: The token, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminTokenWithSecret'
+        '400':
+          description: Unknown scope, or `expires_at` not in the future
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '409':
+          description: An unrevoked token with this name exists
+    get:
+      operationId: listAdminTokens
+      tags: [Admin]
+      summary: List admin tokens (metadata only)
+      description: Revoked and expired tokens are included, flagged by `status`, unless `status` filters them out.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:tokens
+      parameters:
+        - $ref: '#/components/parameters/CredentialStatusParam'
+      responses:
+        '200':
+          description: Tokens, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AdminToken'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/tokens/{token_id}:
+    parameters:
+      - name: token_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAdminToken
+      tags: [Admin]
+      summary: Get an admin token (metadata only)
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:tokens
+      responses:
+        '200':
+          description: The token's metadata, also when revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: revokeAdminToken
+      tags: [Admin]
+      summary: Revoke an admin token
+      description: |
+        Revokes at once. The row is kept (`status: revoked`, readable by
+        id) and the name can be reused. Revoking a revoked token is 204.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:tokens
+      responses:
+        '204':
+          description: Revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/api-keys:
+    post:
+      operationId: createTenantApiKey
+      tags: [Admin]
+      summary: Issue a tenant ingest key
+      description: |
+        The key is returned once, in this response; only its hash is
+        stored. While `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off the new key
+        also has full access to `/api/v1/admin`, like every ingest key.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantApiKeyRequest'
+      responses:
+        '201':
+          description: The key, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantApiKeyWithSecret'
+        '400':
+          description: '`expires_at` not in the future'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '409':
+          description: An unrevoked key with this name exists
+    get:
+      operationId: listTenantApiKeys
+      tags: [Admin]
+      summary: List tenant ingest keys (metadata only)
+      description: |
+        Revoked and expired keys are included, flagged by `status`, unless
+        `status` filters them out. The first call for a tenant whose key
+        still lives on the tenant row moves it here as `legacy-ingest-key`
+        (audited); the key itself keeps working.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:keys
+      parameters:
+        - $ref: '#/components/parameters/CredentialStatusParam'
+      responses:
+        '200':
+          description: Keys, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TenantApiKey'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/api-keys/{key_id}:
+    parameters:
+      - $ref: '#/components/parameters/KeyIdPathParam'
+    get:
+      operationId: getTenantApiKey
+      tags: [Admin]
+      summary: Get a tenant ingest key (metadata only)
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:keys
+      responses:
+        '200':
+          description: The key's metadata, also when revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantApiKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: revokeTenantApiKey
+      tags: [Admin]
+      summary: Revoke a tenant ingest key
+      description: |
+        Revokes at once, including a secret still in a rotation grace
+        window. The row is kept (`status: revoked`, readable by id) and the
+        name can be reused. Revoking a revoked key is 204. Revoking the key
+        this request is made with locks that caller out.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:keys
+      responses:
+        '204':
+          description: Revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/api-keys/{key_id}/rotate:
+    parameters:
+      - $ref: '#/components/parameters/KeyIdPathParam'
+    post:
+      operationId: rotateTenantApiKey
+      tags: [Admin]
+      summary: Replace a key's secret, keeping its id
+      description: |
+        Returns the new secret once. With `grace_period_seconds` the old
+        secret keeps authenticating until the window ends
+        (`rotation_grace_ends_at`); a secret still in an earlier window ends
+        now. `expires_at` is unchanged. The body is optional.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:keys
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateTenantApiKeyRequest'
+      responses:
+        '200':
+          description: The key with its new secret, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantApiKeyWithSecret'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The key is revoked or expired
+
+  # ── Partner credentials (tenant admin) ────────────────────────────────
+
+  /api/v1/admin/partner-scopes:
+    get:
+      operationId: listPartnerScopes
+      tags: [Admin]
+      summary: List Partner API scopes and rate-limit tiers
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:partners
+      responses:
+        '200':
+          description: Grantable scopes, aliases, defaults and tiers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scopes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        description:
+                          type: string
+                  aliases:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: string
+                  default_scopes:
+                    type: array
+                    items:
+                      type: string
+                  rate_limit_tiers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        requests_per_minute:
+                          type: integer
+                required: [scopes, aliases, default_scopes, rate_limit_tiers]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/partner-credentials:
+    post:
+      operationId: issuePartnerCredential
+      tags: [Admin]
+      summary: Issue a Partner API credential
+      description: |
+        Returns the client secret and API key once. Several credentials may
+        share a `partner_name` (issue the new one, then revoke the old one
+        to rotate), so this is not a 409 on a name in use.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:partners
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssuePartnerCredentialRequest'
+      responses:
+        '201':
+          description: The credential with its secrets, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartnerCredentialWithSecrets'
+        '400':
+          description: Unknown scope or rate-limit tier, or both a tier and a custom limit
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listPartnerCredentials
+      tags: [Admin]
+      summary: List Partner API credentials
+      description: Revoked and expired credentials are included, flagged by `status`, unless `status` filters them out.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:partners
+      parameters:
+        - $ref: '#/components/parameters/CredentialStatusParam'
+      responses:
+        '200':
+          description: Credentials, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PartnerCredential'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/partner-credentials/{credential_id}:
+    parameters:
+      - name: credential_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getPartnerCredential
+      tags: [Admin]
+      summary: Get a Partner API credential
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:partners
+      responses:
+        '200':
+          description: The credential, also when revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartnerCredential'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: updatePartnerCredential
+      tags: [Admin]
+      summary: Change a credential's scopes or rate limit
+      description: Takes effect on the partner's next request, including with access tokens issued before. Audited.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:partners
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePartnerCredentialRequest'
+      responses:
+        '200':
+          description: The updated credential
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartnerCredential'
+        '400':
+          description: Unknown scope or tier, or both a tier and a custom limit
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: revokePartnerCredential
+      tags: [Admin]
+      summary: Revoke a Partner API credential
+      description: |
+        Revokes at once, including access tokens already issued. The row is
+        kept (`status: revoked`, `is_active: "false"`, readable by id).
+        Revoking a revoked credential is 204.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:partners
+      responses:
+        '204':
+          description: Revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Registry jobs (tenant admin) ──────────────────────────────────────
+
+  /api/v1/admin/asset-lifecycle/sweep:
+    post:
+      operationId: runAssetLifecycleSweep
+      tags: [Admin]
+      summary: Mark the tenant's assets stale or retired based on last telemetry
+      description: >-
+        Thresholds are per discovery source unless `stale_after_days` or
+        `retire_after_days` is given. Owner-retired assets are not changed.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:registry
+      parameters:
+        - name: stale_after_days
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: retire_after_days
+          in: query
+          schema:
+            type: integer
+            minimum: 2
+      responses:
+        '200':
+          description: Counts of assets changed
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Invalid thresholds
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/risk-suggestions/run:
+    post:
+      operationId: runRiskSuggestions
+      tags: [Admin]
+      summary: Re-evaluate risk classification suggestions for the tenant's assets
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:registry
+      responses:
+        '200':
+          description: Counts of suggestions added, updated and withdrawn
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/risk-mappings/{risk_id}/review:
+    parameters:
+      - name: risk_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: reviewRiskMapping
+      tags: [Admin]
+      summary: Confirm or reject a risk mapping
+      description: A human decision the suggestion engine keeps. Audited.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:registry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [confirmed, rejected]
+                reviewed_by:
+                  type: string
+                  minLength: 1
+                  maxLength: 320
+                  description: The person deciding, e.g. an email
+              required: [status, reviewed_by]
+      responses:
+        '200':
+          description: The reviewed risk mapping
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Operator-triggered pulls and syncs (PS_ADMIN_TOKEN) ───────────────
+
+  /api/v1/admin/provider-usage/pull:
+    post:
+      operationId: pullProviderUsage
+      tags: [Operator]
+      summary: Pull org usage from provider admin APIs for one tenant (operator)
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+                days:
+                  type: integer
+                  minimum: 1
+                  maximum: 90
+                  default: 7
+                providers:
+                  type: [array, 'null']
+                  items:
+                    type: string
+              required: [tenant_id]
+      responses:
+        '200':
+          description: Per-provider pull results
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/cloud-inventory/pull:
+    post:
+      operationId: pullCloudInventory
+      tags: [Operator]
+      summary: Inventory AI model deployments in a tenant's cloud accounts (operator)
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+                clouds:
+                  type: [array, 'null']
+                  items:
+                    type: string
+              required: [tenant_id]
+      responses:
+        '200':
+          description: Per-cloud inventory results
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Unknown cloud
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/leanix/sync:
+    post:
+      operationId: syncLeanix
+      tags: [Operator]
+      summary: Push a tenant's AI asset registry to LeanIX (operator)
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorSyncRequest'
+      responses:
+        '200':
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/leanix/status:
+    get:
+      operationId: leanixStatus
+      tags: [Operator]
+      summary: LeanIX connector state for a tenant (operator)
+      security:
+        - OperatorToken: []
+      parameters:
+        - $ref: '#/components/parameters/TenantIdQueryParam'
+      responses:
+        '200':
+          description: Connector configuration (no secrets) and sync state
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/servicenow/sync:
+    post:
+      operationId: syncServiceNow
+      tags: [Operator]
+      summary: Push a tenant's AI asset registry to the ServiceNow CMDB (operator)
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorSyncRequest'
+      responses:
+        '200':
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/servicenow/status:
+    get:
+      operationId: serviceNowStatus
+      tags: [Operator]
+      summary: ServiceNow connector state for a tenant (operator)
+      security:
+        - OperatorToken: []
+      parameters:
+        - $ref: '#/components/parameters/TenantIdQueryParam'
+      responses:
+        '200':
+          description: Connector configuration (no secrets) and sync state
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  # ── Operator: tenants, retention, erasure (PS_ADMIN_TOKEN) ────────────
+
+  /api/v1/operator/tenants:
+    post:
+      operationId: createTenant
+      tags: [Operator]
+      summary: Create a tenant
+      description: |
+        Optionally issues the tenant's first ingest key (returned once).
+        Use `POST /api/v1/operator/tenants/{tenant_id}/admin-tokens` for
+        its first admin token.
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+      responses:
+        '201':
+          description: The tenant, with its first ingest key shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantCreated'
+        '400':
+          description: Invalid settings
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+        '409':
+          description: A tenant with this name exists (case-insensitive)
+    get:
+      operationId: listTenants
+      tags: [Operator]
+      summary: List tenants
+      security:
+        - OperatorToken: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, disabled]
+      responses:
+        '200':
+          description: Tenants, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tenant'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/operator/tenants/{tenant_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantIdPathParam'
+    get:
+      operationId: getTenant
+      tags: [Operator]
+      summary: Get a tenant
+      security:
+        - OperatorToken: []
+      responses:
+        '200':
+          description: The tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+    patch:
+      operationId: updateTenant
+      tags: [Operator]
+      summary: Change a tenant's name, domain or settings, or disable and enable it
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenantRequest'
+      responses:
+        '200':
+          description: The updated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          description: Invalid settings
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+        '409':
+          description: Another tenant has this name
+        '422':
+          description: Empty body, a null `name`, `settings` or `disabled`, or an unknown field
+    delete:
+      operationId: eraseTenant
+      tags: [Operator]
+      summary: Erase a tenant and all its data
+      description: |
+        Irreversible (GDPR erasure): every row of the tenant, then the
+        tenant. Batched and safe to rerun. Recorded in the retention audit
+        log, which outlives the tenant. To stop a tenant without deleting
+        its data, PATCH `disabled: true` instead.
+      security:
+        - OperatorToken: []
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          description: Must repeat the tenant id
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Rows deleted per table
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id:
+                    type: string
+                    format: uuid
+                  tenant_existed:
+                    type: boolean
+                  rows_deleted:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                required: [tenant_id, tenant_existed, rows_deleted]
+        '400':
+          description: '`confirm` does not equal the tenant id'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/operator/tenants/{tenant_id}/admin-tokens:
+    parameters:
+      - $ref: '#/components/parameters/TenantIdPathParam'
+    post:
+      operationId: bootstrapAdminToken
+      tags: [Operator]
+      summary: Issue a scoped admin token for a tenant
+      description: |
+        How a tenant's first admin token is made, for example when
+        `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is on and no tenant key may call
+        `/api/v1/admin/tokens`. Any scope may be granted. The token is
+        returned once.
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BootstrapAdminTokenRequest'
+      responses:
+        '201':
+          description: The token, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminTokenWithSecret'
+        '400':
+          description: Unknown scope, or `expires_at` not in the future
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+        '409':
+          description: An unrevoked token with this name exists
+
+  /api/v1/operator/tenants/{tenant_id}/retention:
+    parameters:
+      - $ref: '#/components/parameters/TenantIdPathParam'
+    get:
+      operationId: getTenantRetention
+      tags: [Operator]
+      summary: Show a tenant's retention period
+      security:
+        - OperatorToken: []
+      responses:
+        '200':
+          description: Effective retention and the current cutoff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id:
+                    type: string
+                    format: uuid
+                  retention_days:
+                    type: integer
+                  cutoff:
+                    type: string
+                    format: date-time
+                required: [tenant_id, retention_days, cutoff]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+    put:
+      operationId: setTenantRetention
+      tags: [Operator]
+      summary: Set a tenant's retention period
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                retention_days:
+                  type: [integer, 'null']
+                  minimum: 1
+                  maximum: 36500
+                  description: null clears the override (`PS_RETENTION_DAYS_DEFAULT` applies)
+      responses:
+        '200':
+          description: The effective retention
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id:
+                    type: string
+                    format: uuid
+                  retention_days:
+                    type: integer
+                required: [tenant_id, retention_days]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/operator/audit/verify:
+    get:
+      operationId: verifyAuditTrail
+      tags: [Operator]
+      summary: Verify the audit trail hash chains
+      description: |
+        Walks each audit trail hash chain (one tenant's, or every chain
+        including the system chain) and reports the first modified, missing
+        or reordered row. `ok` is false if any chain is broken. Record
+        `head_hash` outside the database to detect rows later removed from
+        the end. See docs/guides/audit-trail.mdx.
+      security:
+        - OperatorToken: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: One tenant's chain; omit for every chain
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Verification result per chain
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        tenant_id:
+                          type: string
+                        ok:
+                          type: boolean
+                        rows:
+                          type: integer
+                        first_seq:
+                          type: [integer, 'null']
+                        last_seq:
+                          type: [integer, 'null']
+                        head_hash:
+                          type: [string, 'null']
+                        anchor:
+                          type: string
+                          enum: [genesis, checkpoint, empty]
+                        first_break:
+                          type: [object, 'null']
+                required: [ok, data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/operator/retention/purge:
+    post:
+      operationId: purgeExpiredEvents
+      tags: [Operator]
+      summary: Delete usage events past retention
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id:
+                  type: [string, 'null']
+                  format: uuid
+                  description: One tenant; omit for every tenant
+                dry_run:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Per-tenant purge results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'

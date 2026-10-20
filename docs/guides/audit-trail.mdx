@@ -38,7 +38,7 @@ Each row holds:
 | `tenant_id`, `seq` | The chain and the row's position in it (1, 2, ...) |
 | `created_at` | UTC time the row was written |
 | `action`, `outcome` | What happened; `success` or `failure` |
-| `actor_type`, `actor_id` | `tenant_key` (the key's SHA-256 lookup prefix), `partner` (credential id), `operator` (`operator-api`), `system` (job name, e.g. `cli`, `provider-usage-pull`) or `anonymous` (an unauthenticated caller; the prefix of the key it presented, if any) |
+| `actor_type`, `actor_id` | `tenant_key` (the key's SHA-256 lookup prefix), `admin_token` (a scoped admin token's SHA-256 lookup prefix), `partner` (credential id), `operator` (`operator-api`), `system` (job name, e.g. `cli`, `provider-usage-pull`) or `anonymous` (an unauthenticated caller; the prefix of the key it presented, if any) |
 | `target_type`, `target_id` | What was acted on, e.g. `provider_credential` / `openai` |
 | `request_id`, `status_code` | The request's `X-Request-ID` (yours if you send a short token, else generated and returned in the response header) and HTTP status |
 | `details` | Ids, counts, scope names and field names |

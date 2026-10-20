@@ -1,6 +1,7 @@
 """Tenant admin endpoints for partner change webhooks (#103).
 
-Mounted at /api/v1/admin/webhooks with the tenant API key (resolve_tenant),
+Mounted at /api/v1/admin/webhooks with tenant admin auth (the tenant API
+key, or an admin token with scope ``admin:webhooks``; collector/admin_auth.py),
 so the tenant, not the partner, decides where its registry data is pushed.
 The signing secret is returned once, on creation and on rotation.
 
@@ -32,18 +33,20 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from db.models import PartnerCredential, WebhookDelivery, WebhookSubscription
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import delete, func, select
 
 from collector import audit_trail, webhooks
+from collector.admin_auth import AdminPrincipal, require_admin
 from collector.audit import build_audit_row, record_read
-from collector.auth import resolve_tenant
 from collector.sanitize import BoundedJsonRoute, StorableStr
 
 router = APIRouter(
     prefix="/api/v1/admin/webhooks", tags=["Admin"], route_class=BoundedJsonRoute
 )
+
+_WEBHOOKS = Depends(require_admin("admin:webhooks"))
 
 SECRET_WARNING = "Save the signing secret now. It will not be shown again."
 
@@ -124,8 +127,10 @@ async def _get_subscription(db, tenant_id: UUID, subscription_id: UUID) -> Webho
 
 
 @router.post("/subscriptions", status_code=201, summary="Subscribe a partner to asset change events")
-async def create_subscription(body: CreateSubscriptionBody, request: Request) -> dict:
-    tenant_id = await resolve_tenant(request)
+async def create_subscription(
+    body: CreateSubscriptionBody, request: Request, principal: AdminPrincipal = _WEBHOOKS
+) -> dict:
+    tenant_id = principal.tenant_id
     db = request.state.db
 
     partner = (
@@ -212,8 +217,10 @@ async def _audit(
 
 
 @router.get("/subscriptions", summary="List webhook subscriptions")
-async def list_subscriptions(request: Request, partner_id: UUID | None = None) -> dict:
-    tenant_id = await resolve_tenant(request)
+async def list_subscriptions(
+    request: Request, partner_id: UUID | None = None, principal: AdminPrincipal = _WEBHOOKS
+) -> dict:
+    tenant_id = principal.tenant_id
     conditions = [WebhookSubscription.tenant_id == tenant_id]
     if partner_id is not None:
         conditions.append(WebhookSubscription.partner_id == partner_id)
@@ -228,8 +235,10 @@ async def list_subscriptions(request: Request, partner_id: UUID | None = None) -
 
 
 @router.get("/subscriptions/{subscription_id}", summary="Get a webhook subscription")
-async def get_subscription(subscription_id: UUID, request: Request) -> dict:
-    tenant_id = await resolve_tenant(request)
+async def get_subscription(
+    subscription_id: UUID, request: Request, principal: AdminPrincipal = _WEBHOOKS
+) -> dict:
+    tenant_id = principal.tenant_id
     return _subscription_dict(
         await _get_subscription(request.state.db, tenant_id, subscription_id)
     )
@@ -240,8 +249,10 @@ async def get_subscription(subscription_id: UUID, request: Request) -> dict:
     status_code=204,
     summary="Delete a webhook subscription and its queued and past deliveries",
 )
-async def delete_subscription(subscription_id: UUID, request: Request) -> None:
-    tenant_id = await resolve_tenant(request)
+async def delete_subscription(
+    subscription_id: UUID, request: Request, principal: AdminPrincipal = _WEBHOOKS
+) -> None:
+    tenant_id = principal.tenant_id
     db = request.state.db
     sub = await _get_subscription(db, tenant_id, subscription_id)
     details = {"partner_id": sub.partner_id, "event_types": list(sub.event_types)}
@@ -292,9 +303,12 @@ class UpdateSubscriptionBody(BaseModel):
     summary="Change a webhook subscription's URL or event types, or pause and resume it",
 )
 async def update_subscription(
-    subscription_id: UUID, body: UpdateSubscriptionBody, request: Request
+    subscription_id: UUID,
+    body: UpdateSubscriptionBody,
+    request: Request,
+    principal: AdminPrincipal = _WEBHOOKS,
 ) -> dict:
-    tenant_id = await resolve_tenant(request)
+    tenant_id = principal.tenant_id
     db = request.state.db
 
     async def refuse(exc: HTTPException) -> HTTPException:
@@ -386,9 +400,12 @@ class RotateSecretBody(BaseModel):
     summary="Replace the signing secret, optionally keeping the old one valid for a grace period",
 )
 async def rotate_secret(
-    subscription_id: UUID, request: Request, body: RotateSecretBody | None = None
+    subscription_id: UUID,
+    request: Request,
+    body: RotateSecretBody | None = None,
+    principal: AdminPrincipal = _WEBHOOKS,
 ) -> dict:
-    tenant_id = await resolve_tenant(request)
+    tenant_id = principal.tenant_id
     db = request.state.db
     sub = await _get_subscription(db, tenant_id, subscription_id)
     grace = body.grace_period_seconds if body else 0
@@ -435,8 +452,9 @@ async def list_deliveries(
     status: Literal["pending", "succeeded", "dead"] = "dead",
     subscription_id: UUID | None = None,
     limit: int = Query(default=50, ge=1, le=200),
+    principal: AdminPrincipal = _WEBHOOKS,
 ) -> dict:
-    tenant_id = await resolve_tenant(request)
+    tenant_id = principal.tenant_id
     conditions = [WebhookDelivery.tenant_id == tenant_id, WebhookDelivery.status == status]
     if subscription_id is not None:
         conditions.append(WebhookDelivery.subscription_id == subscription_id)
@@ -452,8 +470,10 @@ async def list_deliveries(
 
 
 @router.post("/deliveries/{delivery_id}/redeliver", summary="Queue a delivery again")
-async def redeliver(delivery_id: UUID, request: Request) -> dict:
-    tenant_id = await resolve_tenant(request)
+async def redeliver(
+    delivery_id: UUID, request: Request, principal: AdminPrincipal = _WEBHOOKS
+) -> dict:
+    tenant_id = principal.tenant_id
     db = request.state.db
     d = (
         await db.execute(

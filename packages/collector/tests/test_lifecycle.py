@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from collector import lifecycle
+from collector import admin_auth, lifecycle
 from collector.dedup import find_or_create_asset
 from collector.lifecycle import (
     ACTIVE,
@@ -256,16 +256,23 @@ def _admin_app(db: FakeSession, tenant_id: uuid.UUID) -> FastAPI:
     return app
 
 
+# Any bearer token: resolve_tenant is replaced below.
+TENANT_AUTH = {"Authorization": "Bearer ps-test-key"}
+
+
 async def test_admin_sweep_endpoint(monkeypatch):
     tenant_id = uuid.uuid4()
 
     async def fake_resolve_tenant(request):
         return tenant_id
 
-    monkeypatch.setattr(lifecycle, "resolve_tenant", fake_resolve_tenant)
+    # Admin routes authenticate through collector.admin_auth.
+    monkeypatch.setattr(admin_auth, "resolve_tenant", fake_resolve_tenant)
     db = FakeSession(rowcounts=(1, 2, 0))
     transport = ASGITransport(app=_admin_app(db, tenant_id))
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=TENANT_AUTH
+    ) as client:
         resp = await client.post(
             "/api/v1/admin/asset-lifecycle/sweep?stale_after_days=7&retire_after_days=30"
         )
@@ -284,10 +291,13 @@ async def test_admin_sweep_rejects_bad_thresholds(monkeypatch):
     async def fake_resolve_tenant(request):
         return uuid.uuid4()
 
-    monkeypatch.setattr(lifecycle, "resolve_tenant", fake_resolve_tenant)
+    # Admin routes authenticate through collector.admin_auth.
+    monkeypatch.setattr(admin_auth, "resolve_tenant", fake_resolve_tenant)
     db = FakeSession()
     transport = ASGITransport(app=_admin_app(db, uuid.uuid4()))
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=TENANT_AUTH
+    ) as client:
         resp = await client.post(
             "/api/v1/admin/asset-lifecycle/sweep?stale_after_days=30&retire_after_days=10"
         )

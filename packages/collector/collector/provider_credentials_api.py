@@ -1,8 +1,10 @@
 """HTTP routes for provider admin credentials and key fingerprint links (#93).
 Logic: collector.provider_credentials.
 
-Tenant admin (tenant API key), under /api/v1/admin; Partner API, under
-/partner/v1, scope ``provider-credentials:manage``. Same routes on both:
+Tenant admin (tenant API key, or an admin token with scope
+``admin:provider-credentials``; collector/admin_auth.py), under
+/api/v1/admin; Partner API, under /partner/v1, scope
+``provider-credentials:manage``. Same routes on both:
 
   GET    /provider-credentials                     list (masked)
   GET    /provider-credentials/{provider}          read (masked)
@@ -37,8 +39,8 @@ from pydantic import BaseModel, ConfigDict
 
 from collector import audit_trail
 from collector import provider_credentials as pc
+from collector.admin_auth import AdminPrincipal, require_admin
 from collector.audit import record_read
-from collector.auth import resolve_tenant
 from collector.partner_auth import PartnerPrincipal, require_scope
 from collector.partner_registry import _audit, _enforce_rate_limit
 from collector.provider_usage import ProviderUsageSettings, admin_keys_for_tenant
@@ -46,6 +48,7 @@ from collector.sanitize import BoundedJsonRoute
 
 SCOPE = "provider-credentials:manage"
 _SCOPE = Depends(require_scope(SCOPE))
+_ADMIN = Depends(require_admin("admin:provider-credentials"))
 
 Provider = Literal["openai", "anthropic"]
 
@@ -307,8 +310,14 @@ async def _run_audited(
     return status, body
 
 
-async def _as_tenant(request: Request, response: Response, handler: Handler, *args):
-    tenant_id = await resolve_tenant(request)
+async def _as_tenant(
+    request: Request,
+    response: Response,
+    principal: AdminPrincipal,
+    handler: Handler,
+    *args,
+):
+    tenant_id = principal.tenant_id
     db = request.state.db
     actor = audit_trail.tenant_key_actor(request)
     try:
@@ -351,17 +360,22 @@ _LINK = "/provider-key-fingerprints"
 
 
 @tenant_router.get(_CRED, summary="List stored provider admin credentials (masked)")
-async def tenant_list_credentials(request: Request, response: Response):
-    return await _as_tenant(request, response, _list_credentials)
+async def tenant_list_credentials(
+    request: Request, response: Response, principal: AdminPrincipal = _ADMIN
+):
+    return await _as_tenant(request, response, principal, _list_credentials)
 
 
 @tenant_router.get(
     _CRED + "/{provider}", summary="Get a stored provider credential (masked)"
 )
 async def tenant_get_credential(
-    provider: Provider, request: Request, response: Response
+    provider: Provider,
+    request: Request,
+    response: Response,
+    principal: AdminPrincipal = _ADMIN,
 ):
-    return await _as_tenant(request, response, _get_credential, provider)
+    return await _as_tenant(request, response, principal, _get_credential, provider)
 
 
 @tenant_router.post(
@@ -370,32 +384,49 @@ async def tenant_get_credential(
     summary="Store a provider admin key (write-only)",
 )
 async def tenant_create_credential(
-    provider: Provider, body: AdminKeyBody, request: Request, response: Response
+    provider: Provider,
+    body: AdminKeyBody,
+    request: Request,
+    response: Response,
+    principal: AdminPrincipal = _ADMIN,
 ):
-    return await _as_tenant(request, response, _create_credential, provider, body)
+    return await _as_tenant(
+        request, response, principal, _create_credential, provider, body
+    )
 
 
 @tenant_router.post(
     _CRED + "/{provider}/rotate", summary="Replace a stored provider admin key"
 )
 async def tenant_rotate_credential(
-    provider: Provider, body: AdminKeyBody, request: Request, response: Response
+    provider: Provider,
+    body: AdminKeyBody,
+    request: Request,
+    response: Response,
+    principal: AdminPrincipal = _ADMIN,
 ):
-    return await _as_tenant(request, response, _rotate_credential, provider, body)
+    return await _as_tenant(
+        request, response, principal, _rotate_credential, provider, body
+    )
 
 
 @tenant_router.delete(
     _CRED + "/{provider}", status_code=204, summary="Delete a stored provider admin key"
 )
 async def tenant_delete_credential(
-    provider: Provider, request: Request, response: Response
+    provider: Provider,
+    request: Request,
+    response: Response,
+    principal: AdminPrincipal = _ADMIN,
 ):
-    await _as_tenant(request, response, _delete_credential, provider)
+    await _as_tenant(request, response, principal, _delete_credential, provider)
 
 
 @tenant_router.get(_LINK, summary="List provider key id -> api_key_fingerprint links")
-async def tenant_list_links(request: Request, response: Response):
-    return await _as_tenant(request, response, _list_links)
+async def tenant_list_links(
+    request: Request, response: Response, principal: AdminPrincipal = _ADMIN
+):
+    return await _as_tenant(request, response, principal, _list_links)
 
 
 @tenant_router.put(
@@ -408,8 +439,11 @@ async def tenant_put_link(
     body: FingerprintBody,
     request: Request,
     response: Response,
+    principal: AdminPrincipal = _ADMIN,
 ):
-    return await _as_tenant(request, response, _put_link, provider, api_key_id, body)
+    return await _as_tenant(
+        request, response, principal, _put_link, provider, api_key_id, body
+    )
 
 
 @tenant_router.delete(
@@ -418,9 +452,13 @@ async def tenant_put_link(
     summary="Delete a fingerprint link",
 )
 async def tenant_delete_link(
-    provider: Provider, api_key_id: str, request: Request, response: Response
+    provider: Provider,
+    api_key_id: str,
+    request: Request,
+    response: Response,
+    principal: AdminPrincipal = _ADMIN,
 ):
-    await _as_tenant(request, response, _delete_link, provider, api_key_id)
+    await _as_tenant(request, response, principal, _delete_link, provider, api_key_id)
 
 
 # ──────────────────────────────────────────────────────────────────────

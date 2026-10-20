@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     retention_batch_size: int = 5000
     # Operator token for /api/v1/operator/*. Empty disables those endpoints.
     admin_token: str = ""
+    # Tenant admin routes (/api/v1/admin/*): refuse tenant ingest keys and
+    # accept only scoped admin tokens (PS_ADMIN_REQUIRE_SCOPED_TOKENS). Off
+    # by default, so ingest keys keep full admin access as before. See
+    # collector/admin_auth.py.
+    admin_require_scoped_tokens: bool = False
     # Serve FastAPI's /docs, /redoc and /openapi.json
     # (PS_COLLECTOR_API_DOCS_ENABLED). Off by default: they are
     # unauthenticated and list every route, including operator routes.

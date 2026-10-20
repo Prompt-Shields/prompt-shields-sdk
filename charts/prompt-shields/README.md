@@ -471,6 +471,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_DATABASE_URL` (secret) | — | Application role URL (migration Job: owner role URL) |
 | `PS_PARTNER_JWT_SECRET` (secret) | development value | Partner token signing key |
 | `PS_ADMIN_TOKEN` (secret) | empty (off) | Operator endpoints `/api/v1/operator/*` |
+| `PS_ADMIN_REQUIRE_SCOPED_TOKENS` | `false` | `true`: tenant admin routes (`/api/v1/admin/*`) take only scoped admin tokens and refuse tenant ingest keys. Set it in `collector.config` |
 | `PS_RLS_REQUIRED` (*chart*) | `true` in the chart | Refuse to start unless RLS binds the role |
 | `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `true`; the chart sets `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob | Background loops in the API process |
 | `PS_COLLECTOR_METRICS_ENABLED` (*chart*) | `false` | Prometheus `/metrics` |

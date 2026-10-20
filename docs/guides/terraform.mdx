@@ -1,0 +1,262 @@
+---
+title: Managing Prompt Shields with Terraform today
+description: Install with helm_release and manage tenants, ingest keys, partner credentials, webhooks and provider keys through the admin API with the generic restapi provider
+---
+
+# Managing Prompt Shields with Terraform today
+
+There is no `promptshields` Terraform provider yet. Until there is, you can put a Prompt Shields deployment under Terraform (or OpenTofu) with three stock providers:
+
+| Layer | Provider | What it manages |
+|-------|----------|-----------------|
+| Install | `hashicorp/helm` (`helm_release`) | The gateway and collector, from the `charts/prompt-shields` chart |
+| Platform (operator) | `Mastercard/restapi` with the operator token | Tenants (`/api/v1/operator/tenants`) |
+| Tenant configuration | `Mastercard/restapi` with a scoped admin token | Ingest keys, partner credentials, webhook subscriptions, provider admin keys (`/api/v1/admin/*`) |
+
+Every route used here is in [`docs/openapi.yaml`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/openapi.yaml). The examples show the shape of the configuration; check attribute names against the `restapi` provider documentation for the version you pin.
+
+## 1. Install with `helm_release`
+
+```hcl
+resource "helm_release" "prompt_shields" {
+  name             = "prompt-shields"
+  namespace        = "prompt-shields"
+  create_namespace = true
+  repository       = "oci://ghcr.io/prompt-shields/charts"
+  chart            = "prompt-shields"
+  version          = "0.1.1"
+  timeout          = 900
+
+  # Secrets are created outside this release (External Secrets, Vault, or
+  # kubernetes_secret resources); see the chart README.
+  set {
+    name  = "secrets.migration.existingSecret"
+    value = "prompt-shields-migration"
+  }
+  set {
+    name  = "secrets.collector.existingSecret"
+    value = "prompt-shields-collector"
+  }
+  set {
+    name  = "secrets.gateway.existingSecret"
+    value = "prompt-shields-gateway"
+  }
+
+  values = [yamlencode({
+    collector = {
+      config = {
+        # Admin routes take scoped admin tokens only (see "Auth" below).
+        PS_ADMIN_REQUIRE_SCOPED_TOKENS = "true"
+      }
+    }
+  })]
+}
+```
+
+The chart's README covers database roles, row-level security and air-gapped installs.
+
+## 2. Credentials: which token goes where
+
+The collector has three kinds of credential. Terraform should only ever hold the last one.
+
+| Credential | Reaches | Use in Terraform |
+|------------|---------|------------------|
+| `PS_ADMIN_TOKEN` (operator) | `/api/v1/operator/*` and operator pulls, across every tenant, bypassing row-level security | Only in a separate platform workspace that creates tenants, or not at all |
+| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | Ingest, the registry, and every `/api/v1/admin` route unless `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` | No: it is what SDKs and gateways send |
+| Admin token (`ps-at-...`) | `/api/v1/admin` routes allowed by its scopes, for one tenant | Yes |
+
+Admin token scopes:
+
+| Scope | Grants |
+|-------|--------|
+| `admin:read` | Every GET under `/api/v1/admin` (plans, drift detection, imports) |
+| `admin:keys` | Issue, rotate and revoke tenant ingest keys |
+| `admin:tokens` | Issue and revoke admin tokens, only with scopes the caller holds |
+| `admin:provider-credentials` | Provider admin keys and key fingerprint links |
+| `admin:webhooks` | Webhook subscriptions and redelivery |
+| `admin:partners` | Partner API credentials |
+| `admin:registry` | Lifecycle sweep, risk suggestions, risk reviews |
+
+Each operation in the OpenAPI spec names its scope in `x-admin-scope`.
+
+### `PS_ADMIN_REQUIRE_SCOPED_TOKENS`
+
+By default (`false`) a tenant ingest key still has full access to `/api/v1/admin`, as it always had. That includes rotating provider admin keys, issuing partner credentials and issuing more ingest keys, so anyone holding a key deployed with an SDK or gateway can do those things. With `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` the collector refuses ingest keys on every `/api/v1/admin` route (403, audited), and only admin tokens with the right scope get in. Ingest and registry routes are unchanged. Turn it on once your automation uses admin tokens.
+
+While it is off, an ingest key reaches every admin route, so issuing or rotating one (`POST /api/v1/admin/api-keys`, `.../rotate`) needs a token with every admin scope; `admin:keys` alone can list, read and revoke keys. With the setting on, `admin:keys` is enough.
+
+### Bootstrap the first admin token
+
+Create the tenant's first admin token once, outside Terraform, with the operator token, and store it in your secret manager:
+
+```bash
+curl -sS -X POST "$PS_COLLECTOR/api/v1/operator/tenants/$TENANT_ID/admin-tokens" \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "terraform", "scopes": ["admin:read", "admin:keys", "admin:partners",
+       "admin:webhooks", "admin:provider-credentials"],
+       "expires_at": "2027-06-30T00:00:00Z"}'
+```
+
+The token is in the response's `token` field and is never shown again; the collector keeps only a bcrypt hash. Revoke it with `DELETE /api/v1/admin/tokens/{id}`.
+
+## 3. Providers
+
+```hcl
+terraform {
+  required_providers {
+    restapi = {
+      source  = "Mastercard/restapi"
+      version = "~> 1.20"
+    }
+  }
+}
+
+variable "ps_collector_url" { type = string }
+variable "ps_admin_token" {
+  type      = string
+  sensitive = true # from Vault / Secrets Manager, never in .tfvars in git
+}
+
+provider "restapi" {
+  uri                  = var.ps_collector_url
+  write_returns_object = true
+  id_attribute         = "id"
+  headers = {
+    Authorization  = "Bearer ${var.ps_admin_token}"
+    "Content-Type" = "application/json"
+  }
+}
+```
+
+## 4. Resources
+
+Conventions every admin resource follows, so `restapi_object` can drive it:
+
+- ids are UUIDs that never change (an ingest key keeps its id across rotations);
+- create is `POST` on the collection, read is `GET {collection}/{id}`, and creating a name an unrevoked row already has is `409` (import the existing one instead);
+- `DELETE {collection}/{id}` revokes: `204`, the row stays readable by id with `status: revoked`, and a repeated DELETE is `204`;
+- secrets (`key`, `token`, `client_secret`, `api_key`, `secret`) are returned once, in the create (or rotate) response.
+
+### Tenant ingest key (for a gateway)
+
+```hcl
+resource "restapi_object" "gateway_key" {
+  path = "/api/v1/admin/api-keys"
+  data = jsonencode({ name = "gateway-prod" })
+  # Keys have no update: a changed name or expiry makes a new key.
+  force_new = ["name", "expires_at"]
+}
+
+# The plaintext key, only in the create response.
+output "gateway_key" {
+  value     = jsondecode(restapi_object.gateway_key.create_response)["key"]
+  sensitive = true
+}
+```
+
+To rotate without dropping events, call the rotate route with a grace window and roll the new key out before it ends:
+
+```bash
+curl -sS -X POST "$PS_COLLECTOR/api/v1/admin/api-keys/$KEY_ID/rotate" \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN_TF" -H 'Content-Type: application/json' \
+  -d '{"grace_period_seconds": 86400}'
+```
+
+The old secret keeps working until `rotation_grace_ends_at` (at most 7 days). A key whose secret moved to the tenant row before this API existed shows up as `legacy-ingest-key` (`origin: legacy`) and can be rotated and revoked the same way.
+
+### Partner credential
+
+```hcl
+resource "restapi_object" "ardoq" {
+  path          = "/api/v1/admin/partner-credentials"
+  update_method = "PATCH"
+  data = jsonencode({
+    partner_name    = "ardoq"
+    scopes          = ["assets:read", "data-flows:read", "risks:read", "changes:read"]
+    rate_limit_tier = "standard"
+  })
+  force_new = ["partner_name"]
+}
+```
+
+`PATCH` changes scopes and the rate limit; the partner sees the change on its next request.
+
+### Webhook subscription
+
+```hcl
+resource "restapi_object" "ardoq_hook" {
+  path          = "/api/v1/admin/webhooks/subscriptions"
+  update_method = "PATCH"
+  data = jsonencode({
+    partner_id  = restapi_object.ardoq.id
+    url         = "https://ardoq.example.com/hooks/prompt-shields"
+    event_types = ["asset.created", "asset.updated"]
+  })
+  # The PATCH body refuses partner_id; send only the fields it accepts.
+  update_data = jsonencode({
+    url         = "https://ardoq.example.com/hooks/prompt-shields"
+    event_types = ["asset.created", "asset.updated"]
+  })
+  force_new = ["partner_id"]
+}
+```
+
+The signing secret is in `create_response` (`secret`). Rotate it with `POST .../{id}/rotate-secret`.
+
+### Provider admin key
+
+Provider credentials are keyed by provider name, not a UUID, and the admin key is write-only: no response carries it.
+
+```hcl
+resource "restapi_object" "openai_admin_key" {
+  path          = "/api/v1/admin/provider-credentials"
+  create_path   = "/api/v1/admin/provider-credentials/openai"
+  read_path     = "/api/v1/admin/provider-credentials/{id}"
+  update_path   = "/api/v1/admin/provider-credentials/{id}/rotate"
+  update_method = "POST"
+  destroy_path  = "/api/v1/admin/provider-credentials/{id}"
+  id_attribute  = "provider"
+  data          = jsonencode({ admin_key = var.openai_admin_key })
+  # The key never comes back, so ignore the server's view of the body.
+  ignore_all_server_changes = true
+}
+```
+
+Changing `var.openai_admin_key` rotates the stored key.
+
+### Tenants (platform workspace only)
+
+Tenants are operator objects. Keep them in a separate workspace whose provider uses the operator token, or create them once by hand:
+
+```hcl
+provider "restapi" {
+  alias = "operator"
+  uri   = var.ps_collector_url
+  headers = {
+    Authorization  = "Bearer ${var.ps_operator_token}"
+    "Content-Type" = "application/json"
+  }
+  write_returns_object = true
+}
+
+resource "restapi_object" "tenant" {
+  provider      = restapi.operator
+  path          = "/api/v1/operator/tenants"
+  update_method = "PATCH"
+  data = jsonencode({
+    name     = "Nordbank"
+    domain   = "nordbank.example"
+    settings = { retention_days = 365 }
+  })
+}
+```
+
+`POST` also issues a first ingest key (in `create_response`, `api_key.key`); send `"issue_api_key": false` to skip it. `PATCH` with `"disabled": true` stops the tenant's keys, admin tokens and partner credentials and keeps its data. Terraform `destroy` does **not** erase a tenant: erasure is `DELETE /api/v1/operator/tenants/{id}?confirm={id}`, irreversible, and deliberately left out of this recipe. Set `destroy_path` to something harmless, or protect the resource with `lifecycle { prevent_destroy = true }`.
+
+## 5. State and secrets
+
+`restapi_object` keeps the create response in state, including once-shown secrets (`key`, `token`, `client_secret`, webhook `secret`) and, for provider credentials, the `admin_key` you sent. Use an encrypted remote backend with restricted access, mark outputs `sensitive`, and prefer to read provider admin keys from your secret manager at apply time. Every change through the admin API is written to the hash-chained audit trail (ids, names and scopes, never the secrets; see the audit trail guide).
+
+## What a dedicated provider would add
+
+A generated `promptshields` provider would use write-only attributes for secrets (no state), typed resources and imports by id, and drift detection without `ignore_all_server_changes`. It needs the same admin API, which is why the routes above follow one set of conventions and are in the OpenAPI spec. Guardrail policies, budgets and rate-limit tiers have no server-side API yet, so they cannot be managed this way.
