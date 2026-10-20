@@ -372,6 +372,30 @@ describe('OtlpLogsExporter against a fake receiver', () => {
     }
   });
 
+  test('drain (shutdown) waits for in-flight sends and sends what is still queued', async () => {
+    const held: ServerResponse[] = [];
+    const r = await receiver((_req, res) => held.push(res));
+    const release = setInterval(() => {
+      for (const res of held.splice(0)) res.end('{}');
+    }, 20);
+    try {
+      const exporter = new OtlpLogsExporter(
+        config(`${r.url}/v1/logs`, { maxBatch: 1, flushMs: 60_000 })
+      );
+      for (let i = 0; i < MAX_IN_FLIGHT + 3; i++) exporter.enqueue({ seq: i });
+      // Every slot is taken: a plain flush sends nothing more.
+      await exporter.flush();
+      expect(exporter.pending).toBe(3);
+      await exporter.drain();
+      expect(exporter.pending).toBe(0);
+      expect(r.received).toHaveLength(MAX_IN_FLIGHT + 3);
+    } finally {
+      clearInterval(release);
+      for (const res of held.splice(0)) res.end('{}');
+      await r.close();
+    }
+  });
+
   test('enqueue never blocks and at most MAX_IN_FLIGHT batches are sent at once', async () => {
     const held: ServerResponse[] = [];
     const r = await receiver((_req, res) => held.push(res));

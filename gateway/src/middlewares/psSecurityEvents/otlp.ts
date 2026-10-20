@@ -183,6 +183,8 @@ export class OtlpLogsExporter {
   private queue: any[] = [];
   private timer: any;
   private inFlight = 0;
+  /** Sends in progress, so `drain` can wait for them. */
+  private sending = new Set<Promise<void>>();
   private warned = false;
 
   constructor(
@@ -231,9 +233,24 @@ export class OtlpLogsExporter {
     }
     const sends: Promise<void>[] = [];
     while (this.queue.length && this.inFlight < MAX_IN_FLIGHT) {
-      sends.push(this.send(this.queue.splice(0, this.config.maxBatch)));
+      const p = this.send(this.queue.splice(0, this.config.maxBatch));
+      this.sending.add(p);
+      void p.then(() => this.sending.delete(p));
+      sends.push(p);
     }
     await Promise.all(sends);
+  }
+
+  /**
+   * Send everything queued and wait for every send in progress, including
+   * ones started before this call (shutdown). `flush` alone sends nothing
+   * while MAX_IN_FLIGHT batches are out. Never throws.
+   */
+  async drain(): Promise<void> {
+    while (this.queue.length || this.sending.size) {
+      await this.flush();
+      if (this.sending.size) await Promise.race(this.sending);
+    }
   }
 
   private async send(batch: any[]): Promise<void> {
@@ -299,14 +316,17 @@ export function securityLogsExporter(): OtlpLogsExporter | null {
   return exporter;
 }
 
-/** Send what is queued, giving up after `timeoutMs` (shutdown). */
+/**
+ * Send what is queued and wait for sends in progress, giving up after
+ * `timeoutMs` (shutdown).
+ */
 export async function flushSecurityLogsExporter(
   timeoutMs = 3000
 ): Promise<void> {
   if (!exporter) return;
   let timer: any;
   await Promise.race([
-    exporter.flush(),
+    exporter.drain(),
     new Promise<void>((r) => {
       timer = setTimeout(r, timeoutMs);
     }),
