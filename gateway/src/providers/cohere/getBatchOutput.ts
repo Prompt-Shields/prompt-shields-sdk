@@ -94,8 +94,8 @@ export const CohereGetBatchOutputHandler = async ({
         headers,
       }
     );
-    const retrieveFileResponseJson: CohereGetFileResponse =
-      await retrieveFileResponse.json();
+    // PS fork (fix): check the status before reading the body; reading
+    // .text() after .json() failed because the body was already used.
     if (!retrieveFileResponse.ok) {
       const errorText = await retrieveFileResponse.text();
       throw new Error(
@@ -107,51 +107,73 @@ export const CohereGetBatchOutputHandler = async ({
         })
       );
     }
+    const retrieveFileResponseJson: CohereGetFileResponse =
+      await retrieveFileResponse.json();
 
     if (!retrieveFileResponseJson.dataset.dataset_parts) {
       throw new Error('file not found');
     }
 
+    // PS fork (fix): parts are decoded one after another and the stream is
+    // closed once, after the last part; closing it at the end of every part
+    // made output with more than one part fail.
+    const fileParts = retrieveFileResponseJson.dataset.dataset_parts;
+    const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start: async (controller) => {
-        const fileParts = retrieveFileResponseJson.dataset.dataset_parts;
-        for (const filePart of fileParts) {
-          const filePartRequest = cohereDatasetPartRequest(
-            filePart.url,
-            baseURL,
-            headers,
-            c
-          );
-          if (!filePartRequest) {
-            controller.error(new Error('Unexpected dataset part location'));
-            return;
-          }
-          const filePartResponse = await externalServiceFetch(
-            filePart.url,
-            filePartRequest
-          );
-          const arrayBuffer = await filePartResponse.arrayBuffer();
-          const buf = Buffer.from(arrayBuffer);
-          const decoder = new avro.streams.BlockDecoder({
-            parseHook: (schema: any) => {
-              return avro.Type.forSchema(schema, { wrapUnions: true });
-            },
-          });
-          const encoder = new TextEncoder();
-          decoder.on('data', (data: any) => {
-            controller.enqueue(
-              encoder.encode(
-                JSON.stringify(
-                  CohereEmbedResponseTransformBatch(JSON.parse(data))
-                )
-              )
+        try {
+          for (const filePart of fileParts) {
+            const filePartRequest = cohereDatasetPartRequest(
+              filePart.url,
+              baseURL,
+              headers,
+              c
             );
-            controller.enqueue(encoder.encode('\n'));
-          });
-          decoder.on('end', () => {
-            controller.close();
-          });
-          decoder.end(buf);
+            if (!filePartRequest) {
+              throw new Error('Unexpected dataset part location');
+            }
+            const filePartResponse = await externalServiceFetch(
+              filePart.url,
+              filePartRequest
+            );
+            if (!filePartResponse.ok) {
+              await filePartResponse.body?.cancel().catch(() => {});
+              throw new Error(
+                `cohere error: dataset part fetch failed (${filePartResponse.status})`
+              );
+            }
+            const buf = Buffer.from(await filePartResponse.arrayBuffer());
+            await new Promise<void>((resolve, reject) => {
+              const decoder = new avro.streams.BlockDecoder({
+                parseHook: (schema: any) => {
+                  return avro.Type.forSchema(schema, { wrapUnions: true });
+                },
+              });
+              decoder.on('data', (data: any) => {
+                try {
+                  controller.enqueue(
+                    encoder.encode(
+                      JSON.stringify(
+                        CohereEmbedResponseTransformBatch(JSON.parse(data))
+                      ) + '\n'
+                    )
+                  );
+                } catch (e) {
+                  decoder.destroy(e as Error);
+                }
+              });
+              decoder.on('error', reject);
+              decoder.on('end', () => resolve());
+              // A no-op after 'end' or 'error'; otherwise it never finished.
+              decoder.on('close', () =>
+                reject(new Error('cohere error: dataset part ended early'))
+              );
+              decoder.end(buf);
+            });
+          }
+          controller.close();
+        } catch (e) {
+          controller.error(e);
         }
       },
     });
