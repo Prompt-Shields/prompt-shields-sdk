@@ -257,6 +257,15 @@ lifecycle:
 {{- fail "The provider usage pull is enabled in both the worker (providerUsagePullIntervalSeconds) and cronJobs.jobs.providerUsage; enable one" -}}
 {{- end -}}
 {{- end -}}
+{{- $oidc := .Values.gateway.oidc -}}
+{{- if and .Values.gateway.enabled $oidc.enabled -}}
+{{- if not $oidc.issuer -}}
+{{- fail "gateway.oidc.enabled needs gateway.oidc.issuer" -}}
+{{- end -}}
+{{- if not $oidc.audience -}}
+{{- fail "gateway.oidc.enabled needs gateway.oidc.audience" -}}
+{{- end -}}
+{{- end -}}
 {{- $c := .Values.collector -}}
 {{- if and $c.enabled $c.probes.readiness.enabled (le (float64 $c.probes.readiness.timeoutSeconds) (float64 $c.readyzTimeoutSeconds)) -}}
 {{- fail "collector.probes.readiness.timeoutSeconds must be above collector.readyzTimeoutSeconds" -}}
@@ -344,3 +353,10 @@ YAML, or "". Call with (dict "ctx" $ "component" "gateway").
 {{ toYaml . }}
 {{- end }}
 {{- end }}
+
+{{/*
+A list (or a comma-separated string) as one comma-separated string.
+*/}}
+{{- define "ps.csv" -}}
+{{- if kindIs "slice" . -}}{{ join "," . }}{{- else -}}{{ toString . }}{{- end -}}
+{{- end -}}

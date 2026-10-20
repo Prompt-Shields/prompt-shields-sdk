@@ -17,6 +17,24 @@ data:
   {{- with .Values.gateway.shutdown.envName }}
   {{ . }}: {{ toString $.Values.gateway.shutdown.timeoutMs | quote }}
   {{- end }}
+  {{- $oidc := .Values.gateway.oidc }}
+  {{- if $oidc.enabled }}
+  PS_OIDC_ENABLED: "true"
+  PS_OIDC_ISSUER: {{ $oidc.issuer | quote }}
+  PS_OIDC_AUDIENCE: {{ include "ps.csv" $oidc.audience | quote }}
+  {{- with $oidc.jwksUrl }}
+  PS_OIDC_JWKS_URL: {{ . | quote }}
+  {{- end }}
+  {{- with $oidc.algorithms }}
+  PS_OIDC_ALGORITHMS: {{ include "ps.csv" . | quote }}
+  {{- end }}
+  PS_OIDC_CLOCK_SKEW_SECONDS: {{ toString $oidc.clockSkewSeconds | quote }}
+  PS_OIDC_GROUPS_CLAIM: {{ $oidc.groupsClaim | quote }}
+  PS_OIDC_TELEMETRY_SUBJECT: {{ $oidc.telemetrySubject | quote }}
+  {{- with $oidc.policy }}
+  PS_OIDC_POLICY: {{ toJson . | quote }}
+  {{- end }}
+  {{- end }}
 {{- end }}
 ---
 apiVersion: v1

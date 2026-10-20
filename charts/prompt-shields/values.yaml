@@ -76,7 +76,9 @@ secrets:
     # Optional. Keys: PS_API_KEY (tenant API key for telemetry to the
     # collector), PS_GATEWAY_ADMIN_TOKEN, PS_METRICS_TOKEN,
     # REDIS_CONNECTION_STRING, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY,
-    # PS_OTEL_HEADERS. Callers send their own provider keys per request.
+    # PS_OTEL_HEADERS. Callers send their own provider keys per request,
+    # except with gateway.oidc: then PS_OIDC_PROVIDER_KEYS (JSON object,
+    # provider -> API key) and PS_OIDC_SUBJECT_SALT go here.
     existingSecret: ""
     values: {}
 
@@ -148,6 +150,38 @@ gateway:
     #  name: prompt-shields-gateway
     #  key: PS_METRICS_TOKEN
     tokenEnvName: PS_METRICS_TOKEN
+  # OIDC/JWT authentication with IdP-group policy on /v1/* (except
+  # /v1/health). See docs/guides/gateway-oidc.mdx. Off by default.
+  oidc:
+    # PS_OIDC_ENABLED
+    enabled: false
+    # PS_OIDC_ISSUER: the token `iss`, e.g.
+    # https://login.microsoftonline.com/<tenant-id>/v2.0 or
+    # https://<org>.okta.com/oauth2/default. Required when enabled.
+    issuer: ""
+    # PS_OIDC_AUDIENCE: accepted `aud` values. Required when enabled.
+    audience: []
+    # PS_OIDC_JWKS_URL. Empty: found through the issuer's OIDC discovery.
+    jwksUrl: ""
+    # PS_OIDC_ALGORITHMS. Empty: every asymmetric RS/PS/ES algorithm.
+    algorithms: []
+    # PS_OIDC_CLOCK_SKEW_SECONDS (0-300).
+    clockSkewSeconds: 60
+    # PS_OIDC_GROUPS_CLAIM: `groups`, `roles`, or a dotted path such as
+    # `realm_access.roles` (Keycloak).
+    groupsClaim: groups
+    # PS_OIDC_TELEMETRY_SUBJECT: hash (default), raw (the `sub` claim) or off.
+    telemetrySubject: hash
+    # PS_OIDC_POLICY, rendered as JSON. Empty: authentication only. Rate
+    # limits are counted per gateway replica.
+    policy: {}
+    #  default: deny
+    #  groups:
+    #    - name: quant-analysts
+    #      match: ["6f1c2a3b-...-c0de"]   # Entra group object id
+    #      providers: [azure-openai]
+    #      models: ["gpt-4o-mini", "gpt-4.1*"]
+    #      rate_limit: {requests_per_minute: 60}
   # Plain (non-secret) environment, rendered into a ConfigMap. Any gateway
   # setting works here; README lists them. Examples:
   #   MAX_JSON_PAYLOAD_SIZE_IN_MB: "100"
