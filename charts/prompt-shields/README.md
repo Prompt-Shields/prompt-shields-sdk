@@ -164,7 +164,7 @@ variable names**. For each component the chart uses the first of:
 |---|---|
 | `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
-| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`. Callers send their own provider credentials with each request |
+| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
 
 ExternalSecret example (External Secrets Operator with Vault or AWS Secrets
 Manager behind a `ClusterSecretStore`):
@@ -407,6 +407,11 @@ can follow the images if those change.
 | `gateway.metrics.enabled` / `.path` | `false` / `/metrics` | `PS_METRICS_ENABLED` |
 | `*.metrics.tokenSecret` / `.tokenEnvName` | `{}` / `PS_METRICS_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN` | Metrics bearer token from a Secret key |
 | `gateway.shutdown.timeoutMs` / `.envName` | `25000` / `PS_SHUTDOWN_TIMEOUT_MS` | Drain on SIGTERM |
+| `gateway.oidc.enabled` | `false` | `PS_OIDC_ENABLED`: OIDC/JWT authentication and IdP-group policy on `/v1/*` ([guide](../../docs/guides/gateway-oidc.mdx)) |
+| `gateway.oidc.issuer` / `.audience` | `""` / `[]` | `PS_OIDC_ISSUER` / `PS_OIDC_AUDIENCE`, both required when enabled |
+| `gateway.oidc.jwksUrl` / `.algorithms` / `.clockSkewSeconds` | discovery / asymmetric RS, PS, ES / `60` | `PS_OIDC_JWKS_URL` / `PS_OIDC_ALGORITHMS` / `PS_OIDC_CLOCK_SKEW_SECONDS` |
+| `gateway.oidc.groupsClaim` / `.telemetrySubject` | `groups` / `hash` | `PS_OIDC_GROUPS_CLAIM` / `PS_OIDC_TELEMETRY_SUBJECT` |
+| `gateway.oidc.policy` | `{}` (authentication only) | `PS_OIDC_POLICY` as JSON: groups to provider/model allowlists and rate limits (per replica) |
 | `collector.rlsRequired` | `true` | `PS_RLS_REQUIRED` |
 | `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `""` (auto) | Background loops in API pods; auto = `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob |
 | `collector.metrics.enabled` / `.envName` / `.path` | `false` / `PS_COLLECTOR_METRICS_ENABLED` / `/metrics` | Collector metrics |
