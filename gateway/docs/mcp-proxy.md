@@ -72,9 +72,21 @@ Environment:
 
 In the Helm chart, mount the file from a ConfigMap with `gateway.extraVolumes` / `gateway.extraVolumeMounts`, set `PS_MCP_CONFIG_FILE` in `gateway.config`, and put `PS_MCP_TOKEN` and the upstream credentials in the gateway Secret.
 
+### With OIDC (`PS_OIDC_ENABLED=true`)
+
+The MCP route is a `/v1/*` route, so the gateway's OIDC middleware runs on it before the MCP handler: the client sends its identity-provider access token as `Authorization: Bearer <JWT>`, not `PS_MCP_TOKEN`. The middleware verifies the token, applies the group policy and removes the token from the request; the MCP handler then accepts the verified identity and does not check `PS_MCP_TOKEN` (which need not be set, and is refused as an invalid IdP token if a client sends it). In this mode:
+
+- A missing or invalid token is the OIDC `401` (an OpenAI-style error body with `error.code` `missing_token` / `invalid_token`, not a JSON-RPC error) and an `auth.failure` event in realm `oidc`.
+- A user whose groups match no policy entry under `default: deny` gets the OIDC `403` (`policy.denied`), and the group's rate limit applies (`429`).
+- The group's provider and model allowlists do not apply: an MCP call names no provider or model. Every user the policy admits can reach every configured MCP server, within that server's tool policy. Per-group MCP server and tool policy is a follow-up.
+- The IdP token never reaches the MCP server. When the request also carries `x-portkey-provider` with a key in `PS_OIDC_PROVIDER_KEYS`, the middleware sets that provider key as `Authorization`; the MCP handler never forwards `Authorization`, so it does not leave the gateway either.
+- The `mcp_tool_call` telemetry event does not carry the user yet.
+
+With OIDC off, nothing changes: `PS_MCP_TOKEN` is required as described above.
+
 ## What is enforced
 
-1. **Client auth.** Bearer `PS_MCP_TOKEN`, compared in constant time, the same static-token pattern as `/metrics` and the admin console. A failure is a `401` and an `auth.failure` security event (`ps.auth.realm: "mcp"`).
+1. **Client auth.** Bearer `PS_MCP_TOKEN`, compared in constant time, the same static-token pattern as `/metrics` and the admin console. A failure is a `401` and an `auth.failure` security event (`ps.auth.realm: "mcp"`). With [OIDC](../../docs/guides/gateway-oidc.mdx) on, the IdP token replaces it (see below).
 2. **No token passthrough.** Only `Accept`, `MCP-Protocol-Version`, `Mcp-Session-Id`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` and `Last-Event-ID` are forwarded. The server's configured credential is added. The client's `Authorization`, cookies, `x-portkey-*` and `x-ps-*` never leave the gateway. When the upstream refuses the gateway's credentials (401/403), the client gets a `502`, without the upstream's `WWW-Authenticate` (its OAuth metadata is for the gateway, not the client).
 3. **Upstream URL.** Fixed per server; nothing in the request changes the scheme, host, port or path. `isSafeUpstreamURL` is checked at startup and on every request, and redirects are never followed (`upstreamFetch`, #209): a 3xx is a `502`.
 4. **Tool policy.** `tools/list` results keep only allowed tools (a result without a `tools` array lists none). Allowlists match exactly; denylists match regardless of case, so an upstream that resolves names case-insensitively cannot be reached through `Delete_File` when `delete_file` is denied. Tools whose name is not 1–128 of `A-Z a-z 0-9 _ - .`, and repeated names (two definitions under one name), are removed. A `tools/call` for any other tool is answered by the gateway with `-32010` and never reaches the upstream.
@@ -96,7 +108,7 @@ JSON-RPC errors from the gateway use the implementation-defined range: `-32010` 
 
 ## Not in this slice
 
-- Inbound OAuth 2.1 resource server: RFC 9728 protected-resource metadata, JWKS validation, per-consumer identity. Then per-consumer and per-tenant policy, and RFC 8693 token exchange (Phase 1b).
+- Inbound OAuth 2.1 resource server for MCP clients: RFC 9728 protected-resource metadata and a `WWW-Authenticate` that points MCP clients at the IdP. (JWT validation and identity exist with OIDC on, see above.) Then per-consumer and per-tenant MCP policy, and RFC 8693 token exchange (Phase 1b).
 - Per-consumer and per-tool rate limits.
 - Shared drift state across replicas, and verifying a pinned tool's definition on `tools/call` when no `tools/list` has been seen.
 - Policy and guardrails on `resources/*`, `prompts/*`, `initialize` instructions, server-to-client requests on 2025-11-25 streams (sampling, elicitation) and `notifications/message`. These pass through unchanged today.

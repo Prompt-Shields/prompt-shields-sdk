@@ -8,11 +8,19 @@
  * refuses every request, unless `PS_MCP_ALLOW_UNAUTHENTICATED=true` says an
  * authenticating proxy (e.g. Kong) sits in front.
  *
+ * With OIDC on (`PS_OIDC_ENABLED=true`), `psOidc` runs first on every
+ * `/v1/*` route: it verifies the IdP access token in `Authorization`, applies
+ * the group policy (default deny, rate limit) and removes the token, so a
+ * static bearer could never arrive here too. A request that reaches this
+ * check with a verified OIDC identity is therefore authenticated, and
+ * `PS_MCP_TOKEN` is not consulted; without one, nothing changes.
+ *
  * The client's Authorization header is checked here and never forwarded.
  * Inbound OAuth 2.1 (RFC 9728 protected-resource metadata) is a follow-up.
  */
 import { Context } from 'hono';
 import { env } from 'hono/adapter';
+import { oidcIdentityOf } from '../middlewares/psOidc/identity';
 import { reportAuthFailure } from '../middlewares/psSecurityEvents';
 
 export const MCP_TOKEN_ENV = 'PS_MCP_TOKEN';
@@ -33,6 +41,8 @@ export type McpAuthResult =
   | { ok: false; status: 401 | 503; message: string };
 
 export function checkMcpClient(c: Context): McpAuthResult {
+  // Only psOidc sets the identity, after verifying the token (see above).
+  if (oidcIdentityOf(c)) return { ok: true };
   const vars = env<Record<string, string | undefined>>(c);
   const token = vars[MCP_TOKEN_ENV]?.trim() ?? '';
   if (token.length < MIN_TOKEN_LENGTH) {

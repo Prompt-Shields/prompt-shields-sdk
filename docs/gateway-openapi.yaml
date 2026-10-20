@@ -34,7 +34,8 @@ info:
     removes it from the request (it never reaches a provider), and applies
     the IdP-group policy: 401 without a valid token, 403 when the policy
     refuses the caller, provider or model, 429 when the group's rate limit
-    is exhausted, 503 while the IdP's signing keys cannot be fetched.
+    is exhausted, 503 while the IdP's signing keys cannot be fetched. The
+    MCP proxy then takes the IdP token in place of `PS_MCP_TOKEN`.
 
     **Headers that are not documented on purpose.** Provider credential
     headers (`x-portkey-aws-secret-access-key`, `x-portkey-aws-session-token`,
@@ -1702,7 +1703,11 @@ paths:
         input and output guardrails on tool arguments and results
         (`-32011`, fail closed); and forwards the request to the configured
         URL with the server's own credentials. The caller's `Authorization`
-        header is never forwarded. Policy refusals of a request are JSON-RPC
+        header is never forwarded. With `PS_OIDC_ENABLED=true` the
+        caller authenticates with its identity-provider token
+        (`GatewayOidc`) instead of `PS_MCP_TOKEN`; OIDC failures are the
+        gateway's OpenAI-style 401/403/429 errors, not JSON-RPC errors.
+        Policy refusals of a request are JSON-RPC
         errors with HTTP 200. SSE responses stream. Only the response to
         this request is released, re-serialised from the checked JSON;
         `tasks/*` is refused (`-32010`). An upstream HTTP error keeps its
@@ -1710,6 +1715,7 @@ paths:
         `gateway/docs/mcp-proxy.md`.
       security:
         - McpToken: []
+        - GatewayOidc: []
       parameters:
         - name: Mcp-Method
           in: header
@@ -1744,6 +1750,8 @@ paths:
           $ref: '#/components/responses/McpError'
         '401':
           $ref: '#/components/responses/McpError'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '404':
           $ref: '#/components/responses/McpError'
         '413':
@@ -1767,6 +1775,7 @@ paths:
         `2026-07-28` server answers 405.
       security:
         - McpToken: []
+        - GatewayOidc: []
       responses:
         '200':
           description: SSE stream
@@ -1782,6 +1791,7 @@ paths:
       summary: End a session (2025-11-25)
       security:
         - McpToken: []
+        - GatewayOidc: []
       responses:
         '200':
           description: Session ended
@@ -1949,6 +1959,8 @@ components:
       description: |
         The `PS_MCP_TOKEN` value. Required on `/v1/mcp/{server}`; without it
         the route answers 503 unless `PS_MCP_ALLOW_UNAUTHENTICATED=true`.
+        Not used with `PS_OIDC_ENABLED=true`: the `GatewayOidc` token
+        authenticates MCP clients then.
     GatewayOidc:
       type: http
       scheme: bearer
