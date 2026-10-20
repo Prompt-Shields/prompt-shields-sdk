@@ -5,7 +5,7 @@ from typing import Annotated, Any
 
 from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, PrivateAttr, field_validator, model_validator
 
 from collector import loss_accounting, metrics
 from collector.auth import resolve_tenant
@@ -14,9 +14,10 @@ from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
+from collector.sanitize import BoundedJsonRoute, is_storable, storable_text
 from collector.webhooks import AssetChanges
 
-router = APIRouter()
+router = APIRouter(route_class=BoundedJsonRoute)
 
 
 class IngestEvent(BaseModel):
@@ -62,6 +63,19 @@ class IngestEvent(BaseModel):
     # SDK's sha256(api key)[:16] (#93). Anything else (a raw or redacted
     # key) is dropped, so a key can never be stored here.
     api_key_fingerprint: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unstorable(cls, data: Any) -> Any:
+        # A value the database cannot store (NUL, lone surrogate; see
+        # collector/sanitize.py) is dropped as if not sent, so it costs that
+        # field rather than the batch. It is counted as "<field>:invalid".
+        if not isinstance(data, dict):
+            return data
+        bad = [k for k in SANITISED_FIELDS if k in data and not is_storable(data[k])]
+        if not bad:
+            return data
+        return {k: v for k, v in data.items() if k not in bad}
 
     @field_validator("api_key_fingerprint", mode="before")
     @classmethod
@@ -194,10 +208,58 @@ def _lenient_amount(value: Any, maximum: float) -> float | None:
     return value
 
 
+# Fields dropped when they hold a value the database cannot store. The
+# vendor is required, so an event whose vendor cannot be stored is skipped
+# instead (unstorable_event). The prompt text is only hashed, never stored.
+SANITISED_FIELDS = tuple(
+    name for name in IngestEvent.model_fields if name not in ("vendor", "prompt_text")
+)
+# Fields whose dropped values are reported as "<field>:invalid": the lenient
+# ones plus every sanitised one that has no default to fall back to.
+REPORTED_FIELDS = tuple(
+    dict.fromkeys(
+        LENIENT_FIELDS
+        + tuple(n for n in SANITISED_FIELDS if IngestEvent.model_fields[n].default is None)
+    )
+)
+UNSTORABLE = "unstorable"
+
+
+def unstorable_event(raw: Any) -> bool:
+    """An event that cannot be stored at all: its vendor is a string the
+    database cannot hold."""
+    if not isinstance(raw, dict):
+        return False
+    vendor = raw.get("vendor")
+    return isinstance(vendor, str) and storable_text(vendor) is None
+
+
+def storable_events(raw_events: Any) -> list:
+    """The raw events that are not skipped by ``unstorable_event``."""
+    if not isinstance(raw_events, list):
+        return []
+    return [e for e in raw_events if not unstorable_event(e)]
+
+
 class IngestRequest(BaseModel):
     events: list[IngestEvent]
     # SDK delivery accounting (#87); parsed leniently by loss_accounting.
     metadata: dict | None = None
+    # Events skipped by unstorable_event; never read from the body.
+    _unstorable: int = PrivateAttr(default=0)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _skip_unstorable_events(cls, data: Any, handler):
+        skipped = 0
+        if isinstance(data, dict) and isinstance(data.get("events"), list):
+            kept = storable_events(data["events"])
+            skipped = len(data["events"]) - len(kept)
+            if skipped:
+                data = {**data, "events": kept}
+        model = handler(data)
+        model._unstorable = skipped
+        return model
 
 
 def _enforce_rate_limit(
@@ -253,12 +315,12 @@ async def ingest_events(
     try:
         assets_created = await _store_events(db, tenant_id, body.events)
         if body.events:
-            raw_events = (await request.json()).get("events")
+            raw_events = storable_events((await request.json()).get("events"))
             ignored = loss_accounting.ignored_fields(
                 raw_events, set(IngestEvent.model_fields)
             )
             for key, n in loss_accounting.invalid_fields(
-                raw_events, body.events, LENIENT_FIELDS
+                raw_events, body.events, REPORTED_FIELDS
             ).items():
                 ignored[key] = ignored.get(key, 0) + n
             await loss_accounting.record_received(
@@ -275,7 +337,17 @@ async def ingest_events(
 
     metrics.record_ingest("events", "accepted", len(body.events))
     metrics.record_assets_created("events", assets_created)
-    return {"ingested": len(body.events), "assets_created": assets_created}
+    if body._unstorable:
+        # Answered 200, so the client will not resend them.
+        metrics.record_ingest("events", "rejected", body._unstorable)
+        await loss_accounting.record_rejected(
+            db, tenant_id, meta, body._unstorable, UNSTORABLE
+        )
+    return {
+        "ingested": len(body.events),
+        "assets_created": assets_created,
+        "rejected": body._unstorable,
+    }
 
 
 async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
@@ -324,7 +396,11 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
 
         prompt_hash = None
         if event.prompt_text:
-            prompt_hash = hashlib.sha256(event.prompt_text.encode()).hexdigest()
+            # surrogatepass: a lone surrogate (never stored) must not fail
+            # the batch's write; valid text hashes as before.
+            prompt_hash = hashlib.sha256(
+                event.prompt_text.encode("utf-8", "surrogatepass")
+            ).hexdigest()
 
         usage_event = AIUsageEvent(
             tenant_id=tenant_id,

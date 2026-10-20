@@ -23,7 +23,6 @@ one bad event never costs the batch, and the SDK does not retry it.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -42,6 +41,7 @@ from collector.auth import resolve_tenant
 from collector.config import settings
 from collector.ingest import _enforce_rate_limit
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_mcp_rate_limiter
+from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
 
 router = APIRouter()
 
@@ -83,7 +83,9 @@ def _problem(status: int, title: str, detail: str) -> HTTPException:
 
 def clean_name(value: Any, max_length: int = MAX_NAME_LENGTH) -> str | None:
     """A printable, stripped, non-empty string of at most ``max_length``
-    characters, else None. Control characters are removed first."""
+    characters, else None. Control characters are removed first; NUL and
+    lone surrogates are not printable, so what is left can be stored
+    (collector/sanitize.py)."""
     if not isinstance(value, str):
         return None
     value = "".join(ch for ch in value if ch.isprintable()).strip()
@@ -257,8 +259,10 @@ async def _read_body(request: Request) -> Any:
             )
         chunks.append(chunk)
     try:
-        return json.loads(b"".join(chunks))
-    except (ValueError, UnicodeDecodeError):
+        return loads_bounded(b"".join(chunks))
+    except BodyTooDeep:
+        raise too_deep_problem() from None
+    except ValueError:  # UnicodeDecodeError included
         raise _problem(400, "Bad Request", "Body is not valid JSON") from None
 
 
