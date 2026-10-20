@@ -1,4 +1,5 @@
 import { HookEventType, PluginContext } from './types';
+import { pluginRequest } from './egress';
 
 interface PostOptions extends RequestInit {
   headers?: Record<string, string>;
@@ -338,28 +339,17 @@ export async function post<T = any>(
   }
 
   try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
-
-    const response: Response = await fetch(url, {
-      ...mergedOptions,
-      signal: controller.signal,
+    // PS fork (security): SSRF-safe egress (URL check, no redirects, the
+    // timeout also covers the body, capped body). See plugins/egress.ts.
+    const { response, text } = await pluginRequest(url, mergedOptions, {
+      timeout,
     });
 
-    clearTimeout(id);
-
     if (!response.ok) {
-      let errorBody: string;
-      try {
-        errorBody = await response.text();
-      } catch (e) {
-        errorBody = 'Unable to retrieve response body';
-      }
-
       const errorResponse: ErrorResponse = {
         status: response.status,
         statusText: response.statusText,
-        body: errorBody,
+        body: text,
         headers: response.headers,
       };
 
@@ -369,7 +359,7 @@ export async function post<T = any>(
       );
     }
 
-    return (await response.json()) as T;
+    return JSON.parse(text) as T;
   } catch (error: any) {
     if (error instanceof HttpError) {
       throw error;

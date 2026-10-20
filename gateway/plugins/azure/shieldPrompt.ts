@@ -1,7 +1,7 @@
 import { HookEventType, PluginContext, PluginParameters } from '../types';
 import { post, getText, getCurrentContentPart } from '../utils';
 import { AzureCredentials } from './types';
-import { getAccessToken } from './utils';
+import { assertAzureResourceName, getAccessToken } from './utils';
 
 const contentText = (content: any): string =>
   Array.isArray(content)
@@ -146,6 +146,7 @@ export const handler = async (
   const timeout = parameters.timeout || 5000;
   let response;
   try {
+    assertAzureResourceName(credentials.resourceName);
     response = await post(url, request, { headers }, timeout);
   } catch (e) {
     return { error: e, verdict: true, data };

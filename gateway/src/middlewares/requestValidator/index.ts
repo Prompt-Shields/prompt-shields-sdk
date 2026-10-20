@@ -58,13 +58,26 @@ const TRUSTED_CUSTOM_HOSTS = (c?: Context) => {
     // Default allowed hosts for local development
     return new Set(['localhost', '127.0.0.1', '::1', 'host.docker.internal']);
   }
+  return configuredTrustedCustomHosts(c);
+};
+
+/**
+ * PS fork: only the hosts the operator listed in TRUSTED_CUSTOM_HOSTS, with
+ * no development defaults (an unset variable trusts nothing). The entry
+ * `none` is dropped, so `TRUSTED_CUSTOM_HOSTS=none` trusts no host anywhere.
+ * Guardrail plugin egress uses this set, since its URLs come from the
+ * caller's guardrail config.
+ */
+export function configuredTrustedCustomHosts(c?: Context): Set<string> {
+  const envVar = Environment(c)?.TRUSTED_CUSTOM_HOSTS;
+  if (!envVar || typeof envVar !== 'string') return new Set();
   return new Set(
     envVar
       .split(',')
       .map((h: string) => h.trim().toLowerCase())
-      .filter((h: string) => h.length > 0)
+      .filter((h: string) => h.length > 0 && h !== 'none')
   );
-};
+}
 
 // Pre-computed IPv4 range boundaries for performance optimization
 const IPV4_RANGES = {
@@ -336,6 +349,39 @@ export function checkConfigFanOut(config: any, c?: Context): string | null {
  * real provider hosts are built here, only internal and metadata targets.
  */
 export function isSafeUpstreamURL(rawUrl: string, c?: Context): boolean {
+  return isSafeURLForTrustedHosts(rawUrl, TRUSTED_CUSTOM_HOSTS(c));
+}
+
+/**
+ * PS fork: the check for guardrail plugin egress (webhook and log URLs,
+ * vendor base-URL overrides, hosts built from caller credentials). Like
+ * isSafeUpstreamURL, but only hosts listed in TRUSTED_CUSTOM_HOSTS are
+ * trusted (never localhost by default), and the internal special-use TLDs
+ * refused for custom hosts (`.internal`, `.local`, ...) are refused too.
+ * Hostname-only: a public name that resolves to a private address is not
+ * caught, so production deployments should also restrict network egress.
+ */
+export function isSafePluginEgressURL(rawUrl: string, c?: Context): boolean {
+  const trustedHosts = configuredTrustedCustomHosts(c);
+  if (!isSafeURLForTrustedHosts(rawUrl, trustedHosts)) return false;
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    if (
+      trustedHosts.has(host) ||
+      (trustedHosts.has('localhost') && host.endsWith('.localhost'))
+    ) {
+      return true;
+    }
+    return !BLOCKED_TLDS.some((tld) => host.endsWith(tld));
+  } catch {
+    return false;
+  }
+}
+
+function isSafeURLForTrustedHosts(
+  rawUrl: string,
+  trustedHosts: Set<string>
+): boolean {
   try {
     if (VALIDATION_PATTERNS.CONTROL_CHARS.test(rawUrl)) return false;
     const url = new URL(rawUrl);
@@ -348,7 +394,6 @@ export function isSafeUpstreamURL(rawUrl: string, c?: Context): boolean {
     if (!/^[a-z0-9.:-]+$/.test(bareHost)) return false;
     if (url.port && !isValidPort(url.port)) return false;
 
-    const trustedHosts = TRUSTED_CUSTOM_HOSTS(c);
     if (
       trustedHosts.has(bareHost) ||
       (trustedHosts.has('localhost') && bareHost.endsWith('.localhost'))

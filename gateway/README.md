@@ -62,7 +62,7 @@ PS_COLLECTOR_URL=https://collector.promptshields.io   # PS collector
 PS_API_KEY=ps-...                                     # tenant API key
 PS_GATEWAY_ADMIN_TOKEN=<16+ random chars>             # unlocks /public console and /log/stream; unset = disabled
 PS_MAX_CUSTOM_HOST_RESPONSE_BYTES=52428800            # optional; cap on custom-host response size
-TRUSTED_CUSTOM_HOSTS=localhost,127.0.0.1              # optional; hosts exempt from the SSRF checks
+TRUSTED_CUSTOM_HOSTS=llm.internal.example.com         # recommended in production; hosts exempt from the SSRF checks (`none` = no host)
 PS_METRICS_ENABLED=true                               # optional; Prometheus metrics at GET /metrics
 PS_METRICS_TOKEN=<random>                             # optional; require Bearer token on /metrics
 PS_SHUTDOWN_TIMEOUT_MS=25000                          # optional; on SIGTERM, wait this long for in-flight requests (streams included) before exiting
@@ -75,6 +75,8 @@ AZURE_AMBIENT_CREDENTIALS_ENABLED=true                # optional; let Azure call
 GCP_AMBIENT_CREDENTIALS_ENABLED=true                  # optional; let Vertex callers use this host's Google identity (vertex auth type workload)
 OAUTH_TOKEN_URL_ALLOWED_HOSTS=login.example.com       # optional; restrict caller OAuth client-credentials token URLs to these hosts
 ```
+
+`TRUSTED_CUSTOM_HOSTS`: when unset, provider custom hosts may use `localhost`, `127.0.0.1`, `::1` and `host.docker.internal` (local development). Set it in production, to the internal hosts callers may reach or to `none`; the Helm chart sets `none`. Guardrail plugin egress (the `webhook`, `log` and `jwt` URLs, vendor base-URL overrides such as Aporia `apiEndpoint`, Azure `customHost`, Pangea or Javelin `domain`, CrowdStrike `baseUrl`, F5 `calypsoUrl`, and hosts built from Azure resource names or AWS regions) comes from caller-controlled guardrail config, so it always refuses metadata, loopback, private and reserved addresses and internal TLDs (`.internal`, `.local`, ...) unless the host is listed here, never trusts localhost by default, does not follow redirects (a 3xx is a check error), times out, and caps response bodies at 5 MiB. A refused request is reported as the check's error, so `failOnError` and `deny` behave as for any network error. The check is hostname-only (no DNS resolution); restrict network egress as well.
 
 OAuth client credentials (`x-portkey-oauth-*` headers, `openai` provider) take precedence over `x-portkey-api-key` / `Authorization` when supplied. The token URL check is hostname-only and does not resolve DNS, so it cannot stop DNS rebinding; set `OAUTH_TOKEN_URL_ALLOWED_HOSTS` whenever callers are not fully trusted.
 
