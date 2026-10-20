@@ -18,12 +18,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from collector import rls
+from collector import audit_trail, rls
 from collector.admin_auth import ADMIN_SCOPES
 from collector.app import app
 from collector.config import settings
 from db.api_keys import api_key_lookup_prefix, hash_api_key, verify_api_key
-from db.models import AdminToken, PartnerAuditLog, Tenant, TenantApiKey
+from db.models import AdminToken, AuditEvent, Tenant, TenantApiKey
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -47,6 +47,7 @@ def _settings(monkeypatch):
     monkeypatch.setattr(settings, "webhook_secret_keys", "k1:" + "1" * 40)
     monkeypatch.setattr(settings, "webhook_secret_key", "")
     monkeypatch.delenv("PS_PROVIDER_ADMIN_KEYS", raising=False)
+    audit_trail.auth_failure_limiter.reset()
 
 
 @pytest.fixture
@@ -88,12 +89,13 @@ async def _token(c, scopes: list[str], key: str = TENANT_KEY, **extra) -> dict:
     return resp.json()
 
 
-async def _audit_rows(engine) -> list[PartnerAuditLog]:
+async def _audit_rows(engine) -> list[AuditEvent]:
+    """Audit trail rows (collector.audit_trail), every chain."""
     async with _admin(engine)() as s:
         return list(
             (
                 await s.execute(
-                    select(PartnerAuditLog).order_by(PartnerAuditLog.timestamp)
+                    select(AuditEvent).order_by(AuditEvent.created_at, AuditEvent.seq)
                 )
             ).scalars()
         )
@@ -147,9 +149,15 @@ async def test_require_scoped_tokens_refuses_tenant_keys_on_admin_routes(
         json={"admin_key": "sk-admin-" + "x" * 30},
     )
     assert resp.status_code == 201, resp.text
-    # The refusal is audited.
+    # The refusal is audited (auth.failure on the tenant's chain).
     rows = await _audit_rows(seeded_db)
-    assert any(r.status_code == 403 and r.endpoint.endswith("/rotate") for r in rows)
+    assert any(
+        r.action == "auth.failure"
+        and r.status_code == 403
+        and r.details["reason"] == "insufficient_scope"
+        and r.details["route"].endswith("/rotate")
+        for r in rows
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -238,6 +246,61 @@ async def test_a_token_cannot_grant_scopes_it_lacks(client):
         json={"name": "bad", "scopes": ["admin:everything"]},
     )
     assert resp.status_code == 400
+
+
+async def test_admin_keys_token_cannot_mint_a_full_admin_ingest_key(
+    client, seeded_db, monkeypatch
+):
+    """While PS_ADMIN_REQUIRE_SCOPED_TOKENS is off an ingest key is full
+    admin, so an admin:keys token may not issue or rotate one."""
+    keys = await _token(client, ["admin:keys"])
+    existing = (
+        await client.post(
+            "/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": "sdk"}
+        )
+    ).json()
+
+    resp = await client.post(
+        "/api/v1/admin/api-keys", headers=H(keys["token"]), json={"name": "mine"}
+    )
+    assert resp.status_code == 403
+    assert "every admin scope" in resp.json()["detail"]["detail"]
+    resp = await client.post(
+        f"/api/v1/admin/api-keys/{existing['id']}/rotate", headers=H(keys["token"])
+    )
+    assert resp.status_code == 403
+    # The key was not rotated: the old secret still works.
+    assert await _works(client, existing["key"]) == 200
+    # Listing needs only admin:keys.
+    assert (
+        await client.get("/api/v1/admin/api-keys", headers=H(keys["token"]))
+    ).status_code == 200
+    rows = await _audit_rows(seeded_db)
+    assert any(
+        r.action == "auth.failure" and r.details["reason"] == "insufficient_scope"
+        for r in rows
+    )
+
+    # With scoped tokens required, an ingest key has no admin access, so
+    # admin:keys is enough.
+    monkeypatch.setattr(settings, "admin_require_scoped_tokens", True)
+    resp = await client.post(
+        "/api/v1/admin/api-keys", headers=H(keys["token"]), json={"name": "mine"}
+    )
+    assert resp.status_code == 201, resp.text
+    minted = resp.json()["key"]
+    assert (
+        await client.get("/api/v1/admin/api-keys", headers=H(minted))
+    ).status_code == 403
+    resp = await client.post(
+        f"/api/v1/admin/api-keys/{existing['id']}/rotate", headers=H(keys["token"])
+    )
+    assert resp.status_code == 200, resp.text
+    assert (
+        await client.delete(
+            f"/api/v1/admin/api-keys/{existing['id']}", headers=H(keys["token"])
+        )
+    ).status_code == 204
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -486,9 +549,8 @@ async def test_api_key_expiry(client, seeded_db):
 async def test_tenant_isolation_under_rls(client, seeded_db):
     await _add_tenant_b(seeded_db)
     tok_a = await _token(client, ["admin:tokens", "admin:keys"])
-    tok_b = await _token(
-        client, ["admin:tokens", "admin:keys", "admin:partners"], key=KEY_B
-    )
+    # Every scope, so the cross-tenant rotate below reaches the lookup.
+    tok_b = await _token(client, list(ADMIN_SCOPES), key=KEY_B)
     key_a = (
         await client.post(
             "/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": "a"}
@@ -647,6 +709,15 @@ async def test_disabled_tenant_is_refused_everywhere(client):
     assert (
         await client.get("/partner/v1/assets", headers=H(partner["api_key"]))
     ).status_code == 403
+    # No new OAuth access tokens either.
+    oauth_form = {
+        "grant_type": "client_credentials",
+        "client_id": partner["client_id"],
+        "client_secret": partner["client_secret"],
+    }
+    resp = await client.post("/oauth/token", data=oauth_form)
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "invalid_client"
     disabled = (
         await client.get("/api/v1/operator/tenants?status=disabled", headers=OP)
     ).json()["data"]
@@ -659,6 +730,7 @@ async def test_disabled_tenant_is_refused_everywhere(client):
     assert (
         await client.get("/api/v1/admin/tokens", headers=H(tok["token"]))
     ).status_code == 200
+    assert (await client.post("/oauth/token", data=oauth_form)).status_code == 200
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -667,7 +739,9 @@ async def test_disabled_tenant_is_refused_everywhere(client):
 
 
 async def test_admin_changes_are_audited_without_secrets(client, seeded_db):
-    tok = await _token(client, ["admin:keys"])
+    # Issuing and rotating ingest keys needs every scope while
+    # PS_ADMIN_REQUIRE_SCOPED_TOKENS is off.
+    tok = await _token(client, list(ADMIN_SCOPES))
     created = (
         await client.post(
             "/api/v1/admin/api-keys", headers=H(tok["token"]), json={"name": "k"}
@@ -687,7 +761,7 @@ async def test_admin_changes_are_audited_without_secrets(client, seeded_db):
     await client.get("/api/v1/admin/webhooks/subscriptions", headers=H(created["key"]))
 
     rows = await _audit_rows(seeded_db)
-    actions = [(r.query_params or {}).get("action") for r in rows]
+    actions = [r.action for r in rows]
     for action in (
         "admin_token.create",
         "api_key.create",
@@ -697,14 +771,29 @@ async def test_admin_changes_are_audited_without_secrets(client, seeded_db):
         "tenant.create",
     ):
         assert action in actions, (action, actions)
-    by_action = {(r.query_params or {}).get("action"): r for r in rows}
+    by_action = {r.action: r for r in rows}
     # The token's calls are attributed to its lookup prefix.
-    assert by_action["api_key.create"].api_key_prefix == api_key_lookup_prefix(
-        tok["token"]
+    create = by_action["api_key.create"]
+    assert (create.actor_type, create.actor_id) == (
+        "admin_token",
+        api_key_lookup_prefix(tok["token"]),
     )
-    assert by_action["tenant.create"].query_params["actor"] == "operator"
-    assert by_action["tenant.create"].api_key_prefix is None
-    dump = json.dumps([r.query_params for r in rows], default=str)
+    assert (create.target_type, create.target_id) == ("tenant_api_key", created["id"])
+    revoke = by_action["admin_token.revoke"]
+    assert (revoke.actor_type, revoke.actor_id) == (
+        "tenant_key",
+        api_key_lookup_prefix(TENANT_KEY),
+    )
+    assert (by_action["tenant.create"].actor_type, by_action["tenant.create"].actor_id) == (
+        "operator",
+        "operator-api",
+    )
+    # The chains still verify.
+    async with _admin(seeded_db)() as s:
+        assert all(r.ok for r in await audit_trail.verify_all(s, None))
+    dump = json.dumps(
+        [(r.actor_id, r.target_id, r.details) for r in rows], default=str
+    )
     for secret in (tok["token"], created["key"], rotated["key"], OP_TOKEN):
         assert secret not in dump
 
@@ -757,7 +846,7 @@ async def test_partner_credential_consistency(client, seeded_db):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Migration 021
+# Migration 022
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -768,9 +857,9 @@ def _load_migration():
         / "db"
         / "alembic"
         / "versions"
-        / "021_admin_tokens_keys.py"
+        / "022_admin_tokens_keys.py"
     )
-    spec = importlib.util.spec_from_file_location("migration_021", path)
+    spec = importlib.util.spec_from_file_location("migration_022", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -778,7 +867,7 @@ def _load_migration():
 
 def test_migration_revision_chain():
     m = _load_migration()
-    assert (m.revision, m.down_revision) == ("021", "020")
+    assert (m.revision, m.down_revision) == ("022", "021")
     assert set(m.TABLES) == {TenantApiKey.__tablename__, AdminToken.__tablename__}
 
 

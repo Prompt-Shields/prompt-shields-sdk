@@ -18,7 +18,9 @@ Erasure
 
 Every statement is filtered on ``tenant_id``; nothing here can reach another
 tenant's rows. Every purge that deletes rows, and every erasure, writes a
-``retention_audit_log`` row with counts only.
+``retention_audit_log`` row with counts only, and the same record to the
+tenant's hash-chained audit trail (``audit_events``, collector.audit_trail),
+which erasure keeps.
 
 Read paths can call :func:`retention_cutoff` (or :func:`get_retention_cutoff`)
 to clamp a time window to what is still retained.
@@ -49,6 +51,7 @@ from db.models import (
     AIAsset,
     AIUsageEvent,
     AssetAttestation,
+    AuditEvent,
     DataFlow,
     McpToolUsage,
     PartnerAuditLog,
@@ -66,6 +69,7 @@ from db.models import (
 from sqlalchemy import Table, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import audit_trail
 from collector.config import settings
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,13 @@ logger = logging.getLogger(__name__)
 RETENTION_SETTING_KEY = "retention_days"
 MIN_RETENTION_DAYS = 1
 MAX_RETENTION_DAYS = 36500
+
+# retention_audit_log action -> audit trail action (collector.audit_trail).
+TRAIL_ACTIONS: dict[str, str] = {
+    "purge": "retention.purge",
+    "erase": "tenant.erase",
+    "set_retention": "tenant.retention.set",
+}
 
 # Tenant-owned tables, children before parents so foreign keys never block a
 # delete. The tenants row itself is removed last. A test checks that every
@@ -96,8 +107,14 @@ ERASE_ORDER: tuple[type, ...] = (
     AdminToken,
 )
 
-# Tables with a tenant_id that erasure keeps on purpose.
-ERASE_EXEMPT: frozenset[str] = frozenset({RetentionAuditLog.__tablename__})
+# Tables with a tenant_id that erasure keeps on purpose. Both hold ids and
+# counts only and have no foreign key to the tenant, so the erasure itself
+# stays provable. audit_events is the hash-chained admin audit trail
+# (collector.audit_trail); erasing it would break the chain, and its own
+# purge keeps the chain verifiable with a checkpoint row instead.
+ERASE_EXEMPT: frozenset[str] = frozenset(
+    {RetentionAuditLog.__tablename__, AuditEvent.__tablename__}
+)
 
 
 @dataclass
@@ -271,6 +288,20 @@ async def _audit(
             cutoff=cutoff,
             details=details or {},
         )
+    )
+    # The same record in the tenant's hash-chained audit trail (kept after
+    # an erasure, so `tenant.erase` is the erased tenant's last row).
+    trail_details = dict(details or {})
+    if cutoff is not None:
+        trail_details["cutoff"] = cutoff
+    await audit_trail.record(
+        db,
+        tenant_id=tenant_id,
+        action=TRAIL_ACTIONS[action],
+        actor=audit_trail.actor_from_name(actor),
+        target_type="tenant",
+        target_id=tenant_id,
+        details=trail_details,
     )
     await db.commit()
 

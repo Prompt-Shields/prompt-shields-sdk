@@ -303,6 +303,7 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /api/v1/operator/tenants/{tenant_id}/retention': NOT_WRAPPED,
   'PUT /api/v1/operator/tenants/{tenant_id}/retention': NOT_WRAPPED,
   'POST /api/v1/operator/retention/purge': NOT_WRAPPED,
+  'GET /api/v1/operator/audit/verify': NOT_WRAPPED,
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

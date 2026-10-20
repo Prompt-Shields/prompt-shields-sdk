@@ -1,0 +1,182 @@
+---
+title: Audit Trail
+description: A hash-chained, tamper-evident record of admin and security actions in the collector, exportable to your SIEM
+---
+
+# Audit Trail
+
+The collector records every admin and security-relevant action in a **hash-chained audit trail** (the `audit_events` table). Each tenant has its own chain, so changing, removing or reordering a row is detectable. Every row can also be pushed to your SIEM as a signed `audit.*` webhook event.
+
+This is separate from the **registry read log** (`partner_audit_log`), which records who read which assets. The read log is not chained.
+
+## What is recorded
+
+| Action | When |
+|---|---|
+| `provider_credential.create` / `.rotate` / `.delete` | A provider admin key is stored, replaced or deleted (tenant admin or Partner API) |
+| `provider_credential.use` | A stored provider key is decrypted for the org usage pull (`outcome: failure` if it could not be) |
+| `provider_key_fingerprint.put` / `.delete` | A provider key id is linked to, or unlinked from, an SDK key fingerprint |
+| `partner_credential.create` / `.update` / `.revoke` | A partner credential is issued, its scopes or rate limit change (`details.scopes_added`, `scopes_removed`), or it is revoked |
+| `webhook_subscription.create` / `.update` / `.delete` / `.rotate_secret` | Webhook subscription admin (`details.changed_fields` on update) |
+| `webhook_delivery.redeliver` | A delivery is queued again |
+| `tenant.retention.read` / `tenant.retention.set` / `tenant.erase` | Operator routes under `/api/v1/operator` |
+| `retention.purge` | A retention run deleted a tenant's expired usage events (row counts) |
+| `registry.attest` / `registry.retire` / `registry.unretire` | An attestation is recorded; an owner retires or un-retires an asset |
+| `registry.lifecycle_sweep` | A tenant admin runs the lifecycle sweep (counts) |
+| `registry.merge_assets` | An operator merges duplicate assets (`python -m collector.dedup merge-duplicates --apply`) |
+| `auth.failure` | A refused operator token or tenant key on an admin route, or a partner without a write scope (`webhooks:manage`, `attestations:write`, `provider-credentials:manage`). Rate-limited (below). |
+| `operator.access` | An operator-token call to the provider usage, cloud inventory, LeanIX or ServiceNow routes |
+| `audit_log.purge` | `python -m collector.audit purge` deleted read-log rows |
+| `audit.purge` | A checkpoint left by the audit trail's own purge (below) |
+
+Refused changes are recorded too, with `outcome: failure` and the HTTP status (for example a provider credential that already exists, `409`).
+
+Each row holds:
+
+| Field | Content |
+|---|---|
+| `tenant_id`, `seq` | The chain and the row's position in it (1, 2, ...) |
+| `created_at` | UTC time the row was written |
+| `action`, `outcome` | What happened; `success` or `failure` |
+| `actor_type`, `actor_id` | `tenant_key` (the key's SHA-256 lookup prefix), `admin_token` (a scoped admin token's SHA-256 lookup prefix), `partner` (credential id), `operator` (`operator-api`), `system` (job name, e.g. `cli`, `provider-usage-pull`) or `anonymous` (an unauthenticated caller; the prefix of the key it presented, if any) |
+| `target_type`, `target_id` | What was acted on, e.g. `provider_credential` / `openai` |
+| `request_id`, `status_code` | The request's `X-Request-ID` (yours if you send a short token, else generated and returned in the response header) and HTTP status |
+| `details` | Ids, counts, scope names and field names |
+| `prev_hash`, `row_hash` | The chain links |
+
+Rows never contain secrets (keys, tokens, signing secrets), webhook URLs, emails such as `attested_by`, IP addresses, comments or other free text. Keys whose name looks secret are replaced with `[REDACTED]` before the row is written.
+
+Events that belong to no tenant (operator authentication failures, `operator.access`, `audit_log.purge`) go on a **system chain** with tenant id `00000000-0000-0000-0000-000000000000`.
+
+## How the chain works
+
+```
+row_hash = sha256( prev_hash + "\n" + canonical_json(row) )
+```
+
+- `prev_hash` is the previous row's `row_hash`, or 64 zeros for `seq` 1.
+- `canonical_json` is a JSON object of `id`, `tenant_id`, `seq`, `created_at`, `action`, `outcome`, `actor_type`, `actor_id`, `target_type`, `target_id`, `request_id`, `status_code`, `details` and `"v": 1`. Keys are sorted, there is no whitespace, the encoding is UTF-8, and `created_at` is written as `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
+- Writers take a per-tenant Postgres advisory lock before they read the chain head, so concurrent requests append one after another. A unique `(tenant_id, seq)` constraint backs this up.
+- The audit row is written in the same transaction as the change it describes, so both commit or neither does.
+- On Postgres, triggers reject any `UPDATE` and any `DELETE` that does not come from the audit purge. They stop accidents and casual edits, not someone who holds the collector's database credentials: the purge runs as the collector's role, so that role can enable the purge setting (`prompt_shields.audit_purge`) and delete rows, and the table's owner (often the same role, since it runs the migrations) can disable the triggers. Integrity rests on the hash chain plus a copy kept outside the database (see **Limits** below).
+
+The reference implementation is `packages/db/audit_chain.py`.
+
+## Verify
+
+```bash
+python -m collector.audit_trail verify               # every chain
+python -m collector.audit_trail verify --tenant <id> # one chain
+```
+
+Or call `GET /api/v1/operator/audit/verify[?tenant_id=<id>]` with `Authorization: Bearer $PS_ADMIN_TOKEN`.
+
+The verifier walks each chain in `seq` order. It reports the **first break**: a row whose contents no longer match its `row_hash` (the row was modified), a `prev_hash` that does not match the row before it, a gap in `seq` (a row was removed), or missing leading rows with no checkpoint. The CLI exits with status 1 when any chain is broken.
+
+```json
+{
+  "ok": false,
+  "data": [
+    {
+      "tenant_id": "0b7d…",
+      "ok": false,
+      "rows": 3,
+      "first_seq": 1,
+      "last_seq": 3,
+      "head_hash": "9c1e…",
+      "anchor": "genesis",
+      "first_break": { "seq": 3, "id": "…", "reason": "row_hash does not match the row's contents (row modified)" }
+    }
+  ]
+}
+```
+
+**Limits.** A hash chain cannot show that rows were removed from its *end*. It also cannot catch someone who controls the database and rewrites the chain from some row onwards. Keep a copy outside the database to catch both: export the events to your SIEM (below), or record `head_hash` from a scheduled `verify` run somewhere the collector's database role cannot write.
+
+## Export to a SIEM
+
+Every tenant row is also queued in the existing webhook outbox as an event of type `audit.<action>`, for example `audit.provider_credential.rotate`. Delivery is the same as for asset webhooks: HMAC-signed, retried with backoff and dead-lettered. See [Change Webhooks](/api-reference/sync/webhooks).
+
+1. Issue a partner credential for the SIEM integration with the `audit:read` scope. This scope is never granted by default, and `registry:read` does not include it.
+2. Create a subscription for that partner with `"event_types": ["audit.*"]`. A subscription that names no event types still gets asset events only.
+
+```json
+{
+  "id": "5d2f…",
+  "type": "audit.provider_credential.rotate",
+  "created_at": "2026-10-20T09:12:44.120391+00:00",
+  "tenant_id": "0b7d…",
+  "data": {
+    "audit": {
+      "schema_version": "1.0",
+      "id": "5d2f…",
+      "tenant_id": "0b7d…",
+      "seq": 42,
+      "created_at": "2026-10-20T09:12:44.120391Z",
+      "action": "provider_credential.rotate",
+      "outcome": "success",
+      "actor": { "type": "tenant_key", "id": "3f9a12c4d5e6f708" },
+      "target": { "type": "provider_credential", "id": "openai" },
+      "request_id": "req-7f3c",
+      "status_code": 200,
+      "details": { "provider": "openai" },
+      "prev_hash": "a41c…",
+      "row_hash": "77be…",
+      "hash_version": 1
+    }
+  }
+}
+```
+
+The event `id` is the audit row's id, and it stays the same across retries, so use it to de-duplicate. With `seq`, `prev_hash` and `row_hash`, the receiver can check the chain itself. A gap in `seq` means an event is still being retried or has been dead-lettered. Check the dead-letter view (`GET /api/v1/admin/webhooks/deliveries?status=dead`) and redeliver it.
+
+The system chain and a tenant's `tenant.erase` row are not exported: an erasure deletes the tenant's subscriptions. Read them with `verify`, or from the table.
+
+### Alignment with the gateway security-event schema
+
+The gateway's [security events](/guides/security-events) (`docs/security-events.schema.json`, #211) are JSON log lines. Audit trail events are durable webhook deliveries, not log lines. Where the two describe the same thing, they use the same values:
+
+| Audit event | Security event (v1) |
+|---|---|
+| `created_at` | `@timestamp` |
+| `id` | `event.id` |
+| `action` (`auth.failure`, …) | `event.name` |
+| `outcome` (`success` / `failure`) | `event.outcome` |
+| `request_id` | `ps.request_id` |
+| `status_code` | `http.response.status_code` |
+| `details.route`, `details.method` (auth failures) | `http.route`, `http.request.method` |
+| `details.realm` (`operator`, `tenant_admin`, `partner`) | `ps.auth.realm` (`admin`, `metrics`) |
+| `details.reason` (`missing_credentials`, `invalid_credentials`, `insufficient_scope`) | `ps.auth.reason` |
+| `tenant_id` | `ps.tenant` |
+
+For Splunk CIM, map `audit.auth.failure` to the Authentication data model and the other actions to Change. A single sourcetype, for example `promptshields:collector:audit`, can extract `data.audit.*`.
+
+## Auth failure rate limit
+
+Each collector process writes at most 5 `auth.failure` rows per minute for each source (realm plus client address), and at most 60 per minute in total. When it skips rows, the source's next row reports the number skipped in `details.suppressed`. The client address is used only for this limit and is never stored.
+
+## Retention and erasure
+
+- **Retention.** Audit rows are kept forever by default. Set `PS_AUDIT_EVENT_RETENTION_DAYS`, then run `python -m collector.audit_trail purge` (add `--tenant <id>` or `--days <n>` to narrow it) from cron. The purge first appends an `audit.purge` checkpoint row recording the `seq` and `row_hash` of the last row it removes, then deletes that prefix of the chain. `verify` accepts a chain whose first remaining row links to such a checkpoint and reports `"anchor": "checkpoint"`. A forged checkpoint is caught like any other modified row.
+- **Tenant erasure** (`DELETE /api/v1/operator/tenants/{id}`) keeps the tenant's audit rows, as it already keeps `retention_audit_log`. They hold only ids and counts, and `tenant.erase` becomes the chain's last row, so the erasure itself stays provable. To remove the rows as well, run the purge for that tenant once your retention period allows it.
+- **Row-level security.** `audit_events` has the same `tenant_isolation` policy as every other tenant table. A tenant context sees and appends to its own chain only. The system chain is visible only to operator sessions, which bypass RLS with logging.
+
+## DORA mapping
+
+This table lists which records exist for some DORA topics. It is not a statement of compliance; your own assessment decides what you need.
+
+| DORA topic | Records available |
+|---|---|
+| Art. 9: ICT security, access control and authentication | `auth.failure` for admin routes; `partner_credential.*` scope changes; `operator.access` |
+| Art. 9: management of cryptographic keys and credentials | `provider_credential.create/rotate/delete/use`; `webhook_subscription.rotate_secret`; `partner_credential.create/revoke` |
+| Art. 9: change management | `webhook_subscription.*`, `partner_credential.update`, `tenant.retention.set`, `registry.*` |
+| Art. 10: detection of anomalous activity | `auth.failure` with suppressed counts; the export, so your SIEM can alert |
+| Art. 12: logging, backup and integrity of records | The hash chain, `verify`, the append-only triggers, checkpointed retention and the external copy through `audit.*` webhooks |
+| Art. 17: incident handling (evidence) | `request_id` on every row and in the `X-Request-ID` response header, so you can correlate rows with the collector's and the gateway's logs |
+| Art. 28: ICT third-party risk (provider keys) | `provider_credential.use` each time a stored provider key is decrypted |
+
+Keep the collector's clock in sync with NTP. `created_at` comes from the collector host, and the chain shows the order of rows, not the correctness of their timestamps.
+
+## Migration
+
+Migration `021` creates `audit_events`, its triggers and its RLS policy. It then backfills each tenant's existing `retention_audit_log` rows (purges, erasures, retention changes) as the start of that tenant's chain, oldest first. Each backfilled row has `details.backfilled_from` set to `retention_audit_log:<id>`. Nothing else existed to backfill. Every other chain starts at genesis with its next audited action.

@@ -19,6 +19,12 @@ Tenants:
 
 Disabling a tenant keeps its data and stops its ingest keys, admin tokens
 and Partner API credentials (403) until it is enabled again.
+
+Audit trail (collector.audit_trail): purges, retention changes and
+erasures are recorded in the tenant's chain by collector.retention;
+reading a tenant's retention is recorded here; a wrong or missing operator
+token is an ``auth.failure`` on the system chain (rate-limited).
+``GET /audit/verify`` checks the hash chains.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 
-from collector import retention, rls, tenant_keys
+from collector import audit_trail, retention, rls, tenant_keys
 from collector.admin_auth import (
     ADMIN_SCOPES,
     TOKEN_WARNING,
@@ -77,8 +83,14 @@ async def require_operator(request: Request) -> str:
         auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
     )
     if not presented or not hmac.compare_digest(presented.encode(), token.encode()):
+        await audit_trail.record_auth_failure(
+            request,
+            realm="operator",
+            reason="invalid_credentials" if presented else "missing_credentials",
+            status_code=401,
+        )
         raise _problem(401, "Unauthorized", "Invalid operator token")
-    actor = "operator-api"
+    actor = audit_trail.OPERATOR.id
     await rls.bypass(
         request.state.db, f"operator:{request.method} {request.url.path}", actor=actor
     )
@@ -128,6 +140,15 @@ async def get_retention(
     if row is None:
         raise _problem(404, "Not Found", "Tenant not found")
     tenant_settings = row[0] or {}
+    await audit_trail.record_committed(
+        request.state.db,
+        tenant_id=tenant_id,
+        action="tenant.retention.read",
+        actor=audit_trail.OPERATOR,
+        target_type="tenant",
+        target_id=tenant_id,
+        status_code=200,
+    )
     return {
         "tenant_id": str(tenant_id),
         "retention_days": retention.retention_days_for(tenant_settings),
@@ -297,13 +318,15 @@ async def create_tenant(
     if body.issue_api_key:
         row, plaintext = await tenant_keys.issue_key(db, tenant.id, body.api_key_name)
         api_key = {**tenant_keys.serialize_key(row), "key": plaintext}
-    add_audit(
+    await add_audit(
         request,
         db,
         tenant_id=tenant.id,
         status_code=201,
         action="tenant.create",
-        operator=True,
+        principal=None,
+        target_type="tenant",
+        target_id=tenant.id,
         api_key_id=api_key["id"] if api_key else None,
     )
     out = _tenant_dict(tenant)
@@ -373,14 +396,17 @@ async def update_tenant(
         tenant.disabled_at = datetime.now(UTC) if body.disabled else None
         changed.append("disabled")
     if changed:
-        add_audit(
+        await add_audit(
             request,
             db,
             tenant_id=tenant.id,
             status_code=200,
             action="tenant.update",
-            operator=True,
+            principal=None,
+            target_type="tenant",
+            target_id=tenant.id,
             changed_fields=changed,
+            disabled=tenant.disabled_at is not None,
         )
         await db.commit()
         await db.refresh(tenant)
@@ -419,16 +445,31 @@ async def bootstrap_admin_token(
             409, "Conflict", "An unrevoked admin token with this name already exists"
         ) from None
     out = serialize_token(row)
-    add_audit(
+    await add_audit(
         request,
         db,
         tenant_id=tenant.id,
         status_code=201,
         action="admin_token.create",
-        operator=True,
-        token_id=out["id"],
+        principal=None,
+        target_type="admin_token",
+        target_id=out["id"],
         name=row.name,
         scopes=out["scopes"],
     )
     await db.commit()
     return {**out, "token": token, "warning": TOKEN_WARNING}
+@router.get("/audit/verify", summary="Verify the audit trail hash chains")
+async def verify_audit(
+    request: Request,
+    tenant_id: UUID | None = None,
+    actor: str = Depends(require_operator),
+):
+    """Walks each chain (one tenant's, or every chain including the system
+    chain) and reports the first break. ``ok`` is false if any chain is
+    broken; ``head_hash`` is worth recording outside the database."""
+    results = await audit_trail.verify_all(request.state.db, tenant_id)
+    return {
+        "ok": all(r.ok for r in results),
+        "data": [asdict(r) for r in results],
+    }

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from db.models import PartnerCredential
+from db.models import PartnerCredential, Tenant
 from fastapi import APIRouter, Form, HTTPException, Request
 from sqlalchemy import select
 
@@ -58,9 +58,14 @@ async def token_endpoint(
         )
 
     db = request.state.db
-    stmt = select(PartnerCredential).where(PartnerCredential.client_id == client_id)
+    stmt = (
+        select(PartnerCredential, Tenant.disabled_at)
+        .join(Tenant, Tenant.id == PartnerCredential.tenant_id)
+        .where(PartnerCredential.client_id == client_id)
+    )
     async with rls.auth_lookup(db):
-        partner = (await db.execute(stmt)).scalar_one_or_none()
+        found = (await db.execute(stmt)).one_or_none()
+    partner, tenant_disabled_at = found if found is not None else (None, None)
 
     if partner is None or partner.is_active != "true":
         raise HTTPException(
@@ -86,6 +91,17 @@ async def token_endpoint(
             detail={
                 "error": "invalid_client",
                 "error_description": "Invalid client_secret",
+            },
+        )
+
+    if tenant_disabled_at is not None:
+        # The operator disabled the tenant (collector/operator_admin.py);
+        # resolve_partner refuses its tokens too.
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "invalid_client",
+                "error_description": "Client's tenant is disabled",
             },
         )
 

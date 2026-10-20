@@ -33,7 +33,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import rls
+from collector import audit_trail, rls
 from collector.audit import record_read
 from collector.partner_scopes import SCOPES, effective_rate_limit, expand_scopes
 
@@ -301,6 +301,14 @@ def _rate_limit_for(partner: PartnerCredential) -> int:
     return effective_rate_limit(partner.rate_limit_tier, partner.rate_limit)
 
 
+# Scopes whose routes change tenant configuration or data. A partner
+# refused one of them is an auth.failure in the tenant's audit trail
+# (collector.audit_trail); read-scope refusals stay in partner_audit_log.
+ADMIN_SCOPES = frozenset(
+    {"webhooks:manage", "attestations:write", "provider-credentials:manage"}
+)
+
+
 def require_scope(scope: str):
     """Dependency factory: ensures the principal has the named scope.
 
@@ -314,6 +322,16 @@ def require_scope(scope: str):
     async def _dep(request: Request) -> PartnerPrincipal:
         principal = await resolve_partner(request)
         if not principal.has_scope(scope):
+            if scope in ADMIN_SCOPES:
+                await audit_trail.record_auth_failure(
+                    request,
+                    realm="partner",
+                    reason="insufficient_scope",
+                    status_code=403,
+                    tenant_id=principal.tenant_id,
+                    actor=audit_trail.partner_actor(principal.partner_id),
+                    db=request.state.db,
+                )
             await record_read(
                 request,
                 tenant_id=principal.tenant_id,

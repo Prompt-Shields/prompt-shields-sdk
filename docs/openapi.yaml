@@ -86,6 +86,7 @@ components:
             webhooks:manage: Manage webhook subscriptions (never granted by default)
             attestations:write: Record human attestations, including retiring and un-retiring assets (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
+            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
@@ -799,7 +800,12 @@ components:
 
     WebhookEventType:
       type: string
-      enum: [asset.created, asset.changed, asset.retired, asset.attested]
+      description: >-
+        Event types a subscription can name. `audit.*` subscribes to the
+        tenant's hash-chained admin audit trail, delivered as one event per
+        row with the type `audit.<action>` (see the Audit trail guide); it
+        needs the `audit:read` scope and is not part of the default list.
+      enum: [asset.created, asset.changed, asset.retired, asset.attested, audit.*]
 
     CreateWebhookSubscriptionRequest:
       type: object
@@ -810,7 +816,8 @@ components:
           format: uuid
           description: >-
             Partner credential (of this tenant) that receives the events. It
-            needs `changes:read`, plus `assets:read` for `asset.attested`.
+            needs `changes:read`, plus `assets:read` for `asset.attested`,
+            and `audit:read` for `audit.*`.
         url:
           type: string
           maxLength: 2048
@@ -820,7 +827,7 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/WebhookEventType'
-          description: Defaults to every event type
+          description: Defaults to every asset event type (not `audit.*`)
         description:
           type: string
           maxLength: 200
@@ -874,7 +881,9 @@ components:
           type: string
           format: uuid
         event_type:
-          $ref: '#/components/schemas/WebhookEventType'
+          type: string
+          description: An asset event type, or `audit.<action>` for an audit trail event
+          example: audit.provider_credential.rotate
         asset_id:
           type: string
           format: uuid
@@ -1004,8 +1013,8 @@ components:
       description: |
         Admin token scope. `admin:read` grants every GET under
         `/api/v1/admin`; the others grant one resource family. While
-        `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off, `admin:keys` is effectively
-        full admin, because an ingest key it issues reaches every admin route.
+        `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off an ingest key reaches every
+        admin route, so issuing or rotating one needs every admin scope.
       enum:
         - admin:read
         - admin:keys
@@ -1130,7 +1139,7 @@ components:
           enum: [api, legacy]
           description: >-
             `legacy` for the key that lived on the tenant row before this API,
-            moved here by migration 021 or by the first key API call
+            moved here by migration 022 or by the first key API call
         status:
           $ref: '#/components/schemas/CredentialStatus'
         rotation_grace_ends_at:
@@ -4034,6 +4043,65 @@ paths:
                   retention_days:
                     type: integer
                 required: [tenant_id, retention_days]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/operator/audit/verify:
+    get:
+      operationId: verifyAuditTrail
+      tags: [Operator]
+      summary: Verify the audit trail hash chains
+      description: |
+        Walks each audit trail hash chain (one tenant's, or every chain
+        including the system chain) and reports the first modified, missing
+        or reordered row. `ok` is false if any chain is broken. Record
+        `head_hash` outside the database to detect rows later removed from
+        the end. See docs/guides/audit-trail.mdx.
+      security:
+        - OperatorToken: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: One tenant's chain; omit for every chain
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Verification result per chain
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        tenant_id:
+                          type: string
+                        ok:
+                          type: boolean
+                        rows:
+                          type: integer
+                        first_seq:
+                          type: [integer, 'null']
+                        last_seq:
+                          type: [integer, 'null']
+                        head_hash:
+                          type: [string, 'null']
+                        anchor:
+                          type: string
+                          enum: [genesis, checkpoint, empty]
+                        first_break:
+                          type: [object, 'null']
+                required: [ok, data]
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':

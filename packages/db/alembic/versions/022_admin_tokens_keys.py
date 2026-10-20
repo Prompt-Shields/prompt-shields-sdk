@@ -26,8 +26,8 @@ one if still live, else the oldest live key) so every tenant that could
 ingest still can, then drops the tables and the column. Other keys and all
 admin tokens are lost.
 
-Revision ID: 021 (may be renumbered at merge)
-Revises: 020
+Revision ID: 022
+Revises: 021
 Create Date: 2026-10-20
 """
 
@@ -37,8 +37,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "021"
-down_revision: str | None = "020"
+revision: str = "022"
+down_revision: str | None = "021"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -155,7 +155,7 @@ def upgrade() -> None:
 
     # Move legacy keys. The bypass covers a database where RLS is already
     # enforced and the migration role is bound by it (transaction-local).
-    op.execute("SELECT set_config('app.rls_bypass', 'migration-021', true)")
+    op.execute("SELECT set_config('app.rls_bypass', 'migration-022', true)")
     op.execute(
         "INSERT INTO tenant_api_keys "
         "(id, tenant_id, name, key_prefix, key_hash, key_hint, origin, created_at) "
@@ -171,7 +171,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("SELECT set_config('app.rls_bypass', 'migration-021', true)")
+    op.execute("SELECT set_config('app.rls_bypass', 'migration-022', true)")
     op.execute(
         "UPDATE tenants t SET api_key_prefix = k.key_prefix, api_key_hash = k.key_hash "
         "FROM ("

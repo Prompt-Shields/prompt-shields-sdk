@@ -74,7 +74,7 @@ from db.models import (
 from sqlalchemy import delete, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import data_flows
+from collector import audit_trail, data_flows
 from collector.dedup import CLASSIFICATION_ORDER, OLDEST_FIRST, compute_confidence
 from collector.lifecycle import lock_assets
 from collector.webhooks import changed_fields, enqueue_asset_merged
@@ -351,6 +351,19 @@ async def merge_tenant_duplicates(
                 **result.counts,
             },
         )
+    )
+    await audit_trail.record(
+        db,
+        tenant_id=tenant_id,
+        action="registry.merge_assets",
+        actor=audit_trail.actor_from_name(actor),
+        target_type="tenant",
+        target_id=tenant_id,
+        details={
+            "survivors": [str(g.survivor) for g in groups],
+            "merged": [str(i) for g in groups for i in g.merged],
+            **result.counts,
+        },
     )
     await db.commit()
     return result

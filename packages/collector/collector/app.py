@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -10,7 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from collector import rls
+from collector import audit_trail, rls
 from collector.config import settings
 from collector.embeddings import get_embedder
 from collector.metrics import MetricsMiddleware, metrics_endpoint
@@ -91,6 +92,22 @@ async def db_session_middleware(request: Request, call_next):
         request.state.db = session
         response = await call_next(request)
         return response
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """X-Request-ID: the caller's if it is a short token, else a new one.
+    Echoed on the response and stored on audit trail rows."""
+    request_id = audit_trail.clean_request_id(
+        request.headers.get(audit_trail.REQUEST_ID_HEADER)
+    ) or str(uuid.uuid4())
+    token = audit_trail.REQUEST_ID.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        audit_trail.REQUEST_ID.reset(token)
+    response.headers[audit_trail.REQUEST_ID_HEADER] = request_id
+    return response
 
 
 # Prometheus metrics (PS_COLLECTOR_METRICS_ENABLED); outermost, so it times

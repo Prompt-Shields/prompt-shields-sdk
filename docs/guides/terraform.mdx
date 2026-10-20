@@ -83,7 +83,7 @@ Each operation in the OpenAPI spec names its scope in `x-admin-scope`.
 
 By default (`false`) a tenant ingest key still has full access to `/api/v1/admin`, as it always had. That includes rotating provider admin keys, issuing partner credentials and issuing more ingest keys, so anyone holding a key deployed with an SDK or gateway can do those things. With `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` the collector refuses ingest keys on every `/api/v1/admin` route (403, audited), and only admin tokens with the right scope get in. Ingest and registry routes are unchanged. Turn it on once your automation uses admin tokens.
 
-While it is off, `admin:keys` is effectively full admin: an ingest key it issues reaches every admin route.
+While it is off, an ingest key reaches every admin route, so issuing or rotating one (`POST /api/v1/admin/api-keys`, `.../rotate`) needs a token with every admin scope; `admin:keys` alone can list, read and revoke keys. With the setting on, `admin:keys` is enough.
 
 ### Bootstrap the first admin token
 
@@ -255,7 +255,7 @@ resource "restapi_object" "tenant" {
 
 ## 5. State and secrets
 
-`restapi_object` keeps the create response in state, including once-shown secrets (`key`, `token`, `client_secret`, webhook `secret`) and, for provider credentials, the `admin_key` you sent. Use an encrypted remote backend with restricted access, mark outputs `sensitive`, and prefer to read provider admin keys from your secret manager at apply time. Every change through the admin API is written to the audit log (ids, names and scopes, never the secrets).
+`restapi_object` keeps the create response in state, including once-shown secrets (`key`, `token`, `client_secret`, webhook `secret`) and, for provider credentials, the `admin_key` you sent. Use an encrypted remote backend with restricted access, mark outputs `sensitive`, and prefer to read provider admin keys from your secret manager at apply time. Every change through the admin API is written to the hash-chained audit trail (ids, names and scopes, never the secrets; see the audit trail guide).
 
 ## What a dedicated provider would add
 

@@ -72,7 +72,8 @@
         "guides/terraform",
         "guides/security-events",
         "guides/observability",
-        "guides/gateway-oidc"
+        "guides/gateway-oidc",
+        "guides/audit-trail"
       ]
     },
     {

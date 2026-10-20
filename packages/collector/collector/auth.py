@@ -4,7 +4,7 @@ from uuid import UUID
 from db.api_keys import hash_api_key, verify_api_key
 from fastapi import HTTPException, Request
 
-from collector import rls, tenant_keys
+from collector import audit_trail, rls, tenant_keys
 
 # Checked when no key matches the lookup prefix, so an unknown key costs the
 # same bcrypt work as a known key with a wrong secret.
@@ -35,9 +35,23 @@ def tenant_disabled() -> HTTPException:
     )
 
 
-def bearer_token(request: Request) -> str:
+# Tenant admin surface: a refused key here is an audit trail auth.failure.
+ADMIN_PATH_PREFIX = "/api/v1/admin/"
+
+
+async def _audit_admin_failure(request: Request, reason: str) -> None:
+    path = getattr(getattr(request, "url", None), "path", "")
+    if path.startswith(ADMIN_PATH_PREFIX):
+        await audit_trail.record_auth_failure(
+            request, realm="tenant_admin", reason=reason, status_code=401
+        )
+
+
+async def bearer_token(request: Request) -> str:
+    """The Bearer token, or 401 (an audit trail auth.failure on admin routes)."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
+        await _audit_admin_failure(request, "missing_credentials")
         raise _unauthorized("Missing or invalid Authorization header")
     return auth.removeprefix("Bearer ").strip()
 
@@ -54,7 +68,7 @@ async def resolve_tenant(request: Request) -> UUID:
     On success the request's session is scoped to the tenant for Postgres
     row-level security (collector/rls.py).
     """
-    api_key = bearer_token(request)
+    api_key = await bearer_token(request)
 
     db = request.state.db
     async with rls.auth_lookup(db):
@@ -65,8 +79,10 @@ async def resolve_tenant(request: Request) -> UUID:
     valid = await asyncio.to_thread(verify_api_key, api_key, stored_hash)
 
     if candidate is None or not valid:
+        await _audit_admin_failure(request, "invalid_credentials")
         raise _unauthorized("Invalid API key")
     if not candidate.live:
+        await _audit_admin_failure(request, "invalid_credentials")
         raise _unauthorized("API key revoked or expired")
     if candidate.tenant_disabled:
         raise tenant_disabled()

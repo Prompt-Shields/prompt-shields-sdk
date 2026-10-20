@@ -18,13 +18,20 @@ admin route (403), so only admin tokens with the right scope get in. It is
 off by default so nothing breaks on upgrade. Turning it on is how an
 operator closes the open question of whether any ingest key (including one
 deployed with an SDK) should be able to rotate provider admin keys, issue
-partner credentials or mint more keys. While it is off, ``admin:keys`` is
-effectively full admin, because an ingest key it issues reaches every admin
-route.
+partner credentials or mint more keys. While it is off, an ingest key
+reaches every admin route, so issuing or rotating one (which returns a key)
+needs every admin scope, not just ``admin:keys``; otherwise an
+``admin:keys`` token could mint itself full admin (``require_full_admin``).
 
 Tokens are stored like ingest keys (SHA-256 lookup prefix + bcrypt hash)
 and returned once. A token can only issue tokens with scopes it holds.
-Denied calls (403) are written to the audit log.
+
+Audit: changes are written to the hash-chained audit trail
+(collector.audit_trail, ``audit_events``) through ``add_audit``, in the same
+transaction as the change. Refused calls (bad token 401, missing scope or
+ingest key refused 403) are ``auth.failure`` rows (rate-limited). The actor
+is the credential's SHA-256 lookup prefix (``admin_token`` or
+``tenant_key``) or ``operator``; never a secret.
 """
 
 from __future__ import annotations
@@ -41,13 +48,13 @@ from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import rls
-from collector.audit import bearer_key_prefix, build_audit_row, record_read
+from collector import audit_trail, rls
+from collector.audit import bearer_key_prefix
 from collector.auth import _DUMMY_HASH, bearer_token, resolve_tenant, tenant_disabled
 from collector.config import settings
 from collector.tenant_keys import DuplicateName, key_status
 
-TOKEN_PREFIX = "ps-at-"
+TOKEN_PREFIX = audit_trail.ADMIN_TOKEN_PREFIX  # "ps-at-"
 TOKEN_WARNING = "Save the token now. It will not be shown again."
 
 # Scope -> what it grants. Order is the order shown by GET /token-scopes.
@@ -56,7 +63,7 @@ ADMIN_SCOPES: dict[str, str] = {
     "admin:keys": (
         "Issue, rotate and revoke tenant ingest keys. While "
         "PS_ADMIN_REQUIRE_SCOPED_TOKENS is off an ingest key reaches every "
-        "admin route, so this scope is then effectively full admin"
+        "admin route, so issuing or rotating one also needs every other scope"
     ),
     "admin:tokens": "Issue and revoke admin tokens (only with scopes the caller holds)",
     "admin:provider-credentials": (
@@ -128,8 +135,10 @@ async def _resolve_admin_token(request: Request, token: str) -> AdminPrincipal:
     stored = row.token_hash if row is not None else _DUMMY_HASH
     valid = await asyncio.to_thread(verify_api_key, token, stored)
     if row is None or not valid:
+        await _audit_failure(request, "invalid_credentials", 401)
         raise _problem(401, "Unauthorized", "Invalid admin token")
     if key_status(row) != "active":
+        await _audit_failure(request, "invalid_credentials", 401)
         raise _problem(401, "Unauthorized", "Admin token revoked or expired")
     if row.disabled_at is not None:
         raise tenant_disabled()
@@ -142,14 +151,30 @@ async def _resolve_admin_token(request: Request, token: str) -> AdminPrincipal:
     )
 
 
+async def _audit_failure(
+    request: Request, reason: str, status_code: int, tenant_id: UUID | None = None
+) -> None:
+    """auth.failure on the audit trail: the tenant's chain when the caller
+    is known, else the system chain (rate-limited, best effort)."""
+    await audit_trail.record_auth_failure(
+        request,
+        realm="tenant_admin",
+        reason=reason,
+        status_code=status_code,
+        tenant_id=tenant_id,
+        actor=audit_trail.tenant_key_actor(request) if tenant_id else None,
+        db=request.state.db if tenant_id else None,
+    )
+
+
 async def resolve_admin(request: Request) -> AdminPrincipal:
     """Authenticate an admin route caller (admin token or tenant key)."""
-    token = bearer_token(request)
+    token = await bearer_token(request)
     if token.startswith(TOKEN_PREFIX):
         return await _resolve_admin_token(request, token)
     tenant_id = await resolve_tenant(request)
     if settings.admin_require_scoped_tokens:
-        await record_read(request, tenant_id=tenant_id, status_code=403)
+        await _audit_failure(request, "insufficient_scope", 403, tenant_id)
         raise _problem(
             403,
             "Forbidden",
@@ -161,6 +186,25 @@ async def resolve_admin(request: Request) -> AdminPrincipal:
     )
 
 
+async def require_full_admin(request: Request, principal: AdminPrincipal) -> None:
+    """403 unless the caller could already do anything a tenant ingest key
+    can. Used before handing out an ingest key (issue, rotate): while
+    PS_ADMIN_REQUIRE_SCOPED_TOKENS is off an ingest key reaches every admin
+    route, so an ``admin:keys`` token must not be able to mint one."""
+    if settings.admin_require_scoped_tokens:
+        return
+    missing = sorted(set(ADMIN_SCOPES) - principal.scopes)
+    if missing:
+        await _audit_failure(request, "insufficient_scope", 403, principal.tenant_id)
+        raise _problem(
+            403,
+            "Forbidden",
+            "Issuing or rotating an ingest key needs every admin scope while "
+            "PS_ADMIN_REQUIRE_SCOPED_TOKENS is off (an ingest key then has "
+            f"full admin access); missing: {missing}",
+        )
+
+
 def require_admin(scope: str):
     """Dependency factory for a tenant admin route that needs ``scope``
     (GET routes also take ``admin:read``). A typo fails at import time."""
@@ -170,7 +214,7 @@ def require_admin(scope: str):
     async def _dep(request: Request) -> AdminPrincipal:
         principal = await resolve_admin(request)
         if not principal.allows(scope, request.method):
-            await record_read(request, tenant_id=principal.tenant_id, status_code=403)
+            await _audit_failure(request, "insufficient_scope", 403, principal.tenant_id)
             raise _problem(403, "Forbidden", f"Token lacks required scope: {scope}")
         return principal
 
@@ -179,29 +223,41 @@ def require_admin(scope: str):
     return _dep
 
 
-def add_audit(
+def admin_actor(request: Request, principal: AdminPrincipal | None) -> audit_trail.Actor:
+    """The audit trail actor: the operator, or the caller's credential
+    (admin token or tenant key) by its SHA-256 lookup prefix."""
+    if principal is None:
+        return audit_trail.OPERATOR
+    return audit_trail.tenant_key_actor(request)
+
+
+async def add_audit(
     request: Request,
     db: AsyncSession,
     *,
     tenant_id: UUID,
     status_code: int,
     action: str,
-    operator: bool = False,
+    principal: AdminPrincipal | None,
+    target_type: str | None = None,
+    target_id: str | UUID | None = None,
     **details,
 ) -> None:
-    """Stage a partner_audit_log row for an admin change, committed with
-    the change itself. ``details`` must be JSON-safe and never secrets
-    (ids, names, scopes). Operator rows carry no key prefix."""
-    row = build_audit_row(request, tenant_id=tenant_id, status_code=status_code)
-    if operator:
-        row.api_key_prefix = None
-    row.query_params = {
-        **(row.query_params or {}),
-        "action": action,
-        "actor": "operator" if operator else "tenant",
-        **details,
-    }
-    db.add(row)
+    """Append an audit trail row (collector.audit_trail) for an admin change
+    to ``tenant_id``'s chain. Flushes, does not commit: it commits with the
+    change itself. ``principal=None`` means the operator. ``details`` are
+    ids, names and scopes, never secrets (audit_trail redacts secret-looking
+    keys anyway)."""
+    await audit_trail.record(
+        db,
+        tenant_id=tenant_id,
+        action=action,
+        actor=admin_actor(request, principal),
+        target_type=target_type,
+        target_id=target_id,
+        status_code=status_code,
+        details=details,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

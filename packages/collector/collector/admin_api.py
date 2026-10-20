@@ -7,12 +7,15 @@ ingest keys. Mounted at /api/v1/admin. Auth and scopes: collector/admin_auth.py.
   GET    /tokens/{token_id}                read                          admin:tokens | admin:read
   DELETE /tokens/{token_id}                revoke                        admin:tokens
 
-  POST   /api-keys                         issue (key returned once)     admin:keys
+  POST   /api-keys                         issue (key returned once)     admin:keys *
   GET    /api-keys                         list (metadata)               admin:keys | admin:read
   GET    /api-keys/{key_id}                read                          admin:keys | admin:read
   POST   /api-keys/{key_id}/rotate         new secret, same id; optional
-                                           grace window for the old one  admin:keys
+                                           grace window for the old one  admin:keys *
   DELETE /api-keys/{key_id}                revoke                        admin:keys
+
+  * While PS_ADMIN_REQUIRE_SCOPED_TOKENS is off, an ingest key is full admin,
+    so issuing or rotating one needs every admin scope (require_full_admin).
 
 Conventions shared with partner credentials:
 
@@ -22,8 +25,9 @@ Conventions shared with partner credentials:
     ``status: revoked`` (so audit rows resolve), and a repeated DELETE is
     204 too. Lists include revoked rows unless ``?status=`` filters them.
 
-Every change writes a partner_audit_log row in the same transaction (ids,
-names and scopes; never a secret).
+Every change writes an audit trail row (collector.audit_trail,
+``audit_events``) in the same transaction: ids, names and scopes, never a
+secret.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ from collector.admin_auth import (
     created_by,
     issue_token,
     require_admin,
+    require_full_admin,
     serialize_token,
     unknown_scopes,
 )
@@ -138,13 +143,15 @@ async def create_token(
             409, "Conflict", "An unrevoked admin token with this name already exists"
         ) from None
     out = serialize_token(row)
-    add_audit(
+    await add_audit(
         request,
         db,
         tenant_id=principal.tenant_id,
         status_code=201,
         action="admin_token.create",
-        token_id=out["id"],
+        principal=principal,
+        target_type="admin_token",
+        target_id=out["id"],
         name=row.name,
         scopes=out["scopes"],
     )
@@ -198,13 +205,15 @@ async def revoke_token(
     row = await _get_token(request, principal.tenant_id, token_id)
     if row.revoked_at is None:
         row.revoked_at = datetime.now(UTC)
-        add_audit(
+        await add_audit(
             request,
             db,
             tenant_id=principal.tenant_id,
             status_code=204,
             action="admin_token.revoke",
-            token_id=str(row.id),
+            principal=principal,
+            target_type="admin_token",
+            target_id=str(row.id),
             name=row.name,
         )
         await db.commit()
@@ -249,18 +258,21 @@ async def _get_key(request: Request, tenant_id: UUID, key_id: UUID) -> TenantApi
     return row
 
 
-async def _adopt(request: Request, tenant_id: UUID) -> None:
+async def _adopt(request: Request, principal: AdminPrincipal) -> None:
     """Bring a legacy tenant-row key into the table (tenant_keys module doc)."""
     db = request.state.db
+    tenant_id = principal.tenant_id
     row = await tenant_keys.adopt_legacy_key(db, tenant_id)
     if row is not None:
-        add_audit(
+        await add_audit(
             request,
             db,
             tenant_id=tenant_id,
             status_code=200,
             action="api_key.adopt_legacy",
-            key_id=str(row.id),
+            principal=principal,
+            target_type="tenant_api_key",
+            target_id=str(row.id),
             name=row.name,
         )
         await db.commit()
@@ -270,8 +282,9 @@ async def _adopt(request: Request, tenant_id: UUID) -> None:
 async def create_api_key(
     body: CreateApiKeyBody, request: Request, principal: AdminPrincipal = _KEYS
 ) -> dict:
+    await require_full_admin(request, principal)
     db = request.state.db
-    await _adopt(request, principal.tenant_id)
+    await _adopt(request, principal)
     try:
         row, key = await tenant_keys.issue_key(
             db, principal.tenant_id, body.name, expires_at=_future(body.expires_at)
@@ -281,13 +294,15 @@ async def create_api_key(
             409, "Conflict", "An unrevoked API key with this name already exists"
         ) from None
     out = tenant_keys.serialize_key(row)
-    add_audit(
+    await add_audit(
         request,
         db,
         tenant_id=principal.tenant_id,
         status_code=201,
         action="api_key.create",
-        key_id=out["id"],
+        principal=principal,
+        target_type="tenant_api_key",
+        target_id=out["id"],
         name=row.name,
     )
     await db.commit()
@@ -298,7 +313,7 @@ async def create_api_key(
 async def list_api_keys(
     request: Request, status: Status | None = None, principal: AdminPrincipal = _KEYS
 ) -> dict:
-    await _adopt(request, principal.tenant_id)
+    await _adopt(request, principal)
     rows = (
         (
             await request.state.db.execute(
@@ -332,6 +347,7 @@ async def rotate_api_key(
     body: RotateApiKeyBody | None = None,
     principal: AdminPrincipal = _KEYS,
 ) -> dict:
+    await require_full_admin(request, principal)
     db = request.state.db
     row = await _get_key(request, principal.tenant_id, key_id)
     grace = body.grace_period_seconds if body else 0
@@ -339,13 +355,15 @@ async def rotate_api_key(
         key = tenant_keys.rotate_key(row, timedelta(seconds=grace))
     except NotRotatable as exc:
         raise _problem(409, "Conflict", f"Cannot rotate a {exc} key") from None
-    add_audit(
+    await add_audit(
         request,
         db,
         tenant_id=principal.tenant_id,
         status_code=200,
         action="api_key.rotate",
-        key_id=str(row.id),
+        principal=principal,
+        target_type="tenant_api_key",
+        target_id=str(row.id),
         name=row.name,
         grace_period_seconds=grace,
     )
@@ -363,13 +381,15 @@ async def revoke_api_key(
     db = request.state.db
     row = await _get_key(request, principal.tenant_id, key_id)
     if tenant_keys.revoke_key(row):
-        add_audit(
+        await add_audit(
             request,
             db,
             tenant_id=principal.tenant_id,
             status_code=204,
             action="api_key.revoke",
-            key_id=str(row.id),
+            principal=principal,
+            target_type="tenant_api_key",
+            target_id=str(row.id),
             name=row.name,
         )
         await db.commit()

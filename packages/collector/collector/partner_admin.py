@@ -14,9 +14,13 @@ expose them. Scopes and rate-limit tiers come from `collector.partner_scopes`.
 
 DELETE revokes, like admin tokens and tenant keys: 204, the row is kept
 (``status: revoked``, still readable by id and listed unless filtered out)
-and a repeated DELETE is 204 too. Changes are audited.
+and a repeated DELETE is 204 too.
 
 This is the dashboard's hook for the "Partners > Add Integration" UX.
+
+Issuing, changing (scopes, rate limit) and revoking a credential each
+write an `audit_events` row (collector.audit_trail) with the change: scope
+names and tier, never the secret or the API key.
 """
 
 from __future__ import annotations
@@ -30,7 +34,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from collector.admin_auth import AdminPrincipal, add_audit, require_admin
+from collector import audit_trail
+from collector.admin_auth import AdminPrincipal, admin_actor, require_admin
 from collector.partner_auth import (
     generate_api_key,
     generate_client_id,
@@ -229,15 +234,21 @@ async def issue_partner_credential(
     )
     db.add(partner)
     await db.flush()
-    add_audit(
-        request,
+    await audit_trail.record(
         db,
         tenant_id=tenant_id,
-        status_code=201,
         action="partner_credential.create",
-        credential_id=str(partner.id),
-        name=partner.partner_name,
-        scopes=list(scopes),
+        actor=admin_actor(request, principal),
+        target_type="partner_credential",
+        target_id=partner.id,
+        status_code=201,
+        details={
+            "scopes": scopes,
+            "rate_limit_tier": tier,
+            "rate_limit": rate_limit,
+            "issued_partner_api_key": api_key is not None,
+            "expires_at": body.expires_at,
+        },
     )
     await db.commit()
     await db.refresh(partner)
@@ -309,24 +320,46 @@ async def update_partner_credential(
     """Takes effect on the partner's next request, including requests made
     with access tokens issued before the change."""
     row = await _get_credential(request, principal.tenant_id, credential_id)
-    changed = []
-    if body.scopes is not None:
-        row.scopes = _validated_scopes(body.scopes)
-        changed.append("scopes")
-    if body.rate_limit_tier is not None or body.rate_limit is not None:
-        row.rate_limit_tier, row.rate_limit = _resolve_rate_limit(
-            body.rate_limit_tier, body.rate_limit, default_tier=None
+    tenant_id = row.tenant_id
+    before_scopes = list(row.scopes or [])
+    before_limit = (row.rate_limit_tier, row.rate_limit)
+    try:
+        if body.scopes is not None:
+            row.scopes = _validated_scopes(body.scopes)
+        if body.rate_limit_tier is not None or body.rate_limit is not None:
+            row.rate_limit_tier, row.rate_limit = _resolve_rate_limit(
+                body.rate_limit_tier, body.rate_limit, default_tier=None
+            )
+    except HTTPException as exc:
+        await request.state.db.rollback()
+        await audit_trail.record_committed(
+            request.state.db,
+            tenant_id=tenant_id,
+            action="partner_credential.update",
+            outcome=audit_trail.FAILURE,
+            actor=admin_actor(request, principal),
+            target_type="partner_credential",
+            target_id=credential_id,
+            status_code=exc.status_code,
         )
-        changed.append("rate_limit")
-    add_audit(
-        request,
+        raise
+    after_scopes = list(row.scopes or [])
+    await audit_trail.record(
         request.state.db,
-        tenant_id=principal.tenant_id,
-        status_code=200,
+        tenant_id=row.tenant_id,
         action="partner_credential.update",
-        credential_id=str(row.id),
-        changed_fields=changed,
-        scopes=list(row.scopes),
+        actor=admin_actor(request, principal),
+        target_type="partner_credential",
+        target_id=row.id,
+        status_code=200,
+        details={
+            "scopes": after_scopes,
+            "scopes_added": sorted(set(after_scopes) - set(before_scopes)),
+            "scopes_removed": sorted(set(before_scopes) - set(after_scopes)),
+            "rate_limit_tier": row.rate_limit_tier,
+            "rate_limit": row.rate_limit,
+            "rate_limit_changed": (row.rate_limit_tier, row.rate_limit) != before_limit,
+        },
     )
     await request.state.db.commit()
     await request.state.db.refresh(row)
@@ -344,15 +377,16 @@ async def revoke_partner_credential(
     principal: AdminPrincipal = _PARTNERS,
 ) -> None:
     row = await _get_credential(request, principal.tenant_id, credential_id)
-    if row.is_active != "false":
-        row.is_active = "false"
-        add_audit(
-            request,
-            request.state.db,
-            tenant_id=principal.tenant_id,
-            status_code=204,
-            action="partner_credential.revoke",
-            credential_id=str(row.id),
-            name=row.partner_name,
-        )
-        await request.state.db.commit()
+    if row.is_active == "false":
+        return
+    row.is_active = "false"
+    await audit_trail.record(
+        request.state.db,
+        tenant_id=row.tenant_id,
+        action="partner_credential.revoke",
+        actor=admin_actor(request, principal),
+        target_type="partner_credential",
+        target_id=row.id,
+        status_code=204,
+    )
+    await request.state.db.commit()

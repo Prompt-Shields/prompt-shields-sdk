@@ -122,7 +122,7 @@ def test_webhook_schemas_match_serializers():
     assert _props("WebhookDelivery") == delivery_keys
     assert set(SCHEMAS["WebhookDelivery"]["required"]) == delivery_keys
 
-    assert SCHEMAS["WebhookEventType"]["enum"] == list(webhooks.EVENT_TYPES)
+    assert SCHEMAS["WebhookEventType"]["enum"] == list(webhooks.SUBSCRIBABLE_EVENT_TYPES)
 
 
 @pytest.mark.parametrize(

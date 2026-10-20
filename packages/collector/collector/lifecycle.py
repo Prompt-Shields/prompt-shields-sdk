@@ -91,6 +91,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import TIMESTAMP, and_, case, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import audit_trail
 from collector.admin_auth import AdminPrincipal, require_admin
 from collector.config import parse_source_thresholds, settings
 from collector.webhooks import enqueue_lifecycle_events
@@ -442,8 +443,26 @@ async def run_sweep(
             },
         ) from exc
     await enqueue_lifecycle_events(db, changed_at=now, tenant_id=tenant_id)
+    out = asdict(result)
+    await audit_trail.record(
+        db,
+        tenant_id=tenant_id,
+        action="registry.lifecycle_sweep",
+        actor=audit_trail.tenant_key_actor(request),
+        target_type="tenant",
+        target_id=tenant_id,
+        status_code=200,
+        now=now,
+        details={
+            "marked_stale": result.marked_stale,
+            "marked_retired": result.marked_retired,
+            "reactivated": result.reactivated,
+            "stale_after_days": result.stale_after_days,
+            "retire_after_days": result.retire_after_days,
+        },
+    )
     await db.commit()
-    return asdict(result)
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────
