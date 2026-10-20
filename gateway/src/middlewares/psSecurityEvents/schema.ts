@@ -24,7 +24,8 @@ export type SecurityEventName =
   | 'injection.detected'
   | 'auth.failure'
   | 'rate_limit.hit'
-  | 'payload.rejected';
+  | 'payload.rejected'
+  | 'policy.denied';
 
 /** CIM severity. */
 export type SecuritySeverity = 'informational' | 'low' | 'medium' | 'high';
@@ -110,10 +111,42 @@ export interface InjectionDetectedEvent
 
 export interface AuthFailureEvent extends SecurityEventBase {
   'event.name': 'auth.failure';
-  /** What was protected: the admin console/log stream, or `/metrics`. */
-  'ps.auth.realm': 'admin' | 'metrics';
+  /**
+   * What was protected: the admin console/log stream, `/metrics`, or the
+   * model and proxy routes behind OIDC (`PS_OIDC_ENABLED`).
+   */
+  'ps.auth.realm': 'admin' | 'metrics' | 'oidc';
   'ps.auth.reason': 'missing_credentials' | 'invalid_credentials';
+  /** OIDC only: why the bearer token was refused. */
+  'ps.auth.detail'?:
+    | 'malformed'
+    | 'disallowed_alg'
+    | 'unknown_key'
+    | 'bad_signature'
+    | 'expired'
+    | 'not_yet_valid'
+    | 'wrong_issuer'
+    | 'wrong_audience'
+    | 'invalid_claims'
+    | 'jwks_unavailable';
   'http.response.status_code': number;
+}
+
+/** An authenticated (OIDC) caller was refused by the group policy (403). */
+export interface PolicyDeniedEvent extends SecurityEventBase {
+  'event.name': 'policy.denied';
+  'ps.policy.reason':
+    | 'no_matching_group'
+    | 'provider_not_allowed'
+    | 'model_not_allowed';
+  /** The policy entry that applied (its configured `name`), if any. */
+  'ps.policy.group'?: string;
+  /**
+   * ECS user.hash: the pseudonymous subject (32 hex characters, see
+   * PS_OIDC_SUBJECT_SALT). Absent with PS_OIDC_TELEMETRY_SUBJECT=off.
+   */
+  'user.hash'?: string;
+  'http.response.status_code': 403;
 }
 
 export interface RateLimitHitEvent extends SecurityEventBase {
@@ -140,4 +173,5 @@ export type SecurityEvent =
   | InjectionDetectedEvent
   | AuthFailureEvent
   | RateLimitHitEvent
-  | PayloadRejectedEvent;
+  | PayloadRejectedEvent
+  | PolicyDeniedEvent;

@@ -20,6 +20,10 @@ import {
 } from './psAttempts';
 import { PSTelemetrySender } from './psTelemetrySender';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
+import { oidcTelemetryFields } from './psOidc/telemetry';
+
+// Set by psOidc (./psOidc/index.ts OIDC_IDENTITY_KEY).
+const OIDC_IDENTITY_KEY = 'psOidcIdentity';
 
 interface PSConfig {
   collectorUrl: string;
@@ -73,6 +77,10 @@ interface TelemetryEvent {
   stream?: boolean;
   stream_truncated?: boolean;
   stream_cancelled?: boolean;
+  // OIDC (PS_OIDC_ENABLED): the caller's pseudonymous subject and the name
+  // of the gateway policy group that applied. See psOidc/telemetry.ts.
+  user_id?: string;
+  user_group?: string;
   // Retries and fallbacks (#78): every upstream attempt, in order, linked by
   // trace_id. retry_count is the number of attempts - 1; attempts holds at
   // most MAX_ATTEMPT_RECORDS of them.
@@ -499,6 +507,7 @@ export function psTelemetry() {
         ...usageUnits(path, responseBody, requestBody),
         latency_ms: Date.now() - startTime,
         ...psHeaders,
+        ...oidcTelemetryFields(c.get(OIDC_IDENTITY_KEY)),
       };
 
       if (route) {

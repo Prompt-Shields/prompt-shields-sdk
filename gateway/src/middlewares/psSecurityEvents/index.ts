@@ -21,6 +21,7 @@ import {
   GuardrailStage,
   GuardrailVerdict,
   PayloadRejectedEvent,
+  PolicyDeniedEvent,
   SECURITY_EVENT_SCHEMA_VERSION,
   SecurityEvent,
   SecurityEventBase,
@@ -450,12 +451,13 @@ export function recordHookResults(
 // ---------------------------------------------------------------------------
 // Gateway refusals
 
-/** A gateway credential check failed (admin console/log stream or /metrics). */
+/** A gateway credential check failed (admin console/log stream, /metrics or OIDC). */
 export function reportAuthFailure(
   c: Context,
   realm: AuthFailureEvent['ps.auth.realm'],
   reason: AuthFailureEvent['ps.auth.reason'],
-  status = 401
+  status = 401,
+  detail?: AuthFailureEvent['ps.auth.detail']
 ): void {
   try {
     const target = securityLogTarget(c);
@@ -472,7 +474,48 @@ export function reportAuthFailure(
       'event.name': 'auth.failure',
       'ps.auth.realm': realm,
       'ps.auth.reason': reason,
+      ...(detail ? { 'ps.auth.detail': detail } : {}),
       'http.response.status_code': status,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** The OIDC group policy refused an authenticated caller (403). */
+export function reportPolicyDenied(
+  c: Context,
+  reason: PolicyDeniedEvent['ps.policy.reason'],
+  fields: {
+    group?: string;
+    userHash?: string;
+    provider?: string;
+    model?: string;
+  } = {}
+): void {
+  try {
+    const target = securityLogTarget(c);
+    if (!target) return;
+    enqueue(target, {
+      ...base(c, 'policy.denied', {
+        'event.kind': 'alert',
+        'event.category': ['iam'],
+        'event.outcome': 'failure',
+        severity: 'medium',
+        action: 'blocked',
+        signature: reason,
+      }),
+      ...(fields.provider
+        ? { 'gen_ai.provider.name': safeId(fields.provider) }
+        : {}),
+      ...(fields.model
+        ? { 'gen_ai.request.model': safeId(fields.model, MODEL_RE) }
+        : {}),
+      'event.name': 'policy.denied',
+      'ps.policy.reason': reason,
+      ...(fields.group ? { 'ps.policy.group': safeId(fields.group) } : {}),
+      ...(fields.userHash ? { 'user.hash': fields.userHash } : {}),
+      'http.response.status_code': 403,
     });
   } catch {
     /* best-effort */

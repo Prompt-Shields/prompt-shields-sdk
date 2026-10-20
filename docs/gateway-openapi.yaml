@@ -19,13 +19,21 @@ info:
     - Anthropic Messages: https://docs.anthropic.com/en/api/messages;
     - Cohere Rerank v2: https://docs.cohere.com/reference/rerank.
 
-    **Authentication.** The gateway has no client authentication of its
-    own. The `Authorization` (or `x-api-key`) header carries the
+    **Authentication.** By default the gateway has no client authentication
+    of its own. The `Authorization` (or `x-api-key`) header carries the
     *provider's* API key and is forwarded to the provider; credentials can
     also travel inside `x-portkey-config`. Put the gateway behind an API
     gateway such as Kong for client authentication, and strip the
     provider-credential headers listed below at that layer if clients must
     not choose their own credentials.
+
+    With `PS_OIDC_ENABLED=true` (opt-in, see `GatewayOidc`) every `/v1/*`
+    route except `/v1/health` instead requires an access token from your
+    identity provider in `Authorization: Bearer`. The gateway validates it,
+    removes it from the request (it never reaches a provider), and applies
+    the IdP-group policy: 401 without a valid token, 403 when the policy
+    refuses the caller, provider or model, 429 when the group's rate limit
+    is exhausted, 503 while the IdP's signing keys cannot be fetched.
 
     **Headers that are not documented on purpose.** Provider credential
     headers (`x-portkey-aws-secret-access-key`, `x-portkey-aws-session-token`,
@@ -186,6 +194,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -217,6 +226,10 @@ paths:
           $ref: '#/components/responses/HooksFailed'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '408':
           $ref: '#/components/responses/RequestTimeout'
         '413':
@@ -257,6 +270,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -278,6 +292,10 @@ paths:
           $ref: '#/components/responses/HooksFailed'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '408':
           $ref: '#/components/responses/RequestTimeout'
         '413':
@@ -321,6 +339,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -342,6 +361,10 @@ paths:
           $ref: '#/components/responses/HooksFailed'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '408':
           $ref: '#/components/responses/RequestTimeout'
         '413':
@@ -368,6 +391,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -384,6 +408,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -403,6 +431,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -413,6 +442,10 @@ paths:
                 $ref: '#/components/schemas/ResponseObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -424,6 +457,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -434,6 +468,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -453,6 +491,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -463,6 +502,10 @@ paths:
                 $ref: '#/components/schemas/ResponseObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -482,6 +525,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -492,6 +536,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -532,6 +580,7 @@ paths:
       security:
         - ProviderApiKey: []
         - ProviderBearer: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -554,6 +603,10 @@ paths:
           $ref: '#/components/responses/HooksFailed'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '408':
           $ref: '#/components/responses/RequestTimeout'
         '413':
@@ -581,6 +634,7 @@ paths:
       security:
         - ProviderApiKey: []
         - ProviderBearer: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -597,6 +651,10 @@ paths:
                 $ref: '#/components/schemas/CountTokensResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -626,6 +684,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -644,6 +703,10 @@ paths:
           $ref: '#/components/responses/HooksFailed'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '408':
           $ref: '#/components/responses/RequestTimeout'
         '413':
@@ -678,6 +741,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -694,6 +758,10 @@ paths:
                 $ref: '#/components/schemas/RerankResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '408':
           $ref: '#/components/responses/RequestTimeout'
         '413':
@@ -724,6 +792,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -740,6 +809,10 @@ paths:
                 $ref: '#/components/schemas/ImagesResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '502':
@@ -766,6 +839,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -782,6 +856,10 @@ paths:
                 $ref: '#/components/schemas/ImagesResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '411':
           $ref: '#/components/responses/LengthRequired'
         '413':
@@ -810,6 +888,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -827,6 +906,10 @@ paths:
                 contentMediaType: application/octet-stream
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -851,6 +934,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -867,6 +951,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '411':
           $ref: '#/components/responses/LengthRequired'
         '413':
@@ -895,6 +983,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -911,6 +1000,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '411':
           $ref: '#/components/responses/LengthRequired'
         '413':
@@ -939,6 +1032,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -955,6 +1049,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '502':
@@ -975,6 +1073,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -985,6 +1084,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -998,6 +1101,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -1014,6 +1118,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '411':
           $ref: '#/components/responses/LengthRequired'
         '413':
@@ -1037,6 +1145,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1047,6 +1156,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1058,6 +1171,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1068,6 +1182,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1087,6 +1205,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1098,6 +1217,10 @@ paths:
                 contentMediaType: application/octet-stream
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1116,6 +1239,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1126,6 +1250,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1137,6 +1265,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -1153,6 +1282,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1172,6 +1305,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1182,6 +1316,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1202,6 +1340,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1213,6 +1352,10 @@ paths:
                 contentMediaType: application/octet-stream
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1232,6 +1375,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1242,6 +1386,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1260,6 +1408,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1268,6 +1417,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PassThroughObject'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1279,6 +1432,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -1293,6 +1447,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PassThroughObject'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1312,6 +1470,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1320,6 +1479,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PassThroughObject'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1339,6 +1502,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1347,6 +1511,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PassThroughObject'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1390,6 +1558,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
@@ -1402,6 +1571,10 @@ paths:
                   - $ref: '#/components/schemas/AnthropicModelList'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1427,12 +1600,17 @@ paths:
             type: string
       security:
         - ProviderBearer: []
+        - GatewayOidc: []
         - {}
       responses:
         '101':
           description: Switching protocols to WebSocket
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1458,6 +1636,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         required: true
@@ -1474,6 +1653,10 @@ paths:
                 $ref: '#/components/schemas/PassThroughObject'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1495,6 +1678,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         $ref: '#/components/requestBodies/ProxyBody'
@@ -1503,6 +1687,10 @@ paths:
           $ref: '#/components/responses/ProxySuccess'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -1530,12 +1718,17 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
           $ref: '#/components/responses/ProxySuccess'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
@@ -1559,6 +1752,7 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       requestBody:
         $ref: '#/components/requestBodies/ProxyBody'
@@ -1567,6 +1761,10 @@ paths:
           $ref: '#/components/responses/ProxySuccess'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -1582,12 +1780,17 @@ paths:
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
+        - GatewayOidc: []
         - {}
       responses:
         '200':
           $ref: '#/components/responses/ProxySuccess'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
@@ -1612,6 +1815,20 @@ components:
       type: http
       scheme: bearer
       description: The `PS_METRICS_TOKEN` value, required on `/metrics` when it is set.
+    GatewayOidc:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        An access token (JWT) from the identity provider configured with
+        `PS_OIDC_ISSUER` (Entra ID, Okta, Keycloak, ...). Only when the gateway
+        runs with `PS_OIDC_ENABLED=true`; then it is required on every `/v1/*`
+        route except `/v1/health`. Checked: signature against the issuer's
+        JWKS, `alg` (asymmetric only), `iss`, `aud` (`PS_OIDC_AUDIENCE`),
+        `exp`/`nbf`, `sub`. The token is never forwarded to a provider;
+        provider credentials come from `PS_OIDC_PROVIDER_KEYS`,
+        `x-portkey-config` or keyless provider auth. See
+        docs/guides/gateway-oidc.mdx.
 
   parameters:
     IdPath:
@@ -2001,6 +2218,43 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/GatewayFailure'
+    Unauthenticated:
+      description: |
+        `PS_OIDC_ENABLED` is on and the request has no valid identity-provider
+        access token (missing, malformed, wrong issuer or audience, expired,
+        disallowed `alg`, unknown key or bad signature). `error.code` is
+        `missing_token` or `invalid_token`; `WWW-Authenticate` is set.
+      headers:
+        WWW-Authenticate:
+          description: '`Bearer realm="prompt-shields-gateway"`, with `error="invalid_token"` for a rejected token'
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: Invalid access token (expired)
+              type: authentication_error
+              param: null
+              code: invalid_token
+    PolicyDenied:
+      description: |
+        `PS_OIDC_ENABLED` is on, the token is valid, and the IdP-group policy
+        refuses the request: the caller's groups match no policy entry (with
+        `default: deny`), or the entry does not allow the provider or model
+        of the target being called. `error.code` is `policy_denied`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: 'Forbidden by gateway policy: model "gpt-4o" is not allowed for your group'
+              type: permission_error
+              param: null
+              code: policy_denied
     InternalError:
       description: Unexpected gateway error
       content:
