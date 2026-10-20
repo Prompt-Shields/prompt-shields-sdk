@@ -433,6 +433,161 @@ class AtlasTelemetrySender(TelemetrySender):
         )
 
 
+class BackgroundTelemetrySender(TelemetrySender):
+    """A TelemetrySender that sends from a daemon thread, never from the caller.
+
+    `enqueue()` only appends to the bounded buffer (thread-safe, no I/O), so
+    the caller's latency does not depend on the collector. A background
+    thread, started on the first event, flushes when `flush_size` events are
+    buffered or every `flush_interval` seconds, whichever comes first, one
+    request per batch (up to `max_batch` events). It needs no event loop, so
+    sync and asyncio callers share it.
+
+    Everything else is TelemetrySender's: a full buffer drops the oldest event
+    and counts it (stats()), a 429 pauses sends for Retry-After, failed sends
+    re-buffer, and the bounded exit flush (`register_exit_flush`) sends what
+    is left, after stopping the thread. Never raises into the caller.
+    """
+
+    def __init__(
+        self,
+        collector_url: str,
+        api_key: str,
+        *,
+        flush_size: int = 100,
+        flush_interval: float = 2.0,
+        **kwargs,
+    ):
+        super().__init__(collector_url, api_key, **kwargs)
+        self._flush_size = max(1, flush_size)
+        self._flush_interval = flush_interval
+        self._init_thread_state()
+
+    def _init_thread_state(self) -> None:
+        # Guards the buffer and counters (reentrant: _rebuffer -> _append).
+        self._lock = threading.RLock()
+        # One send at a time: the thread's flush, the exit flush or close.
+        self._send_lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stopping = False
+        self._final_flush = False
+        self._thread: threading.Thread | None = None
+
+    def _reset_after_fork(self) -> None:
+        # The parent's thread does not exist in the child, and its locks
+        # may have been held at fork time: start over with fresh ones.
+        self._init_thread_state()
+        super()._reset_after_fork()
+
+    # --- caller side: no I/O ---------------------------------------------
+
+    def enqueue(self, event: dict) -> None:
+        """Buffer the event and return; the background thread sends it."""
+        try:
+            with self._lock:
+                super().enqueue(event)
+                full = len(self._buffer) >= self._flush_size
+                if self._thread is None and not self._stopping:
+                    self._start_thread()
+            if full and not self._backing_off():
+                self._wake.set()
+        except Exception as e:  # noqa: BLE001 - fail-open: never raise
+            logger.debug(f"Telemetry enqueue error: {e}")
+
+    def _start_thread(self) -> None:
+        thread = threading.Thread(
+            target=self._run, name="prompt-shields-telemetry", daemon=True
+        )
+        try:
+            thread.start()
+        except RuntimeError as e:  # e.g. at interpreter shutdown
+            logger.debug(f"Telemetry thread not started: {e}")
+            return
+        self._thread = thread
+
+    async def flush(self) -> None:
+        """Ask the background thread to flush now; does not wait for it."""
+        self._wake.set()
+
+    # --- background thread ---------------------------------------------------
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait(self._flush_interval)
+            self._wake.clear()
+            if self._stopping and not self._final_flush:
+                return
+            try:
+                self.flush_sync()
+            except Exception as e:  # noqa: BLE001 - keep the thread alive
+                logger.debug(f"Telemetry flush error: {e}")
+            if self._stopping:
+                return
+
+    def flush_sync(self) -> None:
+        with self._send_lock:
+            super().flush_sync()
+
+    def stop(self, final_flush: bool = True) -> None:
+        """Stop the background thread without waiting for it. With
+        `final_flush`, it sends what is buffered first (in the background)."""
+        self._final_flush = final_flush
+        self._stopping = True
+        self._wake.set()
+
+    def flush_at_exit(self, timeout: float) -> None:
+        """Stop the thread, wait up to `timeout` for a send it has in flight,
+        then send what is left within the rest of `timeout`."""
+        try:
+            deadline = time.monotonic() + timeout
+            self.stop(final_flush=False)
+            if not self._send_lock.acquire(timeout=max(0.0, timeout)):
+                return
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    super().flush_at_exit(remaining)
+            finally:
+                self._send_lock.release()
+        except Exception:  # noqa: BLE001, S110 - never raise at exit
+            pass
+
+    def close_sync(self) -> None:
+        self.stop(final_flush=False)
+        with self._send_lock:
+            super().close_sync()
+
+    async def close(self) -> None:
+        # Sends synchronously: this sender's sends never use the event loop.
+        self.close_sync()
+
+    # --- buffer and counters, shared by both sides ----------------------------
+
+    def _append(self, event: dict) -> None:
+        with self._lock:
+            super()._append(event)
+
+    def _drain_chunks(self) -> list[list[dict]]:
+        with self._lock:
+            return super()._drain_chunks()
+
+    def _payload(self, chunk: list[dict]) -> dict:
+        with self._lock:
+            return super()._payload(chunk)
+
+    def _handle_response(self, resp: httpx.Response, chunk: list[dict]) -> bool:
+        with self._lock:
+            return super()._handle_response(resp, chunk)
+
+    def _handle_error(self, exc: Exception, chunk: list[dict]) -> None:
+        with self._lock:
+            super()._handle_error(exc, chunk)
+
+    def stats(self) -> dict:
+        with self._lock:
+            return super().stats()
+
+
 # --- flush at interpreter exit -------------------------------------------------
 #
 # Events still buffered when a short script exits (a stream abandoned just

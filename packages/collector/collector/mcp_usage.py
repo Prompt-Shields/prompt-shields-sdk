@@ -39,8 +39,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.audit import record_read
 from collector.auth import resolve_tenant
+from collector.config import settings
 from collector.ingest import _enforce_rate_limit
-from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
+from collector.partner_rate_limit import FixedWindowRateLimiter, get_mcp_rate_limiter
 
 router = APIRouter()
 
@@ -265,15 +266,15 @@ async def _read_body(request: Request) -> Any:
 async def ingest_mcp(
     request: Request,
     response: Response,
-    limiter: Annotated[FixedWindowRateLimiter, Depends(get_ingest_rate_limiter)],
+    limiter: Annotated[FixedWindowRateLimiter, Depends(get_mcp_rate_limiter)],
 ):
     """Ingest observed MCP tool calls: ``{"events": [{server_name,
     tool_name, outcome, latency_ms, calling_service, environment,
-    transport, source}]}``. Same ingest-key auth and rate limit as
-    ``/ingest/events``; at most ``MAX_EVENTS`` events and
-    ``MAX_BODY_BYTES`` bytes per request."""
+    transport, source}]}``. Same ingest-key auth as ``/ingest/events``,
+    with its own per-tenant rate limit (``PS_MCP_RATE_LIMIT_PER_MINUTE``);
+    at most ``MAX_EVENTS`` events and ``MAX_BODY_BYTES`` bytes per request."""
     tenant_id = await resolve_tenant(request)
-    _enforce_rate_limit(limiter, tenant_id, response)
+    _enforce_rate_limit(limiter, tenant_id, response, settings.mcp_rate_limit_per_minute)
     body = await _read_body(request)
     events = body.get("events") if isinstance(body, dict) else None
     if not isinstance(events, list):
