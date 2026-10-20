@@ -548,8 +548,8 @@
           "maxLength": 128
         },
         "ps.auth.realm": {
-          "enum": ["admin", "metrics", "oidc"],
-          "description": "What was protected: the admin console/log stream, /metrics, or the model and proxy routes behind OIDC (PS_OIDC_ENABLED)."
+          "enum": ["admin", "metrics", "mcp", "oidc"],
+          "description": "What was protected: the admin console/log stream, /metrics, the MCP proxy (PS_MCP_TOKEN), or the model and proxy routes behind OIDC (PS_OIDC_ENABLED)."
         },
         "ps.auth.reason": {
           "enum": ["missing_credentials", "invalid_credentials"]

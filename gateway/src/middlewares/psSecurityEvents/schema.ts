@@ -112,10 +112,11 @@ export interface InjectionDetectedEvent
 export interface AuthFailureEvent extends SecurityEventBase {
   'event.name': 'auth.failure';
   /**
-   * What was protected: the admin console/log stream, `/metrics`, or the
-   * model and proxy routes behind OIDC (`PS_OIDC_ENABLED`).
+   * What was protected: the admin console/log stream, `/metrics`, the MCP
+   * proxy (`/v1/mcp/{server}`), or the model and proxy routes behind OIDC
+   * (`PS_OIDC_ENABLED`).
    */
-  'ps.auth.realm': 'admin' | 'metrics' | 'oidc';
+  'ps.auth.realm': 'admin' | 'metrics' | 'mcp' | 'oidc';
   'ps.auth.reason': 'missing_credentials' | 'invalid_credentials';
   /** OIDC only: why the bearer token was refused. */
   'ps.auth.detail'?:
