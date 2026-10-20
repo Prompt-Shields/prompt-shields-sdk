@@ -18,6 +18,8 @@ import {
 import { psTelemetrySender } from './middlewares/ps-telemetry';
 import { flushSecurityEvents } from './middlewares/psSecurityEvents';
 import { createDrain, shutdownTimeoutMs } from './psShutdown';
+import { loadMcpServersFromEnv } from './mcp/loadConfig';
+import { psMcpTelemetrySender } from './mcp/telemetry';
 
 // Extract the port number from the command line arguments
 const defaultPort = 8787;
@@ -26,6 +28,16 @@ const portArg = args.find((arg) => arg.startsWith('--port='));
 const port = portArg ? parseInt(portArg.split('=')[1]) : defaultPort;
 
 const isHeadless = args.includes('--headless');
+
+// PS fork (#63): MCP proxy servers. An invalid file stops the gateway rather
+// than running with part of its MCP policy.
+try {
+  const mcpServers = await loadMcpServersFromEnv();
+  if (mcpServers) console.log(`MCP proxy: ${mcpServers} server(s) configured`);
+} catch (err) {
+  console.error(`MCP proxy configuration error: ${(err as Error).message}`);
+  process.exit(1);
+}
 const hasAdminToken = Boolean(readAdminToken());
 
 // Setup static file serving only if not in headless mode
@@ -194,7 +206,12 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
         if (result === 'timeout')
           console.warn('Shutdown deadline reached; open connections closed');
       })
-      .then(() => psTelemetrySender.shutdown())
+      .then(() =>
+        Promise.all([
+          psTelemetrySender.shutdown(),
+          psMcpTelemetrySender.shutdown(),
+        ])
+      )
       .finally(() => {
         flushSecurityEvents(true);
         process.exit(0);

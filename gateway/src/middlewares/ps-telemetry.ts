@@ -19,6 +19,7 @@ import {
   traceIdOf,
 } from './psAttempts';
 import { PSTelemetrySender } from './psTelemetrySender';
+import { isMcpProxyPath } from '../mcp/paths';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 
 interface PSConfig {
@@ -445,6 +446,8 @@ export function psTelemetry() {
 
     // Only LLM POST traffic is telemetry-worthy; skip health checks / GETs.
     if (c.req.method !== 'POST') return;
+    // MCP proxy calls are reported to /ingest/mcp by the MCP handler.
+    if (isMcpProxyPath(c.req.path)) return;
 
     try {
       const url = c.req.url as string;

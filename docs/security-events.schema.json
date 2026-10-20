@@ -545,7 +545,7 @@
           "maxLength": 128
         },
         "ps.auth.realm": {
-          "enum": ["admin", "metrics"]
+          "enum": ["admin", "metrics", "mcp"]
         },
         "ps.auth.reason": {
           "enum": ["missing_credentials", "invalid_credentials"]

@@ -110,8 +110,8 @@ export interface InjectionDetectedEvent
 
 export interface AuthFailureEvent extends SecurityEventBase {
   'event.name': 'auth.failure';
-  /** What was protected: the admin console/log stream, or `/metrics`. */
-  'ps.auth.realm': 'admin' | 'metrics';
+  /** What was protected: the admin console/log stream, `/metrics`, or the MCP proxy (`/v1/mcp/{server}`). */
+  'ps.auth.realm': 'admin' | 'metrics' | 'mcp';
   'ps.auth.reason': 'missing_credentials' | 'invalid_credentials';
   'http.response.status_code': number;
 }

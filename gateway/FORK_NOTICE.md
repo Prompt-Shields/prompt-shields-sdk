@@ -46,7 +46,7 @@ Not ported:
 - `/v1/gateway/tokenize` (#62). It is a wrapper over upstream's control-plane-coupled pricing engine (`services/winky`), so token counting will be built on our catalog instead (#71).
 - Prometheus via `prom-client` and `addMetricsMiddleware` (#61): Node-only and tied to control-plane context keys. `/metrics` is our own dependency-free implementation (`src/middlewares/psMetrics/`).
 - OTel trace ingest and `customLogHandler` (#61): wrappers over Portkey's log store. Span ingest belongs in the collector (#92).
-- MCP Gateway, `src/mcp/` (#63, proposed): a separate proxy app whose auth needs the Portkey control plane, and whose `emitLog` records tool arguments and results. MCP tool-call discovery is done by observation instead (SDK, collector, `ps-scan`); see [`docs/mcp-tool-call-discovery.md`](docs/mcp-tool-call-discovery.md).
+- MCP Gateway, upstream `src/mcp/` (#63): a separate proxy app whose auth needs the Portkey control plane, and whose `emitLog` records tool arguments and results. Not ported. Our `src/mcp/` is a PS-written enforcing proxy on the main app (`/v1/mcp/:server`, Phase 1 of [`docs/mcp-tool-call-discovery.md`](docs/mcp-tool-call-discovery.md); see [`docs/mcp-proxy.md`](docs/mcp-proxy.md)). It shares no code with upstream's and records names only.
 
 ### Upstream files modified in this fork
 

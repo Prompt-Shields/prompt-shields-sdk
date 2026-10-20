@@ -76,7 +76,9 @@ secrets:
     # Optional. Keys: PS_API_KEY (tenant API key for telemetry to the
     # collector), PS_GATEWAY_ADMIN_TOKEN, PS_METRICS_TOKEN,
     # REDIS_CONNECTION_STRING, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY,
-    # PS_OTEL_HEADERS. Callers send their own provider keys per request.
+    # PS_OTEL_HEADERS, PS_MCP_TOKEN and the upstream MCP server credentials
+    # named in the MCP config (auth.token_env / auth.value_env). Callers send
+    # their own provider keys per request.
     existingSecret: ""
     values: {}
 

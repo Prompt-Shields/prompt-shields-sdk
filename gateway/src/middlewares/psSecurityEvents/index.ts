@@ -450,7 +450,7 @@ export function recordHookResults(
 // ---------------------------------------------------------------------------
 // Gateway refusals
 
-/** A gateway credential check failed (admin console/log stream or /metrics). */
+/** A gateway credential check failed (admin console/log stream, /metrics or the MCP proxy). */
 export function reportAuthFailure(
   c: Context,
   realm: AuthFailureEvent['ps.auth.realm'],
