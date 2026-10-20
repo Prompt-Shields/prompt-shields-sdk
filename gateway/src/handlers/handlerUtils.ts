@@ -51,6 +51,7 @@ import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
 import { recordAttempt } from '../middlewares/psAttempts';
+import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
 import {
@@ -365,7 +366,7 @@ export async function tryPost(
     if (decision.kind === 'hooks' && decision.fn === 'createModelResponse') {
       const unsupported = responsesUnsupportedChecks(targetHooks);
       if (unsupported.length) {
-        return responsesUnsupportedChecksResponse(decision.fn, unsupported);
+        return responsesUnsupportedChecksResponse(c, decision.fn, unsupported);
       }
     }
     return tryPostToProvider(
@@ -406,7 +407,7 @@ export async function tryPost(
   if ((adapterResult ? adapterResult.fn : fn) === 'createModelResponse') {
     const unsupported = responsesUnsupportedChecks(targetHooks);
     if (unsupported.length) {
-      return responsesUnsupportedChecksResponse(fn, unsupported);
+      return responsesUnsupportedChecksResponse(c, fn, unsupported);
     }
   }
   if (!adapterResult) {
@@ -442,11 +443,14 @@ export async function tryPost(
 /**
  * PS fork (#73): the 400 for a target whose hooks include checks that cannot
  * run on a Responses API request, in the error shape of the caller's API.
+ * Recorded as a payload.rejected security event (reason only, no content).
  */
 function responsesUnsupportedChecksResponse(
+  c: Context,
   fn: endpointStrings,
   checks: string[]
 ): Response {
+  reportPayloadRejected(c, 'unsupported_guardrail', 400);
   const message =
     `The guardrail checks ${checks.join(', ')} cannot run on Responses API ` +
     'requests, so this target cannot be called via the Responses API.';

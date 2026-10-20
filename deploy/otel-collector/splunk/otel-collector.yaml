@@ -1,0 +1,148 @@
+# OpenTelemetry Collector (contrib distribution, or the Splunk OTel
+# Collector) → Splunk HEC, for Prompt Shields.
+#
+# In:
+#   - OTLP/HTTP and gRPC: security-event log records from the gateway
+#     (PS_SECURITY_EVENTS_OTLP=true) and, optionally, GenAI spans
+#     (PS_OTEL_ENDPOINT);
+#   - Prometheus scrape of the gateway and collector /metrics
+#     (PS_METRICS_ENABLED=true, PS_COLLECTOR_METRICS_ENABLED=true).
+# Out: Splunk HEC (splunk_hec exporter): security events to an event index,
+#   metrics to a metrics index, spans to the event index.
+#
+# Environment:
+#   SPLUNK_HEC_ENDPOINT       https://splunk.example.internal:8088/services/collector
+#   SPLUNK_HEC_TOKEN          the HEC token (a secret; never put it in this file)
+#   SPLUNK_EVENTS_INDEX       event index for security events and spans (ps_security)
+#   SPLUNK_METRICS_INDEX      metrics index (datatype = metric) (ps_metrics)
+#   SPLUNK_HEC_INSECURE_SKIP_VERIFY  true only for a local self-signed Splunk
+#   PS_GATEWAY_METRICS_TARGET    host:port of the gateway (prompt-shields-gateway:8787)
+#   PS_COLLECTOR_METRICS_TARGET  host:port of the collector (prompt-shields-collector:8000)
+#
+# Validate with: otelcol-contrib validate --config otel-collector.yaml
+# Local end-to-end stack: docker-compose.splunk.yml next to this file.
+# Docs: docs/guides/observability.mdx
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  prometheus/prompt_shields:
+    config:
+      scrape_configs:
+        - job_name: prompt-shields-gateway
+          scrape_interval: 30s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["${env:PS_GATEWAY_METRICS_TARGET}"]
+          # With PS_METRICS_TOKEN set on the gateway:
+          # authorization:
+          #   credentials_file: /etc/otelcol/ps-metrics-token
+        - job_name: prompt-shields-collector
+          scrape_interval: 30s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["${env:PS_COLLECTOR_METRICS_TARGET}"]
+          # With PS_COLLECTOR_METRICS_TOKEN set on the collector:
+          # authorization:
+          #   credentials_file: /etc/otelcol/ps-collector-metrics-token
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+  # Only Prompt Shields security events go to the security index: every
+  # record the gateway exports has the instrumentation scope "ps.security".
+  filter/ps_security:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'instrumentation_scope.name != "ps.security"'
+
+  # The event body is the v1 JSON event, identical to the stdout line, so
+  # Splunk's KV_MODE=json extracts every field at search time. Dropping the
+  # duplicate log attributes keeps them from also being sent as HEC indexed
+  # fields; remove this processor to keep them as indexed fields instead.
+  transform/ps_security:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - keep_keys(attributes, ["event.name", "severity", "ps.tenant", "ps.business_unit"])
+
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  splunk_hec/ps_security:
+    endpoint: ${env:SPLUNK_HEC_ENDPOINT}
+    token: ${env:SPLUNK_HEC_TOKEN}
+    index: ${env:SPLUNK_EVENTS_INDEX}
+    source: prompt-shields-gateway
+    sourcetype: "promptshields:gateway:security"
+    tls:
+      insecure_skip_verify: ${env:SPLUNK_HEC_INSECURE_SKIP_VERIFY}
+    # Back off and retry while Splunk is unreachable; a persistent queue
+    # (file_storage extension + sending_queue.storage) survives restarts.
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 10m
+
+  splunk_hec/ps_metrics:
+    endpoint: ${env:SPLUNK_HEC_ENDPOINT}
+    token: ${env:SPLUNK_HEC_TOKEN}
+    index: ${env:SPLUNK_METRICS_INDEX}
+    source: prompt-shields
+    sourcetype: "promptshields:metrics"
+    tls:
+      insecure_skip_verify: ${env:SPLUNK_HEC_INSECURE_SKIP_VERIFY}
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+
+  splunk_hec/ps_traces:
+    endpoint: ${env:SPLUNK_HEC_ENDPOINT}
+    token: ${env:SPLUNK_HEC_TOKEN}
+    index: ${env:SPLUNK_EVENTS_INDEX}
+    source: prompt-shields-gateway
+    sourcetype: "promptshields:gateway:span"
+    tls:
+      insecure_skip_verify: ${env:SPLUNK_HEC_INSECURE_SKIP_VERIFY}
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    logs/ps_security:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/ps_security, transform/ps_security, batch]
+      exporters: [splunk_hec/ps_security]
+    metrics/prompt_shields:
+      receivers: [prometheus/prompt_shields]
+      processors: [memory_limiter, batch]
+      exporters: [splunk_hec/ps_metrics]
+    # GenAI spans from PS_OTEL_ENDPOINT=http://<collector>:4318/v1/traces.
+    # Remove this pipeline if spans go elsewhere (Splunk APM: use the
+    # otlphttp or signalfx exporter instead).
+    traces/prompt_shields:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [splunk_hec/ps_traces]

@@ -102,6 +102,14 @@ cronJobs:
       enabled: true
       schedule: "0 5 * * *"
       args: ["python", "-m", "collector.leanix", "--tenant", "00000000-0000-0000-0000-000000000001"]
+grafanaDashboards:
+  enabled: true
+  annotations:
+    grafana_folder: Prompt Shields
+prometheusRule:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
 networkPolicy:
   gateway:
     ingressFrom:

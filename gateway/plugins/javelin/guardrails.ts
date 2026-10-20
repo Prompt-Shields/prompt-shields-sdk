@@ -5,6 +5,7 @@ import {
   PluginParameters,
 } from '../types';
 import { getCurrentContentPart } from '../utils';
+import { pluginRequest } from '../egress';
 
 interface JavelinCredentials {
   apiKey: string;
@@ -64,7 +65,8 @@ async function callJavelinGuardrails(
 
   console.log('[Javelin] Request body:', JSON.stringify(requestBody));
 
-  const response = await fetch(apiUrl, {
+  // PS fork (security): `domain` is caller-set; SSRF-safe egress.
+  const { response, text: responseText } = await pluginRequest(apiUrl, {
     method: 'POST',
     headers,
     body: JSON.stringify(requestBody),
@@ -73,14 +75,14 @@ async function callJavelinGuardrails(
   console.log('[Javelin] Response status:', response.status);
 
   if (!response.ok) {
-    const errorText = await response.text();
+    const errorText = responseText;
     console.error('[Javelin] API error:', errorText);
     throw new Error(
       `Javelin Guardrails API error: ${response.status} ${response.statusText} - ${errorText}`
     );
   }
 
-  const responseData = await response.json();
+  const responseData = JSON.parse(responseText);
 
   return responseData as GuardrailsResponse;
 }
