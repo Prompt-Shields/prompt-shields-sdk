@@ -19,6 +19,12 @@ Events
                   fields (collector.attestation): field, state, actor type
                   and time. The free-text comment, the attested value and
                   `attested_by` (usually an email) are left out.
+  audit.*         one per row of the tenant's hash-chained admin audit
+                  trail (collector.audit_trail), typed `audit.<action>`,
+                  e.g. `audit.provider_credential.rotate`. Subscribe with
+                  the event type `audit.*`; the partner needs `audit:read`.
+                  The event id is the audit row id, and the payload carries
+                  seq, prev_hash and row_hash so a SIEM can check the chain.
 
 Flow
   1. Producers (ingest, OTel ingest, lifecycle sweep, attestation) call
@@ -111,7 +117,15 @@ ASSET_CHANGED = "asset.changed"
 ASSET_RETIRED = "asset.retired"
 ASSET_ATTESTED = "asset.attested"
 EVENT_TYPES: tuple[str, ...] = (ASSET_CREATED, ASSET_CHANGED, ASSET_RETIRED, ASSET_ATTESTED)
-EventType = Literal["asset.created", "asset.changed", "asset.retired", "asset.attested"]
+# Subscription event type for every audit event (`audit.<action>`). Not in
+# EVENT_TYPES, the default for a new subscription: it needs its own scope.
+AUDIT_EVENTS = "audit.*"
+AUDIT_PREFIX = "audit."
+AUDIT_SCOPE = "audit:read"
+SUBSCRIBABLE_EVENT_TYPES: tuple[str, ...] = (*EVENT_TYPES, AUDIT_EVENTS)
+EventType = Literal[
+    "asset.created", "asset.changed", "asset.retired", "asset.attested", "audit.*"
+]
 
 # Scope a partner must hold to receive each event type. Asset events carry
 # the same asset data `/partner/v1/changes` returns under `changes:read`;
@@ -128,8 +142,23 @@ EVENT_SCOPES: dict[str, str] = {
 }
 
 
+def is_audit_event(event_type: str) -> bool:
+    return event_type.startswith(AUDIT_PREFIX)
+
+
 def required_scope(event_type: str) -> str:
+    if is_audit_event(event_type):
+        return AUDIT_SCOPE
     return EVENT_SCOPES[event_type]
+
+
+def subscription_wants(subscribed: Iterable[str], event_type: str) -> bool:
+    """Whether a subscription's event types cover `event_type`. `audit.*`
+    covers every `audit.<action>`."""
+    subscribed = list(subscribed)
+    if is_audit_event(event_type):
+        return AUDIT_EVENTS in subscribed or event_type in subscribed
+    return event_type in subscribed
 
 
 def partner_has_event_scope(partner: PartnerCredential, event_type: str) -> bool:
@@ -680,6 +709,67 @@ async def _enqueue(
             )
             queued += 1
     return queued
+
+
+async def enqueue_audit_event(
+    db: AsyncSession,
+    tenant_id: UUID,
+    event_type: str,
+    event_id: UUID,
+    data: dict,
+    created_at: datetime,
+) -> int:
+    """Queue one `audit.<action>` event (collector.audit_trail) to every
+    eligible `audit.*` subscription of the tenant. Does not commit.
+
+    The event id is the audit row's id, so a receiver can de-duplicate
+    retries and match the event to the row.
+    """
+    subs = (
+        await db.execute(
+            select(
+                WebhookSubscription.id,
+                WebhookSubscription.event_types,
+                PartnerCredential.scopes,
+            )
+            .join(PartnerCredential, PartnerCredential.id == WebhookSubscription.partner_id)
+            .where(
+                WebhookSubscription.tenant_id == tenant_id,
+                WebhookSubscription.is_active.is_(True),
+                PartnerCredential.tenant_id == tenant_id,
+                *_eligible_partner_clause(created_at),
+            )
+        )
+    ).all()
+    targets = [
+        s.id
+        for s in subs
+        if subscription_wants(s.event_types, event_type)
+        and AUDIT_SCOPE in expand_scopes(s.scopes)
+    ]
+    if not targets:
+        return 0
+    payload = {
+        "id": str(event_id),
+        "type": event_type,
+        "created_at": created_at.isoformat(),
+        "tenant_id": str(tenant_id),
+        "data": data,
+    }
+    for sub_id in targets:
+        db.add(
+            WebhookDelivery(
+                tenant_id=tenant_id,
+                subscription_id=sub_id,
+                event_id=event_id,
+                event_type=event_type,
+                asset_id=None,
+                payload=payload,
+                next_attempt_at=created_at,
+                created_at=created_at,
+            )
+        )
+    return len(targets)
 
 
 async def enqueue_lifecycle_events(

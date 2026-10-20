@@ -20,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
+from db import audit_chain
+
 
 def uuid7():
     """Generate a UUIDv7 (time-sortable). Falls back to uuid4 for Phase 1."""
@@ -446,6 +448,48 @@ class RetentionAuditLog(Base):
     )
 
 
+class AuditEvent(Base):
+    """Tamper-evident trail of admin and security-relevant actions.
+
+    One hash chain per tenant (``seq`` 1, 2, ...; see db/audit_chain.py):
+    credential and scope changes, webhook admin, operator actions,
+    retention runs, registry lifecycle changes and admin auth failures.
+    Written by ``collector.audit_trail.record`` in the same transaction as
+    the change. Holds ids and counts only: never a secret, never personal
+    data beyond ids (no emails, IP addresses or free text).
+
+    ``tenant_id`` has no foreign key, like ``retention_audit_log``: the
+    chain outlives a tenant erasure. Events with no tenant use
+    ``SYSTEM_TENANT_ID`` (the nil UUID). Rows are append-only on Postgres
+    (triggers reject UPDATE, and DELETE outside the audit purge).
+    """
+
+    __tablename__ = "audit_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    seq = Column(BigInteger, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    action = Column(Text, nullable=False)  # e.g. provider_credential.rotate
+    outcome = Column(Text, nullable=False)  # success | failure
+    actor_type = Column(Text, nullable=False)  # tenant_key | partner | operator | system
+    # Key prefix, partner credential id or operator/job name; never a secret.
+    actor_id = Column(Text)
+    target_type = Column(Text)
+    target_id = Column(Text)
+    request_id = Column(Text)
+    status_code = Column(Integer)
+    details = Column(JSONB, nullable=False, default=dict)
+    prev_hash = Column(Text, nullable=False)
+    row_hash = Column(Text, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "seq", name="uq_audit_events_tenant_seq"),
+        Index("ix_audit_events_tenant_ts", "tenant_id", "created_at"),
+        Index("ix_audit_events_action_ts", "action", "created_at"),
+    )
+
+
 class TelemetryClientStats(Base):
     """Per-tenant, per-SDK-client delivery accounting (#87).
 
@@ -635,14 +679,18 @@ FOR EACH ROW EXECUTE FUNCTION asset_attestations_no_delete()
 """
 
 # Install the triggers when the schema is built with create_all too (tests).
-for _ddl in (
-    ATTESTATION_IMMUTABLE_FUNCTION_SQL,
-    ATTESTATION_IMMUTABLE_TRIGGER_SQL,
-    ATTESTATION_NO_DELETE_FUNCTION_SQL,
-    ATTESTATION_NO_DELETE_TRIGGER_SQL,
-):
-    event.listen(
+for _table, _ddls in (
+    (
         AssetAttestation.__table__,
-        "after_create",
-        DDL(_ddl).execute_if(dialect="postgresql"),
-    )
+        (
+            ATTESTATION_IMMUTABLE_FUNCTION_SQL,
+            ATTESTATION_IMMUTABLE_TRIGGER_SQL,
+            ATTESTATION_NO_DELETE_FUNCTION_SQL,
+            ATTESTATION_NO_DELETE_TRIGGER_SQL,
+        ),
+    ),
+    (AuditEvent.__table__, audit_chain.TRIGGER_DDL),
+):
+    for _ddl in _ddls:
+        event.listen(_table, "after_create", DDL(_ddl).execute_if(dialect="postgresql"))
+

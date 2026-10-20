@@ -43,7 +43,7 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import provider_credentials
+from collector import audit_trail, provider_credentials
 from collector.dedup import compute_confidence
 from collector.lifecycle import lock_assets, record_sighting
 from collector.webhooks import AssetChanges
@@ -115,10 +115,28 @@ async def resolve_admin_keys(
         except (ValueError, provider_credentials.CredentialsNotConfigured) as exc:
             # Messages name key ids at most, never key material.
             errors[row.provider] = f"stored credential unusable: {exc}"
+            await _audit_use(db, tenant_id, row.provider, audit_trail.FAILURE)
             continue
         keys[row.provider] = SecretStr(plain)
         sources[row.provider] = "stored"
+        await _audit_use(db, tenant_id, row.provider, audit_trail.SUCCESS)
     return keys, sources, errors
+
+
+async def _audit_use(db: AsyncSession, tenant_id: UUID, provider: str, outcome: str) -> None:
+    """provider_credential.use: a stored key was decrypted for a pull.
+    The env fallback (PS_PROVIDER_ADMIN_KEYS) is operator-held and not a
+    tenant credential, so it is not recorded here."""
+    await audit_trail.record(
+        db,
+        tenant_id=tenant_id,
+        action="provider_credential.use",
+        outcome=outcome,
+        actor=audit_trail.system_actor("provider-usage-pull"),
+        target_type="provider_credential",
+        target_id=provider,
+        details={"provider": provider, "purpose": "usage_pull"},
+    )
 
 
 class ProviderUsageError(Exception):
@@ -500,6 +518,10 @@ async def pull_provider_usage(
         raise ValueError("start must be before end")
 
     keys, sources, key_errors = await resolve_admin_keys(db, tenant_id, settings)
+    # Commit the provider_credential.use rows (and any re-encryption) now:
+    # writing them holds the tenant's audit chain lock, which must not stay
+    # held across the provider API calls below.
+    await db.commit()
     wanted = [p for p in (providers or SUPPORTED_PROVIDERS) if p in SUPPORTED_PROVIDERS]
     result: dict[str, dict] = {}
     for provider in wanted:

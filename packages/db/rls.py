@@ -49,6 +49,7 @@ TENANT_TABLES: dict[str, str] = {
     "provider_credentials": "tenant_id",
     "provider_key_fingerprints": "tenant_id",
     "mcp_tool_usage": "tenant_id",
+    "audit_events": "tenant_id",
 }
 
 

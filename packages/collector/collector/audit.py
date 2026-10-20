@@ -190,8 +190,22 @@ async def purge_expired(db, retention_days: int, now: datetime | None = None) ->
     result = await db.execute(
         delete(PartnerAuditLog).where(PartnerAuditLog.timestamp < cutoff)
     )
+    deleted = result.rowcount or 0
+    # The purge run itself goes on the system chain of the admin audit
+    # trail (collector.audit_trail). Late import: audit_trail imports this.
+    from collector import audit_trail
+
+    await audit_trail.record(
+        db,
+        tenant_id=audit_trail.SYSTEM_TENANT_ID,
+        action="audit_log.purge",
+        actor=audit_trail.system_actor("audit-purge"),
+        target_type="table",
+        target_id="partner_audit_log",
+        details={"rows_deleted": deleted, "cutoff": cutoff, "retention_days": retention_days},
+    )
     await db.commit()
-    return result.rowcount or 0
+    return deleted
 
 
 async def _purge_main() -> int:

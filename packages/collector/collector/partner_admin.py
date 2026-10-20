@@ -7,6 +7,10 @@ ONCE on creation; subsequent reads expose only the hashes. Scopes and
 rate-limit tiers come from `collector.partner_scopes`.
 
 This is the dashboard's hook for the "Partners > Add Integration" UX.
+
+Issuing, changing (scopes, rate limit) and revoking a credential each
+write an `audit_events` row (collector.audit_trail) with the change: scope
+names and tier, never the secret or the API key.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from collector import audit_trail
 from collector.auth import resolve_tenant
 from collector.partner_auth import (
     generate_api_key,
@@ -205,6 +210,23 @@ async def issue_partner_credential(
         expires_at=body.expires_at,
     )
     db.add(partner)
+    await db.flush()
+    await audit_trail.record(
+        db,
+        tenant_id=tenant_id,
+        action="partner_credential.create",
+        actor=audit_trail.tenant_key_actor(request),
+        target_type="partner_credential",
+        target_id=partner.id,
+        status_code=201,
+        details={
+            "scopes": scopes,
+            "rate_limit_tier": tier,
+            "rate_limit": rate_limit,
+            "issued_partner_api_key": api_key is not None,
+            "expires_at": body.expires_at,
+        },
+    )
     await db.commit()
     await db.refresh(partner)
 
@@ -253,12 +275,47 @@ async def update_partner_credential(
     """Takes effect on the partner's next request, including requests made
     with access tokens issued before the change."""
     row = await _get_credential(request, credential_id)
-    if body.scopes is not None:
-        row.scopes = _validated_scopes(body.scopes)
-    if body.rate_limit_tier is not None or body.rate_limit is not None:
-        row.rate_limit_tier, row.rate_limit = _resolve_rate_limit(
-            body.rate_limit_tier, body.rate_limit, default_tier=None
+    tenant_id = row.tenant_id
+    before_scopes = list(row.scopes or [])
+    before_limit = (row.rate_limit_tier, row.rate_limit)
+    try:
+        if body.scopes is not None:
+            row.scopes = _validated_scopes(body.scopes)
+        if body.rate_limit_tier is not None or body.rate_limit is not None:
+            row.rate_limit_tier, row.rate_limit = _resolve_rate_limit(
+                body.rate_limit_tier, body.rate_limit, default_tier=None
+            )
+    except HTTPException as exc:
+        await request.state.db.rollback()
+        await audit_trail.record_committed(
+            request.state.db,
+            tenant_id=tenant_id,
+            action="partner_credential.update",
+            outcome=audit_trail.FAILURE,
+            actor=audit_trail.tenant_key_actor(request),
+            target_type="partner_credential",
+            target_id=credential_id,
+            status_code=exc.status_code,
         )
+        raise
+    after_scopes = list(row.scopes or [])
+    await audit_trail.record(
+        request.state.db,
+        tenant_id=row.tenant_id,
+        action="partner_credential.update",
+        actor=audit_trail.tenant_key_actor(request),
+        target_type="partner_credential",
+        target_id=row.id,
+        status_code=200,
+        details={
+            "scopes": after_scopes,
+            "scopes_added": sorted(set(after_scopes) - set(before_scopes)),
+            "scopes_removed": sorted(set(before_scopes) - set(after_scopes)),
+            "rate_limit_tier": row.rate_limit_tier,
+            "rate_limit": row.rate_limit,
+            "rate_limit_changed": (row.rate_limit_tier, row.rate_limit) != before_limit,
+        },
+    )
     await request.state.db.commit()
     await request.state.db.refresh(row)
     return _credential_dict(row)
@@ -275,4 +332,13 @@ async def revoke_partner_credential(
 ) -> None:
     row = await _get_credential(request, credential_id)
     row.is_active = "false"
+    await audit_trail.record(
+        request.state.db,
+        tenant_id=row.tenant_id,
+        action="partner_credential.revoke",
+        actor=audit_trail.tenant_key_actor(request),
+        target_type="partner_credential",
+        target_id=row.id,
+        status_code=204,
+    )
     await request.state.db.commit()

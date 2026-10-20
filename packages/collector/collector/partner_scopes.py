@@ -48,6 +48,10 @@ SCOPES: dict[str, str] = {
         "Store, rotate and delete provider admin keys (write-only) and "
         "key fingerprint links for the org usage pull"
     ),
+    "audit:read": (
+        "Receive the tenant's admin audit trail as `audit.*` webhook events "
+        "(credential, scope, webhook, retention and registry changes)"
+    ),
 }
 
 # What `registry:read` meant in Phase 1: every read route. Frozen on

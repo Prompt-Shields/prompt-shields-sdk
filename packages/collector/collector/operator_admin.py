@@ -3,6 +3,12 @@
 Mounted at /api/v1/operator. These act across tenants, so they are not
 behind a tenant API key: they take ``Authorization: Bearer $PS_ADMIN_TOKEN``.
 With ``PS_ADMIN_TOKEN`` unset every route answers 404, as if absent.
+
+Audit trail (collector.audit_trail): purges, retention changes and
+erasures are recorded in the tenant's chain by collector.retention;
+reading a tenant's retention is recorded here; a wrong or missing operator
+token is an ``auth.failure`` on the system chain (rate-limited).
+``GET /audit/verify`` checks the hash chains.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from collector import retention, rls
+from collector import audit_trail, retention, rls
 from collector.config import settings
 
 router = APIRouter(prefix="/api/v1/operator", tags=["Operator"])
@@ -48,8 +54,14 @@ async def require_operator(request: Request) -> str:
         auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
     )
     if not presented or not hmac.compare_digest(presented.encode(), token.encode()):
+        await audit_trail.record_auth_failure(
+            request,
+            realm="operator",
+            reason="invalid_credentials" if presented else "missing_credentials",
+            status_code=401,
+        )
         raise _problem(401, "Unauthorized", "Invalid operator token")
-    actor = "operator-api"
+    actor = audit_trail.OPERATOR.id
     await rls.bypass(
         request.state.db, f"operator:{request.method} {request.url.path}", actor=actor
     )
@@ -99,6 +111,15 @@ async def get_retention(
     if row is None:
         raise _problem(404, "Not Found", "Tenant not found")
     tenant_settings = row[0] or {}
+    await audit_trail.record_committed(
+        request.state.db,
+        tenant_id=tenant_id,
+        action="tenant.retention.read",
+        actor=audit_trail.OPERATOR,
+        target_type="tenant",
+        target_id=tenant_id,
+        status_code=200,
+    )
     return {
         "tenant_id": str(tenant_id),
         "retention_days": retention.retention_days_for(tenant_settings),
@@ -132,3 +153,19 @@ async def erase(
         raise _problem(400, "Bad Request", "confirm must equal the tenant id")
     result = await retention.erase_tenant(request.state.db, tenant_id, actor=actor)
     return asdict(result)
+
+
+@router.get("/audit/verify", summary="Verify the audit trail hash chains")
+async def verify_audit(
+    request: Request,
+    tenant_id: UUID | None = None,
+    actor: str = Depends(require_operator),
+):
+    """Walks each chain (one tenant's, or every chain including the system
+    chain) and reports the first break. ``ok`` is false if any chain is
+    broken; ``head_hash`` is worth recording outside the database."""
+    results = await audit_trail.verify_all(request.state.db, tenant_id)
+    return {
+        "ok": all(r.ok for r in results),
+        "data": [asdict(r) for r in results],
+    }

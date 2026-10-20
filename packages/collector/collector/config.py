@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # Rows in partner_audit_log older than this are deleted by
     # `python -m collector.audit purge`.
     audit_retention_days: int = 365
+    # Rows in audit_events (the hash-chained admin audit trail,
+    # collector/audit_trail.py) older than this are removed by
+    # `python -m collector.audit_trail purge`, leaving a checkpoint row so
+    # the rest still verifies. 0 (the default) keeps them forever.
+    audit_event_retention_days: int = 0
     # Asset lifecycle: days without telemetry before an asset is marked
     # stale (PS_ASSET_STALE_AFTER_DAYS) and then retired
     # (PS_ASSET_RETIRE_AFTER_DAYS). See collector/lifecycle.py.

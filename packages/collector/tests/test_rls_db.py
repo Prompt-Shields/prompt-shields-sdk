@@ -17,16 +17,18 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from collector import rls
+from collector import audit_trail, rls
 from collector.app import app
 from collector.config import settings
 from collector.partner_auth import hash_secret
+from db import audit_chain
 from db import rls as rls_sql
 from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import (
     AIAsset,
     AIUsageEvent,
     AssetAttestation,
+    AuditEvent,
     Base,
     DataFlow,
     McpToolUsage,
@@ -58,6 +60,26 @@ def test_every_tenant_table_has_a_policy():
         t.name for t in Base.metadata.tables.values() if "tenant_id" in t.c
     }
     assert set(rls_sql.TENANT_TABLES) == expected
+
+
+def _audit_seed(tenant_id) -> AuditEvent:
+    """A valid first row of the tenant's audit chain."""
+    row = AuditEvent(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        seq=1,
+        created_at=datetime.now(UTC),
+        action="seed",
+        outcome="success",
+        actor_type="system",
+        actor_id="test",
+        details={},
+        prev_hash=audit_chain.GENESIS_HASH,
+    )
+    row.row_hash = audit_chain.compute_row_hash(
+        row.prev_hash, audit_trail.chained_fields(row)
+    )
+    return row
 
 
 async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
@@ -128,6 +150,7 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     tool_name="search",
                     call_count=1,
                 ),
+                _audit_seed(tenant_id),
             ]
         )
         sub = WebhookSubscription(
@@ -1179,3 +1202,50 @@ async def test_servicenow_sync_runs_as_its_tenant_under_rls(rls_db, monkeypatch)
     async with rls_db["admin"]() as s:
         state = (await s.get(Tenant, b)).settings["connectors"]["servicenow"]
     assert state["last_status"] == "error" and state["cursor"]
+
+
+async def test_audit_trail_under_rls(rls_db, monkeypatch):
+    """A tenant context appends to and reads only its own chain; the system
+    chain is invisible to tenants; the operator verify endpoint sees every
+    chain through its logged bypass."""
+    a, b = rls_db["a"], rls_db["b"]
+    audit_trail.auth_failure_limiter.reset()
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        row = await audit_trail.record(
+            s, tenant_id=a, action="test.action", actor=audit_trail.system_actor("t")
+        )
+        await s.commit()
+        assert row.seq == 2  # after the seeded row
+        assert set(await _tenant_ids(s, "audit_events")) == {a}
+        assert (await audit_trail.verify_chain(s, b)).rows == 0  # not visible
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await audit_trail.record(
+                s, tenant_id=b, action="evil", actor=audit_trail.system_actor("t")
+            )
+
+    monkeypatch.setattr(settings, "admin_token", TOKEN)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/operator/retention/purge",
+            headers={"Authorization": "Bearer wrong"},
+            json={},
+        )
+        assert resp.status_code == 401
+        resp = await c.get(
+            "/api/v1/operator/audit/verify", headers={"Authorization": f"Bearer {TOKEN}"}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+    assert body["ok"] is True
+    chains = {r["tenant_id"]: r for r in body["data"]}
+    assert set(chains) == {str(a), str(b), str(audit_chain.SYSTEM_TENANT_ID)}
+    assert chains[str(a)]["rows"] == 2
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        actions = (await s.execute(select(AuditEvent.action))).scalars().all()
+    assert "auth.failure" not in actions  # on the system chain, not tenant a's
