@@ -26,12 +26,18 @@ issued before tiers existed keep their own limit (1,000 unless changed).
 
 ## Ingest Limits
 
-`POST /ingest/events` and `POST /ingest/mcp` are limited per tenant API key,
-counted together in requests per minute (a batch of events is one request). The default is 100 requests/minute,
+`POST /ingest/events` is limited per tenant API key, in requests per minute
+(a batch of events is one request). The default is 100 requests/minute,
 set with `PS_RATE_LIMIT_PER_MINUTE` on the collector; `0` turns it off. It
 uses the same headers and `429` response as the Partner API. The SDK is
 fail-open: a `429` keeps the batch buffered for the next flush and never blocks
 the model call.
+
+`POST /ingest/mcp` has its own per-tenant limit, counted separately so MCP
+tool call telemetry never uses up the budget for LLM telemetry:
+`PS_MCP_RATE_LIMIT_PER_MINUTE`, default 600 requests/minute (`0` turns it
+off). The Python SDK batches MCP events (one request every 2 s or per 100
+events per process), so the default leaves room for many processes per tenant.
 
 `POST /ingest/kong` has its own per-tenant limit, counted separately:
 `PS_KONG_RATE_LIMIT_PER_MINUTE`, default 6,000 requests/minute (`0` turns it

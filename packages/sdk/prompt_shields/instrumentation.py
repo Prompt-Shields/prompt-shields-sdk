@@ -27,7 +27,8 @@
   - mcp:          the official `mcp` package's `ClientSession.call_tool`
                   (client-side MCP tool calls; see `mcp_instrumentation`).
                   Names, outcome and latency only, sent to `/ingest/mcp`;
-                  tool arguments and results are never read.
+                  tool arguments and results are never read. Batched off
+                  the call path by default (`mcp_telemetry_mode`).
 Missing packages, or methods an installed version lacks, are skipped.
 openai and anthropic are imported and patched by `instrument()`; the other
 SDKs are patched when the app imports them (at once if already imported),
@@ -97,6 +98,7 @@ from prompt_shields.streaming import (
 )
 from prompt_shields.telemetry import (
     AtlasTelemetrySender,
+    BackgroundTelemetrySender,
     TelemetrySender,
     build_atlas_event,
     register_exit_flush,
@@ -196,6 +198,19 @@ _LAZY_VENDORS = ("google", "mistral", "cohere", "bedrock", "mcp")
 
 # Largest batch the MCP sender posts (the collector accepts up to 1000).
 _MCP_MAX_BATCH = 500
+# Largest request body it posts, in bytes (the collector accepts 1 MiB):
+# 500 events with long non-ASCII names can exceed it.
+_MCP_MAX_BATCH_BYTES = 1_000_000
+
+# How MCP tool call events are sent (`mcp_telemetry_mode`,
+# PS_MCP_TELEMETRY_MODE): "batch" (default) only buffers them on the call
+# path and a background thread posts them, every _MCP_FLUSH_INTERVAL seconds
+# or once _MCP_FLUSH_SIZE are buffered; "sync" posts each event before
+# `call_tool` returns.
+MCP_TELEMETRY_MODE_ENV = "PS_MCP_TELEMETRY_MODE"
+MCP_TELEMETRY_MODES = ("batch", "sync")
+_MCP_FLUSH_SIZE = 100
+_MCP_FLUSH_INTERVAL = 2.0
 
 # (module, class) -> the (module, class) that replaces it when present: the
 # public cohere clients are only patched when there is no raw client (the
@@ -430,10 +445,11 @@ def suppress_instrumentation():
 class _State:
     def __init__(self, telemetry, atlas, metadata, scan_pii, send_prompt_text,
                  pricing_table, vendors=None, azure_deployments=None,
-                 collector_url=None, api_key=None):
+                 collector_url=None, api_key=None, mcp_mode="batch"):
         self.telemetry = telemetry
         self.collector_url = collector_url
         self.api_key = api_key
+        self.mcp_mode = mcp_mode
         self.mcp_telemetry: TelemetrySender | None = None
         self.vendors = vendors
         self.azure_adapter = AzureOpenAIAdapter(azure_deployments)
@@ -450,13 +466,17 @@ class _State:
         apps that never use MCP get no extra client."""
         with _lock:
             if self.mcp_telemetry is None:
-                self.mcp_telemetry = TelemetrySender(
-                    self.collector_url,
-                    self.api_key,
-                    path="/ingest/mcp",
-                    max_batch=_MCP_MAX_BATCH,
-                    report_loss=False,
-                )
+                kwargs = {"path": "/ingest/mcp", "max_batch": _MCP_MAX_BATCH,
+                          "max_batch_bytes": _MCP_MAX_BATCH_BYTES,
+                          "report_loss": False}
+                if self.mcp_mode == "sync":
+                    self.mcp_telemetry = TelemetrySender(
+                        self.collector_url, self.api_key, **kwargs)
+                else:
+                    self.mcp_telemetry = BackgroundTelemetrySender(
+                        self.collector_url, self.api_key,
+                        flush_size=_MCP_FLUSH_SIZE,
+                        flush_interval=_MCP_FLUSH_INTERVAL, **kwargs)
                 if _state is self:
                     register_exit_flush(self.mcp_telemetry)
             return self.mcp_telemetry
@@ -484,6 +504,7 @@ def instrument(
     vendors: tuple[str, ...] | list[str] | None = None,
     azure_deployments: dict[str, str] | None = None,
     exit_flush_timeout: float | None = None,
+    mcp_telemetry_mode: str | None = None,
 ) -> bool:
     """Patch installed provider SDKs so every call emits a telemetry event.
 
@@ -502,8 +523,13 @@ def instrument(
     `exit_flush_timeout` bounds the best-effort flush of still-buffered
     events at interpreter exit, in seconds (default `PS_EXIT_FLUSH_TIMEOUT`,
     else 2; 0 turns it off, as does `PS_DISABLE_EXIT_FLUSH=1`).
+    `mcp_telemetry_mode` (default `PS_MCP_TELEMETRY_MODE`, else "batch"):
+    "batch" only buffers MCP tool call events on the call path and sends
+    them from a background thread (every 2 s or 100 events, one request per
+    batch); "sync" sends each before `call_tool` returns.
     Returns True if this call instrumented, False if already instrumented.
-    Raises ValueError when no Prompt Shields API key is available.
+    Raises ValueError when no Prompt Shields API key is available, or for
+    an unknown `mcp_telemetry_mode`.
     """
     global _state
     with _lock:
@@ -520,6 +546,7 @@ def instrument(
             or os.environ.get("PS_COLLECTOR_URL")
             or "http://localhost:8000"
         )
+        mcp_mode = _mcp_telemetry_mode(mcp_telemetry_mode)
         args = {
             "business_unit": business_unit,
             "use_case": use_case,
@@ -553,6 +580,7 @@ def instrument(
             azure_deployments=azure_deployments,
             collector_url=ps_collector_url,
             api_key=ps_api_key,
+            mcp_mode=mcp_mode,
         )
 
         lazy: dict[str, list[tuple]] = {}
@@ -600,6 +628,26 @@ def instrument(
             continue
         state.finder.patch(module_name, module)
     return True
+
+
+def _mcp_telemetry_mode(value: str | None) -> str:
+    """The MCP telemetry mode: the argument (an unknown one raises), else
+    PS_MCP_TELEMETRY_MODE (an unknown one logs a warning), else "batch"."""
+    if value is not None:
+        mode = str(value).strip().lower()
+        if mode not in MCP_TELEMETRY_MODES:
+            raise ValueError(
+                f"mcp_telemetry_mode must be one of {MCP_TELEMETRY_MODES}, "
+                f"not {value!r}")
+        return mode
+    env = os.environ.get(MCP_TELEMETRY_MODE_ENV, "").strip().lower()
+    if not env:
+        return "batch"
+    if env not in MCP_TELEMETRY_MODES:
+        logger.warning("%s=%r is not one of %s; using batch",
+                       MCP_TELEMETRY_MODE_ENV, env, MCP_TELEMETRY_MODES)
+        return "batch"
+    return env
 
 
 def _patch(state: _State, module: Any, target: tuple) -> bool:
@@ -716,6 +764,11 @@ def uninstrument() -> bool:
                 setattr(cls, name, original)
         unregister_exit_flush(_state.telemetry, _state.atlas,
                               _state.mcp_telemetry)
+        stop = getattr(_state.mcp_telemetry, "stop", None)
+        if stop is not None:
+            # Send what is buffered from the background thread, then end it.
+            with contextlib.suppress(Exception):
+                stop(final_flush=True)
         set_exit_flush_timeout(None)
         _state = None
         return True

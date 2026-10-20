@@ -27,6 +27,7 @@ from collector.mcp_usage import (
     clean_name,
     server_identity,
 )
+from collector.sanitize import is_storable_text
 
 # Attribute keys (exact or prefix) that may carry message content. They are
 # stripped before any mapping happens.
@@ -77,11 +78,16 @@ def is_content_attribute(key: str) -> bool:
 
 def _any_value(value: Any) -> Any:
     """Decode an OTLP/JSON AnyValue. Arrays and maps are not needed for the
-    allowlisted keys and are returned as None."""
+    allowlisted keys and are returned as None. A string the database cannot
+    store (NUL, lone surrogate; collector/sanitize.py) is None too, so it
+    costs that attribute rather than every span in the request."""
     if not isinstance(value, dict):
         return None
     if "stringValue" in value:
-        return value["stringValue"]
+        text = value["stringValue"]
+        if isinstance(text, str) and not is_storable_text(text):
+            return None
+        return text
     if "intValue" in value:  # int64 is encoded as a JSON string
         try:
             return int(value["intValue"])
@@ -202,16 +208,45 @@ _COUNT_ATTRIBUTES = (
 )
 
 
+# String attributes map_span stores.
+_STRING_ATTRIBUTES = (
+    "gen_ai.provider.name",
+    "gen_ai.system",
+    "gen_ai.request.model",
+    "gen_ai.response.model",
+    "gen_ai.operation.name",
+    "gen_ai.conversation.id",
+)
+
+
+def _unstorable_strings(attributes: Any) -> set[str]:
+    """Keys of the stored string attributes whose value _any_value dropped
+    because the database cannot store it."""
+    out: set[str] = set()
+    if not isinstance(attributes, list):
+        return out
+    for attr in attributes:
+        if not isinstance(attr, dict) or attr.get("key") not in _STRING_ATTRIBUTES:
+            continue
+        value = attr.get("value")
+        text = value.get("stringValue") if isinstance(value, dict) else None
+        if isinstance(text, str) and not is_storable_text(text):
+            out.add(attr["key"])
+    return out
+
+
 def invalid_attributes(span: dict) -> dict[str, int]:
     """Values map_span drops as unusable (stored as null), keyed
     "<attribute>:invalid" like /ingest/events reports invalid fields (#87):
-    token counts that are not a non-negative INTEGER, and start/end times
-    that give no duration."""
+    token counts that are not a non-negative INTEGER, strings the database
+    cannot store, and start/end times that give no duration."""
     attrs = safe_attributes(span.get("attributes"))
     out: dict[str, int] = {}
     for key in _COUNT_ATTRIBUTES:
         if key in attrs and _count(attrs[key]) is None:
             out[f"{key}:invalid"] = 1
+    for key in _unstorable_strings(span.get("attributes")):
+        out[f"{key}:invalid"] = 1
     if (
         span.get("startTimeUnixNano") is not None
         and span.get("endTimeUnixNano") is not None

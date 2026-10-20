@@ -49,9 +49,10 @@ from collector.admin_auth import (
     serialize_token,
     unknown_scopes,
 )
+from collector.sanitize import BoundedJsonRoute
 from collector.tenant_keys import KEY_WARNING, DuplicateName, NotRotatable
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+router = APIRouter(prefix="/api/v1/admin", tags=["Admin"], route_class=BoundedJsonRoute)
 
 _TOKENS = Depends(require_admin("admin:tokens"))
 _KEYS = Depends(require_admin("admin:keys"))

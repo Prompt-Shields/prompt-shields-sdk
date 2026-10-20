@@ -3,6 +3,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -11,6 +14,7 @@ from collector import rls
 from collector.config import settings
 from collector.embeddings import get_embedder
 from collector.metrics import MetricsMiddleware, metrics_endpoint
+from collector.sanitize import replace_unstorable
 from collector.workers import start_workers, stop_workers
 
 engine = create_async_engine(settings.database_url)
@@ -65,6 +69,20 @@ app = FastAPI(
     lifespan=lifespan,
     **api_docs_urls(settings.collector_api_docs_enabled),
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """FastAPI's 422, unless the input it echoes holds a lone surrogate,
+    which cannot be encoded as UTF-8: the 422 would become a 500. Then the
+    input is echoed with U+FFFD in its place (collector/sanitize.py)."""
+    try:
+        return await request_validation_exception_handler(request, exc)
+    except UnicodeEncodeError:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": replace_unstorable(jsonable_encoder(exc.errors()))},
+        )
 
 
 @app.middleware("http")

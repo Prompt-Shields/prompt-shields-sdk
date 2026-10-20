@@ -38,6 +38,7 @@ import {
   _resetSecurityEventsForTests,
   flushSecurityEvents,
 } from '../../middlewares/psSecurityEvents';
+import { parseMcpServers, setMcpServers } from '../../mcp/config';
 
 const ISSUER = 'https://idp.test/tenant-1';
 const AUDIENCE = 'api://prompt-shields-gateway';
@@ -1003,5 +1004,128 @@ describe('telemetry', () => {
     await until(() => events.length > 0, 'telemetry event');
     expect(events[0].user_id).toBeUndefined();
     expect(events[0].user_group).toBe('quant-analysts');
+  });
+});
+
+// The MCP proxy (#63) is a /v1 route, so psOidc verifies (and removes) the
+// IdP token before the MCP handler runs; the verified identity then stands in
+// for PS_MCP_TOKEN, which a client could not also send in Authorization.
+describe('MCP proxy', () => {
+  const MCP_URL = 'https://mcp.example.com/mcp';
+  const MCP_TOKEN = 'static-mcp-token-0123456789';
+
+  const mcpCall = (headers: Record<string, string>) =>
+    app.request('/v1/mcp/docs', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'mcp-protocol-version': '2026-07-28',
+        'mcp-method': 'tools/call',
+        'mcp-name': 'search',
+        ...headers,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { q: 'onboarding' } },
+      }),
+    });
+  const mcpCalls = () =>
+    upstreamCalls.filter((c) => c.url.includes('mcp.example.com'));
+
+  beforeEach(() => {
+    setMcpServers(
+      parseMcpServers(
+        {
+          docs: {
+            url: MCP_URL,
+            auth: {
+              type: 'header',
+              header: 'x-api-key',
+              value_env: 'DOCS_KEY',
+            },
+            tools: { allow: ['search'] },
+          },
+        },
+        { DOCS_KEY: 'docs-upstream-key' }
+      )
+    );
+    upstream(/mcp\.example\.com/, (c) =>
+      json({
+        jsonrpc: '2.0',
+        id: c.body.id,
+        result: { content: [{ type: 'text', text: 'found 3 pages' }] },
+      })
+    );
+  });
+  afterEach(() => {
+    delete process.env.PS_MCP_TOKEN;
+    delete process.env.PS_MCP_ALLOW_UNAUTHENTICATED;
+    setMcpServers(new Map());
+  });
+
+  test('a valid IdP token is accepted without PS_MCP_TOKEN; the token never reaches the MCP server', async () => {
+    const jwt = await token();
+    const res = await mcpCall(bearer(jwt));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).result.content[0].text).toBe(
+      'found 3 pages'
+    );
+    const [sent] = mcpCalls();
+    expect(sent.headers['x-api-key']).toBe('docs-upstream-key');
+    expect(sent.headers.authorization).toBeUndefined();
+    expectNeverSent(jwt);
+  });
+
+  test('with PS_MCP_TOKEN set, the IdP token is still what authenticates', async () => {
+    process.env.PS_MCP_TOKEN = MCP_TOKEN;
+    const ok = await mcpCall(bearer(await token()));
+    expect(ok.status).toBe(200);
+    // The static MCP token is not an IdP token: psOidc refuses it.
+    const res = await mcpCall(bearer(MCP_TOKEN));
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as any).error.code).toBe('invalid_token');
+    expect(mcpCalls()).toHaveLength(1);
+    const failure = (await securityEvents()).find(
+      (e) => e['event.name'] === 'auth.failure'
+    );
+    expect(failure).toMatchObject({
+      'ps.auth.realm': 'oidc',
+      'ps.auth.reason': 'invalid_credentials',
+      'http.response.status_code': 401,
+    });
+  });
+
+  test('no token: 401 from psOidc, no MCP call', async () => {
+    const res = await mcpCall({});
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as any).error.code).toBe('missing_token');
+    expect(mcpCalls()).toHaveLength(0);
+  });
+
+  test('group policy default deny applies to MCP too', async () => {
+    const res = await mcpCall(
+      bearer(await token({ claims: { groups: ['x'] } }))
+    );
+    expect(res.status).toBe(403);
+    expect(mcpCalls()).toHaveLength(0);
+  });
+
+  test('a gateway provider key set by psOidc is not sent to the MCP server', async () => {
+    const res = await mcpCall({
+      ...bearer(await token()),
+      'x-portkey-provider': 'openai',
+    });
+    expect(res.status).toBe(200);
+    expectNeverSent(GATEWAY_OPENAI_KEY);
+  });
+
+  test('with OIDC off, PS_MCP_TOKEN is required as before', async () => {
+    delete process.env.PS_OIDC_ENABLED;
+    process.env.PS_MCP_TOKEN = MCP_TOKEN;
+    expect((await mcpCall(bearer(await token()))).status).toBe(401);
+    expect((await mcpCall(bearer(MCP_TOKEN))).status).toBe(200);
+    expect(mcpCalls()).toHaveLength(1);
   });
 });

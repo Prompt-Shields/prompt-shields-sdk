@@ -44,8 +44,11 @@ from collector.admin_auth import (
     unknown_scopes,
 )
 from collector.config import settings
+from collector.sanitize import BoundedJsonRoute, StorableJson, StorableStr
 
-router = APIRouter(prefix="/api/v1/operator", tags=["Operator"])
+router = APIRouter(
+    prefix="/api/v1/operator", tags=["Operator"], route_class=BoundedJsonRoute
+)
 
 
 def _problem(status: int, title: str, detail: str) -> HTTPException:
@@ -235,12 +238,12 @@ async def _get_tenant(db, tenant_id: UUID) -> Tenant:
 class CreateTenantBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(..., min_length=1, max_length=200)
-    domain: str | None = Field(default=None, max_length=253)
-    settings: dict = Field(default_factory=dict)
+    name: StorableStr = Field(..., min_length=1, max_length=200)
+    domain: StorableStr | None = Field(default=None, max_length=253)
+    settings: StorableJson = Field(default_factory=dict)
     # Issue a first ingest key (returned once) named api_key_name.
     issue_api_key: bool = True
-    api_key_name: str = Field(default="default", min_length=1, max_length=100)
+    api_key_name: StorableStr = Field(default="default", min_length=1, max_length=100)
 
 
 class UpdateTenantBody(BaseModel):
@@ -248,10 +251,10 @@ class UpdateTenantBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    domain: str | None = Field(default=None, max_length=253)
+    name: StorableStr | None = Field(default=None, min_length=1, max_length=200)
+    domain: StorableStr | None = Field(default=None, max_length=253)
     # Merged into the stored settings; a key set to null is removed.
-    settings: dict | None = None
+    settings: StorableJson | None = None
     # true disables the tenant (keys, tokens and partners refused), false
     # enables it again.
     disabled: bool | None = None
@@ -269,7 +272,7 @@ class UpdateTenantBody(BaseModel):
 class BootstrapAdminTokenBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(..., min_length=1, max_length=100)
+    name: StorableStr = Field(..., min_length=1, max_length=100)
     scopes: list[str] = Field(..., min_length=1)
     expires_at: datetime | None = None
 

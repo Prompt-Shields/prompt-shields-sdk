@@ -102,3 +102,11 @@ _KONG_LIMITER = FixedWindowRateLimiter()
 
 def get_kong_rate_limiter() -> FixedWindowRateLimiter:
     return _KONG_LIMITER
+
+
+# /ingest/mcp counts apart from /ingest/events (PS_MCP_RATE_LIMIT_PER_MINUTE).
+_MCP_LIMITER = FixedWindowRateLimiter()
+
+
+def get_mcp_rate_limiter() -> FixedWindowRateLimiter:
+    return _MCP_LIMITER
