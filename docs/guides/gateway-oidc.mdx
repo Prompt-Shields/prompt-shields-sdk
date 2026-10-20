@@ -1,0 +1,165 @@
+---
+title: Gateway OIDC and Group Policy
+description: Tie gateway access to your identity provider (Entra ID, Okta, Keycloak) and map IdP groups to model allowlists and rate limits
+---
+
+# Gateway OIDC and Group Policy
+
+By default the Prompt Shields gateway does not authenticate its callers: the `Authorization` header carries the provider's API key. With **OIDC** turned on, callers send an access token from your identity provider (IdP) instead. The gateway:
+
+1. validates the token (signature against the IdP's published keys, issuer, audience, expiry, algorithm);
+2. maps the user's IdP groups or roles to a **policy entry**, which allows certain providers and models and can set a rate limit;
+3. **removes the token** from the request and calls the provider with credentials the gateway holds, so the IdP token never reaches a provider;
+4. records a pseudonymous user id and the policy group in telemetry and security events.
+
+OIDC is opt-in (`PS_OIDC_ENABLED=true`) and covers every `/v1/*` route (model routes and proxy routes) except `/v1/health`. `/`, `/metrics` (its own token) and the admin console (its own token) are not affected.
+
+| Result | Status | `error.code` | Security event |
+|---|---|---|---|
+| No `Authorization: Bearer` token | 401 | `missing_token` | `auth.failure`, `ps.auth.reason: missing_credentials` |
+| Token rejected | 401 | `invalid_token` | `auth.failure`, `ps.auth.detail` says why |
+| IdP keys cannot be fetched and none are cached | 503 | `idp_unavailable` | `auth.failure`, `ps.auth.detail: jwks_unavailable` |
+| No policy entry matches (with `default: deny`) | 403 | `policy_denied` | `policy.denied`, `no_matching_group` |
+| Provider or model not allowed for the entry | 403 | `policy_denied` | `policy.denied`, `provider_not_allowed` / `model_not_allowed` |
+| Entry's rate limit used up | 429 + `Retry-After` | `rate_limit_exceeded` | `rate_limit.hit`, `ps.rate_limit.source: gateway` |
+| Invalid OIDC configuration | 500 | `oidc_misconfigured` | none (the reason is logged once) |
+
+An invalid configuration never falls back to "open": every protected route answers 500 until it is fixed. Events are described in [Security Events](/guides/security-events).
+
+## Configure
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PS_OIDC_ENABLED` | `false` | Turn OIDC on. |
+| `PS_OIDC_ISSUER` | required | The token's `iss`, exactly. Also the base for OIDC discovery (`<issuer>/.well-known/openid-configuration`). `https://` only. |
+| `PS_OIDC_AUDIENCE` | required | Accepted `aud` values, comma-separated. |
+| `PS_OIDC_JWKS_URL` | from discovery | Fetch keys from this URL and skip discovery. |
+| `PS_OIDC_ALGORITHMS` | `RS256,RS384,RS512,PS256,PS384,PS512,ES256,ES384,ES512` | Accepted `alg` values. Asymmetric only (`EdDSA` may be added); `none` and `HS*` are refused at startup. |
+| `PS_OIDC_CLOCK_SKEW_SECONDS` | `60` | Tolerance for `exp` and `nbf` (0-300). |
+| `PS_OIDC_GROUPS_CLAIM` | `groups` | Claim holding the user's groups or roles. A dotted path works, e.g. `realm_access.roles`. |
+| `PS_OIDC_POLICY` | unset | The group policy (JSON, below), or the path of a file containing it. Unset: authentication only, every valid token is allowed. |
+| `PS_OIDC_PROVIDER_KEYS` | unset | **Secret.** JSON object of provider to API key, e.g. `{"openai":"sk-...","anthropic":"sk-ant-..."}`, or a file path. See [Provider credentials](#provider-credentials). |
+| `PS_OIDC_TELEMETRY_SUBJECT` | `hash` | What identifies the user in telemetry: `hash` (pseudonym), `raw` (the `sub` claim) or `off`. |
+| `PS_OIDC_SUBJECT_SALT` | unset | **Secret.** Key for the subject pseudonym (HMAC-SHA-256). Recommended; without it the pseudonym is a plain SHA-256 of issuer and subject, which anyone who can guess a subject (an email address, an employee id) can recompute and match. |
+
+On Cloudflare Workers set these as bindings (secrets for the two marked secret); the file-path forms are Node only. With the Helm chart, use the `gateway.oidc` values and put `PS_OIDC_PROVIDER_KEYS` and `PS_OIDC_SUBJECT_SALT` in the gateway Secret (see the [chart README](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/charts/prompt-shields/README.md)).
+
+### Group policy
+
+```json
+{
+  "default": "deny",
+  "groups": [
+    {
+      "name": "quant-analysts",
+      "match": ["6f1c2a3b-1d2e-4f50-9a8b-7c6d5e4f3a2b", "quants"],
+      "providers": ["azure-openai", "openai"],
+      "models": ["gpt-4o-mini", "gpt-4.1*"],
+      "rate_limit": { "requests_per_minute": 60 }
+    },
+    {
+      "name": "everyone",
+      "match": ["Chat.Use"],
+      "models": ["gpt-4o-mini"],
+      "rate_limit": { "requests_per_minute": 600, "per": "group" }
+    }
+  ]
+}
+```
+
+- **Entries are checked in order; the first entry with a `match` value in the user's groups claim applies.** List the most privileged entries first. Matching is exact and case-sensitive.
+- `name`: your label (`[A-Za-z0-9_.:-]`, up to 64 characters). It appears in telemetry (`user_group`) and events (`ps.policy.group`); the IdP group values do not.
+- `providers`: allowed providers (gateway provider names, e.g. `openai`, `azure-openai`, `anthropic`, `bedrock`). Omitted: any provider. A request that names no provider is denied when this is set.
+- `models`: allowed models, exact or with a trailing `*` as a prefix wildcard. Omitted: any model. For `azure-openai` the deployment (`x-portkey-azure-deployment-id`) must be allowed as well as the body's `model`, so list your deployment names. A chat, completion, embedding, Messages or Responses request without a model is denied when this is set, because some providers would otherwise fill in a default model.
+- `rate_limit.requests_per_minute`: requests per fixed one-minute window; `per` is `user` (default: each user has the budget) or `group` (shared by everyone in the entry).
+- `default`: `deny` (default) refuses users who match no entry; `allow` lets them through without restrictions.
+
+The provider and model are checked **for every target the gateway actually calls**, after `x-portkey-config`, `override_params` and cost-aware routing have been applied, and before guardrails, the cache and the upstream call. In a fallback config, a denied target counts as a failed target, so the next target is tried. Requests that name no model (files, batches, most proxied `GET`s) are checked on the provider only. A batch runs the models named inside its input file, which the gateway does not read, so give a group with a model allowlist no provider that it may run batches against, or accept that limit.
+
+### Provider credentials
+
+With OIDC on, the `Authorization` header holds the IdP token, so it cannot also carry a provider key. The gateway always removes it, together with any client-sent `x-ps-auth-*` header, before anything else runs. Provider credentials then come from one of:
+
+- **`PS_OIDC_PROVIDER_KEYS`** (recommended): when the request names its provider with `x-portkey-provider` and sends neither `x-portkey-config` nor `x-portkey-custom-host`, the gateway uses its own key for that provider. The key is never used with a caller-supplied config or custom host, nor when any other `x-portkey-*` header that can end up in the upstream URL holds more than a plain name (letters, digits, `.`, `_`, `-`): a URL in `x-portkey-huggingface-base-url` or `x-portkey-azure-foundry-url`, or a `/`, `?` or `#` in `x-portkey-azure-resource-name` or `x-portkey-vertex-region`. A caller therefore cannot send it to a host of their choosing.
+- **Keyless provider auth**: AWS, Azure and GCP workload identity, or OAuth client credentials, configured on the gateway.
+- **`x-portkey-config`** with `api_key` per target, if your callers hold provider keys themselves.
+
+Because the token is gone from the request, it is not sent upstream by any route: not as the header-mode API key, not by the proxy routes' header pass-through, and not when a config lists `authorization` in `forward_headers`. Cached responses are scoped per user.
+
+## Microsoft Entra ID
+
+1. **Register the API.** *App registrations → New registration* (for example `prompt-shields-gateway`). Under *Expose an API*, set the Application ID URI (for example `api://prompt-shields-gateway`).
+2. **Use v2 access tokens.** In the app's *Manifest* set `"requestedAccessTokenVersion": 2` (older manifests: `accessTokenAcceptedVersion`). v2 tokens have issuer `https://login.microsoftonline.com/<tenant-id>/v2.0` and audience equal to the app's **client id**.
+3. **Choose what to match on.**
+   - **App roles** (recommended): under *App roles* create e.g. `Chat.Use` and `Quant.Analyst`, assign users or groups under *Enterprise applications → Users and groups*. They arrive in the `roles` claim by name.
+   - **Groups**: under *Token configuration → Add groups claim*, pick *Security groups* (or *Groups assigned to the application*). They arrive in the `groups` claim as **object id GUIDs**; use the GUIDs in `match`.
+
+   A user in more groups than fit in a token (about 200) gets no `groups` claim ("groups overage"); the gateway does not call Microsoft Graph, so such a user matches no entry and the 403 message says so. Use app roles or *Groups assigned to the application* to avoid it.
+4. **Configure the gateway.**
+
+   ```bash
+   PS_OIDC_ENABLED=true
+   PS_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
+   PS_OIDC_AUDIENCE=<client-id>,api://prompt-shields-gateway
+   PS_OIDC_GROUPS_CLAIM=roles            # or: groups (GUIDs)
+   PS_OIDC_POLICY='{"groups":[{"name":"quants","match":["Quant.Analyst"],"providers":["azure-openai"],"models":["gpt-4.1*"]},{"name":"staff","match":["Chat.Use"],"providers":["azure-openai"],"models":["gpt-4o-mini"],"rate_limit":{"requests_per_minute":30}}]}'
+   PS_OIDC_PROVIDER_KEYS='{"azure-openai":"<azure-openai-key>"}'
+   ```
+
+   Or skip the key and use the gateway's managed identity: set `AZURE_AMBIENT_CREDENTIALS_ENABLED=true` on the gateway and have callers send `x-portkey-azure-auth-mode: managed`.
+
+5. **Call it.** A client gets a token for the scope `api://prompt-shields-gateway/.default` (MSAL, or for a quick test `az account get-access-token --scope api://prompt-shields-gateway/.default --query accessToken -o tsv`) and sends it:
+
+   ```bash
+   curl https://gateway.example.com/v1/chat/completions \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "x-portkey-provider: azure-openai" \
+     -H "x-portkey-azure-resource-name: my-resource" \
+     -H "x-portkey-azure-deployment-id: gpt-4o-mini" \
+     -H "x-portkey-azure-api-version: 2024-10-21" \
+     -H "content-type: application/json" \
+     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}]}'
+   ```
+
+## Okta
+
+Use a **custom authorization server** (for example `default`). Tokens from the Okta org authorization server (`https://<org>.okta.com` without `/oauth2/...`) are meant for Okta's own APIs and cannot be validated by a third party.
+
+1. *Security → API → Authorization Servers*: note the server's **Issuer URI** (e.g. `https://<org>.okta.com/oauth2/default`) and **Audience** (e.g. `api://default`, or your own).
+2. *Claims → Add Claim*: name `groups`, include in **Access Token**, value type *Groups*, filter e.g. *Starts with* `ai-` (keep the list short).
+3. *Access Policies*: allow the client apps that will call the gateway.
+4. Configure the gateway:
+
+   ```bash
+   PS_OIDC_ENABLED=true
+   PS_OIDC_ISSUER=https://<org>.okta.com/oauth2/default
+   PS_OIDC_AUDIENCE=api://default
+   PS_OIDC_POLICY='{"groups":[{"name":"ai-power","match":["ai-power-users"]},{"name":"ai-basic","match":["ai-users"],"models":["gpt-4o-mini","claude-3-5-haiku*"],"rate_limit":{"requests_per_minute":20}}]}'
+   PS_OIDC_PROVIDER_KEYS='{"openai":"sk-...","anthropic":"sk-ant-..."}'
+   ```
+
+5. Clients get an access token from `https://<org>.okta.com/oauth2/default/v1/token` (authorization code with PKCE for users, client credentials for services) and send it as `Authorization: Bearer`.
+
+## Keycloak
+
+Issuer `https://<host>/realms/<realm>`. Add an *Audience* mapper to the client scope so `aud` contains your gateway's client id, and match on realm roles with `PS_OIDC_GROUPS_CLAIM=realm_access.roles` (or add a *Group Membership* mapper named `groups`). A Keycloak on a private address must be listed in `TRUSTED_CUSTOM_HOSTS` (see below).
+
+## Security details
+
+- **Algorithms.** Only the configured asymmetric algorithms are accepted; the `alg` is checked before any key lookup, so `none` and `HS*` tokens never cause a key fetch, and keys of type `oct` in a JWKS are ignored.
+- **Claims.** `iss` must equal `PS_OIDC_ISSUER`; `aud` must contain one `PS_OIDC_AUDIENCE` value; `exp` and `sub` are required; `exp`/`nbf` allow `PS_OIDC_CLOCK_SKEW_SECONDS` of skew.
+- **Key fetching.** Discovery and JWKS are fetched over `https` only, through the same address check as provider URLs (`isSafeUpstreamURL`: no metadata or private addresses unless listed in `TRUSTED_CUSTOM_HOSTS`), without following redirects, with a 5 s timeout and a 512 KB limit. The discovery document's `issuer` must equal `PS_OIDC_ISSUER`.
+- **Caching and rotation.** Keys are cached for the JWKS response's `Cache-Control: max-age`, clamped to 1 minute - 24 hours (10 minutes without the header). A token signed with an unknown `kid` triggers a refresh, but fetches happen at most once every 30 s, so random `kid`s cannot be used to flood your IdP. If a refresh fails, the cached keys keep working.
+- **Revocation.** Tokens are verified locally (no introspection), so a revoked token is accepted until it expires. Keep access-token lifetimes short.
+
+## Telemetry and privacy
+
+The collector event for each request gets `user_id` (a 32-character pseudonym: HMAC-SHA-256 of issuer and `sub` with `PS_OIDC_SUBJECT_SALT`, or SHA-256 without it) and `user_group` (the policy entry's `name`). With `PS_OIDC_TELEMETRY_SUBJECT=raw`, `user_id` is the `sub` claim itself; with `off` there is no `user_id`. Email, name and other profile claims are never sent anywhere, and `policy.denied` events carry the same pseudonym as `user.hash`.
+
+## Limitations
+
+- Rate limits are counted **in memory, per gateway replica**: with N replicas behind a load balancer a user can get up to N times the limit. Set limits accordingly.
+- The collector currently accepts but does not yet store `user_id` / `user_group`.
+- The MCP proxy (`/v1/mcp/{server}`) accepts the IdP token instead of `PS_MCP_TOKEN` when OIDC is on. Default deny and group rate limits apply to it; provider and model allowlists do not (an MCP call names neither), so every admitted user reaches every configured MCP server within its tool policy. See `gateway/docs/mcp-proxy.md`.
+- Browsers cannot set `Authorization` on a WebSocket, so `/v1/realtime` with OIDC on needs a non-browser client.
+- A policy given as a file path is read again only when the gateway restarts (the Helm chart restarts pods when `gateway.oidc` changes).

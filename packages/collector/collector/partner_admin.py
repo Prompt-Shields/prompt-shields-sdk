@@ -41,8 +41,9 @@ from collector.partner_scopes import (
     effective_rate_limit,
     unknown_scopes,
 )
+from collector.sanitize import BoundedJsonRoute, StorableJson, StorableStr
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+router = APIRouter(prefix="/api/v1/admin", tags=["Admin"], route_class=BoundedJsonRoute)
 
 
 # Kept for importers; the source of truth is collector.partner_scopes.
@@ -50,7 +51,7 @@ ALLOWED_SCOPES = GRANTABLE_SCOPES
 
 
 class IssuePartnerCredentialBody(BaseModel):
-    partner_name: str = Field(..., min_length=1, max_length=80)
+    partner_name: StorableStr = Field(..., min_length=1, max_length=80)
     # Deny by default: read scopes only unless the admin asks for more.
     scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_SCOPES))
     issue_api_key: bool = True
@@ -58,7 +59,7 @@ class IssuePartnerCredentialBody(BaseModel):
     rate_limit_tier: str | None = None
     rate_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
-    metadata: dict | None = None
+    metadata: StorableJson | None = None
 
 
 class UpdatePartnerCredentialBody(BaseModel):

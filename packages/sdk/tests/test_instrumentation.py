@@ -169,8 +169,10 @@ def fakes(monkeypatch):
     RecordingSender.instances = []
     monkeypatch.setattr(inst, "TelemetrySender", RecordingSender)
     monkeypatch.setattr(inst, "AtlasTelemetrySender", RecordingSender)
+    monkeypatch.setattr(inst, "BackgroundTelemetrySender", RecordingSender)
     for var in ("PS_API_KEY", "PS_COLLECTOR_URL", "PS_ATLAS_URL",
-                "PS_ATLAS_API_KEY", *inst._METADATA_ENV.values()):
+                "PS_ATLAS_API_KEY", inst.MCP_TELEMETRY_MODE_ENV,
+                *inst._METADATA_ENV.values()):
         monkeypatch.delenv(var, raising=False)
     yield NS(chat=chat, responses=responses, messages=messages, beta=beta)
     prompt_shields.uninstrument()

@@ -201,14 +201,20 @@ export class PSTelemetrySender {
     this.sleep = opts.sleep ?? defaultSleep;
   }
 
-  /** A sender configured from PS_* environment variables. */
-  static fromEnv(env: Record<string, string | undefined>): PSTelemetrySender {
+  /**
+   * A sender configured from PS_* environment variables. `path` is the
+   * collector endpoint: LLM events, or `/ingest/mcp` for MCP tool calls.
+   */
+  static fromEnv(
+    env: Record<string, string | undefined>,
+    path = '/ingest/events'
+  ): PSTelemetrySender {
     const base = (env.PS_COLLECTOR_URL || 'http://localhost:8000').replace(
       /\/+$/,
       ''
     );
     return new PSTelemetrySender({
-      url: `${base}/ingest/events`,
+      url: `${base}${path}`,
       apiKey: env.PS_API_KEY || '',
       maxPending: positiveInt(
         env.PS_TELEMETRY_MAX_PENDING,

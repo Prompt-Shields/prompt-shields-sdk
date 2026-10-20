@@ -39,8 +39,11 @@ from sqlalchemy import delete, func, select
 from collector import audit_trail, webhooks
 from collector.audit import build_audit_row, record_read
 from collector.auth import resolve_tenant
+from collector.sanitize import BoundedJsonRoute, StorableStr
 
-router = APIRouter(prefix="/api/v1/admin/webhooks", tags=["Admin"])
+router = APIRouter(
+    prefix="/api/v1/admin/webhooks", tags=["Admin"], route_class=BoundedJsonRoute
+)
 
 SECRET_WARNING = "Save the signing secret now. It will not be shown again."
 
@@ -58,11 +61,11 @@ def _not_configured() -> HTTPException:
 
 class CreateSubscriptionBody(BaseModel):
     partner_id: UUID
-    url: str = Field(..., min_length=1, max_length=webhooks.MAX_URL_LENGTH)
+    url: StorableStr = Field(..., min_length=1, max_length=webhooks.MAX_URL_LENGTH)
     event_types: list[webhooks.EventType] = Field(
         default_factory=lambda: list(webhooks.EVENT_TYPES), min_length=1
     )
-    description: str | None = Field(default=None, max_length=200)
+    description: StorableStr | None = Field(default=None, max_length=200)
 
 
 def _subscription_dict(s: WebhookSubscription) -> dict:
@@ -255,7 +258,7 @@ class UpdateSubscriptionBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    url: str | None = Field(
+    url: StorableStr | None = Field(
         default=None,
         min_length=1,
         max_length=webhooks.MAX_URL_LENGTH,

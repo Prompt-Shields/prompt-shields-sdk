@@ -164,7 +164,7 @@ variable names**. For each component the chart uses the first of:
 |---|---|
 | `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
-| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`. Callers send their own provider credentials with each request |
+| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
 
 ExternalSecret example (External Secrets Operator with Vault or AWS Secrets
 Manager behind a `ClusterSecretStore`):
@@ -407,6 +407,11 @@ can follow the images if those change.
 | `gateway.metrics.enabled` / `.path` | `false` / `/metrics` | `PS_METRICS_ENABLED` |
 | `*.metrics.tokenSecret` / `.tokenEnvName` | `{}` / `PS_METRICS_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN` | Metrics bearer token from a Secret key |
 | `gateway.shutdown.timeoutMs` / `.envName` | `25000` / `PS_SHUTDOWN_TIMEOUT_MS` | Drain on SIGTERM |
+| `gateway.oidc.enabled` | `false` | `PS_OIDC_ENABLED`: OIDC/JWT authentication and IdP-group policy on `/v1/*` ([guide](../../docs/guides/gateway-oidc.mdx)) |
+| `gateway.oidc.issuer` / `.audience` | `""` / `[]` | `PS_OIDC_ISSUER` / `PS_OIDC_AUDIENCE`, both required when enabled |
+| `gateway.oidc.jwksUrl` / `.algorithms` / `.clockSkewSeconds` | discovery / asymmetric RS, PS, ES / `60` | `PS_OIDC_JWKS_URL` / `PS_OIDC_ALGORITHMS` / `PS_OIDC_CLOCK_SKEW_SECONDS` |
+| `gateway.oidc.groupsClaim` / `.telemetrySubject` | `groups` / `hash` | `PS_OIDC_GROUPS_CLAIM` / `PS_OIDC_TELEMETRY_SUBJECT` |
+| `gateway.oidc.policy` | `{}` (authentication only) | `PS_OIDC_POLICY` as JSON: groups to provider/model allowlists and rate limits (per replica) |
 | `collector.rlsRequired` | `true` | `PS_RLS_REQUIRED` |
 | `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `""` (auto) | Background loops in API pods; auto = `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob |
 | `collector.metrics.enabled` / `.envName` / `.path` | `false` / `PS_COLLECTOR_METRICS_ENABLED` / `/metrics` | Collector metrics |
@@ -443,6 +448,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_GATEWAY_ADMIN_TOKEN` (secret) | Admin token for the local UI (not served with `--headless`) |
 | `PS_METRICS_ENABLED` (*chart*), `PS_METRICS_TOKEN` (secret, or *chart* from `gateway.metrics.tokenSecret`) | Prometheus `/metrics` and its bearer token |
 | `PS_SHUTDOWN_TIMEOUT_MS` (*chart*) | Drain deadline on SIGTERM |
+| `PS_MCP_CONFIG_FILE`, `PS_MCP_TOKEN` (secret), `PS_MCP_ALLOW_UNAUTHENTICATED` | MCP proxy (`/v1/mcp/{server}`): the `mcp_servers` file (mount it from a ConfigMap with `gateway.extraVolumes` / `extraVolumeMounts`) and the client bearer token. See `gateway/docs/mcp-proxy.md` |
 | `PS_TELEMETRY_MAX_ATTEMPTS`, `PS_TELEMETRY_RETRY_BASE_MS`, `PS_TELEMETRY_MAX_PENDING`, `PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS` | Telemetry delivery to the collector |
 | `PS_OTEL_ENDPOINT`, `PS_OTEL_HEADERS`, `PS_OTEL_CAPTURE_CONTENT`, `PS_OTEL_MAX_BATCH`, `PS_OTEL_FLUSH_MS`, `PS_OTEL_MAX_QUEUE` | OpenTelemetry GenAI spans |
 | `PS_SECURITY_EVENTS_LOG`, `PS_SECURITY_EVENTS_TENANT` | Security events as JSON lines on stdout |
@@ -472,6 +478,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_READYZ_TIMEOUT_SECONDS` (*chart*) | `2` | `/readyz` database check deadline |
 | `PS_COLLECTOR_API_DOCS_ENABLED` (*chart*) | `false` | `/docs`, `/redoc`, `/openapi.json` |
 | `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process) |
+| `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart (per process) |
 | `PS_AUDIT_RETENTION_DAYS` | `365` | Partner audit log retention |
 | `PS_AUDIT_EVENT_RETENTION_DAYS` | `0` (keep) | Audit trail retention for `python -m collector.audit_trail purge` (leaves a checkpoint row) |
 | `PS_RETENTION_DAYS_DEFAULT`, `PS_RETENTION_BATCH_SIZE` | `365`, `5000` | Usage event retention |

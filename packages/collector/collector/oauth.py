@@ -19,6 +19,7 @@ from collector.partner_auth import (
     issue_access_token,
     verify_secret,
 )
+from collector.sanitize import is_storable_text
 
 router = APIRouter(tags=["Partner OAuth"])
 
@@ -42,6 +43,17 @@ async def token_endpoint(
             detail={
                 "error": "unsupported_grant_type",
                 "error_description": "Only client_credentials is supported",
+            },
+        )
+
+    if not is_storable_text(client_id):
+        # No client id holds NUL or a lone surrogate, and the lookup would
+        # fail in the database (500) instead of finding nothing.
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "invalid_client",
+                "error_description": "Unknown or inactive client",
             },
         )
 

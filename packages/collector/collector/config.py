@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # limit above (Kong's http-log sends one request per call unless
     # batching is on); 0 or less disables it.
     kong_rate_limit_per_minute: int = 6000
+    # Per-tenant /ingest/mcp requests per minute, counted apart from
+    # /ingest/events so MCP telemetry cannot use up the LLM telemetry
+    # budget (the SDK batches MCP events); 0 or less disables it.
+    mcp_rate_limit_per_minute: int = 600
     # Rows in partner_audit_log older than this are deleted by
     # `python -m collector.audit purge`.
     audit_retention_days: int = 365

@@ -185,7 +185,7 @@ instrument Azure without plain OpenAI.
 
 ### MCP tool calls your code makes
 
-When the official [`mcp`](https://pypi.org/project/mcp/) package is installed, `instrument()` also patches `mcp.ClientSession.call_tool` (it is patched when your app imports `mcp`, so `instrument()` does not import it). This covers MCP servers your own code calls, over stdio or HTTP, including through `mcp.Client` and `ClientSessionGroup`. Each tool call sends one event to the collector's `POST /ingest/mcp`:
+When the official [`mcp`](https://pypi.org/project/mcp/) package is installed, `instrument()` also patches `mcp.ClientSession.call_tool` (it is patched when your app imports `mcp`, so `instrument()` does not import it). This covers MCP servers your own code calls, over stdio or HTTP, including through `mcp.Client` and `ClientSessionGroup`. Each tool call produces one event for the collector's `POST /ingest/mcp`:
 
 ```json
 {"server_name": "github", "tool_name": "create_issue", "outcome": "ok",
@@ -194,7 +194,8 @@ When the official [`mcp`](https://pypi.org/project/mcp/) package is installed, `
 
 - **Names only.** The server name is the one the server reports about itself (`serverInfo.name`); a URL-shaped value is reduced to its host. Tool arguments, results, tool descriptions, transport URLs, commands, headers and environment are never read. A session whose server never identified itself is reported as `unknown`.
 - `outcome` is `error` when the tool returns `isError` or the call raises. The exception still reaches your code unchanged; cancellations are not recorded.
-- Fail-open, like the provider wrappers. Also like them, the event is sent before `call_tool` returns, so a slow or unreachable collector adds its round trip (bounded by the sender's 5 s timeouts) to each tool call. `vendors=("openai",)` (or `PS_INSTRUMENT_VENDORS`) without `"mcp"` leaves MCP alone, and calls inside `suppress_instrumentation()` are not recorded.
+- **Off the call path.** `call_tool` only adds the event to an in-memory buffer (no network I/O), so a slow or unreachable collector does not delay tool calls. A background daemon thread posts the buffer as one request per batch, every 2 s or as soon as 100 events are waiting, and makes a last bounded flush at interpreter exit (`exit_flush_timeout` / `PS_EXIT_FLUSH_TIMEOUT`, off with `PS_DISABLE_EXIT_FLUSH=1`). It works the same in sync and asyncio code. The buffer holds 1,000 events; when it is full (collector down or rate limiting), the oldest event is dropped and counted. Set `mcp_telemetry_mode="sync"` (or `PS_MCP_TELEMETRY_MODE=sync`) to post each event before `call_tool` returns instead, which adds the collector's round trip (up to the sender's 5 s timeouts) to each call.
+- Fail-open, like the provider wrappers. `vendors=("openai",)` (or `PS_INSTRUMENT_VENDORS`) without `"mcp"` leaves MCP alone, and calls inside `suppress_instrumentation()` are not recorded.
 - Not covered: desktop clients (Claude Desktop, Cursor, VS Code) and non-official MCP clients. For servers you run, export their OTel spans to the collector instead (see the OTLP receiver).
 
 ### Without a code change: `prompt-shields-instrument`
@@ -357,7 +358,7 @@ client = ShieldsOpenAI(
 
 ## Fail-Open Guarantees
 
-1. **LLM calls never blocked by telemetry** — response returned before telemetry sent
+1. **Telemetry never fails an LLM call** — errors are swallowed, and the provider's response (or exception) is what your code gets. The event is posted after the provider responds but before the call returns to your code (a stream's event when the stream ends), so a slow or unreachable collector adds its round trip, up to the sender's 5 s timeout, to each LLM call. MCP tool call events are sent from a background thread instead (see above).
 2. **No prompt content leaves the host** unless explicitly opted in
 3. **Telemetry errors never raise** — logged at WARN, buffered for retry
 4. **Buffer overflow drops oldest events** — never blocks the app

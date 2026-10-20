@@ -21,6 +21,9 @@
     },
     {
       "$ref": "#/$defs/payload_rejected"
+    },
+    {
+      "$ref": "#/$defs/policy_denied"
     }
   ],
   "$defs": {
@@ -545,10 +548,26 @@
           "maxLength": 128
         },
         "ps.auth.realm": {
-          "enum": ["admin", "metrics"]
+          "enum": ["admin", "metrics", "mcp", "oidc"],
+          "description": "What was protected: the admin console/log stream, /metrics, the MCP proxy (PS_MCP_TOKEN), or the model and proxy routes behind OIDC (PS_OIDC_ENABLED)."
         },
         "ps.auth.reason": {
           "enum": ["missing_credentials", "invalid_credentials"]
+        },
+        "ps.auth.detail": {
+          "enum": [
+            "malformed",
+            "disallowed_alg",
+            "unknown_key",
+            "bad_signature",
+            "expired",
+            "not_yet_valid",
+            "wrong_issuer",
+            "wrong_audience",
+            "invalid_claims",
+            "jwks_unavailable"
+          ],
+          "description": "OIDC only: why the bearer token was refused. jwks_unavailable comes with status 503."
         },
         "http.response.status_code": {
           "type": "integer"
@@ -824,6 +843,142 @@
         "http.request.method",
         "ps.payload.reason",
         "http.response.status_code"
+      ],
+      "additionalProperties": false
+    },
+    "policy_denied": {
+      "type": "object",
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC time the event was recorded."
+        },
+        "ps.schema_version": {
+          "const": "1.0.0"
+        },
+        "event.id": {
+          "type": "string",
+          "description": "Random id of this event."
+        },
+        "event.name": {
+          "const": "policy.denied"
+        },
+        "event.kind": {
+          "enum": ["alert", "event"],
+          "description": "ECS event.kind."
+        },
+        "event.category": {
+          "type": "array",
+          "items": {
+            "enum": ["iam"]
+          },
+          "description": "ECS event.category."
+        },
+        "event.outcome": {
+          "enum": ["success", "failure", "unknown"],
+          "description": "ECS event.outcome."
+        },
+        "log.logger": {
+          "const": "ps.security",
+          "description": "Filter on this to route security events."
+        },
+        "service.name": {
+          "const": "prompt-shields-gateway"
+        },
+        "vendor_product": {
+          "const": "Prompt Shields Gateway",
+          "description": "Splunk CIM vendor_product."
+        },
+        "severity": {
+          "enum": ["informational", "low", "medium", "high"],
+          "description": "Splunk CIM severity."
+        },
+        "action": {
+          "enum": ["allowed", "blocked", "failure"],
+          "description": "Splunk CIM action."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Splunk CIM signature: check id, PII category or rejection reason."
+        },
+        "ps.request_id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "x-portkey-trace-id when it is a short token, else generated once per request."
+        },
+        "http.route": {
+          "type": "string",
+          "description": "Matched route pattern, e.g. /v1/chat/completions."
+        },
+        "http.request.method": {
+          "type": "string"
+        },
+        "ps.tenant": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "PS_SECURITY_EVENTS_TENANT, when set."
+        },
+        "ps.business_unit": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Workspace: the X-PS-Business-Unit header."
+        },
+        "ps.environment": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The X-PS-Environment header."
+        },
+        "gen_ai.provider.name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "gen_ai.request.model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ps.policy.reason": {
+          "enum": [
+            "no_matching_group",
+            "provider_not_allowed",
+            "model_not_allowed"
+          ],
+          "description": "Why the OIDC group policy refused the caller."
+        },
+        "ps.policy.group": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Configured name of the policy entry that applied, if any."
+        },
+        "user.hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "ECS user.hash: pseudonymous OIDC subject (HMAC or SHA-256 of issuer and sub). Absent with PS_OIDC_TELEMETRY_SUBJECT=off."
+        },
+        "http.response.status_code": {
+          "const": 403
+        }
+      },
+      "required": [
+        "@timestamp",
+        "ps.schema_version",
+        "event.id",
+        "event.name",
+        "event.kind",
+        "event.category",
+        "event.outcome",
+        "log.logger",
+        "service.name",
+        "vendor_product",
+        "severity",
+        "action",
+        "signature",
+        "ps.request_id",
+        "http.route",
+        "http.request.method",
+        "http.response.status_code",
+        "ps.policy.reason"
       ],
       "additionalProperties": false
     }

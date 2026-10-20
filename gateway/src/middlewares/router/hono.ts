@@ -14,6 +14,7 @@
  * untouched. Only requests carrying a `messages` array are ever routed.
  */
 import { Context, Next } from 'hono';
+import { isMcpProxyPath } from '../../mcp/paths';
 import { psRouterMiddleware, PSRoute } from './middleware';
 import { defaultPolicy } from './policy';
 import { RoutePolicy, RouterStrategy } from './types';
@@ -34,7 +35,12 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
   return async (c: Context, next: Next) => {
     try {
       const contentType = c.req.header('content-type') || '';
-      if (c.req.method === 'POST' && contentType.includes('application/json')) {
+      if (
+        c.req.method === 'POST' &&
+        contentType.includes('application/json') &&
+        // MCP proxy traffic is not a model call (#63).
+        !isMcpProxyPath(c.req.path)
+      ) {
         // Cached by Hono — the same object reference the handler will read.
         const body = await c.req.json();
         const headers = Object.fromEntries(c.req.raw.headers);

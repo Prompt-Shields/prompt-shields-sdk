@@ -71,6 +71,7 @@
         "guides/data-retention",
         "guides/security-events",
         "guides/observability",
+        "guides/gateway-oidc",
         "guides/audit-trail"
       ]
     },

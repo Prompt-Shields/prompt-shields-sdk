@@ -1,6 +1,7 @@
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
 import { providerFromHeaders, reportsOwnUsage } from '../ps-telemetry';
+import { isMcpProxyPath } from '../../mcp/paths';
 import { inputTokensOf, observeStream } from '../psStreamObserver';
 import {
   Counter,
@@ -125,6 +126,8 @@ export function psMetrics() {
 
       // Streamed responses: usage and outcome are known only once the stream
       // ends, so they are recorded then, without holding the response.
+      // MCP streams carry no tokens and no terminal event (ps_gateway_mcp_*).
+      if (isMcpProxyPath(c.req.path)) return;
       const stream = observeStream(c);
       if (stream) {
         stream

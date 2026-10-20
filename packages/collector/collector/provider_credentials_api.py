@@ -33,7 +33,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
 
 from collector import audit_trail
@@ -43,6 +42,7 @@ from collector.auth import resolve_tenant
 from collector.partner_auth import PartnerPrincipal, require_scope
 from collector.partner_registry import _audit, _enforce_rate_limit
 from collector.provider_usage import ProviderUsageSettings, admin_keys_for_tenant
+from collector.sanitize import BoundedJsonRoute
 
 SCOPE = "provider-credentials:manage"
 _SCOPE = Depends(require_scope(SCOPE))
@@ -65,7 +65,7 @@ _SAFE_LOC = frozenset(
 )
 
 
-class _RedactedValidationRoute(APIRoute):
+class _RedactedValidationRoute(BoundedJsonRoute):
     """Request validation errors without the submitted values.
 
     FastAPI's 422 body echoes each failing ``input`` (pydantic's

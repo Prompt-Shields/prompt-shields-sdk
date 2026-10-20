@@ -54,6 +54,7 @@ from collector.provider_usage import (
     admin_keys_for_tenant,
     pull_provider_usage,
 )
+from collector.sanitize import BoundedJsonRoute
 
 logger = logging.getLogger("prompt_shields.provider_usage")
 
@@ -63,7 +64,7 @@ SCHEDULE_BYPASS_REASON = "provider-usage-schedule"
 # no other code uses; this one is "PSPUSAGE" in ASCII.
 SCHEDULE_LOCK_KEY = 0x5053_5055_5341_4745
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+router = APIRouter(prefix="/api/v1/admin", tags=["Admin"], route_class=BoundedJsonRoute)
 
 
 class _OperatorSettings(BaseSettings):

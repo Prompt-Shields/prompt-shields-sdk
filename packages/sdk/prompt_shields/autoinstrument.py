@@ -38,7 +38,8 @@ COMMAND is a program (python, gunicorn, uvicorn, ...) or a .py script, which
 is run with this interpreter. Configuration comes from the environment:
 PS_API_KEY (required), PS_COLLECTOR_URL, PS_USE_CASE, PS_BUSINESS_UNIT,
 PS_OWNER, PS_DATA_CLASSIFICATION, PS_ENVIRONMENT, PS_CALLING_SERVICE,
-PS_ATLAS_URL, PS_ATLAS_API_KEY, PS_INSTRUMENT_VENDORS (e.g. openai,anthropic).
+PS_ATLAS_URL, PS_ATLAS_API_KEY, PS_INSTRUMENT_VENDORS (e.g. openai,anthropic),
+PS_MCP_TELEMETRY_MODE (batch or sync).
 """
 
 
