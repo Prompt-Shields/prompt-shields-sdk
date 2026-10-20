@@ -200,7 +200,7 @@ business unit and environment as for every other source.
 | Status | When | Kong |
 |--------|------|------|
 | `200` | Accepted. Body: `{"ingested", "assets_created", "ignored", "rejected"}` | done |
-| `400` | Body is not JSON, or not an object or array | retries until `max_retry_time`, then drops |
+| `400` | Body is not JSON, not an object or array, or nested deeper than 64 levels | retries until `max_retry_time`, then drops |
 | `401` | Missing or wrong tenant key | retries, then drops |
 | `413` | Body over 4 MiB or more than 1,000 entries | retries, then drops |
 | `415` | Content type is not `application/json` | retries, then drops |

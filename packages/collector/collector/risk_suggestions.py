@@ -76,6 +76,7 @@ from collector import rls
 from collector.audit import bearer_key_prefix, record_read
 from collector.auth import resolve_tenant
 from collector.dedup import CLASSIFICATION_ORDER
+from collector.sanitize import BoundedJsonRoute, StorableStr
 
 RULES_DIR = Path(__file__).parent / "risk_rules"
 
@@ -637,7 +638,7 @@ def risk_dict(r: RiskMapping) -> dict:
 # Admin endpoints (tenant API key, like the lifecycle sweep)
 # ──────────────────────────────────────────────────────────────────────
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+router = APIRouter(prefix="/api/v1/admin", tags=["Admin"], route_class=BoundedJsonRoute)
 
 
 def _not_found(detail: str) -> HTTPException:
@@ -668,7 +669,7 @@ class ReviewBody(BaseModel):
     status: Literal["confirmed", "rejected"]
     # A tenant API key is a machine credential, so the human who decided is
     # named here (as for attestations); the key prefix is stored next to it.
-    reviewed_by: str = Field(
+    reviewed_by: StorableStr = Field(
         ..., min_length=1, max_length=320, description="The person deciding, e.g. an email"
     )
 

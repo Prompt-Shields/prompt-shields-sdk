@@ -9,7 +9,6 @@ for now; protobuf requests get 415.
 from __future__ import annotations
 
 import contextlib
-import json
 from uuid import UUID
 
 from db.models import AIUsageEvent
@@ -34,6 +33,7 @@ from collector.otel_mapping import (
     map_span,
     safe_attributes,
 )
+from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
 from collector.webhooks import AssetChanges
 
 router = APIRouter()
@@ -160,8 +160,10 @@ async def ingest_otel_traces(request: Request):
 
     raw = await _read_bounded_body(request)
     try:
-        payload = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+        payload = loads_bounded(raw)
+    except BodyTooDeep:
+        raise too_deep_problem() from None
+    except ValueError:  # UnicodeDecodeError included
         raise _problem(400, "Bad Request", "Body is not valid JSON") from None
     if not isinstance(payload, dict):
         raise _problem(
