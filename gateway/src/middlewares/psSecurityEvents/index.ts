@@ -532,7 +532,7 @@ export function reportPolicyDenied(
   } = {}
 ): void {
   try {
-    const target = securityLogTarget(c);
+    const target = sinksOf(c);
     if (!target) return;
     enqueue(target, {
       ...base(c, 'policy.denied', {
