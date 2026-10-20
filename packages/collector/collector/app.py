@@ -167,7 +167,13 @@ from collector.servicenow import router as servicenow_router
 app.include_router(leanix_router)
 app.include_router(servicenow_router)
 
-# Operator surface: retention purge and tenant erasure (PS_ADMIN_TOKEN)
+# Tenant admin automation credentials: scoped admin tokens and tenant
+# ingest keys (collector/admin_auth.py)
+from collector.admin_api import router as admin_api_router
+
+app.include_router(admin_api_router)
+
+# Operator surface: tenants, retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router
 
 app.include_router(operator_admin_router)

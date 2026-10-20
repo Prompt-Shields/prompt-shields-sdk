@@ -1,26 +1,36 @@
 """Internal admin endpoint to issue Partner API credentials.
 
-Mounted at /api/v1/admin/partner-credentials and /partner-scopes. Uses
-the existing internal PS API key auth (resolve_tenant) — only tenant
-admins can call this. Returns the plaintext client_secret and api_key
-ONCE on creation; subsequent reads expose only the hashes. Scopes and
-rate-limit tiers come from `collector.partner_scopes`.
+Mounted at /api/v1/admin/partner-credentials and /partner-scopes. Tenant
+admin auth (collector/admin_auth.py): the tenant API key, or an admin token
+with scope ``admin:partners`` (``admin:read`` for the GET routes). Returns
+the plaintext client_secret and api_key ONCE on creation; reads never
+expose them. Scopes and rate-limit tiers come from `collector.partner_scopes`.
+
+  POST   /partner-credentials          issue
+  GET    /partner-credentials          list (?status=active|expired|revoked)
+  GET    /partner-credentials/{id}     read
+  PATCH  /partner-credentials/{id}     scopes / rate limit
+  DELETE /partner-credentials/{id}     revoke
+
+DELETE revokes, like admin tokens and tenant keys: 204, the row is kept
+(``status: revoked``, still readable by id and listed unless filtered out)
+and a repeated DELETE is 204 too. Changes are audited.
 
 This is the dashboard's hook for the "Partners > Add Integration" UX.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
 from db.models import PartnerCredential
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from collector.auth import resolve_tenant
+from collector.admin_auth import AdminPrincipal, add_audit, require_admin
 from collector.partner_auth import (
     generate_api_key,
     generate_client_id,
@@ -38,6 +48,8 @@ from collector.partner_scopes import (
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+
+_PARTNERS = Depends(require_admin("admin:partners"))
 
 
 # Kept for importers; the source of truth is collector.partner_scopes.
@@ -118,6 +130,14 @@ def _resolve_rate_limit(
     return tier, RATE_LIMIT_TIERS[tier]
 
 
+def credential_status(r: PartnerCredential, now: datetime | None = None) -> str:
+    if r.is_active != "true":
+        return "revoked"
+    if r.expires_at is not None and r.expires_at <= (now or datetime.now(UTC)):
+        return "expired"
+    return "active"
+
+
 def _credential_dict(r: PartnerCredential) -> dict:
     return {
         "id": str(r.id),
@@ -127,14 +147,16 @@ def _credential_dict(r: PartnerCredential) -> dict:
         "rate_limit": effective_rate_limit(r.rate_limit_tier, r.rate_limit),
         "rate_limit_tier": r.rate_limit_tier,
         "is_active": r.is_active,
+        "status": credential_status(r),
         "has_api_key": r.api_key_hash is not None,
         "expires_at": r.expires_at.isoformat() if r.expires_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
 
 
-async def _get_credential(request: Request, credential_id: UUID) -> PartnerCredential:
-    tenant_id = await resolve_tenant(request)
+async def _get_credential(
+    request: Request, tenant_id: UUID, credential_id: UUID
+) -> PartnerCredential:
     row = (
         await request.state.db.execute(
             select(PartnerCredential).where(
@@ -157,8 +179,7 @@ async def _get_credential(request: Request, credential_id: UUID) -> PartnerCrede
 
 
 @router.get("/partner-scopes", summary="List partner scopes and rate-limit tiers")
-async def list_partner_scopes(request: Request):
-    await resolve_tenant(request)
+async def list_partner_scopes(principal: AdminPrincipal = _PARTNERS):
     return {
         "scopes": [{"name": k, "description": v} for k, v in SCOPES.items()],
         "aliases": {k: sorted(v) for k, v in SCOPE_ALIASES.items()},
@@ -178,8 +199,9 @@ async def list_partner_scopes(request: Request):
 async def issue_partner_credential(
     body: IssuePartnerCredentialBody,
     request: Request,
+    principal: AdminPrincipal = _PARTNERS,
 ) -> IssuePartnerCredentialResponse:
-    tenant_id = await resolve_tenant(request)
+    tenant_id = principal.tenant_id
 
     scopes = _validated_scopes(body.scopes)
     tier, rate_limit = _resolve_rate_limit(
@@ -205,6 +227,17 @@ async def issue_partner_credential(
         expires_at=body.expires_at,
     )
     db.add(partner)
+    await db.flush()
+    add_audit(
+        request,
+        db,
+        tenant_id=tenant_id,
+        status_code=201,
+        action="partner_credential.create",
+        credential_id=str(partner.id),
+        name=partner.partner_name,
+        scopes=list(scopes),
+    )
     await db.commit()
     await db.refresh(partner)
 
@@ -227,18 +260,39 @@ async def issue_partner_credential(
     "/partner-credentials",
     summary="List partner credentials for this tenant",
 )
-async def list_partner_credentials(request: Request):
-    tenant_id = await resolve_tenant(request)
+async def list_partner_credentials(
+    request: Request,
+    status: Literal["active", "expired", "revoked"] | None = None,
+    principal: AdminPrincipal = _PARTNERS,
+):
     db = request.state.db
     rows = (
         await db.execute(
-            select(PartnerCredential).where(
-                PartnerCredential.tenant_id == tenant_id,
-            )
+            select(PartnerCredential)
+            .where(PartnerCredential.tenant_id == principal.tenant_id)
+            .order_by(PartnerCredential.created_at, PartnerCredential.id)
         )
     ).scalars().all()
+    now = datetime.now(UTC)
+    return {
+        "data": [
+            _credential_dict(r)
+            for r in rows
+            if status is None or credential_status(r, now) == status
+        ]
+    }
 
-    return {"data": [_credential_dict(r) for r in rows]}
+
+@router.get(
+    "/partner-credentials/{credential_id}",
+    summary="Get a partner credential (never its secrets)",
+)
+async def get_partner_credential(
+    credential_id: UUID, request: Request, principal: AdminPrincipal = _PARTNERS
+):
+    return _credential_dict(
+        await _get_credential(request, principal.tenant_id, credential_id)
+    )
 
 
 @router.patch(
@@ -249,16 +303,30 @@ async def update_partner_credential(
     credential_id: UUID,
     body: UpdatePartnerCredentialBody,
     request: Request,
+    principal: AdminPrincipal = _PARTNERS,
 ):
     """Takes effect on the partner's next request, including requests made
     with access tokens issued before the change."""
-    row = await _get_credential(request, credential_id)
+    row = await _get_credential(request, principal.tenant_id, credential_id)
+    changed = []
     if body.scopes is not None:
         row.scopes = _validated_scopes(body.scopes)
+        changed.append("scopes")
     if body.rate_limit_tier is not None or body.rate_limit is not None:
         row.rate_limit_tier, row.rate_limit = _resolve_rate_limit(
             body.rate_limit_tier, body.rate_limit, default_tier=None
         )
+        changed.append("rate_limit")
+    add_audit(
+        request,
+        request.state.db,
+        tenant_id=principal.tenant_id,
+        status_code=200,
+        action="partner_credential.update",
+        credential_id=str(row.id),
+        changed_fields=changed,
+        scopes=list(row.scopes),
+    )
     await request.state.db.commit()
     await request.state.db.refresh(row)
     return _credential_dict(row)
@@ -272,7 +340,18 @@ async def update_partner_credential(
 async def revoke_partner_credential(
     credential_id: UUID,
     request: Request,
+    principal: AdminPrincipal = _PARTNERS,
 ) -> None:
-    row = await _get_credential(request, credential_id)
-    row.is_active = "false"
-    await request.state.db.commit()
+    row = await _get_credential(request, principal.tenant_id, credential_id)
+    if row.is_active != "false":
+        row.is_active = "false"
+        add_audit(
+            request,
+            request.state.db,
+            tenant_id=principal.tenant_id,
+            status_code=204,
+            action="partner_credential.revoke",
+            credential_id=str(row.id),
+            name=row.partner_name,
+        )
+        await request.state.db.commit()

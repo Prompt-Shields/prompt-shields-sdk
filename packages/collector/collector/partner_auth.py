@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import bcrypt
-from db.models import PartnerCredential
+from db.models import PartnerCredential, Tenant
 from fastapi import HTTPException, Request
 from jose import JWTError, jwt
 from sqlalchemy import select
@@ -176,6 +176,28 @@ async def _lookup_by_api_key(db: AsyncSession, plaintext_key: str) -> PartnerCre
 
 
 async def resolve_partner(request: Request) -> PartnerPrincipal:
+    """Resolve the partner principal from the request (`_resolve_credential`),
+    refusing a tenant the operator has disabled (403)."""
+    principal = await _resolve_credential(request)
+    disabled_at = (
+        await request.state.db.execute(
+            select(Tenant.disabled_at).where(Tenant.id == principal.tenant_id)
+        )
+    ).scalar_one_or_none()
+    if disabled_at is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "type": "about:blank",
+                "title": "Forbidden",
+                "status": 403,
+                "detail": "Tenant is disabled",
+            },
+        )
+    return principal
+
+
+async def _resolve_credential(request: Request) -> PartnerPrincipal:
     """Resolve the partner principal from the request.
 
     Looks at the Authorization header. If the token is a JWT (3 dot-

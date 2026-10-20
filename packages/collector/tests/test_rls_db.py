@@ -24,6 +24,7 @@ from collector.partner_auth import hash_secret
 from db import rls as rls_sql
 from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import (
+    AdminToken,
     AIAsset,
     AIUsageEvent,
     AssetAttestation,
@@ -38,6 +39,7 @@ from db.models import (
     RiskMapping,
     TelemetryClientStats,
     Tenant,
+    TenantApiKey,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -127,6 +129,22 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     server_name=f"server-{name}",
                     tool_name="search",
                     call_count=1,
+                ),
+                TenantApiKey(
+                    tenant_id=tenant_id,
+                    name="seed",
+                    key_prefix=api_key_lookup_prefix(f"ps-ik-seed-{name}"),
+                    key_hash=hash_api_key(f"ps-ik-seed-{name}"),
+                    key_hint="ed-" + name,
+                ),
+                AdminToken(
+                    tenant_id=tenant_id,
+                    name="seed",
+                    scopes=["admin:read"],
+                    token_prefix=api_key_lookup_prefix(f"ps-at-seed-{name}"),
+                    token_hash=hash_api_key(f"ps-at-seed-{name}"),
+                    token_hint="ed-" + name,
+                    created_by="operator",
                 ),
             ]
         )

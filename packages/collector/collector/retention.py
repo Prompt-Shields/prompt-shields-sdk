@@ -45,6 +45,7 @@ from uuid import UUID
 
 from db.models import (
     ATTESTATION_ERASE_SETTING,
+    AdminToken,
     AIAsset,
     AIUsageEvent,
     AssetAttestation,
@@ -58,6 +59,7 @@ from db.models import (
     RiskMapping,
     TelemetryClientStats,
     Tenant,
+    TenantApiKey,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -90,6 +92,8 @@ ERASE_ORDER: tuple[type, ...] = (
     ProviderKeyFingerprint,
     ProviderCredential,
     McpToolUsage,
+    TenantApiKey,
+    AdminToken,
 )
 
 # Tables with a tenant_id that erasure keeps on purpose.

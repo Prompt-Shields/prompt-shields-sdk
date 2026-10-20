@@ -26,6 +26,11 @@ class _Result:
     def one_or_none(self):
         return self._row
 
+    def first(self):
+        # The tenant_api_keys lookup finds nothing; the legacy tenant row
+        # lookup then returns the stub row.
+        return None
+
 
 class _DB:
     def __init__(self, row):
@@ -43,7 +48,9 @@ def _request(db, authorization: str | None):
 
 
 def _tenant_row(key: str):
-    return SimpleNamespace(id=uuid.uuid4(), api_key_hash=hash_api_key(key))
+    return SimpleNamespace(
+        id=uuid.uuid4(), api_key_hash=hash_api_key(key), disabled_at=None
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -89,11 +96,14 @@ class TestResolveTenant:
     async def test_lookup_filters_on_prefix_not_plaintext(self):
         db = _DB(_tenant_row(KEY))
         await auth.resolve_tenant(_request(db, f"Bearer {KEY}"))
-        (stmt,) = db.statements
-        params = stmt.compile().params
-        assert api_key_lookup_prefix(KEY) in params.values()
-        assert KEY not in params.values()
-        assert "api_key_prefix" in str(stmt)
+        # tenant_api_keys first, then the legacy key on the tenant row.
+        keys_stmt, legacy_stmt = db.statements
+        for stmt in db.statements:
+            params = stmt.compile().params
+            assert api_key_lookup_prefix(KEY) in params.values()
+            assert KEY not in params.values()
+        assert "tenant_api_keys.key_prefix" in str(keys_stmt)
+        assert "tenants.api_key_prefix" in str(legacy_stmt)
 
     async def test_missing_header_is_401(self):
         with pytest.raises(HTTPException) as exc:

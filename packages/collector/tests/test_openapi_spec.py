@@ -1,9 +1,11 @@
 """docs/openapi.yaml against the collector's routes and serializers.
 
-Covers the Partner API routes plus the tenant admin webhook and provider
-credential routes the spec documents: every documented operation exists in
-the app (and the reverse for those prefixes), and the documented schemas
-have exactly the keys the serializers and request bodies use.
+Covers the Partner API, every tenant admin route (/api/v1/admin) and every
+operator route (/api/v1/operator): every documented operation exists in
+the app (and the reverse for those prefixes), each admin operation's
+security and ``x-admin-scope`` match the route's dependency, and the
+documented schemas have exactly the keys the serializers and request
+bodies use.
 """
 
 from __future__ import annotations
@@ -14,9 +16,25 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from collector import (
+    admin_api,
+    cloud_inventory,
+    leanix,
+    lifecycle,
+    operator_admin,
+    partner_admin,
+    provider_credentials_api,
+    provider_usage_admin,
+    risk_suggestions,
+    servicenow,
+    tenant_keys,
+    webhook_admin,
+    webhooks,
+)
 from collector import provider_credentials as pc
-from collector import provider_credentials_api, webhook_admin, webhooks
+from collector.admin_auth import ADMIN_SCOPES, serialize_token
 from collector.app import app
+from fastapi.routing import APIRoute
 
 yaml = pytest.importorskip("yaml")
 
@@ -29,9 +47,8 @@ METHODS = ("get", "post", "put", "patch", "delete")
 # Route prefixes the spec documents in full.
 DOCUMENTED_PREFIXES = (
     "/partner/v1/",
-    "/api/v1/admin/webhooks/",
-    "/api/v1/admin/provider-credentials",
-    "/api/v1/admin/provider-key-fingerprints",
+    "/api/v1/admin/",
+    "/api/v1/operator/",
 )
 
 
@@ -116,6 +133,14 @@ def test_webhook_schemas_match_serializers():
         ("RotateWebhookSecretRequest", webhook_admin.RotateSecretBody),
         ("AdminKeyRequest", provider_credentials_api.AdminKeyBody),
         ("FingerprintRequest", provider_credentials_api.FingerprintBody),
+        ("CreateAdminTokenRequest", admin_api.CreateAdminTokenBody),
+        ("CreateTenantApiKeyRequest", admin_api.CreateApiKeyBody),
+        ("RotateTenantApiKeyRequest", admin_api.RotateApiKeyBody),
+        ("IssuePartnerCredentialRequest", partner_admin.IssuePartnerCredentialBody),
+        ("UpdatePartnerCredentialRequest", partner_admin.UpdatePartnerCredentialBody),
+        ("CreateTenantRequest", operator_admin.CreateTenantBody),
+        ("UpdateTenantRequest", operator_admin.UpdateTenantBody),
+        ("BootstrapAdminTokenRequest", operator_admin.BootstrapAdminTokenBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -158,3 +183,138 @@ def test_provider_credential_partner_routes_need_the_scope():
                 assert item[method]["security"][0] == {
                     "OAuth2": ["provider-credentials:manage"]
                 }, (method, path)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tenant admin and operator routes
+# ──────────────────────────────────────────────────────────────────────
+
+
+# Every router mounted under /api/v1/admin or /api/v1/operator. A router
+# missing here fails the test below with a KeyError on its paths.
+ADMIN_ROUTERS = (
+    admin_api.router,
+    partner_admin.router,
+    webhook_admin.router,
+    provider_credentials_api.tenant_router,
+    lifecycle.router,
+    risk_suggestions.router,
+    provider_usage_admin.router,
+    cloud_inventory.router,
+    leanix.router,
+    servicenow.router,
+    operator_admin.router,
+)
+
+
+def _route_admin_scopes() -> dict[tuple[str, str], str | None]:
+    """(METHOD, path) -> the admin scope its require_admin dependency
+    declares, or None for a route without one (operator routes)."""
+    out = {}
+    for route in (r for router in ADMIN_ROUTERS for r in router.routes):
+        if not isinstance(route, APIRoute):
+            continue
+        scopes = {
+            getattr(dep.call, "admin_scope", None) for dep in route.dependant.dependencies
+        } - {None}
+        assert len(scopes) <= 1, route.path
+        for method in route.methods:
+            out[(method, route.path)] = next(iter(scopes), None)
+    return out
+
+
+def test_admin_operations_document_their_scope_and_security():
+    scopes = _route_admin_scopes()
+    assert scopes
+    for path, item in SPEC["paths"].items():
+        if not path.startswith(("/api/v1/admin/", "/api/v1/operator/")):
+            continue
+        for method in METHODS:
+            if method not in item:
+                continue
+            op = item[method]
+            scope = scopes[(method.upper(), path)]
+            if scope is None:
+                # Operator routes take PS_ADMIN_TOKEN, never a tenant credential.
+                assert op["security"] == [{"OperatorToken": []}], (method, path)
+                assert "x-admin-scope" not in op, (method, path)
+            else:
+                assert op["security"] == [{"TenantApiKey": []}, {"AdminToken": []}], (
+                    method,
+                    path,
+                )
+                assert op["x-admin-scope"] == scope, (method, path)
+                assert op["responses"]["403"] == {
+                    "$ref": "#/components/responses/AdminForbidden"
+                }, (method, path)
+
+
+def test_admin_scope_enum_matches_code():
+    assert SCHEMAS["AdminScope"]["enum"] == list(ADMIN_SCOPES)
+
+
+def test_admin_credential_schemas_match_serializers():
+    now = datetime.now(UTC)
+    token = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="terraform",
+        scopes=["admin:read"],
+        token_hint="abcd",
+        created_by="operator",
+        created_at=now,
+        expires_at=None,
+        revoked_at=None,
+    )
+    keys = set(serialize_token(token))
+    assert _props("AdminToken") == keys == set(SCHEMAS["AdminToken"]["required"])
+    assert _props("AdminTokenWithSecret") == keys | {"token", "warning"}
+
+    key = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="gateway",
+        key_hint="abcd",
+        origin="api",
+        previous_key_hash=None,
+        previous_expires_at=None,
+        created_at=now,
+        rotated_at=None,
+        expires_at=None,
+        revoked_at=None,
+    )
+    keys = set(tenant_keys.serialize_key(key))
+    assert _props("TenantApiKey") == keys == set(SCHEMAS["TenantApiKey"]["required"])
+    assert _props("TenantApiKeyWithSecret") == keys | {"key", "warning"}
+    assert SCHEMAS["CredentialStatus"]["enum"] == list(tenant_keys.STATUSES)
+
+
+def test_partner_credential_schemas_match_serializers():
+    cred = SimpleNamespace(
+        id=uuid.uuid4(),
+        partner_name="ardoq",
+        client_id="ps-client-ardoq",
+        scopes=["assets:read"],
+        rate_limit=None,
+        rate_limit_tier="standard",
+        is_active="true",
+        api_key_hash=None,
+        expires_at=None,
+        created_at=datetime.now(UTC),
+    )
+    keys = set(partner_admin._credential_dict(cred))
+    assert _props("PartnerCredential") == keys == set(SCHEMAS["PartnerCredential"]["required"])
+    issued = set(partner_admin.IssuePartnerCredentialResponse.model_fields)
+    assert _props("PartnerCredentialWithSecrets") == issued
+
+
+def test_tenant_schema_matches_serializer():
+    tenant = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Nordbank",
+        domain=None,
+        settings={},
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    keys = set(operator_admin._tenant_dict(tenant))
+    assert _props("Tenant") == keys == set(SCHEMAS["Tenant"]["required"])
+    assert _props("TenantCreated") == keys | {"api_key", "warning"}

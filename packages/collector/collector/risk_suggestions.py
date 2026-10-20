@@ -66,15 +66,15 @@ from typing import Any, Literal
 from uuid import UUID
 
 from db.models import AIAsset, DataFlow, RiskMapping, Tenant, uuid7
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import rls
+from collector.admin_auth import AdminPrincipal, require_admin
 from collector.audit import bearer_key_prefix, record_read
-from collector.auth import resolve_tenant
 from collector.dedup import CLASSIFICATION_ORDER
 
 RULES_DIR = Path(__file__).parent / "risk_rules"
@@ -639,6 +639,8 @@ def risk_dict(r: RiskMapping) -> dict:
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
+_REGISTRY = Depends(require_admin("admin:registry"))
+
 
 def _not_found(detail: str) -> HTTPException:
     return HTTPException(
@@ -656,8 +658,8 @@ def _not_found(detail: str) -> HTTPException:
     "/risk-suggestions/run",
     summary="Re-evaluate risk classification suggestions for the tenant's assets",
 )
-async def run_suggestions(request: Request) -> dict:
-    tenant_id = await resolve_tenant(request)
+async def run_suggestions(request: Request, principal: AdminPrincipal = _REGISTRY) -> dict:
+    tenant_id = principal.tenant_id
     db = request.state.db
     result = await suggest_risks(db, tenant_id)
     await db.commit()
@@ -677,8 +679,10 @@ class ReviewBody(BaseModel):
     "/risk-mappings/{risk_id}/review",
     summary="Confirm or reject a risk mapping (a human decision the engine keeps)",
 )
-async def review_risk(risk_id: UUID, body: ReviewBody, request: Request) -> dict:
-    tenant_id = await resolve_tenant(request)
+async def review_risk(
+    risk_id: UUID, body: ReviewBody, request: Request, principal: AdminPrincipal = _REGISTRY
+) -> dict:
+    tenant_id = principal.tenant_id
     db = request.state.db
     row = (
         await db.execute(
