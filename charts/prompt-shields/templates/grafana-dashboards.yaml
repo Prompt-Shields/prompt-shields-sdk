@@ -1,0 +1,21 @@
+{{- /* Grafana dashboards for the sidecar: files/dashboards/*.json (copies of deploy/grafana/dashboards). */ -}}
+{{- if .Values.grafanaDashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ps.fullname" . }}-dashboards
+  {{- with .Values.grafanaDashboards.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "ps.labels" (dict "ctx" . "component" "monitoring") | nindent 4 }}
+    {{- with .Values.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{- (.Files.Glob "files/dashboards/*.json").AsConfig | nindent 2 }}
+{{- end }}

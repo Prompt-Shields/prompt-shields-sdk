@@ -70,6 +70,7 @@
         "guides/confidence-scoring",
         "guides/data-retention",
         "guides/security-events",
+        "guides/observability",
         "guides/gateway-oidc"
       ]
     },
