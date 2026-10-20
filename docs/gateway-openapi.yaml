@@ -1520,7 +1520,10 @@ paths:
         (`-32011`, fail closed); and forwards the request to the configured
         URL with the server's own credentials. The caller's `Authorization`
         header is never forwarded. Policy refusals of a request are JSON-RPC
-        errors with HTTP 200. SSE responses stream. See
+        errors with HTTP 200. SSE responses stream. Only the response to
+        this request is released, re-serialised from the checked JSON;
+        `tasks/*` is refused (`-32010`). An upstream HTTP error keeps its
+        status, with its body only when that is a JSON-RPC error. See
         `gateway/docs/mcp-proxy.md`.
       security:
         - McpToken: []
@@ -1575,7 +1578,9 @@ paths:
       tags: [MCP]
       summary: Open the server-to-client SSE stream (2025-11-25)
       description: |
-        Passed through to a `2025-11-25` server with the session id. A
+        Passed through to a `2025-11-25` server with the session id. The
+        stream carries the server's requests and notifications only: a
+        JSON-RPC response on it (a resumed stream's replay) is dropped. A
         `2026-07-28` server answers 405.
       security:
         - McpToken: []
