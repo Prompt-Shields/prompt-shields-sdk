@@ -480,6 +480,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process) |
 | `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart (per process) |
 | `PS_AUDIT_RETENTION_DAYS` | `365` | Partner audit log retention |
+| `PS_AUDIT_EVENT_RETENTION_DAYS` | `0` (keep) | Audit trail retention for `python -m collector.audit_trail purge` (leaves a checkpoint row) |
 | `PS_RETENTION_DAYS_DEFAULT`, `PS_RETENTION_BATCH_SIZE` | `365`, `5000` | Usage event retention |
 | `PS_ASSET_STALE_AFTER_DAYS`, `PS_ASSET_RETIRE_AFTER_DAYS`, `PS_ASSET_LIFECYCLE_SOURCE_THRESHOLDS` | `30`, `90`, `""` | Lifecycle sweep |
 | `PS_EMBEDDINGS_BACKEND`, `PS_EMBEDDINGS_MODEL`, `PS_EMBEDDINGS_OPENAI_BASE_URL`, `PS_EMBEDDINGS_CACHE_DIR` | `auto`, —, `https://api.openai.com/v1`, — | Semantic search embeddings |

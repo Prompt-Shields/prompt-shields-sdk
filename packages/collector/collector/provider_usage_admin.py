@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings
 from sqlalchemy import select, text
 
-from collector import rls
+from collector import audit_trail, rls
 from collector.provider_usage import (
     SUPPORTED_PROVIDERS,
     ProviderUsageSettings,
@@ -87,14 +87,32 @@ def _problem(status: int, title: str, detail: str) -> HTTPException:
 
 
 async def require_operator(request: Request) -> None:
-    """Constant-time check of ``Authorization: Bearer $PS_ADMIN_TOKEN``."""
+    """Constant-time check of ``Authorization: Bearer $PS_ADMIN_TOKEN``.
+
+    Audit trail (system chain): ``operator.access`` for every authorised
+    call (route and method), ``auth.failure`` (rate-limited) otherwise.
+    """
     token = _OperatorSettings().admin_token.get_secret_value()
     if not token:
         raise _problem(404, "Not Found", "Not Found")
     auth = request.headers.get("Authorization", "")
     presented = auth[len("Bearer ") :].strip() if auth.startswith("Bearer ") else ""
     if not presented or not hmac.compare_digest(presented.encode(), token.encode()):
+        await audit_trail.record_auth_failure(
+            request,
+            realm="operator",
+            reason="invalid_credentials" if presented else "missing_credentials",
+            status_code=401,
+        )
         raise _problem(401, "Unauthorized", "Invalid operator token")
+    await audit_trail.record_system_event(
+        action="operator.access",
+        actor=audit_trail.OPERATOR,
+        details={
+            "route": audit_trail.route_template(request),
+            "method": request.method,
+        },
+    )
 
 
 class ProviderUsagePullBody(BaseModel):

@@ -71,6 +71,7 @@ components:
             webhooks:manage: Manage webhook subscriptions (never granted by default)
             attestations:write: Record human attestations, including retiring and un-retiring assets (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
+            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
@@ -758,7 +759,12 @@ components:
 
     WebhookEventType:
       type: string
-      enum: [asset.created, asset.changed, asset.retired, asset.attested]
+      description: >-
+        Event types a subscription can name. `audit.*` subscribes to the
+        tenant's hash-chained admin audit trail, delivered as one event per
+        row with the type `audit.<action>` (see the Audit trail guide); it
+        needs the `audit:read` scope and is not part of the default list.
+      enum: [asset.created, asset.changed, asset.retired, asset.attested, audit.*]
 
     CreateWebhookSubscriptionRequest:
       type: object
@@ -769,7 +775,8 @@ components:
           format: uuid
           description: >-
             Partner credential (of this tenant) that receives the events. It
-            needs `changes:read`, plus `assets:read` for `asset.attested`.
+            needs `changes:read`, plus `assets:read` for `asset.attested`,
+            and `audit:read` for `audit.*`.
         url:
           type: string
           maxLength: 2048
@@ -779,7 +786,7 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/WebhookEventType'
-          description: Defaults to every event type
+          description: Defaults to every asset event type (not `audit.*`)
         description:
           type: string
           maxLength: 200
@@ -833,7 +840,9 @@ components:
           type: string
           format: uuid
         event_type:
-          $ref: '#/components/schemas/WebhookEventType'
+          type: string
+          description: An asset event type, or `audit.<action>` for an audit trail event
+          example: audit.provider_credential.rotate
         asset_id:
           type: string
           format: uuid

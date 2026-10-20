@@ -19,7 +19,10 @@ The admin key is write-only: no response, log line or audit row carries
 it. Responses show ``key_hint`` (last four characters), ``key_id`` (the
 keyring key it is encrypted under) and timestamps. Invalid keys are
 refused with a message that does not echo them. Every call writes a
-``partner_audit_log`` row (path and status, never the body).
+``partner_audit_log`` row (path and status, never the body). Every change,
+and every refused change, also writes an ``audit_events`` row
+(collector.audit_trail) in the same transaction as the change: action,
+provider (and key id for links), outcome and status, never the key.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict
 
+from collector import audit_trail
 from collector import provider_credentials as pc
 from collector.audit import record_read
 from collector.auth import resolve_tenant
@@ -185,9 +189,7 @@ async def _create_credential(
         raise _not_configured() from exc
     except ValueError as exc:
         raise _problem(400, "Bad Request", str(exc)) from exc
-    out = pc.serialize_credential(row)
-    await db.commit()
-    return 201, out
+    return 201, pc.serialize_credential(row)
 
 
 async def _rotate_credential(
@@ -202,9 +204,7 @@ async def _rotate_credential(
         raise _not_configured() from exc
     except ValueError as exc:
         raise _problem(400, "Bad Request", str(exc)) from exc
-    out = pc.serialize_credential(row)
-    await db.commit()
-    return 200, out
+    return 200, pc.serialize_credential(row)
 
 
 async def _delete_credential(db, tenant_id: UUID, provider: str) -> tuple[int, None]:
@@ -212,7 +212,6 @@ async def _delete_credential(db, tenant_id: UUID, provider: str) -> tuple[int, N
     if row is None:
         raise _not_found()
     await db.delete(row)
-    await db.commit()
     return 204, None
 
 
@@ -233,12 +232,10 @@ async def _put_link(
         raise _problem(400, "Bad Request", str(exc)) from exc
     await db.flush()
     corroborated = await pc.corroborate_by_fingerprint(db, tenant_id)
-    out = {
+    return (201 if created else 200), {
         "data": pc.serialize_link(row),
         "meta": {"corroborated_assets": corroborated},
     }
-    await db.commit()
-    return (201 if created else 200), out
 
 
 async def _delete_link(
@@ -248,20 +245,75 @@ async def _delete_link(
     if row is None:
         raise _problem(404, "Not Found", "No fingerprint link for this key id")
     await db.delete(row)
-    await db.commit()
     return 204, None
 
 
 Handler = Callable[..., Awaitable[tuple[int, dict | None]]]
 
+# Handlers that change something -> audit trail action. Reads are only in
+# partner_audit_log.
+_AUDITED: dict[Handler, str] = {
+    _create_credential: "provider_credential.create",
+    _rotate_credential: "provider_credential.rotate",
+    _delete_credential: "provider_credential.delete",
+    _put_link: "provider_key_fingerprint.put",
+    _delete_link: "provider_key_fingerprint.delete",
+}
+
+
+def _audit_kwargs(handler: Handler, args: tuple, actor: audit_trail.Actor) -> dict | None:
+    action = _AUDITED.get(handler)
+    if action is None:
+        return None
+    provider = args[0]
+    if action.startswith("provider_key_fingerprint."):
+        api_key_id = args[1]
+        target = ("provider_key_fingerprint", f"{provider}/{api_key_id}")
+        details = {"provider": provider, "api_key_id": api_key_id}
+    else:
+        target = ("provider_credential", provider)
+        details = {"provider": provider}
+    return {
+        "action": action,
+        "actor": actor,
+        "target_type": target[0],
+        "target_id": target[1],
+        "details": details,
+    }
+
+
+async def _run_audited(
+    db, tenant_id: UUID, actor: audit_trail.Actor, handler: Handler, args: tuple
+) -> tuple[int, dict | None]:
+    """Run a handler, then commit its change together with its audit row.
+    On refusal, roll back and record the refused attempt."""
+    audit = _audit_kwargs(handler, args, actor)
+    try:
+        status, body = await handler(db, tenant_id, *args)
+        if audit is not None:
+            await audit_trail.record(db, tenant_id=tenant_id, status_code=status, **audit)
+        await db.commit()
+    except HTTPException as exc:
+        await db.rollback()
+        if audit is not None:
+            await audit_trail.record_committed(
+                db,
+                tenant_id=tenant_id,
+                outcome=audit_trail.FAILURE,
+                status_code=exc.status_code,
+                **audit,
+            )
+        raise
+    return status, body
+
 
 async def _as_tenant(request: Request, response: Response, handler: Handler, *args):
     tenant_id = await resolve_tenant(request)
     db = request.state.db
+    actor = audit_trail.tenant_key_actor(request)
     try:
-        status, body = await handler(db, tenant_id, *args)
+        status, body = await _run_audited(db, tenant_id, actor, handler, args)
     except HTTPException as exc:
-        await db.rollback()
         await record_read(request, tenant_id=tenant_id, status_code=exc.status_code)
         raise
     await record_read(request, tenant_id=tenant_id, status_code=status)
@@ -279,10 +331,10 @@ async def _as_partner(
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
     endpoint, method = request.url.path, request.method
+    actor = audit_trail.partner_actor(principal.partner_id)
     try:
-        status, body = await handler(db, principal.tenant_id, *args)
+        status, body = await _run_audited(db, principal.tenant_id, actor, handler, args)
     except HTTPException as exc:
-        await db.rollback()
         await _audit(request, principal, endpoint, method, exc.status_code)
         raise
     await _audit(request, principal, endpoint, method, status)

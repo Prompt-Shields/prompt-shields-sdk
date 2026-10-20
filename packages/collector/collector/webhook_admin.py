@@ -17,6 +17,11 @@ The signing secret is returned once, on creation and on rotation.
   GET    /deliveries?status=dead               dead-letter (and other) view
   POST   /deliveries/{id}/redeliver            queue a delivery again
 
+Every change (create, update, delete, rotate-secret, redeliver) also
+writes an `audit_events` row (collector.audit_trail) with the subscription
+id, partner id, event types and changed field names: never the URL (it
+can carry a token) or the secret.
+
 See collector/webhooks.py for delivery, signing and destination checks.
 """
 
@@ -31,7 +36,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import delete, func, select
 
-from collector import webhooks
+from collector import audit_trail, webhooks
 from collector.audit import build_audit_row, record_read
 from collector.auth import resolve_tenant
 from collector.sanitize import BoundedJsonRoute, StorableStr
@@ -176,9 +181,34 @@ async def create_subscription(body: CreateSubscriptionBody, request: Request) ->
         is_active=True,
     )
     db.add(sub)
+    await db.flush()
+    await _audit(
+        db,
+        request,
+        tenant_id,
+        "webhook_subscription.create",
+        sub.id,
+        201,
+        {"partner_id": partner.id, "event_types": sub.event_types},
+    )
     await db.commit()
     await db.refresh(sub)
     return {**_subscription_dict(sub), "secret": secret, "warning": SECRET_WARNING}
+
+
+async def _audit(
+    db, request: Request, tenant_id: UUID, action: str, target_id, status: int, details=None
+) -> None:
+    await audit_trail.record(
+        db,
+        tenant_id=tenant_id,
+        action=action,
+        actor=audit_trail.tenant_key_actor(request),
+        target_type="webhook_delivery" if action.startswith("webhook_delivery") else "webhook_subscription",
+        target_id=target_id,
+        status_code=status,
+        details=details,
+    )
 
 
 @router.get("/subscriptions", summary="List webhook subscriptions")
@@ -214,10 +244,12 @@ async def delete_subscription(subscription_id: UUID, request: Request) -> None:
     tenant_id = await resolve_tenant(request)
     db = request.state.db
     sub = await _get_subscription(db, tenant_id, subscription_id)
+    details = {"partner_id": sub.partner_id, "event_types": list(sub.event_types)}
     await db.execute(
         delete(WebhookDelivery).where(WebhookDelivery.subscription_id == sub.id)
     )
     await db.delete(sub)
+    await _audit(db, request, tenant_id, "webhook_subscription.delete", subscription_id, 204, details)
     await db.commit()
 
 
@@ -318,6 +350,19 @@ async def update_subscription(
     audit = build_audit_row(request, tenant_id=tenant_id, status_code=200)
     audit.query_params = {**(audit.query_params or {}), "changed_fields": changed}
     db.add(audit)
+    await _audit(
+        db,
+        request,
+        tenant_id,
+        "webhook_subscription.update",
+        sub.id,
+        200,
+        {
+            "changed_fields": changed,
+            "event_types": list(sub.event_types),
+            "is_active": sub.is_active,
+        },
+    )
     await db.commit()
     await db.refresh(sub)
     return _subscription_dict(sub)
@@ -370,6 +415,15 @@ async def rotate_secret(
         raise _not_configured() from exc
     sub.previous_secret_ciphertext = previous
     sub.previous_secret_expires_at = now + timedelta(seconds=grace) if previous else None
+    await _audit(
+        db,
+        request,
+        tenant_id,
+        "webhook_subscription.rotate_secret",
+        sub.id,
+        200,
+        {"grace_period_seconds": grace},
+    )
     await db.commit()
     await db.refresh(sub)
     return {**_subscription_dict(sub), "secret": secret, "warning": SECRET_WARNING}
@@ -419,6 +473,15 @@ async def redeliver(delivery_id: UUID, request: Request) -> dict:
     d.last_error = None
     d.last_status_code = None
     d.delivered_at = None
+    await _audit(
+        db,
+        request,
+        tenant_id,
+        "webhook_delivery.redeliver",
+        d.id,
+        200,
+        {"subscription_id": d.subscription_id, "event_type": d.event_type},
+    )
     await db.commit()
     await db.refresh(d)
     return _delivery_dict(d)

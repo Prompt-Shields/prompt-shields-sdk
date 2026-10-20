@@ -6,7 +6,7 @@ from db.models import Tenant
 from fastapi import HTTPException, Request
 from sqlalchemy import select
 
-from collector import rls
+from collector import audit_trail, rls
 
 # Checked when no tenant matches the key's lookup prefix, so an unknown key
 # costs the same bcrypt work as a known key with a wrong secret.
@@ -25,6 +25,18 @@ def _unauthorized(detail: str) -> HTTPException:
     )
 
 
+# Tenant admin surface: a refused key here is an audit trail auth.failure.
+ADMIN_PATH_PREFIX = "/api/v1/admin/"
+
+
+async def _audit_admin_failure(request: Request, reason: str) -> None:
+    path = getattr(getattr(request, "url", None), "path", "")
+    if path.startswith(ADMIN_PATH_PREFIX):
+        await audit_trail.record_auth_failure(
+            request, realm="tenant_admin", reason=reason, status_code=401
+        )
+
+
 async def resolve_tenant(request: Request) -> UUID:
     """Extract Bearer token, resolve to tenant_id.
 
@@ -37,6 +49,7 @@ async def resolve_tenant(request: Request) -> UUID:
     """
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
+        await _audit_admin_failure(request, "missing_credentials")
         raise _unauthorized("Missing or invalid Authorization header")
     api_key = auth.removeprefix("Bearer ").strip()
 
@@ -53,6 +66,7 @@ async def resolve_tenant(request: Request) -> UUID:
     valid = await asyncio.to_thread(verify_api_key, api_key, stored_hash)
 
     if row is None or not valid:
+        await _audit_admin_failure(request, "invalid_credentials")
         raise _unauthorized("Invalid API key")
     await rls.set_tenant(db, row.id)
     return row.id

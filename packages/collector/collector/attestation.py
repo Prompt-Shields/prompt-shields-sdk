@@ -53,7 +53,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import lifecycle, webhooks
+from collector import audit_trail, lifecycle, webhooks
 
 UNREVIEWED = "unreviewed"
 ATTESTED = "attested"
@@ -164,6 +164,28 @@ async def record_attestation(
     await webhooks.enqueue_attestation_event(db, tenant_id, asset, row, now=now)
     if lifecycle_event is not None:
         await webhooks.enqueue_asset_events(db, tenant_id, [lifecycle_event], now=now)
+    # Admin audit trail, same transaction: who (key prefix or partner id,
+    # not `attested_by`), which asset, field and state. No comment or value.
+    actor = (
+        audit_trail.partner_actor(partner_id)
+        if actor_type == ACTOR_PARTNER and partner_id is not None
+        else audit_trail.Actor("tenant_key", api_key_prefix)
+    )
+    trail = [("registry.attest", {"attestation_id": row.id})]
+    if lifecycle_event is not None:
+        retired = lifecycle_event[0] == webhooks.ASSET_RETIRED
+        trail.append(("registry.retire" if retired else "registry.unretire", {}))
+    for action, extra in trail:
+        await audit_trail.record(
+            db,
+            tenant_id=tenant_id,
+            action=action,
+            actor=actor,
+            target_type="asset",
+            target_id=asset.id,
+            now=now,
+            details={"field": field, "state": state, "actor_type": actor_type, **extra},
+        )
     return row
 
 
