@@ -2,57 +2,55 @@
 
 # Prompt Shields Gateway
 
-#### A discovery-focused fork of the [Portkey AI Gateway](https://github.com/Portkey-AI/gateway) (MIT)
+#### An LLM gateway for AI discovery, forked from the [Portkey AI Gateway](https://github.com/Portkey-AI/gateway) (MIT)
 
 </div>
 
-The Prompt Shields Gateway is a thin LLM proxy that captures **AI discovery telemetry** for every request flowing through it. It inherits Portkey's provider abstraction (250+ models across 45+ providers) and OpenAI-compatible API surface, then strips features that don't serve discovery and adds the `ps-telemetry` middleware that feeds the Prompt Shields collector.
+The Prompt Shields Gateway is an OpenAI-compatible LLM proxy. Its main job is **AI discovery**: the `ps-telemetry` middleware records which vendors and models are called, by which business unit, with what usage, and sends it to the Prompt Shields collector. It keeps Portkey's provider abstraction and routing (retries, fallbacks, load balancing), runs Portkey's guardrail checks on the requests it can inspect and refuses the ones it cannot, and can write a security-event stream for a SIEM.
 
 **Zero code changes** — point your existing OpenAI client at the gateway and start populating your AI asset registry.
 
+The gateway does not authenticate its clients: the key a caller sends is the provider's key. Run it behind an API gateway such as Kong for client authentication and rate limits.
+
+Docs:
+
+- [Gateway API](../docs/gateway/overview.mdx): headers, error codes and Kong import; the OpenAPI spec is [`docs/gateway-openapi.yaml`](../docs/gateway-openapi.yaml)
+- [Security events](../docs/guides/security-events.mdx) (schema [`docs/security-events.schema.json`](../docs/security-events.schema.json))
+- [Kong AI Gateway integration](../docs/integrations/kong.mdx): send Kong traffic to the collector
+- [Helm chart](../charts/prompt-shields/README.md) for the gateway and collector on Kubernetes
+- [`FORK_NOTICE.md`](./FORK_NOTICE.md): upstream base and every change made to upstream files
+
 ---
 
-## What This Fork Keeps from Portkey
+## What this fork keeps, changes and leaves out
 
-These features are kept because they directly support discovery, observability, and provider coverage:
-
-| Feature | Why it stays | Portkey docs |
-|---------|--------------|--------------|
-| **Provider abstraction** (250+ models, 45+ providers) | Lets one proxy capture telemetry from any LLM customers use | [Providers](https://portkey.wiki/gh-59) |
-| **OpenAI-compatible API surface** | Drop-in replacement for `openai`/`anthropic` SDKs — no SDK install required | [Quickstart](https://portkey.ai/docs) |
-| **Request/response interception pipeline** | The middleware hook where `ps-telemetry` runs | — |
-| **Streaming (SSE) support** | Tokens/cost still captured at stream completion | [Streaming](https://portkey.ai/docs) |
-| **Multi-modal capabilities** (vision, audio, image) | Multi-modal calls are still AI assets that need to be discovered | [Multi-modal](https://portkey.wiki/gh-41) |
-| **Realtime APIs** (WebSocket) | OpenAI Realtime API observability | [Realtime](https://portkey.wiki/gh-42) |
-| **MCP Gateway observability hooks** | Tool calls via MCP are AI surface area worth tracking | [MCP Gateway](https://portkey.ai/docs/product/mcp-gateway) |
-| **Usage analytics primitives** | Token/cost/latency capture is core to discovery | [Analytics](https://portkey.wiki/gh-49) |
-| **Deployment options** — Docker, Node.js, Cloudflare Workers, Replit, EC2 | Customers deploy where their apps already live | [Deployment](./docs/installation-deployments.md) |
-
-## What This Fork Strips
-
-These features are deliberately removed or disabled. They belong to other product layers (routing tools like Portkey itself, security tools like Defender/Purview, or PS's own copilot):
-
-| Feature | Why it's stripped | Where to get it |
-|---------|-------------------|-----------------|
-| **Fallbacks & retries** | Reliability is the upstream gateway's job, not discovery's | Use [Portkey](https://portkey.ai) itself |
-| **Load balancing & weighted routing** | Same — not in discovery's lane | Portkey |
-| **Smart caching** (Portkey simple + semantic) | Portkey's built-in caching is disabled; PS ships its own exact-match cache instead (see [What This Fork Adds](#what-this-fork-adds)) | Portkey |
-| **Guardrails engine** (40+ guardrails) | PS ships its own prompt improvement copilot via browser extensions | [Prompt Shields](https://promptshields.io) |
-| **Virtual keys / secure key management** | Enterprise customers manage LLM keys in their own vaults | Use existing vault |
-| **Role-based access control on the gateway** | RBAC lives in the Atlas AI dashboard (atlas.ai repo) | atlas.ai |
-| **Prompt template management** | Out of scope; PS browser extensions handle prompt improvement | — |
-| **Provider optimization / cost routing** | Discovery is read-only — we observe spend, we don't route around it | Portkey |
-
-If you need any of the stripped features, run an upstream Portkey instance **in front of** the PS gateway: Portkey routes and caches, then forwards to the PS gateway for discovery telemetry.
+| Feature | In this fork | Notes |
+|---------|--------------|-------|
+| **Provider abstraction** | Kept | 90 provider ids in `src/providers/index.ts`, including the ones this fork added (see [Supported Providers](#supported-providers-inherited-from-portkey)) |
+| **API surface** | Kept, extended | OpenAI-compatible routes, Anthropic `/v1/messages` and the Responses API. `/v1/messages` for OpenAI models that only have a Responses API (codex, `-pro`, deep research) is served via the Responses API |
+| **Streaming (SSE)** | Kept | Telemetry is sent when the stream ends, with the usage from its last events |
+| **Multi-modal** (vision, audio, images, OCR) | Kept | Telemetry records the modality and non-token usage (audio seconds, OCR pages, speech characters) |
+| **Realtime** (WebSocket) | Kept | Upstream URLs are checked before connecting. Realtime sessions produce no `ps-telemetry` events |
+| **Retries, fallbacks, load balancing, conditional routing** | Kept (upstream) | Configured with `strategy` / `retry` in `x-portkey-config`. Telemetry records the upstream attempts of each request. A provider redirect is never followed or retried (502 `upstream_redirect`) |
+| **Guardrails and mutators** | Kept, enforced in more places | The hooks engine and checks in `plugins/` (68 checks under 20 plugin ids; partner checks send the text they inspect to that vendor's API). They run on unified routes as upstream, on Responses API requests (the upstream version this fork is based on skipped them), and on proxied model calls (`/v1/proxy/*` and the `/v1/*` catch-all), which upstream skips. A request they cannot inspect is refused with a 400 `unsupported_guardrail` before any upstream call. Output checks do not inspect streamed responses. New guardrails from upstream are not merged |
+| **Caching** | Replaced | Portkey's simple and semantic caches are not used. PS has its own in-memory, exact-match cache, scoped to the caller's credentials and off unless turned on (see [Exact-match cache](#exact-match-cache)) |
+| **Cost-aware routing** | PS addition, opt-in | `PS_ROUTER_ENABLED=true` and `X-PS-Quality` / `X-PS-Max-Cost` / `X-PS-Route` hints. See [`src/middlewares/PS_README.md`](./src/middlewares/PS_README.md) |
+| **Security events and metrics** | PS addition, opt-in | `PS_SECURITY_EVENTS_LOG` writes JSON lines (guardrail verdicts, PII and injection detections, auth failures, 429s, rejected payloads) without prompt content. `PS_METRICS_ENABLED` exposes Prometheus metrics on `/metrics` |
+| **OpenTelemetry GenAI spans** | PS addition, opt-in | `PS_OTEL_ENDPOINT`; see [`PS_README.md`](./src/middlewares/PS_README.md#psotelts-opentelemetry-genai-spans-70) |
+| **MCP Gateway** | Not included | Upstream's MCP Gateway is not ported. MCP tool use is discovered by the SDK and the collector; see [`docs/mcp-tool-call-discovery.md`](./docs/mcp-tool-call-discovery.md) |
+| **Virtual keys / key management** | Not included | No key store. Callers send provider keys, or the gateway uses the host's cloud identity when an `*_AMBIENT_CREDENTIALS_ENABLED` flag allows it |
+| **Client authentication and RBAC** | Not included | Put the gateway behind an API gateway (see above). Only the admin console (`PS_GATEWAY_ADMIN_TOKEN`) and `/metrics` (`PS_METRICS_TOKEN`) take a token |
+| **Prompt template management** | Not included | No prompt store |
+| **Deployment** | Kept, extended | Docker image `ghcr.io/prompt-shields/prompt-shields-sdk/gateway`, Node.js (drains in-flight requests on SIGTERM), Cloudflare Workers, the [Helm chart](../charts/prompt-shields/README.md); upstream's [deployment guides](./docs/installation-deployments.md) |
 
 ## What This Fork Adds
 
 ### `src/middlewares/ps-telemetry.ts`
 
-The single, self-contained middleware that makes this a discovery gateway. On every request:
+The middleware that makes this a discovery gateway (on when `PS_API_KEY` is set). On every POST request:
 
-1. **Before forward:** reads `X-PS-*` headers for business context, strips them from the upstream call
-2. **After response:** extracts vendor, model, tokens, latency, tool calls, fingerprints the LLM provider API key, and POSTs to the Prompt Shields collector
+1. **Before forward:** reads `X-PS-*` headers for business context; the gateway never sends `X-PS-*` headers to the provider
+2. **After response:** extracts vendor, model, token usage (including cached and reasoning tokens), latency, cache status, routing decision and upstream attempts, and POSTs them to the Prompt Shields collector. Prompt and response content is not sent
 3. **Fail-open:** telemetry errors are swallowed — the LLM response always reaches the client
 
 Configuration:
@@ -97,7 +95,7 @@ X-PS-Environment: production
 Prompt Shields owns an **exact-match** response cache in this fork (Portkey's simple/semantic caching is disabled). It short-circuits identical requests to the same endpoint and reports hit/miss telemetry through `ps-telemetry` (`cache_status`, `est_tokens_saved`).
 
 ```bash
-PS_CACHE_DEFAULT=off        # on | off — behavior when the request header is omitted (default off)
+PS_CACHE_DEFAULT=off        # on | off — behavior when the request header is omitted (unset: the config's `cache` setting decides; none means off)
 PS_CACHE_MAX_ENTRIES=1000   # cap on the in-memory LRU cache
 ```
 
@@ -109,7 +107,7 @@ X-PS-Cache: off       # bypass entirely
 X-PS-Cache: refresh   # skip the read, repopulate the entry with the fresh response
 ```
 
-Notes: exact-match only (SHA-256 of request body + endpoint) — semantic caching is out of scope and planned as a separate sub-project; the cache is in-memory and per-instance (not shared across replicas); only non-streaming responses are cached; and cache failures fail open (the request still proceeds to the provider).
+Notes: exact-match only (SHA-256 of the request body, the upstream URL and a digest of the caller's credentials and identity headers, so callers with different keys never share entries) — semantic caching is out of scope and planned as a separate sub-project; the cache is in-memory and per-instance (not shared across replicas); only non-streaming responses are cached; and cache failures fail open (the request still proceeds to the provider).
 
 ---
 
@@ -149,7 +147,7 @@ Want richer per-request annotations and PII detection on the client side? Use th
 
 ## Supported Providers (inherited from Portkey)
 
-All 78 providers in `src/providers/` are intact and forward telemetry through the PS middleware. Common ones:
+The provider configs in `src/providers/` (90 provider ids) are intact and report telemetry through the PS middleware. Common ones:
 
 OpenAI · Anthropic · Google (Gemini, Vertex) · Azure OpenAI · AWS Bedrock · Cohere · Mistral · Meta Llama · Groq · Together AI · Fireworks · DeepSeek · Cerebras · Perplexity · OpenRouter · LM Studio · Ollama · vLLM · …
 
@@ -206,7 +204,7 @@ Both write to the same Prompt Shields collector — events are merged by the ded
 
 ## Versioning & upstream merges
 
-This fork tracks Portkey at a specific commit. Provider additions from upstream are cherry-picked as needed — routing/guardrails additions are skipped (PS ships its own exact-match cache — see [What This Fork Adds](#what-this-fork-adds)).
+This fork tracks Portkey at a specific commit, with selected changes ported from upstream `main` and `2.0.0`. Provider additions and fixes are taken as needed; new routing strategies, caching layers and guardrail checks from upstream are not merged. The routing and guardrails already in the fork stay and are maintained here.
 
 See [`FORK_NOTICE.md`](./FORK_NOTICE.md) for the upstream base commit and modification log.
 
