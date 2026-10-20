@@ -1,8 +1,24 @@
 import { AzureCredentials } from './types';
+import { pluginRequest, PluginEgressError } from '../egress';
 
 const cacheExpiry = 15 * 60; // 15 minutes
 
 const AZURE_RESOURCE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/i;
+
+/**
+ * PS fork (security): requests built as
+ * `https://<resourceName>.cognitiveservices.azure.com` must stay on that
+ * host; a resource name with `.`, `/`, `@`, `?` or `#` would swap in another
+ * one. Call it inside the plugin's request `try`, so a bad name is reported
+ * like a network error. (A `customHost` gets the plugin egress URL check.)
+ */
+export function assertAzureResourceName(resourceName?: string): void {
+  if (!AZURE_RESOURCE_NAME.test(resourceName ?? '')) {
+    throw new PluginEgressError(
+      'Azure resourceName must match ^[a-z0-9][a-z0-9-]{0,62}$'
+    );
+  }
+}
 const COGNITIVE_SERVICES_RESOURCE = 'https://cognitiveservices.azure.com/';
 
 /** Thrown by `pii`, whose token lookup reports errors by throwing. */
@@ -35,7 +51,7 @@ export async function getAccessTokenFromEntraId(
       grant_type: 'client_credentials',
     });
 
-    const response = await fetch(url, {
+    const { response, text } = await pluginRequest(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -44,11 +60,10 @@ export async function getAccessTokenFromEntraId(
     });
 
     if (!response.ok) {
-      const errorMessage = await response.text();
-      result.error = errorMessage;
+      result.error = text;
       return result;
     }
-    const data: { access_token: string } = await response.json();
+    const data: { access_token: string } = JSON.parse(text);
     result.token = data.access_token;
     await options?.putInCacheWithValue?.(
       env,
@@ -79,21 +94,24 @@ export async function getAzureManagedIdentityToken(
     return { token: cachedToken, error: null };
   }
   try {
-    const response = await fetch(
+    // The fixed IMDS URL is internal by design (operator-gated by
+    // AZURE_AMBIENT_CREDENTIALS_ENABLED); still no redirects, a timeout and
+    // a body cap.
+    const { response, text } = await pluginRequest(
       `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encodeURIComponent(resource)}${clientId ? `&client_id=${encodeURIComponent(clientId)}` : ''}`,
       {
         method: 'GET',
         headers: {
           Metadata: 'true',
         },
-      }
+      },
+      { allowInternalHost: true }
     );
     if (!response.ok) {
-      const errorMessage = await response.text();
-      result.error = errorMessage;
+      result.error = text;
       return result;
     }
-    const data: { access_token: string } = await response.json();
+    const data: { access_token: string } = JSON.parse(text);
     result.token = data.access_token;
     await options?.putInCacheWithValue?.(
       env,

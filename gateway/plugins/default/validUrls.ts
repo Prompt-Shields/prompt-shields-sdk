@@ -5,6 +5,7 @@ import {
   PluginParameters,
 } from '../types';
 import { getText } from '../utils';
+import { pluginRequest } from '../egress';
 
 export const handler: PluginHandler = async (
   context: PluginContext,
@@ -108,56 +109,41 @@ export const handler: PluginHandler = async (
   return { error, verdict, data };
 };
 
+// PS fork (security): the URLs come from prompt or completion text, so they
+// go through SSRF-safe egress; an internal, metadata or redirecting URL
+// counts as invalid.
 async function checkUrl(target: string): Promise<boolean> {
-  const controller = new AbortController();
-  const { signal } = controller;
-  let timeoutId: NodeJS.Timeout;
-
   try {
-    // Create a promise that rejects after timeout
-    const timeoutPromise = new Promise<Response>((_, reject) => {
-      timeoutId = setTimeout(() => {
-        controller.abort();
-        reject(new Error('Request timeout'));
-      }, 3000);
-    });
-
-    // Race between the fetch and the timeout
-    const response = await Promise.race([
-      fetch(target, {
+    const { response } = await pluginRequest(
+      target,
+      {
         method: 'HEAD', // Use HEAD instead of GET for efficiency
-        signal,
         headers: {
           'User-Agent': 'URLValidator/1.0', // Add user agent to prevent some 403s
         },
-      }),
-      timeoutPromise,
-    ]);
-
-    clearTimeout(timeoutId!);
+      },
+      { timeout: 3000 }
+    );
     return response.ok;
   } catch (error) {
     return false;
-  } finally {
-    clearTimeout(timeoutId!);
-    controller.abort(); // Always abort to clean up
   }
 }
 
 async function checkDNS(target: string): Promise<boolean> {
   try {
     const parsedUrl = new URL(target);
-    const response = await fetch(
+    const { text } = await pluginRequest(
       // Using DNS over HTTPS (DoH) for cross-runtime compatibility (works in both Edge and Node.js)
       // https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/
-      `https://1.1.1.1/dns-query?name=${parsedUrl.hostname}`,
+      `https://1.1.1.1/dns-query?name=${encodeURIComponent(parsedUrl.hostname)}`,
       {
         headers: {
           accept: 'application/dns-json',
         },
       }
     );
-    const data: Record<string, any> = await response.json();
+    const data: Record<string, any> = JSON.parse(text);
     return data.Status === 0 && data.Answer && data.Answer.length > 0;
   } catch (error) {
     return false;

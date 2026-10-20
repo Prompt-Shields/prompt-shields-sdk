@@ -159,6 +159,13 @@ gateway:
   #   LOG_LEVEL: "info"
   config:
     NODE_ENV: production
+    # Hosts exempt from the gateway's SSRF checks (provider custom hosts,
+    # guardrail webhook/log URLs and vendor base-URL overrides). Unset, the
+    # gateway trusts localhost, 127.0.0.1, ::1 and host.docker.internal for
+    # provider custom hosts, which in a pod reaches the gateway itself and
+    # any sidecar. `none` trusts no host; list internal hosts you need
+    # instead, e.g. "llm.internal.example.com,guardrails.internal.example.com".
+    TRUSTED_CUSTOM_HOSTS: "none"
   # Extra env entries (full EnvVar objects, e.g. valueFrom).
   extraEnv: []
   extraEnvFrom: []
