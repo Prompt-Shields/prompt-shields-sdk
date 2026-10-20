@@ -1,0 +1,95 @@
+name: Kong plugin
+
+# Pull requests touching integrations/kong/ (the prompt-shields Kong plugin):
+# luacheck and the PDK-mocked busted unit tests, then the Pongo specs against
+# real Kong Gateway 3.10 LTS and 3.14 images (no Enterprise license needed;
+# the plugin only uses the free tier). The collector side of the event
+# contract is tested by packages/collector/tests/test_kong_plugin_contract.py
+# in ci.yml.
+
+on:
+  pull_request:
+    paths:
+      - "integrations/kong/**"
+      - ".github/workflows/kong-plugin.yml"
+  push:
+    branches: [main]
+    paths:
+      - "integrations/kong/**"
+      - ".github/workflows/kong-plugin.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kong-plugin-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: integrations/kong
+
+jobs:
+  lint-unit:
+    name: luacheck + busted (unit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: leafo/gh-actions-lua@6919171ccf181b826f44b9bca76307b577217377 # v13.0.0
+        with:
+          # Kong runs OpenResty's LuaJIT 2.1.
+          luaVersion: "luajit-openresty"
+      - uses: leafo/gh-actions-luarocks@35d062def313a7699a0d513e996bcf4352f05389 # v6.1.0
+      - name: Install busted, luacheck and the modules Kong would provide
+        run: |
+          luarocks install busted 2.2.0-1
+          luarocks install luacheck 1.2.0-1
+          luarocks install luasocket 3.1.0-1
+          luarocks install lua-cjson 2.1.0.10-1
+      - name: luacheck
+        run: luacheck .
+      - name: busted (unit, mocked PDK)
+        run: busted --run=unit -o TAP
+      - name: rockspec
+        run: luarocks lint kong-plugin-prompt-shields-*.rockspec
+
+  pongo:
+    name: Pongo (Kong ${{ matrix.kong_version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        kong_version:
+          - "3.10.0.x" # LTS
+          - "3.14.0.x"
+    env:
+      KONG_VERSION: ${{ matrix.kong_version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      # Pongo is fetched by commit and checked, rather than through
+      # Kong/kong-pongo-action, which checks it out by tag with an unpinned
+      # actions/checkout@v3.
+      - name: Install Pongo 2.29.0
+        working-directory: ${{ runner.temp }}
+        env:
+          PONGO_SHA: d4a5b9a22e2a27addcd7d5081607b052198b62f7 # 2.29.0
+        run: |
+          git init -q kong-pongo
+          git -C kong-pongo fetch -q --depth 1 https://github.com/Kong/kong-pongo.git "$PONGO_SHA"
+          git -C kong-pongo checkout -q FETCH_HEAD
+          test "$(git -C kong-pongo rev-parse HEAD)" = "$PONGO_SHA"
+          ln -s "$PWD/kong-pongo/pongo.sh" "$PWD/kong-pongo/pongo"
+          echo "$PWD/kong-pongo" >> "$GITHUB_PATH"
+      - name: Start Pongo
+        run: pongo up
+      - name: Run the Pongo specs
+        run: pongo run
+      - name: Stop Pongo
+        if: always()
+        run: pongo down

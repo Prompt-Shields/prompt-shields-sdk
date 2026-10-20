@@ -1,0 +1,42 @@
+{
+  "ai": {
+    "proxy": {
+      "meta": {
+        "provider_name": "openai",
+        "request_model": "gpt-4o",
+        "response_model": "gpt-4o-2024-08-06",
+        "llm_latency": 790
+      },
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 40,
+        "cost": 0.0007
+      }
+    }
+  },
+  "consumer": {
+    "username": "payments-api",
+    "custom_id": "app-42"
+  },
+  "route": {
+    "name": "hr-chat"
+  },
+  "service": {
+    "name": "openai"
+  },
+  "latencies": {
+    "proxy": 812
+  },
+  "request": {
+    "headers": {
+      "x-ps-business-unit": "Payments",
+      "x-ps-use-case": "fraud-explainer",
+      "x-ps-owner": "owner@example.com",
+      "x-ps-data-classification": "confidential",
+      "x-ps-environment": "production"
+    }
+  },
+  "prompt_shields": {
+    "plugin_version": "0.1.0"
+  }
+}
