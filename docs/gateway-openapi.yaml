@@ -19,8 +19,9 @@ info:
     - Anthropic Messages: https://docs.anthropic.com/en/api/messages;
     - Cohere Rerank v2: https://docs.cohere.com/reference/rerank.
 
-    **Authentication.** By default the gateway has no client authentication
-    of its own. The `Authorization` (or `x-api-key`) header carries the
+    **Authentication.** Apart from the MCP proxy (`/v1/mcp/{server}`,
+    bearer `PS_MCP_TOKEN`), by default the gateway has no client
+    authentication of its own. The `Authorization` (or `x-api-key`) header carries the
     *provider's* API key and is forwarded to the provider; credentials can
     also travel inside `x-portkey-config`. Put the gateway behind an API
     gateway such as Kong for client authentication, and strip the
@@ -33,7 +34,8 @@ info:
     removes it from the request (it never reaches a provider), and applies
     the IdP-group policy: 401 without a valid token, 403 when the policy
     refuses the caller, provider or model, 429 when the group's rate limit
-    is exhausted, 503 while the IdP's signing keys cannot be fetched.
+    is exhausted, 503 while the IdP's signing keys cannot be fetched. The
+    MCP proxy then takes the IdP token in place of `PS_MCP_TOKEN`.
 
     **Headers that are not documented on purpose.** Provider credential
     headers (`x-portkey-aws-secret-access-key`, `x-portkey-aws-session-token`,
@@ -94,6 +96,8 @@ tags:
     description: Model listing
   - name: Realtime
     description: Realtime API over WebSocket
+  - name: MCP
+    description: Enforcing MCP proxy to configured MCP servers
   - name: Proxy
     description: Pass-through to any provider path
   - name: Operations
@@ -1660,6 +1664,140 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/mcp/{server}:
+    parameters:
+      - name: server
+        in: path
+        required: true
+        description: Id of an MCP server configured in `mcp_servers`
+        schema:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9_-]{0,62}$'
+      - name: MCP-Protocol-Version
+        in: header
+        required: false
+        description: |
+          MCP protocol revision. From `2026-07-28` on, `Mcp-Method` (and
+          `Mcp-Name` for `tools/call`, `prompts/get` and `resources/read`)
+          are required and must match the body.
+        schema:
+          type: string
+          example: '2026-07-28'
+      - name: Mcp-Session-Id
+        in: header
+        required: false
+        description: Session id of a `2025-11-25` server, passed through.
+        schema:
+          type: string
+    post:
+      operationId: mcpPost
+      tags: [MCP]
+      summary: Send one JSON-RPC message to an MCP server
+      description: |
+        Enforcing MCP Streamable HTTP proxy (#63). The body is one JSON-RPC
+        2.0 request, notification or response (no batches). The gateway:
+        checks `Mcp-Method` / `Mcp-Name` against the body (`-32020` on a
+        mismatch); applies the server's tool allowlist or denylist to
+        `tools/call` (`-32010`) and filters `tools/list` results; refuses a
+        pinned tool whose definition changed (`-32012`); runs the server's
+        input and output guardrails on tool arguments and results
+        (`-32011`, fail closed); and forwards the request to the configured
+        URL with the server's own credentials. The caller's `Authorization`
+        header is never forwarded. With `PS_OIDC_ENABLED=true` the
+        caller authenticates with its identity-provider token
+        (`GatewayOidc`) instead of `PS_MCP_TOKEN`; OIDC failures are the
+        gateway's OpenAI-style 401/403/429 errors, not JSON-RPC errors.
+        Policy refusals of a request are JSON-RPC
+        errors with HTTP 200. SSE responses stream. Only the response to
+        this request is released, re-serialised from the checked JSON;
+        `tasks/*` is refused (`-32010`). An upstream HTTP error keeps its
+        status, with its body only when that is a JSON-RPC error. See
+        `gateway/docs/mcp-proxy.md`.
+      security:
+        - McpToken: []
+        - GatewayOidc: []
+      parameters:
+        - name: Mcp-Method
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: Mcp-Name
+          in: header
+          required: false
+          description: Plain or `=?base64?...?=` encoded.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JsonRpcMessage'
+      responses:
+        '200':
+          description: JSON-RPC response, as JSON or as an SSE stream
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcMessage'
+            text/event-stream:
+              schema:
+                type: string
+        '202':
+          description: Notification or response accepted by the MCP server
+        '400':
+          $ref: '#/components/responses/McpError'
+        '401':
+          $ref: '#/components/responses/McpError'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
+        '404':
+          $ref: '#/components/responses/McpError'
+        '413':
+          $ref: '#/components/responses/McpError'
+        '415':
+          $ref: '#/components/responses/McpError'
+        '502':
+          $ref: '#/components/responses/McpError'
+        '503':
+          $ref: '#/components/responses/McpError'
+        '504':
+          $ref: '#/components/responses/McpError'
+    get:
+      operationId: mcpGetStream
+      tags: [MCP]
+      summary: Open the server-to-client SSE stream (2025-11-25)
+      description: |
+        Passed through to a `2025-11-25` server with the session id. The
+        stream carries the server's requests and notifications only: a
+        JSON-RPC response on it (a resumed stream's replay) is dropped. A
+        `2026-07-28` server answers 405.
+      security:
+        - McpToken: []
+        - GatewayOidc: []
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        default:
+          $ref: '#/components/responses/McpError'
+    delete:
+      operationId: mcpDeleteSession
+      tags: [MCP]
+      summary: End a session (2025-11-25)
+      security:
+        - McpToken: []
+        - GatewayOidc: []
+      responses:
+        '200':
+          description: Session ended
+        default:
+          $ref: '#/components/responses/McpError'
+
   /v1/proxy/{path}:
     parameters:
       - $ref: '#/components/parameters/ProxyPath'
@@ -1815,6 +1953,14 @@ components:
       type: http
       scheme: bearer
       description: The `PS_METRICS_TOKEN` value, required on `/metrics` when it is set.
+    McpToken:
+      type: http
+      scheme: bearer
+      description: |
+        The `PS_MCP_TOKEN` value. Required on `/v1/mcp/{server}`; without it
+        the route answers 503 unless `PS_MCP_ALLOW_UNAUTHENTICATED=true`.
+        Not used with `PS_OIDC_ENABLED=true`: the `GatewayOidc` token
+        authenticates MCP clients then.
     GatewayOidc:
       type: http
       scheme: bearer
@@ -2131,6 +2277,12 @@ components:
             contentMediaType: application/octet-stream
 
   responses:
+    McpError:
+      description: JSON-RPC error from the gateway or the MCP server
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/JsonRpcMessage'
     ProxySuccess:
       description: The provider's response, passed through
       content:
@@ -2294,6 +2446,35 @@ components:
             $ref: '#/components/schemas/NotFoundResponse'
 
   schemas:
+    JsonRpcMessage:
+      type: object
+      description: One JSON-RPC 2.0 message (MCP). Only the fields the gateway reads are listed.
+      required: [jsonrpc]
+      properties:
+        jsonrpc:
+          type: string
+          const: '2.0'
+        id:
+          oneOf:
+            - type: string
+            - type: number
+            - type: 'null'
+        method:
+          type: string
+        params:
+          type: object
+          additionalProperties: true
+        result:
+          type: object
+          additionalProperties: true
+        error:
+          type: object
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
+      additionalProperties: true
     PassThroughObject:
       type: object
       description: |

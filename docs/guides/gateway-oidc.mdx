@@ -160,5 +160,6 @@ The collector event for each request gets `user_id` (a 32-character pseudonym: H
 
 - Rate limits are counted **in memory, per gateway replica**: with N replicas behind a load balancer a user can get up to N times the limit. Set limits accordingly.
 - The collector currently accepts but does not yet store `user_id` / `user_group`.
+- The MCP proxy (`/v1/mcp/{server}`) accepts the IdP token instead of `PS_MCP_TOKEN` when OIDC is on. Default deny and group rate limits apply to it; provider and model allowlists do not (an MCP call names neither), so every admitted user reaches every configured MCP server within its tool policy. See `gateway/docs/mcp-proxy.md`.
 - Browsers cannot set `Authorization` on a WebSocket, so `/v1/realtime` with OIDC on needs a non-browser client.
 - A policy given as a file path is read again only when the gateway restarts (the Helm chart restarts pods when `gateway.oidc` changes).
