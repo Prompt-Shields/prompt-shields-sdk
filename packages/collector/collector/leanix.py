@@ -84,6 +84,7 @@ from collector.connectors import (
     validate_hostname,
 )
 from collector.provider_usage_admin import require_operator
+from collector.sanitize import BoundedJsonRoute
 
 logger = logging.getLogger("prompt_shields.leanix")
 
@@ -633,7 +634,7 @@ async def sync_leanix(
 # Operator endpoints and CLI
 # ──────────────────────────────────────────────────────────────────────
 
-router = APIRouter(prefix="/api/v1/admin/connectors/leanix", tags=["Admin"])
+router = APIRouter(prefix="/api/v1/admin/connectors/leanix", tags=["Admin"], route_class=BoundedJsonRoute)
 
 
 def _not_found() -> HTTPException:
