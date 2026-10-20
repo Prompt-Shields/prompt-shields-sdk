@@ -18,6 +18,12 @@ as data.
 Fail-open like the provider wrappers: telemetry errors are logged and
 swallowed; the caller gets the tool's result or exception unchanged. Calls
 made inside `suppress_instrumentation()` are not recorded.
+
+Off the call path by default: in "batch" mode (`mcp_telemetry_mode`,
+PS_MCP_TELEMETRY_MODE) the event is only buffered, with no I/O, and a
+background thread posts batches to `/ingest/mcp`, so a slow or unreachable
+collector does not delay `call_tool`. "sync" mode posts each event before
+`call_tool` returns.
 """
 
 from __future__ import annotations
@@ -164,6 +170,7 @@ async def _record(state: Any, session: Any, args: tuple, kwargs: dict,
                 event[key] = value
         sender = state.mcp_sender()
         sender.enqueue(event)
-        await sender.flush()
+        if state.mcp_mode == "sync":
+            await sender.flush()
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"MCP instrumentation error: {e}")

@@ -7,10 +7,13 @@ test_retention.py."""
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
-from collector import mcp_usage
+from collector import mcp_usage, partner_rate_limit
 from collector.app import app
+from collector.config import settings
+from collector.partner_rate_limit import FixedWindowRateLimiter, get_mcp_rate_limiter
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
@@ -88,6 +91,42 @@ async def test_ingest_requires_an_ingest_key(client):
     assert resp.status_code == 401
     resp = await client.get("/api/v1/registry/mcp-tools")
     assert resp.status_code == 401
+
+
+@pytest.fixture
+def mcp_limit(monkeypatch):
+    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 2)
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 1)
+    monkeypatch.setattr(
+        partner_rate_limit, "time", SimpleNamespace(time=lambda: 1_700_000_030.0)
+    )
+    fresh = FixedWindowRateLimiter()
+    app.dependency_overrides[get_mcp_rate_limiter] = lambda: fresh
+    yield
+    app.dependency_overrides.pop(get_mcp_rate_limiter, None)
+
+
+@pytest.mark.asyncio
+async def test_ingest_has_its_own_rate_limit(client, mcp_limit):
+    """/ingest/mcp is limited by PS_MCP_RATE_LIMIT_PER_MINUTE, and does not
+    use up the /ingest/events budget (PS_RATE_LIMIT_PER_MINUTE)."""
+    ok = [await client.post("/ingest/mcp", headers=HEADERS, json={"events": [_event()]})
+          for _ in range(2)]
+    blocked = await client.post("/ingest/mcp", headers=HEADERS, json={"events": []})
+    sdk = await client.post("/ingest/events", headers=HEADERS, json={"events": []})
+    assert [r.status_code for r in ok] == [200, 200]
+    assert ok[0].headers["X-RateLimit-Limit"] == "2"
+    assert blocked.status_code == 429
+    assert blocked.headers["Retry-After"] == "10"
+    assert sdk.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ingest_rate_limit_zero_disables_it(client, mcp_limit, monkeypatch):
+    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 0)
+    codes = [(await client.post("/ingest/mcp", headers=HEADERS,
+                                json={"events": []})).status_code for _ in range(4)]
+    assert codes == [200] * 4
 
 
 async def test_ingest_size_limits(client, seeded_db, monkeypatch):

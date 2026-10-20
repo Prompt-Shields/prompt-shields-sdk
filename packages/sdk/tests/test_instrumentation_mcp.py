@@ -90,6 +90,7 @@ def test_records_names_outcome_and_latency_only(mcp_session):
     sender = _mcp_sender()
     assert sender.args == ("http://localhost:8000", "ps_key")
     assert sender.kwargs["report_loss"] is False
+    assert sender.flushes == 0  # batch mode (default): nothing sent on the call path
     ok, failed = sender.events
     assert set(ok) == {"server_name", "tool_name", "outcome", "latency_ms", "source",
                        "calling_service", "environment"}
