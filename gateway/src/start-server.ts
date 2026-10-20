@@ -17,6 +17,7 @@ import {
 } from './middlewares/adminAuth';
 import { psTelemetrySender } from './middlewares/ps-telemetry';
 import { flushSecurityEvents } from './middlewares/psSecurityEvents';
+import { flushSecurityLogsExporter } from './middlewares/psSecurityEvents/otlp';
 import { createDrain, shutdownTimeoutMs } from './psShutdown';
 import { loadMcpServersFromEnv } from './mcp/loadConfig';
 import { psMcpTelemetrySender } from './mcp/telemetry';
@@ -212,6 +213,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
           psMcpTelemetrySender.shutdown(),
         ])
       )
+      .then(() => flushSecurityLogsExporter())
       .finally(() => {
         flushSecurityEvents(true);
         process.exit(0);

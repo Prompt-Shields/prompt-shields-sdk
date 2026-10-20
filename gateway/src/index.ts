@@ -28,6 +28,7 @@ import { rerankHandler } from './handlers/rerankHandler';
 import { logHandler } from './middlewares/log';
 import { metricsHandler, psMetrics } from './middlewares/psMetrics';
 import { psSecurityEvents } from './middlewares/psSecurityEvents';
+import { psOidc } from './middlewares/psOidc';
 import { version } from '../package.json';
 import { payloadSizeValidatorMiddleware } from './middlewares/payloadSizeValidator';
 import { redactSecrets, redactString } from './utils/redact';
@@ -118,6 +119,12 @@ app.use('*', psSecurityEvents());
 // PS_METRICS_TOKEN to require a bearer token on GET /metrics.
 app.get('/metrics', metricsHandler);
 app.use('*', psMetrics());
+
+// OIDC/JWT authentication and IdP-group policy on /v1/* (except /v1/health).
+// Opt-in via PS_OIDC_ENABLED; read per request, so Workers bindings work.
+// Mounted before anything reads the body, and it removes the IdP token from
+// the request so it can never be forwarded to a provider.
+app.use('*', psOidc());
 
 // Reject oversized JSON bodies before anything parses them (opt-in via
 // MAX_JSON_PAYLOAD_SIZE_IN_MB). Ported from Portkey 2.0.0.

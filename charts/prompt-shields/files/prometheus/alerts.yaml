@@ -1,0 +1,196 @@
+# Prometheus alerting rules for the Prompt Shields gateway and collector.
+#
+# Load this file with `rule_files:` in prometheus.yml, or enable
+# `prometheusRule.enabled` in the Helm chart (charts/prompt-shields), which
+# renders the same groups as a PrometheusRule. The chart keeps a copy at
+# charts/prompt-shields/files/prometheus/alerts.yaml; CI fails when the two
+# differ (.github/workflows/observability.yml).
+#
+# Every expression uses metrics that exist today:
+#   gateway   /metrics (PS_METRICS_ENABLED=true):
+#     ps_gateway_requests_total, ps_gateway_guardrail_verdicts_total,
+#     ps_gateway_telemetry_dropped_total
+#   collector /metrics (PS_COLLECTOR_METRICS_ENABLED=true):
+#     ps_collector_requests_total, ps_collector_ingest_events_total
+#
+# Thresholds are starting points; tune them per deployment.
+groups:
+  - name: prompt-shields-gateway
+    rules:
+      - alert: PromptShieldsGuardrailDenyRateHigh
+        # More than a quarter of guardrail checks deny, with real traffic.
+        # A new deny policy, a misconfigured check or an attack all look
+        # like this.
+        expr: |
+          (
+            sum(rate(ps_gateway_guardrail_verdicts_total{verdict="deny"}[10m]))
+              /
+            sum(rate(ps_gateway_guardrail_verdicts_total[10m]))
+          ) > 0.25
+          and
+          sum(rate(ps_gateway_guardrail_verdicts_total[10m])) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: High guardrail deny rate on the gateway
+          description: >-
+            {{ $value | humanizePercentage }} of guardrail checks denied the
+            request over the last 10 minutes. Check
+            ps_gateway_guardrail_verdicts_total by hook and check, and the
+            guardrail.verdict security events.
+
+      - alert: PromptShieldsGateway5xxRateHigh
+        # Gateway answers with 5xx (its own errors and upstream failures it
+        # passes through) above 5% of requests.
+        expr: |
+          (
+            sum(rate(ps_gateway_requests_total{status=~"5.."}[5m]))
+              /
+            sum(rate(ps_gateway_requests_total[5m]))
+          ) > 0.05
+          and
+          sum(rate(ps_gateway_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: Gateway 5xx rate above 5%
+          description: >-
+            {{ $value | humanizePercentage }} of gateway requests returned a
+            5xx over the last 5 minutes. Break ps_gateway_requests_total down
+            by provider and route to find the source.
+
+      - alert: PromptShieldsTelemetryDropped
+        # A sink is losing telemetry: OTel spans (otel), security-event OTLP
+        # log records (otel_logs), collector telemetry (ps_telemetry) or
+        # security event lines (security_events). Fires on a meaningful
+        # count (100+ in 30 minutes) or on drops that keep happening (some
+        # in every 5-minute window for 10 minutes); an isolated drop does
+        # not alert.
+        expr: |
+          sum by (sink, reason) (
+            increase(ps_gateway_telemetry_dropped_total[30m])
+          ) >= 100
+          or
+          (
+            sum by (sink, reason) (
+              increase(ps_gateway_telemetry_dropped_total[30m])
+            )
+            and
+            sum by (sink, reason) (
+              rate(ps_gateway_telemetry_dropped_total[5m])
+            ) > 0
+          )
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "Gateway is dropping telemetry ({{ $labels.sink }}, {{ $labels.reason }})"
+          description: >-
+            {{ $value | humanize }} {{ $labels.sink }} items were dropped in
+            the last 30 minutes (reason {{ $labels.reason }}). Check that the
+            receiving endpoint is reachable and sized for the load; gaps in
+            this telemetry are gaps in the audit trail.
+
+  - name: prompt-shields-collector
+    rules:
+      - alert: PromptShieldsCollectorNotReady
+        # The readiness probe (GET /readyz, a database check) is failing and
+        # not succeeding on the same instance. Needs a probe that calls
+        # /readyz, as the Helm chart's readiness probe does.
+        expr: |
+          (
+            sum by (instance) (
+              rate(ps_collector_requests_total{route="/readyz",status!="200"}[5m])
+            ) > 0
+          )
+          unless
+          (
+            sum by (instance) (
+              rate(ps_collector_requests_total{route="/readyz",status="200"}[5m])
+            ) > 0
+          )
+        for: 5m
+        labels:
+          severity: critical
+          service: prompt-shields-collector
+        annotations:
+          summary: "Collector {{ $labels.instance }} is not ready"
+          description: >-
+            Every /readyz call on {{ $labels.instance }} failed for 5 minutes.
+            The collector cannot reach its database; ingest and the partner
+            API are failing on this instance.
+
+      - alert: PromptShieldsCollector5xxRateHigh
+        expr: |
+          (
+            sum(rate(ps_collector_requests_total{status=~"5..",route!="/readyz"}[5m]))
+              /
+            sum(rate(ps_collector_requests_total{route!="/readyz"}[5m]))
+          ) > 0.05
+          and
+          sum(rate(ps_collector_requests_total{route!="/readyz"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-collector
+        annotations:
+          summary: Collector 5xx rate above 5%
+          description: >-
+            {{ $value | humanizePercentage }} of collector requests (probes
+            excluded) returned a 5xx over the last 5 minutes.
+
+      - alert: PromptShieldsIngestStalled
+        # The gateway is serving traffic but the collector has accepted no
+        # events for 15 minutes. Assumes the gateway sends telemetry to this
+        # collector (PS_API_KEY set); drop or adapt it otherwise.
+        # Only evaluated while the collector's metrics are scraped
+        # (ps_collector_requests_total exists; the readiness probe alone
+        # creates it). A scraped collector that has never accepted an event
+        # has no accepted series yet and counts as 0; a collector whose
+        # metrics are off or not scraped never alerts.
+        expr: |
+          sum(rate(ps_gateway_requests_total[15m])) > 0.01
+          and on()
+          (
+            sum(rate(ps_collector_ingest_events_total{outcome="accepted"}[15m]))
+            or on()
+            (sum(ps_collector_requests_total) * 0)
+          ) == 0
+        for: 15m
+        labels:
+          severity: critical
+          service: prompt-shields-collector
+        annotations:
+          summary: Collector ingest has stalled
+          description: >-
+            The gateway handled traffic for the last 15 minutes but the
+            collector accepted no ingest events. Check the gateway's
+            ps_gateway_telemetry_dropped_total{sink="ps_telemetry"} and the
+            collector's ps_collector_ingest_events_total by outcome.
+
+      - alert: PromptShieldsIngestFailing
+        # Ingest is reaching the collector but being refused or not stored.
+        # Needs at least 60 events in 10 minutes, so a few refused events
+        # on an idle collector do not alert.
+        expr: |
+          (
+            sum(rate(ps_collector_ingest_events_total{outcome=~"write_failed|rejected|rate_limited"}[10m]))
+              /
+            sum(rate(ps_collector_ingest_events_total[10m]))
+          ) > 0.1
+          and
+          sum(rate(ps_collector_ingest_events_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-collector
+        annotations:
+          summary: Collector is refusing or failing ingest
+          description: >-
+            {{ $value | humanizePercentage }} of ingested events were rate
+            limited, rejected or failed to write over the last 10 minutes.

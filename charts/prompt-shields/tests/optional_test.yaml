@@ -225,3 +225,57 @@ tests:
     asserts:
       - notExists:
           path: spec.endpoints[0].authorization
+
+  - it: renders no OIDC settings by default
+    template: templates/configmap.yaml
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: data.PS_OIDC_ENABLED
+      - notExists:
+          path: data.PS_OIDC_POLICY
+
+  - it: renders the OIDC settings and the policy as JSON
+    template: templates/configmap.yaml
+    documentIndex: 0
+    set:
+      gateway.oidc.enabled: true
+      gateway.oidc.issuer: https://login.microsoftonline.com/tid/v2.0
+      gateway.oidc.audience: ["api://gw", "gw-client-id"]
+      gateway.oidc.groupsClaim: roles
+      gateway.oidc.policy:
+        default: deny
+        groups:
+          - name: analysts
+            match: ["Chat.Use"]
+            models: ["gpt-4o-mini"]
+    asserts:
+      - equal:
+          path: data.PS_OIDC_ENABLED
+          value: "true"
+      - equal:
+          path: data.PS_OIDC_ISSUER
+          value: https://login.microsoftonline.com/tid/v2.0
+      - equal:
+          path: data.PS_OIDC_AUDIENCE
+          value: api://gw,gw-client-id
+      - equal:
+          path: data.PS_OIDC_GROUPS_CLAIM
+          value: roles
+      - equal:
+          path: data.PS_OIDC_CLOCK_SKEW_SECONDS
+          value: "60"
+      - equal:
+          path: data.PS_OIDC_POLICY
+          value: '{"default":"deny","groups":[{"match":["Chat.Use"],"models":["gpt-4o-mini"],"name":"analysts"}]}'
+      - notExists:
+          path: data.PS_OIDC_JWKS_URL
+
+  - it: refuses OIDC without an issuer
+    template: templates/configmap.yaml
+    set:
+      gateway.oidc.enabled: true
+      gateway.oidc.audience: ["api://gw"]
+    asserts:
+      - failedTemplate:
+          errorPattern: "gateway.oidc.issuer"

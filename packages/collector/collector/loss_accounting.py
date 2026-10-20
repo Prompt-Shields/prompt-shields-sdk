@@ -55,6 +55,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.auth import resolve_tenant
+from collector.sanitize import storable_text
 
 logger = logging.getLogger("collector.loss_accounting")
 
@@ -100,17 +101,19 @@ def parse_metadata(raw) -> BatchMetadata:
     rather than failing the ingest request (the SDK would retry it forever)."""
     if not isinstance(raw, dict):
         return BatchMetadata()
-    client_id = raw.get("client_id")
-    if not isinstance(client_id, str) or not 0 < len(client_id) <= _MAX_ID_LEN:
+    # Every string here is stored: one the database cannot hold (NUL, lone
+    # surrogate; collector/sanitize.py) is treated as malformed.
+    client_id = storable_text(raw.get("client_id"))
+    if client_id is None or not 0 < len(client_id) <= _MAX_ID_LEN:
         return BatchMetadata()
     dropped: dict[str, int] = {}
     raw_dropped = raw.get("dropped")
     if isinstance(raw_dropped, dict):
         for reason, n in list(raw_dropped.items())[:_MAX_KEYS]:
             n = _count(n)
-            if isinstance(reason, str) and 0 < len(reason) <= _MAX_KEY_LEN and n:
+            if storable_text(reason) and len(reason) <= _MAX_KEY_LEN and n:
                 dropped[reason] = n
-    sdk = raw.get("sdk")
+    sdk = storable_text(raw.get("sdk"))
     return BatchMetadata(
         client_id=client_id,
         seq=_count(raw.get("seq")),
@@ -129,7 +132,7 @@ def ignored_fields(raw_events, known: set[str]) -> dict[str, int]:
         if not isinstance(event, dict):
             continue
         for key in event:
-            if key not in known and isinstance(key, str):
+            if key not in known and storable_text(key) is not None:
                 counts[key[:_MAX_KEY_LEN]] = counts.get(key[:_MAX_KEY_LEN], 0) + 1
     return counts
 
@@ -231,8 +234,8 @@ async def record_rejected(
 
 def otel_client_id(resource_attrs: dict) -> str:
     """The loss-accounting client for an OTLP resource: one per service."""
-    name = resource_attrs.get("service.name")
-    if isinstance(name, str) and name.strip():
+    name = storable_text(resource_attrs.get("service.name"))
+    if name and name.strip():
         return f"{OTEL_CLIENT_PREFIX}{name.strip()}"[:_MAX_ID_LEN]
     return OTEL_SDK
 

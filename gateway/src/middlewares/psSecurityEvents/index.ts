@@ -21,11 +21,17 @@ import {
   GuardrailStage,
   GuardrailVerdict,
   PayloadRejectedEvent,
+  PolicyDeniedEvent,
   SECURITY_EVENT_SCHEMA_VERSION,
   SecurityEvent,
   SecurityEventBase,
   SecurityEventName,
 } from './schema';
+import {
+  _setSecurityLogsExporterForTests,
+  securityLogRecord,
+  securityLogsExporter,
+} from './otlp';
 
 /**
  * PS gateway security events (schema v1, `./schema.ts`).
@@ -40,6 +46,10 @@ import {
  * batch on the next event-loop turn. When stdout cannot keep up the queue
  * waits for `drain`; past MAX_QUEUE the oldest events are dropped and
  * counted in `ps_gateway_telemetry_dropped_total{sink="security_events"}`.
+ *
+ * `PS_SECURITY_EVENTS_OTLP=true` also exports each event as an OTLP log
+ * record (`./otlp.ts`), bounded and best-effort in the same way, with drops
+ * counted under `sink="otel_logs"`.
  *
  * Guardrail events are recorded centrally by `HooksManager.executeHooks`
  * (every hook run on unified routes, proxied model calls and Responses goes
@@ -119,7 +129,35 @@ export function flushSecurityEvents(force = false): void {
   }
 }
 
-function enqueue(target: Target, event: SecurityEvent) {
+/** Where this request's events go: stdout/stderr lines and/or OTLP logs. */
+interface Sinks {
+  target?: Target;
+  otlp?: ReturnType<typeof securityLogsExporter>;
+  waitUntil?: (p: Promise<unknown>) => void;
+}
+
+const waitUntilOf = (c: Context) => {
+  try {
+    const ctx = c.executionCtx;
+    if (ctx?.waitUntil) return (p: Promise<unknown>) => ctx.waitUntil(p);
+  } catch {
+    /* no execution context on Node */
+  }
+  return undefined;
+};
+
+/** The active sinks, or undefined when no event would be written anywhere. */
+export const sinksOf = (c: Context): Sinks | undefined => {
+  const target = securityLogTarget(c);
+  const otlp = securityLogsExporter();
+  if (!target && !otlp) return undefined;
+  return { target, otlp, waitUntil: otlp ? waitUntilOf(c) : undefined };
+};
+
+function enqueue(sinks: Sinks, event: SecurityEvent) {
+  if (sinks.otlp) sinks.otlp.enqueue(securityLogRecord(event), sinks.waitUntil);
+  const target = sinks.target;
+  if (!target) return;
   queue.push({ target, line: JSON.stringify(event) });
   if (queue.length > MAX_QUEUE) {
     const n = queue.length - MAX_QUEUE;
@@ -240,6 +278,7 @@ export function _resetSecurityEventsForTests() {
   queue = [];
   scheduled = false;
   waitingForDrain = false;
+  _setSecurityLogsExporterForTests(undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +359,7 @@ export function recordHookResults(
   pluginRegistry: unknown
 ): void {
   try {
-    const target = securityLogTarget(c);
+    const target = sinksOf(c);
     const metrics = isMetricsEnabled(c);
     if (!target && !metrics) return;
 
@@ -450,15 +489,16 @@ export function recordHookResults(
 // ---------------------------------------------------------------------------
 // Gateway refusals
 
-/** A gateway credential check failed (admin console/log stream, /metrics or the MCP proxy). */
+/** A gateway credential check failed (admin console/log stream, /metrics, the MCP proxy or OIDC). */
 export function reportAuthFailure(
   c: Context,
   realm: AuthFailureEvent['ps.auth.realm'],
   reason: AuthFailureEvent['ps.auth.reason'],
-  status = 401
+  status = 401,
+  detail?: AuthFailureEvent['ps.auth.detail']
 ): void {
   try {
-    const target = securityLogTarget(c);
+    const target = sinksOf(c);
     if (!target) return;
     enqueue(target, {
       ...base(c, 'auth.failure', {
@@ -472,7 +512,48 @@ export function reportAuthFailure(
       'event.name': 'auth.failure',
       'ps.auth.realm': realm,
       'ps.auth.reason': reason,
+      ...(detail ? { 'ps.auth.detail': detail } : {}),
       'http.response.status_code': status,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** The OIDC group policy refused an authenticated caller (403). */
+export function reportPolicyDenied(
+  c: Context,
+  reason: PolicyDeniedEvent['ps.policy.reason'],
+  fields: {
+    group?: string;
+    userHash?: string;
+    provider?: string;
+    model?: string;
+  } = {}
+): void {
+  try {
+    const target = sinksOf(c);
+    if (!target) return;
+    enqueue(target, {
+      ...base(c, 'policy.denied', {
+        'event.kind': 'alert',
+        'event.category': ['iam'],
+        'event.outcome': 'failure',
+        severity: 'medium',
+        action: 'blocked',
+        signature: reason,
+      }),
+      ...(fields.provider
+        ? { 'gen_ai.provider.name': safeId(fields.provider) }
+        : {}),
+      ...(fields.model
+        ? { 'gen_ai.request.model': safeId(fields.model, MODEL_RE) }
+        : {}),
+      'event.name': 'policy.denied',
+      'ps.policy.reason': reason,
+      ...(fields.group ? { 'ps.policy.group': safeId(fields.group) } : {}),
+      ...(fields.userHash ? { 'user.hash': fields.userHash } : {}),
+      'http.response.status_code': 403,
     });
   } catch {
     /* best-effort */
@@ -486,7 +567,7 @@ export function reportPayloadRejected(
   status: number
 ): void {
   try {
-    const target = securityLogTarget(c);
+    const target = sinksOf(c);
     if (!target) return;
     const declared = Number(c.req.header('content-length'));
     enqueue(target, {
@@ -521,7 +602,7 @@ export function psSecurityEvents() {
     await next();
     try {
       if (c.res.status !== 429) return;
-      const target = securityLogTarget(c);
+      const target = sinksOf(c);
       const metrics = isMetricsEnabled(c);
       if (!target && !metrics) return;
       const source = attemptsOf(c).length ? 'upstream' : 'gateway';

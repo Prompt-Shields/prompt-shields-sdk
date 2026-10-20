@@ -1,0 +1,98 @@
+name: Observability
+
+# Checks the shipped observability assets:
+# - Prometheus alert rules: `promtool check rules` and the rule unit tests
+#   (deploy/prometheus/alerts.test.yaml);
+# - dashboards and rules use only metric names the code registers, and the
+#   Helm chart's copies match deploy/ (scripts/check-observability-metrics.py);
+# - the Splunk OpenTelemetry Collector recipe: `otelcol-contrib validate`.
+# Tools are downloaded from their GitHub releases and checked against the
+# SHA-256 sums pinned below.
+
+on:
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "charts/prompt-shields/files/**"
+      - "gateway/src/middlewares/psMetrics/**"
+      - "packages/collector/collector/metrics.py"
+      - "scripts/check-observability-metrics.py"
+      - ".github/workflows/observability.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - "charts/prompt-shields/files/**"
+      - "gateway/src/middlewares/psMetrics/**"
+      - "packages/collector/collector/metrics.py"
+      - "scripts/check-observability-metrics.py"
+      - ".github/workflows/observability.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observability-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROMETHEUS_VERSION: 3.1.0
+  PROMETHEUS_SHA256: 9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c
+  OTELCOL_VERSION: 0.116.0
+  OTELCOL_SHA256: 59e53bef012a5503c925aaba4d25e8acdf4d0fb60949551123daa4806700bf56
+
+jobs:
+  check:
+    name: Alert rules, dashboards, collector recipe
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install promtool (checksum verified)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/dl"
+          cd "$RUNNER_TEMP/dl"
+          tarball="prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          curl -fsSLo "$tarball" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${tarball}"
+          echo "${PROMETHEUS_SHA256}  ${tarball}" | sha256sum --check --strict
+          tar -xzf "$tarball" --strip-components=1 "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          mv promtool "$RUNNER_TEMP/bin/"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: promtool check rules
+        run: promtool check rules deploy/prometheus/alerts.yaml charts/prompt-shields/files/prometheus/alerts.yaml
+
+      - name: promtool test rules
+        run: promtool test rules deploy/prometheus/alerts.test.yaml
+
+      - name: Dashboards are valid JSON
+        run: |
+          for f in deploy/grafana/dashboards/*.json; do
+            python3 -m json.tool "$f" > /dev/null || { echo "::error file=$f::invalid JSON"; exit 1; }
+          done
+
+      - name: Metric names exist, chart copies match
+        run: python3 scripts/check-observability-metrics.py
+
+      - name: Install otelcol-contrib (checksum verified)
+        run: |
+          cd "$RUNNER_TEMP/dl"
+          tarball="otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLo "$tarball" \
+            "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/${tarball}"
+          echo "${OTELCOL_SHA256}  ${tarball}" | sha256sum --check --strict
+          tar -xzf "$tarball" otelcol-contrib
+          mv otelcol-contrib "$RUNNER_TEMP/bin/"
+
+      - name: otelcol-contrib validate (Splunk recipe)
+        env:
+          SPLUNK_HEC_ENDPOINT: https://splunk.example.internal:8088/services/collector
+          SPLUNK_HEC_TOKEN: validate-only
+          SPLUNK_EVENTS_INDEX: ps_security
+          SPLUNK_METRICS_INDEX: ps_metrics
+          SPLUNK_HEC_INSECURE_SKIP_VERIFY: "false"
+          PS_GATEWAY_METRICS_TARGET: prompt-shields-gateway:8787
+          PS_COLLECTOR_METRICS_TARGET: prompt-shields-collector:8000
+        run: otelcol-contrib validate --config deploy/otel-collector/splunk/otel-collector.yaml

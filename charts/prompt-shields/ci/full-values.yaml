@@ -31,6 +31,18 @@ gateway:
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   metrics:
     enabled: true
+  oidc:
+    enabled: true
+    issuer: https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0
+    audience: ["api://prompt-shields-gateway"]
+    groupsClaim: roles
+    policy:
+      default: deny
+      groups:
+        - name: chat-users
+          match: [Chat.Use]
+          providers: [azure-openai]
+          rate_limit: {requests_per_minute: 60}
   config:
     AWS_AMBIENT_CREDENTIALS_ENABLED: "true"
     HTTPS_PROXY: http://egress-proxy.example.com:3128
@@ -102,6 +114,14 @@ cronJobs:
       enabled: true
       schedule: "0 5 * * *"
       args: ["python", "-m", "collector.leanix", "--tenant", "00000000-0000-0000-0000-000000000001"]
+grafanaDashboards:
+  enabled: true
+  annotations:
+    grafana_folder: Prompt Shields
+prometheusRule:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
 networkPolicy:
   gateway:
     ingressFrom:

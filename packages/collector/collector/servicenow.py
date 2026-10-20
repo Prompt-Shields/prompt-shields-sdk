@@ -107,6 +107,7 @@ from collector.connectors import (
     validate_hostname,
 )
 from collector.provider_usage_admin import require_operator
+from collector.sanitize import BoundedJsonRoute
 
 logger = logging.getLogger("prompt_shields.servicenow")
 
@@ -616,7 +617,7 @@ async def sync_servicenow(
 # Operator endpoints and CLI
 # ──────────────────────────────────────────────────────────────────────
 
-router = APIRouter(prefix="/api/v1/admin/connectors/servicenow", tags=["Admin"])
+router = APIRouter(prefix="/api/v1/admin/connectors/servicenow", tags=["Admin"], route_class=BoundedJsonRoute)
 
 
 def _not_found() -> HTTPException:

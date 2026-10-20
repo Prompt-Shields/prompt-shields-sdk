@@ -164,7 +164,7 @@ variable names**. For each component the chart uses the first of:
 |---|---|
 | `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
-| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request |
+| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
 
 ExternalSecret example (External Secrets Operator with Vault or AWS Secrets
 Manager behind a `ClusterSecretStore`):
@@ -308,7 +308,16 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
   `/partner/v1/health`; the gateway uses `/v1/health` for both.
 - `*.serviceMonitor.enabled` renders a Prometheus Operator ServiceMonitor.
 - OpenTelemetry traces from the gateway: `PS_OTEL_ENDPOINT` in
-  `gateway.config`.
+  `gateway.config`. Security events as OTLP log records:
+  `PS_SECURITY_EVENTS_OTLP: "true"` (sent to `PS_OTEL_ENDPOINT`'s `/v1/logs`
+  unless `PS_SECURITY_EVENTS_OTLP_ENDPOINT` is set).
+- `grafanaDashboards.enabled` ships the gateway traffic, guardrails and
+  security, and collector health dashboards as a ConfigMap labelled for the
+  Grafana sidecar (`grafana_dashboard: "1"` by default).
+- `prometheusRule.enabled` renders the alert rules as a PrometheusRule; add
+  the label your Prometheus `ruleSelector` matches to `prometheusRule.labels`.
+- Both are copies of `deploy/grafana/dashboards` and
+  `deploy/prometheus/alerts.yaml`; see `docs/guides/observability.mdx`.
 
 The probe paths and the env var names the chart sets
 (`collector.runWorkers.envName`, `collector.metrics.envName`,
@@ -398,6 +407,11 @@ can follow the images if those change.
 | `gateway.metrics.enabled` / `.path` | `false` / `/metrics` | `PS_METRICS_ENABLED` |
 | `*.metrics.tokenSecret` / `.tokenEnvName` | `{}` / `PS_METRICS_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN` | Metrics bearer token from a Secret key |
 | `gateway.shutdown.timeoutMs` / `.envName` | `25000` / `PS_SHUTDOWN_TIMEOUT_MS` | Drain on SIGTERM |
+| `gateway.oidc.enabled` | `false` | `PS_OIDC_ENABLED`: OIDC/JWT authentication and IdP-group policy on `/v1/*` ([guide](../../docs/guides/gateway-oidc.mdx)) |
+| `gateway.oidc.issuer` / `.audience` | `""` / `[]` | `PS_OIDC_ISSUER` / `PS_OIDC_AUDIENCE`, both required when enabled |
+| `gateway.oidc.jwksUrl` / `.algorithms` / `.clockSkewSeconds` | discovery / asymmetric RS, PS, ES / `60` | `PS_OIDC_JWKS_URL` / `PS_OIDC_ALGORITHMS` / `PS_OIDC_CLOCK_SKEW_SECONDS` |
+| `gateway.oidc.groupsClaim` / `.telemetrySubject` | `groups` / `hash` | `PS_OIDC_GROUPS_CLAIM` / `PS_OIDC_TELEMETRY_SUBJECT` |
+| `gateway.oidc.policy` | `{}` (authentication only) | `PS_OIDC_POLICY` as JSON: groups to provider/model allowlists and rate limits (per replica) |
 | `collector.rlsRequired` | `true` | `PS_RLS_REQUIRED` |
 | `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `""` (auto) | Background loops in API pods; auto = `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob |
 | `collector.metrics.enabled` / `.envName` / `.path` | `false` / `PS_COLLECTOR_METRICS_ENABLED` / `/metrics` | Collector metrics |
@@ -416,6 +430,8 @@ can follow the images if those change.
 | `networkPolicy.enabled` | `true` | NetworkPolicies |
 | `networkPolicy.gateway.ingressFrom` / `.collector.extraIngressFrom` | `[]` | Ingress peers |
 | `networkPolicy.egress.dns` / `.database.cidrs` / `.database.port` / `.allowExternal` / `.extra` | `true` / `[]` / `5432` / `true` / `[]` | Egress |
+| `grafanaDashboards.enabled` / `.labels` / `.annotations` / `.namespace` | `false` / `grafana_dashboard: "1"` / `{}` / release namespace | Dashboards ConfigMap for the Grafana sidecar |
+| `prometheusRule.enabled` / `.labels` | `false` / `{}` | Alert rules as a PrometheusRule |
 | `extraObjects` | `[]` | Extra manifests (templated) |
 
 ## Environment variables
@@ -435,6 +451,8 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_MCP_CONFIG_FILE`, `PS_MCP_TOKEN` (secret), `PS_MCP_ALLOW_UNAUTHENTICATED` | MCP proxy (`/v1/mcp/{server}`): the `mcp_servers` file (mount it from a ConfigMap with `gateway.extraVolumes` / `extraVolumeMounts`) and the client bearer token. See `gateway/docs/mcp-proxy.md` |
 | `PS_TELEMETRY_MAX_ATTEMPTS`, `PS_TELEMETRY_RETRY_BASE_MS`, `PS_TELEMETRY_MAX_PENDING`, `PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS` | Telemetry delivery to the collector |
 | `PS_OTEL_ENDPOINT`, `PS_OTEL_HEADERS`, `PS_OTEL_CAPTURE_CONTENT`, `PS_OTEL_MAX_BATCH`, `PS_OTEL_FLUSH_MS`, `PS_OTEL_MAX_QUEUE` | OpenTelemetry GenAI spans |
+| `PS_SECURITY_EVENTS_LOG`, `PS_SECURITY_EVENTS_TENANT` | Security events as JSON lines on stdout |
+| `PS_SECURITY_EVENTS_OTLP`, `PS_SECURITY_EVENTS_OTLP_ENDPOINT`, `PS_SECURITY_EVENTS_OTLP_HEADERS` | Security events as OTLP log records |
 | `PS_ROUTER_ENABLED`, `PS_CACHE_DEFAULT`, `PS_CACHE_MAX_ENTRIES` | Router and response cache |
 | `PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`, `TRUSTED_CUSTOM_HOSTS`, `OAUTH_TOKEN_URL_ALLOWED_HOSTS` | Custom upstream hosts |
 | `MAX_JSON_PAYLOAD_SIZE_IN_MB`, `MAX_FILE_PAYLOAD_SIZE_IN_MB` | Request size limits |
