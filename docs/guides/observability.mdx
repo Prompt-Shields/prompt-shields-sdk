@@ -92,11 +92,11 @@ collector:
 |---|---|---|
 | `PromptShieldsGuardrailDenyRateHigh` | Over 25% of guardrail checks deny for 15 minutes (with more than 0.05 checks/s) | warning |
 | `PromptShieldsGateway5xxRateHigh` | Over 5% of gateway requests are 5xx for 10 minutes | warning |
-| `PromptShieldsTelemetryDropped` | Any sink dropped telemetry in the last 10 minutes, per `sink` and `reason` | warning |
+| `PromptShieldsTelemetryDropped` | A sink dropped 100+ items in 30 minutes, or kept dropping for 10 minutes, per `sink` and `reason` (an isolated drop does not alert) | warning |
 | `PromptShieldsCollectorNotReady` | An instance's `/readyz` calls all failed for 5 minutes | critical |
 | `PromptShieldsCollector5xxRateHigh` | Over 5% of collector requests (probes excluded) are 5xx for 10 minutes | warning |
-| `PromptShieldsIngestStalled` | The gateway serves traffic but the collector accepted no events for 15 minutes | critical |
-| `PromptShieldsIngestFailing` | Over 10% of ingested events are rate limited, rejected or fail to write | warning |
+| `PromptShieldsIngestStalled` | The gateway serves traffic but the collector accepted no events for 15 minutes; only while the collector's metrics are scraped | critical |
+| `PromptShieldsIngestFailing` | Over 10% of ingested events are rate limited, rejected or fail to write, with at least 60 events in 10 minutes | warning |
 
 `PromptShieldsIngestStalled` assumes the gateway sends telemetry to this collector (`PS_API_KEY`); drop it otherwise. Thresholds are starting points.
 
@@ -147,4 +147,4 @@ This adds the gateway (8787), the OpenTelemetry Collector (4318) and Splunk (Web
 
 ## Delivery and retention
 
-Gateway telemetry is best effort: bounded in-memory queues, no retry for OTLP batches, every loss counted in `ps_gateway_telemetry_dropped_total` and alerted on by `PromptShieldsTelemetryDropped`. For durability across Splunk outages, give the OpenTelemetry Collector a persistent sending queue (`file_storage` extension). Data you export follows your own retention policy.
+Gateway telemetry is best effort: bounded in-memory queues, no retry for OTLP batches, every loss counted in `ps_gateway_telemetry_dropped_total`, and sustained or large losses alerted on by `PromptShieldsTelemetryDropped`. For durability across Splunk outages, give the OpenTelemetry Collector a persistent sending queue (`file_storage` extension). Data you export follows your own retention policy.

@@ -57,15 +57,19 @@ tests:
               summary: Gateway 5xx rate above 5%
               description: "16.67% of gateway requests returned a 5xx over the last 5 minutes. Break ps_gateway_requests_total down by provider and route to find the source."
 
-  - name: telemetry drops
+  - name: sustained telemetry drops
     interval: 1m
     input_series:
       - series: 'ps_gateway_telemetry_dropped_total{sink="otel_logs",reason="http_error"}'
-        values: "0 0 0 5 10 15 20 25 30 35 40 45 50"
+        values: "0 0 0 5+5x30"
       - series: 'ps_gateway_telemetry_dropped_total{sink="otel",reason="queue_full"}'
-        values: "0x12"
+        values: "0x33"
     alert_rule_test:
-      - eval_time: 12m
+      # Dropping since minute 3, but not yet for 10 minutes.
+      - eval_time: 10m
+        alertname: PromptShieldsTelemetryDropped
+        exp_alerts: []
+      - eval_time: 20m
         alertname: PromptShieldsTelemetryDropped
         exp_alerts:
           - exp_labels:
@@ -75,7 +79,41 @@ tests:
               reason: http_error
             exp_annotations:
               summary: "Gateway is dropping telemetry (otel_logs, http_error)"
-              description: "50 otel_logs items were dropped in the last 10 minutes (reason http_error). Check that the receiving endpoint is reachable and sized for the load; gaps in this telemetry are gaps in the audit trail."
+              description: "90 otel_logs items were dropped in the last 30 minutes (reason http_error). Check that the receiving endpoint is reachable and sized for the load; gaps in this telemetry are gaps in the audit trail."
+
+  - name: a single telemetry drop does not alert
+    interval: 1m
+    input_series:
+      - series: 'ps_gateway_telemetry_dropped_total{sink="otel_logs",reason="send_failed"}'
+        values: "0 0 0 1x40"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PromptShieldsTelemetryDropped
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PromptShieldsTelemetryDropped
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsTelemetryDropped
+        exp_alerts: []
+
+  - name: a large burst of telemetry drops alerts
+    interval: 1m
+    input_series:
+      - series: 'ps_gateway_telemetry_dropped_total{sink="security_events",reason="queue_full"}'
+        values: "0 0 0 500x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PromptShieldsTelemetryDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              sink: security_events
+              reason: queue_full
+            exp_annotations:
+              summary: "Gateway is dropping telemetry (security_events, queue_full)"
+              description: "500 security_events items were dropped in the last 30 minutes (reason queue_full). Check that the receiving endpoint is reachable and sized for the load; gaps in this telemetry are gaps in the audit trail."
 
   - name: collector not ready
     interval: 1m
@@ -120,11 +158,15 @@ tests:
               summary: Collector ingest has stalled
               description: "The gateway handled traffic for the last 15 minutes but the collector accepted no ingest events. Check the gateway's ps_gateway_telemetry_dropped_total{sink=\"ps_telemetry\"} and the collector's ps_collector_ingest_events_total by outcome."
 
-  - name: ingest stalled when the collector never accepted anything
+  - name: ingest stalled when a scraped collector never accepted anything
     interval: 1m
     input_series:
       - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="200",provider="openai",business_unit="none",environment="none"}'
         values: "0+10x60"
+      # Only the readiness probe: the collector is scraped but has no
+      # accepted series.
+      - series: 'ps_collector_requests_total{instance="c1:8000",route="/readyz",method="GET",status="200"}'
+        values: "0+6x60"
     alert_rule_test:
       - eval_time: 45m
         alertname: PromptShieldsIngestStalled
@@ -135,6 +177,16 @@ tests:
             exp_annotations:
               summary: Collector ingest has stalled
               description: "The gateway handled traffic for the last 15 minutes but the collector accepted no ingest events. Check the gateway's ps_gateway_telemetry_dropped_total{sink=\"ps_telemetry\"} and the collector's ps_collector_ingest_events_total by outcome."
+
+  - name: collector metrics not scraped does not alert ingest stalled
+    interval: 1m
+    input_series:
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="200",provider="openai",business_unit="none",environment="none"}'
+        values: "0+10x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: PromptShieldsIngestStalled
+        exp_alerts: []
 
   - name: ingest failing
     interval: 1m
@@ -153,3 +205,16 @@ tests:
             exp_annotations:
               summary: Collector is refusing or failing ingest
               description: "33.33% of ingested events were rate limited, rejected or failed to write over the last 10 minutes."
+
+  - name: ingest failing needs real traffic
+    interval: 1m
+    input_series:
+      # 3 events a minute, a third of them failing: under the traffic floor.
+      - series: 'ps_collector_ingest_events_total{endpoint="events",outcome="accepted"}'
+        values: "0+2x30"
+      - series: 'ps_collector_ingest_events_total{endpoint="events",outcome="rejected"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: PromptShieldsIngestFailing
+        exp_alerts: []

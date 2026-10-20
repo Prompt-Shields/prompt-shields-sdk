@@ -64,14 +64,27 @@ groups:
             by provider and route to find the source.
 
       - alert: PromptShieldsTelemetryDropped
-        # Any sink lost telemetry: OTel spans (otel), security-event OTLP log
-        # records (otel_logs), collector telemetry (ps_telemetry) or security
-        # event lines (security_events).
+        # A sink is losing telemetry: OTel spans (otel), security-event OTLP
+        # log records (otel_logs), collector telemetry (ps_telemetry) or
+        # security event lines (security_events). Fires on a meaningful
+        # count (100+ in 30 minutes) or on drops that keep happening (some
+        # in every 5-minute window for 10 minutes); an isolated drop does
+        # not alert.
         expr: |
           sum by (sink, reason) (
-            increase(ps_gateway_telemetry_dropped_total[10m])
-          ) > 0
-        for: 5m
+            increase(ps_gateway_telemetry_dropped_total[30m])
+          ) >= 100
+          or
+          (
+            sum by (sink, reason) (
+              increase(ps_gateway_telemetry_dropped_total[30m])
+            )
+            and
+            sum by (sink, reason) (
+              rate(ps_gateway_telemetry_dropped_total[5m])
+            ) > 0
+          )
+        for: 10m
         labels:
           severity: warning
           service: prompt-shields-gateway
@@ -79,7 +92,7 @@ groups:
           summary: "Gateway is dropping telemetry ({{ $labels.sink }}, {{ $labels.reason }})"
           description: >-
             {{ $value | humanize }} {{ $labels.sink }} items were dropped in
-            the last 10 minutes (reason {{ $labels.reason }}). Check that the
+            the last 30 minutes (reason {{ $labels.reason }}). Check that the
             receiving endpoint is reachable and sized for the load; gaps in
             this telemetry are gaps in the audit trail.
 
@@ -135,12 +148,18 @@ groups:
         # The gateway is serving traffic but the collector has accepted no
         # events for 15 minutes. Assumes the gateway sends telemetry to this
         # collector (PS_API_KEY set); drop or adapt it otherwise.
+        # Only evaluated while the collector's metrics are scraped
+        # (ps_collector_requests_total exists; the readiness probe alone
+        # creates it). A scraped collector that has never accepted an event
+        # has no accepted series yet and counts as 0; a collector whose
+        # metrics are off or not scraped never alerts.
         expr: |
           sum(rate(ps_gateway_requests_total[15m])) > 0.01
           and on()
           (
             sum(rate(ps_collector_ingest_events_total{outcome="accepted"}[15m]))
-            or on() vector(0)
+            or on()
+            (sum(ps_collector_requests_total) * 0)
           ) == 0
         for: 15m
         labels:
@@ -156,12 +175,16 @@ groups:
 
       - alert: PromptShieldsIngestFailing
         # Ingest is reaching the collector but being refused or not stored.
+        # Needs at least 60 events in 10 minutes, so a few refused events
+        # on an idle collector do not alert.
         expr: |
           (
             sum(rate(ps_collector_ingest_events_total{outcome=~"write_failed|rejected|rate_limited"}[10m]))
               /
             sum(rate(ps_collector_ingest_events_total[10m]))
           ) > 0.1
+          and
+          sum(rate(ps_collector_ingest_events_total[10m])) > 0.1
         for: 10m
         labels:
           severity: warning
