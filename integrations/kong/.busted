@@ -1,0 +1,11 @@
+-- `busted --run=unit` runs the PDK-mocked unit tests in unit/ with plain
+-- LuaJIT. The default run is left untouched, because Pongo copies this file
+-- into its container and runs the integration specs in spec/ with it.
+return {
+  unit = {
+    ROOT = { "unit" },
+    lpath = "./?.lua;./?/init.lua;./unit/?.lua",
+    pattern = "_spec",
+    verbose = true,
+  },
+}
