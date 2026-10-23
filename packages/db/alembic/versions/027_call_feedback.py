@@ -8,8 +8,8 @@ opaque user id, source). Fed by ``POST /ingest/feedback``.
 The new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Revision ID: 026
-Revises: 025
+Revision ID: 027
+Revises: 023 (intended: 026; the chain is fixed at merge)
 Create Date: 2026-10-23
 """
 
@@ -19,8 +19,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "026"
-down_revision: str | None = "025"
+revision: str = "027"
+down_revision: str | None = "023"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
