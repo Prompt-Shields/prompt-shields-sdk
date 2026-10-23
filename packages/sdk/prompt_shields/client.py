@@ -14,7 +14,9 @@ if telemetry delivery fails. See `telemetry.py` for buffering details.
 
 import hashlib
 import os
+import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 from prompt_shields.instrumentation import suppress_instrumentation
@@ -39,6 +41,21 @@ from prompt_shields.telemetry import (
     unregister_exit_flush,
 )
 from prompt_shields.types import PSMetadata, RouteHint
+
+# OpenAI reasoning models (o1, o3-mini, o4-mini, gpt-5, ...) reject
+# `max_tokens` and take `max_completion_tokens` instead.
+_REASONING_MODEL = re.compile(r"^(?:o\d+(?:-|$)|gpt-5)")
+
+
+def _openai_max_tokens(model: str, max_tokens: int | None, kwargs: dict) -> None:
+    """Pass create()'s named `max_tokens` on to an OpenAI chat call, as
+    `max_completion_tokens` for reasoning models. An explicit
+    `max_completion_tokens` wins."""
+    if max_tokens is None or "max_completion_tokens" in kwargs:
+        return
+    name = model.rsplit("/", 1)[-1] if isinstance(model, str) else ""
+    key = "max_completion_tokens" if _REASONING_MODEL.match(name) else "max_tokens"
+    kwargs[key] = max_tokens
 
 
 def _fingerprint(api_key: str) -> str:
@@ -272,6 +289,23 @@ class _CompletionsNamespace:
         max_tokens: int | None = None,
         **kwargs,
     ):
+        return self._create(model=model, messages=messages,
+                            ps_metadata=ps_metadata, route=route,
+                            max_tokens=max_tokens, **kwargs)
+
+    def _create(
+        self,
+        *,
+        model: str,
+        messages: list,
+        ps_metadata: PSMetadata | None = None,
+        route: RouteHint | None = None,
+        max_tokens: int | None = None,
+        _event_hook: Callable[[dict], None] | None = None,
+        **kwargs,
+    ):
+        """`create`, plus `_event_hook(event)` called on the telemetry event
+        before it is sent (ShieldsRouter adds its route decision there)."""
         # Route hints travel as X-PS-* headers; the gateway acts on them, the
         # provider ignores them. Merge over any caller-supplied extra_headers.
         if route is not None:
@@ -299,7 +333,7 @@ class _CompletionsNamespace:
             return self._wrap_stream(
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
-                hide_usage_chunk=hide_usage_chunk,
+                hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
             )
 
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -311,6 +345,8 @@ class _CompletionsNamespace:
             latency_ms=latency_ms,
             ps_metadata=ps_metadata,
         )
+        if _event_hook is not None:
+            _event_hook(event)
         self._send(event, messages)
         return response
 
@@ -326,7 +362,8 @@ class _CompletionsNamespace:
 
     def _wrap_stream(self, response: Any, *, model: str, messages: list,
                      ps_metadata: PSMetadata | None, start: float,
-                     hide_usage_chunk: bool) -> Any:
+                     hide_usage_chunk: bool,
+                     event_hook: Callable[[dict], None] | None = None) -> Any:
         """Wrap a stream so one event is emitted when it ends. Fail-open."""
 
         def on_finish(adapter_fields: dict, stream_fields: dict,
@@ -339,6 +376,8 @@ class _CompletionsNamespace:
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):
                 event["tokens_estimated"] = True
+            if event_hook is not None:
+                event_hook(event)
             self._send(event, messages, flush=flush)
 
         try:
@@ -361,6 +400,8 @@ class _CompletionsNamespace:
         vendor = self._parent._vendor
 
         if vendor == "openai":
+            # max_tokens is a named parameter of create(); pass it on.
+            _openai_max_tokens(model, max_tokens, kwargs)
             return upstream.chat.completions.create(
                 model=model, messages=messages, **kwargs
             )

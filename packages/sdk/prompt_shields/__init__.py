@@ -11,6 +11,11 @@ Public surface:
         AsyncShieldsOpenAI   — typed convenience
         AsyncShieldsAnthropic — typed convenience
 
+    Routing (opt-in; the clients above never pick a model):
+        ShieldsRouter        — picks the model per call under a route policy
+        AsyncShieldsRouter   — async variant
+        PolicyViolation      — raised when no allowed model is left (fail closed)
+
     Types:
         PSMetadata           — per-request metadata TypedDict
         PSConfig             — client config TypedDict
@@ -47,6 +52,13 @@ from prompt_shields.instrumentation import (
 )
 from prompt_shields.pii import detect_pii_categories, scan_messages
 from prompt_shields.pricing import estimate_cost, estimate_unit_cost
+from prompt_shields.route_policy import PolicyViolation
+from prompt_shields.router import (
+    AsyncShieldsRouter,
+    RoutedChatCompletion,
+    RouterError,
+    ShieldsRouter,
+)
 from prompt_shields.types import (
     DataClassification,
     DiscoverySource,
@@ -63,15 +75,20 @@ __all__ = [
     "AsyncShieldsAnthropic",
     "AsyncShieldsClient",
     "AsyncShieldsOpenAI",
+    "AsyncShieldsRouter",
     "DataClassification",
     "DiscoverySource",
     "PSConfig",
     "PSMetadata",
+    "PolicyViolation",
     "Quality",
     "RouteHint",
+    "RoutedChatCompletion",
+    "RouterError",
     "ShieldsAnthropic",
     "ShieldsClient",
     "ShieldsOpenAI",
+    "ShieldsRouter",
     "Vendor",
     "detect_pii_categories",
     "estimate_cost",
