@@ -18,13 +18,19 @@ Data: every legacy key on ``tenants.api_key_prefix`` / ``api_key_hash`` is
 moved into ``tenant_api_keys`` as ``legacy-ingest-key`` (origin 'legacy')
 and the tenant columns are cleared. The key does not change, so SDKs and
 gateways keep working; it can now be listed, rotated and revoked. The
-collector still accepts a key written to the tenant columns later (the demo
-seed does this) and moves it on the first key API call for that tenant.
+collector still accepts a key written to the tenant columns later (older
+seeds and fixtures do this) and moves it when that tenant first issues a key
+through the key API; listing keys does not move it.
 
 Downgrade puts one live key per tenant back on the tenant row (the legacy
 one if still live, else the oldest live key) so every tenant that could
 ingest still can, then drops the tables and the column. Other keys and all
-admin tokens are lost.
+admin tokens are lost. So is ``tenants.disabled_at``: a tenant disabled
+through the operator API is enabled again by a downgrade (its restored key
+works), and stays enabled after a later upgrade. List such tenants before
+downgrading (``SELECT id FROM tenants WHERE disabled_at IS NOT NULL``) and
+disable them again after the next upgrade
+(``PATCH /api/v1/operator/tenants/{id}`` with ``{"disabled": true}``).
 
 Revision ID: 022
 Revises: 021

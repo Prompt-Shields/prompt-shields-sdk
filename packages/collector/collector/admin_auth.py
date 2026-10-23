@@ -285,12 +285,70 @@ def serialize_token(row: AdminToken) -> dict:
 
 
 def created_by(request: Request, principal: AdminPrincipal | None) -> str:
-    """Who issued a token: 'operator', or the caller's key prefix."""
+    """Who issued a token: 'operator', or the caller's key prefix
+    (``token:<token_prefix>`` for a token made by another token)."""
     if principal is None:
         return "operator"
     prefix = bearer_key_prefix(request) or "unknown"
     kind = "token" if principal.kind == "admin_token" else "key"
     return f"{kind}:{prefix}"
+
+
+async def cap_child_expiry(
+    db: AsyncSession, principal: AdminPrincipal, expires_at: datetime | None
+) -> datetime | None:
+    """A token made by another token expires no later than its parent, so
+    a short-lived token cannot mint a longer-lived (or never-expiring) one.
+    Tokens made by a tenant key or the operator are not capped."""
+    if principal.kind != "admin_token" or principal.token_id is None:
+        return expires_at
+    parent_expiry = (
+        await db.execute(
+            select(AdminToken.expires_at).where(AdminToken.id == principal.token_id)
+        )
+    ).scalar_one_or_none()
+    if parent_expiry is None:
+        return expires_at
+    if expires_at is None or expires_at > parent_expiry:
+        return parent_expiry
+    return expires_at
+
+
+async def revoke_descendants(
+    db: AsyncSession, parent: AdminToken, now: datetime
+) -> list[AdminToken]:
+    """Revoke every live token that ``parent`` created, and the tokens those
+    created, and so on (linked by ``created_by = token:<token_prefix>``).
+    Returns the tokens revoked here. Flushes nothing; the caller audits and
+    commits."""
+    revoked: list[AdminToken] = []
+    seen = {parent.id}
+    frontier = [parent.token_prefix]
+    while frontier:
+        children = (
+            (
+                await db.execute(
+                    select(AdminToken).where(
+                        AdminToken.tenant_id == parent.tenant_id,
+                        AdminToken.created_by.in_([f"token:{p}" for p in frontier]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        frontier = []
+        for child in children:
+            if child.id in seen:
+                continue
+            seen.add(child.id)
+            # Walk through already revoked tokens too: their children may
+            # still be live.
+            frontier.append(child.token_prefix)
+            if child.revoked_at is None:
+                child.revoked_at = now
+                revoked.append(child)
+    return revoked
 
 
 async def issue_token(

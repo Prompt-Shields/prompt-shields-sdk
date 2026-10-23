@@ -400,15 +400,113 @@ async def test_admin_token_revoke_semantics(client):
     await _token(client, ["admin:read"], name=tok["name"])
 
 
+def _ts(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+async def test_child_token_expiry_is_capped_at_the_parent(client):
+    parent_exp = datetime.now(UTC) + timedelta(hours=1)
+    parent = await _token(
+        client, ["admin:tokens", "admin:read"], expires_at=parent_exp.isoformat()
+    )
+    # No expiry, or a later one: capped to the parent's.
+    forever = await _token(client, ["admin:read"], key=parent["token"])
+    later = await _token(
+        client,
+        ["admin:read"],
+        key=parent["token"],
+        expires_at=(parent_exp + timedelta(days=30)).isoformat(),
+    )
+    assert _ts(forever["expires_at"]) == _ts(parent["expires_at"])
+    assert _ts(later["expires_at"]) == _ts(parent["expires_at"])
+    # An earlier one is kept.
+    sooner = parent_exp - timedelta(minutes=30)
+    kept = await _token(
+        client, ["admin:read"], key=parent["token"], expires_at=sooner.isoformat()
+    )
+    assert _ts(kept["expires_at"]) == sooner
+    # A parent with no expiry does not cap; nor does the tenant key.
+    unbounded = await _token(client, ["admin:tokens", "admin:read"])
+    child = await _token(client, ["admin:read"], key=unbounded["token"])
+    assert unbounded["expires_at"] is None and child["expires_at"] is None
+
+
+async def test_revoking_a_token_revokes_the_tokens_it_created(client, seeded_db):
+    parent = await _token(client, ["admin:tokens", "admin:read"])
+    child = await _token(client, ["admin:tokens", "admin:read"], key=parent["token"])
+    grandchild = await _token(client, ["admin:read"], key=child["token"])
+    sibling = await _token(client, ["admin:read"])  # made by the tenant key
+
+    path = f"/api/v1/admin/tokens/{parent['id']}"
+    assert (await client.delete(path, headers=H(TENANT_KEY))).status_code == 204
+
+    for tok in (parent, child, grandchild):
+        assert (
+            await client.get("/api/v1/admin/tokens", headers=H(tok["token"]))
+        ).status_code == 401
+        got = await client.get(f"/api/v1/admin/tokens/{tok['id']}", headers=H(TENANT_KEY))
+        assert got.json()["status"] == "revoked"
+    assert (
+        await client.get("/api/v1/admin/tokens", headers=H(sibling["token"]))
+    ).status_code == 200
+
+    revokes = [r for r in await _audit_rows(seeded_db) if r.action == "admin_token.revoke"]
+    assert {r.target_id: r.details.get("cascade_from") for r in revokes} == {
+        parent["id"]: None,
+        child["id"]: parent["id"],
+        grandchild["id"]: parent["id"],
+    }
+    assert all(r.outcome == "success" for r in revokes)
+
+
+async def test_repeated_revoke_cascades_to_children_left_active(client, seeded_db):
+    """A child left active (made before revocation cascaded) is revoked by
+    a repeated DELETE of its parent."""
+    parent = await _token(client, ["admin:tokens", "admin:read"])
+    child = await _token(client, ["admin:read"], key=parent["token"])
+    async with _admin(seeded_db)() as s:
+        await s.execute(
+            update(AdminToken)
+            .where(AdminToken.id == uuid.UUID(parent["id"]))
+            .values(revoked_at=datetime.now(UTC))
+        )
+        await s.commit()
+    assert (
+        await client.get("/api/v1/admin/tokens", headers=H(child["token"]))
+    ).status_code == 200
+    path = f"/api/v1/admin/tokens/{parent['id']}"
+    assert (await client.delete(path, headers=H(TENANT_KEY))).status_code == 204
+    assert (
+        await client.get("/api/v1/admin/tokens", headers=H(child["token"]))
+    ).status_code == 401
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Tenant ingest keys
 # ──────────────────────────────────────────────────────────────────────
 
 
 async def test_legacy_key_is_adopted_and_keeps_working(client, seeded_db):
+    # Listing is read-only: it neither moves the key nor writes an audit row.
+    before = len(await _audit_rows(seeded_db))
+    resp = await client.get("/api/v1/admin/api-keys", headers=H(TENANT_KEY))
+    assert resp.status_code == 200 and resp.json()["data"] == []
+    async with _admin(seeded_db)() as s:
+        tenant = (await s.execute(select(Tenant))).scalar_one()
+    assert tenant.api_key_hash is not None
+    assert len(await _audit_rows(seeded_db)) == before
+
+    # The first key write moves it.
+    issued = (
+        await client.post(
+            "/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": "new"}
+        )
+    ).json()
     resp = await client.get("/api/v1/admin/api-keys", headers=H(TENANT_KEY))
     assert resp.status_code == 200
-    (legacy,) = resp.json()["data"]
+    legacy, new = resp.json()["data"]
+    assert new["id"] == issued["id"]
+    assert "api_key.adopt_legacy" in {r.action for r in await _audit_rows(seeded_db)}
     assert legacy["name"] == "legacy-ingest-key"
     assert legacy["origin"] == "legacy"
     assert legacy["key_hint"] is None
