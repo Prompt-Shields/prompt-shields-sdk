@@ -130,7 +130,7 @@ the cache middleware (so the cache key reflects the resolved model). A pluggable
 | File | Responsibility |
 |------|----------------|
 | `router/types.ts` | `RouteRequest`, `RouteDecision`, `RouterStrategy`, `ModelTier`, `RoutePolicy` |
-| `router/policy.ts` | `defaultPolicy`, token/cost estimation, `pickCheapestIn`, `cheapestUnderBudget` |
+| `router/policy.ts` | `defaultPolicy` (from the generated `router/defaultPolicy.json`), token/cost estimation, `pickCheapestIn`, `cheapestUnderBudget` |
 | `router/heuristic.ts` | `HeuristicStrategy` — the ship-first decision function |
 | `router/index.ts` | `parseRouteHeaders`, `buildRouteRequest`, `resolveRoute` (precedence) |
 | `router/middleware.ts` | `psRouterMiddleware` — `beforeRequest` hook that rewrites `body.model` |
@@ -151,7 +151,10 @@ Model groups (`cheap` / `balanced` / `frontier`) and the `defaultGroup` are
 defined by a `RoutePolicy`. The mounted router uses `defaultPolicy`; there is
 no per-deployment or per-key policy configuration yet (`psRouter(policy)`
 takes one in code). The per-request override is `X-PS-Route`.
-`defaultPolicy` pricing mirrors the SDK's `pricing.py`.
+`defaultPolicy` is generated from the model catalog
+(`router/defaultPolicy.json`, written by `scripts/build_catalog.py` from
+`schemas/catalog/source.v1.json`), so its prices match the SDK's. Do not
+edit the JSON by hand; CI fails on drift (`docs/guides/model-catalog.mdx`).
 
 **Wiring (done):** `router/hono.ts` exports `psRouter()`, a Hono middleware
 mounted in `src/index.ts` via `app.use('*', psRouter())`, gated on
