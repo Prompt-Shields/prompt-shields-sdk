@@ -66,6 +66,10 @@ An inbound `traceparent` makes the span a child of the caller's span.
 - `PS_OTEL_MAX_BATCH` (64), `PS_OTEL_FLUSH_MS` (5000), `PS_OTEL_MAX_QUEUE` (2048) — batching on Node. On Workers each request flushes the queue under `waitUntil`.
 
 Export never blocks or fails a request; failed batches are dropped.
+The endpoint must pass `isSafeUpstreamURL` (list a private or loopback host in
+`TRUSTED_CUSTOM_HOSTS`), and redirects are never followed. Spans for a refused
+endpoint are dropped and counted in
+`ps_gateway_telemetry_dropped_total{sink="otel",reason="unsafe_endpoint"}`.
 
 **Do not point this exporter at the Prompt Shields collector while `PS_API_KEY`
 telemetry (`ps-telemetry.ts`) is also on.** Both paths ingest the same call, so

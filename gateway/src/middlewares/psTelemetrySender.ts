@@ -44,12 +44,16 @@
  */
 
 import { telemetryDroppedTotal } from './psMetrics/security';
+import { isSafeUpstreamURL } from './requestValidator';
+import { upstreamFetch } from '../utils/fetch';
 
 // Drop reasons (a superset of the SDK's DROP_REASONS):
 //   buffer_overflow       too many events already waiting to be delivered
 //                         while sends are succeeding
 //   send_failed           network error or non-2xx response on every attempt
-//                         (also used for overflow while sends are failing)
+//                         (also used for overflow while sends are failing);
+//                         also, without retries, when PS_COLLECTOR_URL fails
+//                         the egress check (isSafeUpstreamURL)
 //   rate_limited          429 on the last attempt (also overflow while
 //                         backing off after a 429)
 //   server_skipped        a 2xx response reported rows it skipped (final)
@@ -89,7 +93,10 @@ export interface SenderOptions {
   retryBaseMs?: number;
   /** Default wait in shutdown() before pending events count as `shutdown`. */
   shutdownTimeoutMs?: number;
-  /** Defaults to the global fetch at call time (tests replace it). */
+  /**
+   * Defaults to `upstreamFetch` (the global fetch at call time, so tests can
+   * replace it), which never follows a redirect.
+   */
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -186,6 +193,7 @@ export class PSTelemetrySender {
   private wakeDrain: (() => void) | undefined;
   private closed = false;
   private idleWaiters: Array<() => void> = [];
+  private warnedUnsafe = false;
 
   private readonly maxPending: number;
   private readonly maxAttempts: number;
@@ -460,6 +468,20 @@ export class PSTelemetrySender {
 
   /** One request for one event. Never throws; a 429 starts the back-off. */
   private async attempt(event: unknown): Promise<Outcome> {
+    // The collector URL must pass the same egress check as other upstream
+    // calls (no metadata, private or loopback addresses unless listed in
+    // TRUSTED_CUSTOM_HOSTS). Retrying cannot help, so the event is dropped.
+    if (!isSafeUpstreamURL(this.opts.url)) {
+      if (!this.warnedUnsafe) {
+        this.warnedUnsafe = true;
+        console.warn(
+          '[PS Telemetry] the collector URL is not an allowed egress target ' +
+            '(list private or loopback hosts in TRUSTED_CUSTOM_HOSTS); ' +
+            'events are dropped'
+        );
+      }
+      return { ok: false, reason: 'send_failed', final: true };
+    }
     let body: string;
     try {
       body = this.body([event]);
@@ -468,7 +490,7 @@ export class PSTelemetrySender {
       return { ok: false, reason: 'serialization_failed', final: true };
     }
     try {
-      const doFetch = this.opts.fetch ?? globalThis.fetch;
+      const doFetch = this.opts.fetch ?? upstreamFetch;
       const resp = await doFetch(this.opts.url, {
         method: 'POST',
         headers: {
