@@ -137,6 +137,8 @@ export interface RiskMapping {
   reviewedAt?: string | null;
   /** The person who confirmed or rejected the mapping. */
   reviewedBy?: string | null;
+  /** The reviewer's comment on the latest review. */
+  reviewComment?: string | null;
 }
 
 /** Current attestation of one field (its newest attestation). */
