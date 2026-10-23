@@ -1696,17 +1696,21 @@ paths:
       description: |
         Enforcing MCP Streamable HTTP proxy (#63). The body is one JSON-RPC
         2.0 request, notification or response (no batches). The gateway:
-        checks `Mcp-Method` / `Mcp-Name` against the body (`-32020` on a
-        mismatch); applies the server's tool allowlist or denylist to
-        `tools/call` (`-32010`) and filters `tools/list` results; refuses a
-        pinned tool whose definition changed (`-32012`); runs the server's
-        input and output guardrails on tool arguments and results
+        checks `Mcp-Method` / `Mcp-Name`, and for a tool whose definition
+        it has seen the `Mcp-Param-*` headers its `x-mcp-header`
+        annotations declare, against the body (`-32020` on a mismatch);
+        applies the server's tool allowlist or denylist, and the caller's
+        OIDC group MCP policy, to `tools/call` (`-32010`) and filters
+        `tools/list` results; refuses a pinned tool whose definition
+        changed (`-32012`); runs the server's input and output guardrails
+        on tool arguments and MRTR `inputResponses`, and on results
         (`-32011`, fail closed); and forwards the request to the configured
         URL with the server's own credentials. The caller's `Authorization`
         header is never forwarded. With `PS_OIDC_ENABLED=true` the
         caller authenticates with its identity-provider token
         (`GatewayOidc`) instead of `PS_MCP_TOKEN`; OIDC failures are the
-        gateway's OpenAI-style 401/403/429 errors, not JSON-RPC errors.
+        gateway's OpenAI-style 401/403/429 errors, not JSON-RPC errors,
+        except a server the caller's group may not use (403, `-32016`).
         Policy refusals of a request are JSON-RPC
         errors with HTTP 200. SSE responses stream. Only the response to
         this request is released, re-serialised from the checked JSON;
@@ -1751,7 +1755,7 @@ paths:
         '401':
           $ref: '#/components/responses/McpError'
         '403':
-          $ref: '#/components/responses/PolicyDenied'
+          $ref: '#/components/responses/McpPolicyDenied'
         '404':
           $ref: '#/components/responses/McpError'
         '413':
@@ -2283,6 +2287,18 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/JsonRpcMessage'
+    McpPolicyDenied:
+      description: |
+        `PS_OIDC_ENABLED` is on and the IdP-group policy refuses the caller:
+        no matching group with `default: deny` (the OIDC `policy_denied`
+        error), or a group whose `mcp` entry does not list this server (a
+        JSON-RPC error, code `-32016`).
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorResponse'
+              - $ref: '#/components/schemas/JsonRpcMessage'
     ProxySuccess:
       description: The provider's response, passed through
       content:
