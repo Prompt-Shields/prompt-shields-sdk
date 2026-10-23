@@ -176,6 +176,8 @@ function enqueue(sinks: Sinks, event: SecurityEvent) {
 const ID_RE = /^[A-Za-z0-9_.:@\/-]{1,128}$/;
 const MODEL_RE = /^[A-Za-z0-9_.:@\/ +-]{1,128}$/;
 const CATEGORY_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+const MCP_SERVER_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+const MCP_TOOL_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 
 /** A structured identifier, or "other" when it is not one. */
 const safeId = (raw: unknown, re = ID_RE): string =>
@@ -529,6 +531,9 @@ export function reportPolicyDenied(
     userHash?: string;
     provider?: string;
     model?: string;
+    mcpServer?: string;
+    mcpTool?: string;
+    status?: 403 | 200;
   } = {}
 ): void {
   try {
@@ -553,7 +558,13 @@ export function reportPolicyDenied(
       'ps.policy.reason': reason,
       ...(fields.group ? { 'ps.policy.group': safeId(fields.group) } : {}),
       ...(fields.userHash ? { 'user.hash': fields.userHash } : {}),
-      'http.response.status_code': 403,
+      ...(fields.mcpServer !== undefined
+        ? { 'ps.mcp.server': safeId(fields.mcpServer, MCP_SERVER_RE) }
+        : {}),
+      ...(fields.mcpTool !== undefined
+        ? { 'ps.mcp.tool': safeId(fields.mcpTool, MCP_TOOL_RE) }
+        : {}),
+      'http.response.status_code': fields.status ?? 403,
     });
   } catch {
     /* best-effort */

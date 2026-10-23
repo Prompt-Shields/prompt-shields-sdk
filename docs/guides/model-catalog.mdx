@@ -1,0 +1,72 @@
+---
+title: Model Catalog
+description: Prices, capabilities and sovereignty metadata per model, shared by the SDK and the gateway router
+---
+
+# Model Catalog
+
+The model catalog (catalog v1) lists each model's prices, capabilities and limits, plus where the provider is based and where it hosts the model. The SDK prices events from it, and the gateway router's default policy takes its prices from it, so the two stay in step.
+
+| File | What it is |
+|---|---|
+| `schemas/catalog/source.v1.json` | The hand-maintained source. Edit this one. |
+| `packages/sdk/prompt_shields/catalog.json` | Generated SDK catalog, shipped in the `prompt-shields` package. |
+| `gateway/src/middlewares/router/defaultPolicy.json` | Generated gateway default `RoutePolicy` (groups and per-1k prices). |
+| `scripts/build_catalog.py` | The generator and drift check. Standard library only. |
+
+## Model entries
+
+Models are keyed `"<provider>/<model id>"`, for example `openai/gpt-4o` or `berget/meta-llama/Llama-3.3-70B-Instruct`. Price, limit and capability fields use the names from LiteLLM's `model_prices_and_context_window.json`, with prices per token:
+
+- Base: `input_cost_per_token`, `output_cost_per_token`.
+- Cache: `cache_read_input_token_cost`, `cache_creation_input_token_cost` (5-minute writes), `cache_creation_input_token_cost_above_1hr` (1-hour writes).
+- Reasoning: `output_cost_per_reasoning_token`. Where it is set, it equals the output rate, which is what the SDK charges reasoning tokens at.
+- Long context: `*_above_200k_tokens`. When the whole prompt is above 200k tokens, the whole request is priced at these rates.
+- Batch and flex: `*_batches`, `*_flex`.
+- Audio: `input_cost_per_audio_token`, `output_cost_per_audio_token`.
+- Limits and capabilities: `max_input_tokens`, `max_output_tokens`, `supports_function_calling`, `supports_response_schema`, `supports_vision`, `supports_reasoning`, `supports_prompt_caching`.
+
+Each entry also has `currency`. It is `USD`, or `EUR` for EU providers that publish prices in euros. EUR prices are recorded as the vendor lists them and are never converted, and only USD entries price SDK events. A call to a EUR-priced model has `cost: null` (unmetered). LiteLLM itself assumes USD, so check `currency` before you feed entries to LiteLLM. Each entry also records the `source` of its prices and, where one exists, a `litellm_key`.
+
+## Sovereignty fields
+
+Every model carries its provider's sovereignty fields. A model entry in the source can override them, for example for a regional deployment.
+
+| Field | Meaning |
+|---|---|
+| `jurisdiction` | `EEA`, `US`, `NO`, `CH`, `UK` or `CA` |
+| `hosting_countries` | ISO 3166 alpha-2 codes of the countries where the model is served |
+| `provider_hq_country` | ISO 3166 alpha-2 code of the provider's headquarters |
+| `us_cloud_act_exposure` | Whether US ownership or US hosting puts the data within reach of the US CLOUD Act. This reflects ownership and hosting, not a legal opinion. |
+| `zdr` | `true` only when prompts and outputs are not retained by default. If zero data retention is only available on request, the value is `false`, and the provider's `notes` say so. |
+| `trains_on_data` | Whether API traffic is used for training by default |
+| `certifications` | Company-level certifications (ISO 27001, C5, SOC 2, ...). Their scope may not cover the inference service. |
+
+`null` means unknown or not verified. A data policy must treat `null` as non-compliant, so that it fails closed. The catalog's `sovereignty_checked` date says when these fields were last reviewed. Check them before you rely on them for routing.
+
+The seeded supply includes OpenAI, Anthropic, Google (Gemini API), Amazon Bedrock, Mistral (EU), Cohere, and the EU providers Berget AI, Infercom, Regolo, IONOS, STACKIT, Scaleway and OVHcloud.
+
+## Python API
+
+```python
+from prompt_shields import catalog
+
+entry = catalog.get_model("anthropic", "claude-sonnet-4-5")
+catalog.capabilities(entry)   # {"tools": True, "json_schema": True, ..., "max_input_tokens": 1000000}
+catalog.sovereignty(entry)    # {"jurisdiction": "US", "us_cloud_act_exposure": True, ...}
+
+eu = list(catalog.iter_models(jurisdiction="EEA", us_cloud_act_exposure=False))
+catalog.catalog_version()     # "2026-10-23"
+```
+
+`estimate_cost()` is unchanged. Its default tables (`DEFAULT_PRICING`, `LONG_CONTEXT_PRICING` and `AUDIO_PRICING`) are now built from the catalog, and a custom `pricing_table` works as before.
+
+## Updating the catalog
+
+1. Edit `schemas/catalog/source.v1.json`, and bump `catalog_version` when prices change.
+2. Run `python scripts/build_catalog.py` to regenerate both files, then commit all three.
+3. Optionally, run `python scripts/build_catalog.py --litellm path/to/model_prices_and_context_window.json` to list each price that differs from LiteLLM's. The report is informational. Some differences are deliberate: existing prices are kept until they are reviewed.
+
+The generator validates the source first. It checks that every sovereignty field is present and well-formed, that prices are non-negative numbers, that rate fields come in order (for example, a cache-write price needs a cache-read price), and that router groups name USD-priced models.
+
+CI fails on drift. The `Catalog` workflow runs `python scripts/build_catalog.py --check`, and the SDK test suite (`packages/sdk/tests/test_catalog.py`) runs the same comparison.
