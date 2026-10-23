@@ -2074,7 +2074,10 @@ components:
       name: x-ps-use-case
       in: header
       required: false
-      description: Use-case name for telemetry and OTel spans. Never sent upstream.
+      description: |
+        Use-case name for telemetry and OTel spans. With the router on and a
+        route policy that has `use_cases`, it also selects the use case's
+        quality bar. Never sent upstream.
       schema:
         type: string
       example: interview-screening
@@ -2092,7 +2095,14 @@ components:
       name: x-ps-data-classification
       in: header
       required: false
-      description: Data classification for telemetry and OTel spans. Never sent upstream.
+      description: |
+        Data classification for telemetry and OTel spans. With the router on
+        and a route policy that has a `sensitivity` / `data_policy` section,
+        it is the declared sensitivity level: PII found in the messages can
+        only raise it, an unknown or missing level counts as the policy's
+        `unclassified_default`, and only models allowed at the resulting
+        level are routed to (403 `policy_violation` when none is). Never
+        sent upstream.
       schema:
         type: string
       example: confidential
@@ -2399,20 +2409,36 @@ components:
               code: invalid_token
     PolicyDenied:
       description: |
+        A gateway policy refuses the request, before any upstream call.
         `PS_OIDC_ENABLED` is on, the token is valid, and the IdP-group policy
-        refuses the request: the caller's groups match no policy entry (with
+        refuses it: the caller's groups match no policy entry (with
         `default: deny`), or the entry does not allow the provider or model
-        of the target being called. `error.code` is `policy_denied`.
+        of the target being called (`error.code: policy_denied`). Or the
+        router's data policy allows no model at the call's sensitivity level
+        (`X-PS-Data-Classification`, raised by detected PII): the call fails
+        closed and is never served by a non-compliant model
+        (`error.code: policy_violation`).
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error:
-              message: 'Forbidden by gateway policy: model "gpt-4o" is not allowed for your group'
-              type: permission_error
-              param: null
-              code: policy_denied
+          examples:
+            policyDenied:
+              summary: OIDC group policy
+              value:
+                error:
+                  message: 'Forbidden by gateway policy: model "gpt-4o" is not allowed for your group'
+                  type: permission_error
+                  param: null
+                  code: policy_denied
+            policyViolation:
+              summary: Routing data policy (fail closed)
+              value:
+                error:
+                  message: 'Forbidden by the routing data policy (sensitivity: restricted): no allowed model can serve this request'
+                  type: permission_error
+                  param: null
+                  code: policy_violation
     InternalError:
       description: Unexpected gateway error
       content:

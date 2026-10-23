@@ -26,9 +26,9 @@ the tool lands must do these steps by hand and say so in the methodology record.
 | Price at `served_model`, not `requested_model` | #6 | **Pending.** See [§4.2](#42-served-model-vs-requested-model). |
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
-| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
+| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. The sensitivity, data-policy and quality-bar vectors are active: both implementations pass them (gateway stages #18, #19). |
 | `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | Built: `prompt_shields/teardown/`, see [cli.md](cli.md). Re-prices at `served_model` from token counts. |
-| Policy replay and sensitivity mix | #13 | **Built (Python), not yet in the CLI.** `packages/sdk/prompt_shields/teardown_replay.py` replays normalised records through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) and reports the sensitivity mix and projected spend per strategy. Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway does not apply sensitivity, data policy or the quality bar yet. |
+| Policy replay and sensitivity mix | #13 | **Built (Python), not yet in the CLI.** `packages/sdk/prompt_shields/teardown_replay.py` replays normalised records through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) and reports the sensitivity mix and projected spend per strategy. Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway applies the same stages (`resolvePolicyRoute`) when its route policy has them. |
 | Eval harness and sample re-execution (quality parity) | #14 | **Partly built.** `prompt_shields.evals` and the `ps-eval` CLI: stratified sample, re-execution (opt-in, spend cap, rate limit, per-level model allowlist), exact match / schema validity / similarity / pairwise judge, Wilson parity per (use case, model), savings at parity with a bootstrap interval, sections 9–10 of the report. Pending: PII escalation of the sampled level (#13), a judge constrained by `route-policy.v1` data policy (#13), savings through policy replay rather than a per-use-case model swap (#13). |
 | Learning-tuple export | #42 | **Partly built.** `ps-teardown run --learning-tuples` exports (features, model, cost) per call with no prompt text ([cli.md](cli.md#learning-tuples-42)); quality score pending #14, replayed decision pending #13. Out of scope for this appendix. |
 
@@ -295,8 +295,9 @@ Python reference router that implements `route-policy.v1`, then prices the route
 decision. The router must pass the golden vectors in `schemas/route-policy/vectors/`
 before a report can use it. `route_policy.resolve_policy_route` applies the whole policy
 (sensitivity, data policy, use-case quality bar, then hints and strategy) and passes every
-vector, including the sensitivity, data-policy and quality-bar vectors that stay
-`pending` for the gateway (`packages/sdk/tests/test_route_policy_vectors.py`). The
+vector, including the sensitivity, data-policy and quality-bar vectors, which the
+gateway's `resolvePolicyRoute` also passes (`packages/sdk/tests/test_route_policy_vectors.py`,
+`gateway/src/middlewares/router/vectors.test.ts`). The
 strategy must be `heuristic`; replay refuses the others.
 
 Calls with an unpriced baseline, or an unpriced projection, are left out of the savings

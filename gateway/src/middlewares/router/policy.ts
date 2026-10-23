@@ -69,12 +69,14 @@ export function pickCheapestIn(tiers: ModelTier[], req: RouteRequest) {
 /**
  * Cheapest tier across ALL groups whose estimated cost fits `maxCost`. When
  * nothing fits, returns the globally cheapest tier and flags `underBudget:false`
- * so the caller can record that the ceiling could not be honored.
+ * so the caller can record that the ceiling could not be honored. `allow`
+ * limits the tiers considered (the data policy and use-case bar).
  */
 export function cheapestUnderBudget(
   policy: RoutePolicy,
   maxCost: number,
-  req: RouteRequest
+  req: RouteRequest,
+  allow?: (tier: ModelTier) => boolean
 ) {
   const out = outTokens(req);
   let underBudget: { tier: ModelTier; estCost: number } | null = null;
@@ -82,6 +84,7 @@ export function cheapestUnderBudget(
 
   for (const group of Object.keys(policy.groups)) {
     for (const tier of policy.groups[group]) {
+      if (allow && !allow(tier)) continue;
       const estCost = estimateTierCost(tier, req.approxInputTokens, out);
       if (!cheapest || estCost < cheapest.estCost) cheapest = { tier, estCost };
       if (

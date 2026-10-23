@@ -5,8 +5,6 @@
   "vectors": [
     {
       "id": "min-group-raises-draft",
-      "status": "pending",
-      "pending_reason": "Per-use-case quality bar is not implemented yet (backlog item 18, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -21,8 +19,6 @@
     },
     {
       "id": "min-group-applies-on-transparent-path",
-      "status": "pending",
-      "pending_reason": "Per-use-case quality bar is not implemented yet (backlog item 18, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -36,8 +32,6 @@
     },
     {
       "id": "eval-set-limits-to-eligible-models",
-      "status": "pending",
-      "pending_reason": "Per-use-case quality bar is not implemented yet (backlog item 18, P1).",
       "description": "scaleway-small is compliant and cheaper but has not passed claims-v3.",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
@@ -53,8 +47,6 @@
     },
     {
       "id": "unknown-use-case-has-no-bar",
-      "status": "pending",
-      "pending_reason": "Per-use-case quality bar is not implemented yet (backlog item 18, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,

@@ -395,7 +395,13 @@ export interface SpanInput {
   requestBody?: any;
   responseBody?: any;
   stream?: StreamSummary;
-  route?: { requestedModel?: string; group?: string; reason?: string };
+  route?: {
+    requestedModel?: string;
+    group?: string;
+    reason?: string;
+    sensitivityLevel?: string;
+    sensitivitySource?: string;
+  };
   captureContent?: boolean;
 }
 
@@ -466,6 +472,8 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     'ps.data_classification': ps.data_classification,
     'ps.route.group': input.route?.group,
     'ps.route.reason': input.route?.reason,
+    'ps.route.sensitivity_level': input.route?.sensitivityLevel,
+    'ps.route.sensitivity_source': input.route?.sensitivitySource,
     'ps.stream': input.stream ? true : undefined,
     'ps.stream.truncated': input.stream?.truncated || undefined,
     'ps.stream.cancelled': input.stream?.cancelled || undefined,

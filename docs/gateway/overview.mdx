@@ -33,7 +33,7 @@ and `/metrics` needs `PS_METRICS_TOKEN` as a bearer token when that is set.
 | `x-portkey-custom-host`, `-forward-headers`, `-request-timeout`, `-trace-id`, `-metadata`, `-strict-open-ai-compliance`, `-default-input-guardrails`, `-default-output-guardrails`, `-messages-via-responses` | Per-request gateway options | Never |
 | `x-ps-route`, `x-ps-quality`, `x-ps-max-cost` | Cost-aware routing hints (`PS_ROUTER_ENABLED=true`) | Never |
 | `x-ps-cache` | `on`, `off` or `refresh` | Never |
-| `x-ps-business-unit`, `x-ps-use-case`, `x-ps-owner`, `x-ps-data-classification`, `x-ps-environment` | Business context for telemetry, OTel spans and metrics labels | Never |
+| `x-ps-business-unit`, `x-ps-use-case`, `x-ps-owner`, `x-ps-data-classification`, `x-ps-environment` | Business context for telemetry, OTel spans and metrics labels; with the router on, `x-ps-data-classification` and `x-ps-use-case` also feed the route policy's sensitivity, data policy and quality bar | Never |
 
 Headers named in `x-portkey-forward-headers` are forwarded on every route, except `x-ps-*` headers, which the gateway never sends upstream.
 Provider credential headers (`x-portkey-aws-secret-access-key`,
@@ -46,6 +46,7 @@ deliberately not part of the spec.
 |--------|------|------|
 | 400 | Missing or invalid provider, config, custom host or content type | `{"status": "failure", "message": ...}` |
 | 400 | Guardrails are configured and a proxied request cannot be inspected (fail closed, before any upstream call) | `error.code: "unsupported_guardrail"` |
+| 403 | The router's data policy allows no model at the call's sensitivity level (fail closed, before any upstream call) | `error.code: "policy_violation"` |
 | 408 | `x-portkey-request-timeout` exceeded | OpenAI-shaped `error` |
 | 411 | `MAX_FILE_PAYLOAD_SIZE_IN_MB` set and a multipart upload has no `content-length` | `{"status": "failure", ...}` |
 | 413 | `content-length` over `MAX_JSON_PAYLOAD_SIZE_IN_MB` (JSON) or `MAX_FILE_PAYLOAD_SIZE_IN_MB` (multipart uploads) | `{"status": "failure", ...}` |

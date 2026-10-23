@@ -10,12 +10,12 @@ The SDK client does not route: it only encodes intent as ``X-PS-*`` headers
 (``prompt_shields.route_policy``, used by policy replay, #13) along the same
 path as the gateway runner: hints -> ``X-PS-*`` headers ->
 ``parse_route_headers`` -> ``build_route_request`` -> ``resolve_route``.
-Vectors with status ``pending`` (sensitivity, PII escalation, data policy,
-quality bar) are skipped there with their pending_reason, because
-``resolve_route`` mirrors the gateway, which does not apply those stages yet.
-``test_full_policy_vector`` runs every vector in those files, pending or not,
-through ``resolve_policy_route`` (the whole policy, as policy replay uses it).
-Nothing is counted as passing that was not run.
+The sensitivity, data-policy and quality-bar vectors need the whole policy:
+``test_full_policy_vector`` runs them through ``resolve_policy_route``, the
+port of the gateway's ``resolvePolicyRoute`` (the gateway applies those
+stages whenever a policy has them). Vectors with status ``pending`` are
+skipped with their pending_reason; nothing is counted as passing that was
+not run.
 """
 
 from __future__ import annotations
@@ -62,8 +62,15 @@ def _policy_validator():
     return jsonschema.Draft202012Validator(POLICY_SCHEMA)
 
 
-def _all_vectors():
+# Vector files whose stages only resolve_policy_route implements
+# (resolve_route ignores sensitivity, data_policy and use_cases).
+FULL_POLICY_FILES = ("sensitivity", "data-policy", "quality-bar")
+
+
+def _all_vectors(exclude=()):
     for path in VECTOR_FILES:
+        if path.stem in exclude:
+            continue
         doc = _load(path)
         for vector in doc["vectors"]:
             yield pytest.param(doc["policy"], vector, id=f"{path.stem}/{vector['id']}")
@@ -184,7 +191,9 @@ def test_route_hint_encodes_vector_hints(policy_name, vector):
 # --- decisions -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("policy_name,vector", list(_all_vectors()))
+@pytest.mark.parametrize(
+    "policy_name,vector", list(_all_vectors(exclude=FULL_POLICY_FILES))
+)
 def test_decision_vector(policy_name, vector):
     if vector.get("status") == "pending":
         pytest.skip(f"pending: {vector['pending_reason']}")
@@ -217,11 +226,6 @@ def test_decision_vector(policy_name, vector):
 
 
 # --- decisions under the whole policy (policy replay, #13) -------------------
-
-# Vector files whose stages only resolve_policy_route implements. They stay
-# ``pending`` in the shared files until the gateway implements them too.
-FULL_POLICY_FILES = ("sensitivity", "data-policy", "quality-bar")
-
 
 def _full_policy_vectors():
     for stem in FULL_POLICY_FILES:
