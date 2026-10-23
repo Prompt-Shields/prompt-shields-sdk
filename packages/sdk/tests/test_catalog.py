@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from prompt_shields import catalog
+from prompt_shields import catalog, pricing
 from prompt_shields.pricing import (
     AUDIO_PRICING,
     CACHE_READ_MULTIPLIER,
@@ -290,6 +290,9 @@ def test_check_mode_fails_on_drift_and_regenerates(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(build_catalog, "ROOT", tmp_path)
     monkeypatch.setattr(build_catalog, "SDK_CATALOG", sdk)
     monkeypatch.setattr(build_catalog, "GATEWAY_POLICY", gateway)
+    pricing_tables = tmp_path / "psPricingTables.json"
+    pricing_tables.write_text(build_catalog.GATEWAY_PRICING.read_text())
+    monkeypatch.setattr(build_catalog, "GATEWAY_PRICING", pricing_tables)
 
     assert build_catalog.main(["--check"]) == 1
     assert "defaultPolicy.json is out of date" in capsys.readouterr().err
@@ -298,6 +301,27 @@ def test_check_mode_fails_on_drift_and_regenerates(tmp_path, monkeypatch, capsys
     assert build_catalog.main([]) == 0
     assert build_catalog.main(["--check"]) == 0
     assert json.loads(gateway.read_text())["defaultGroup"] == "balanced"
+
+
+def test_gateway_pricing_tables_match_sdk_pricing():
+    """gateway psPricingTables.json holds the SDK's token, long-context and
+    audio rate tables (psPricing.ts prices gateway events with them)."""
+    tables = json.loads(build_catalog.GATEWAY_PRICING.read_text())
+    assert tables["catalogVersion"] == catalog.catalog_version()
+
+    def keyed(entries):
+        return {tuple(k.split("/", 1)): v for k, v in entries.items()}
+
+    assert {k: tuple(v) for k, v in keyed(tables["tokenPricing"]).items()} == (
+        pricing.DEFAULT_PRICING
+    )
+    assert {
+        k: (v["threshold"], tuple(v["rates"]))
+        for k, v in keyed(tables["longContextPricing"]).items()
+    } == pricing.LONG_CONTEXT_PRICING
+    assert {k: tuple(v) for k, v in keyed(tables["audioPricing"]).items()} == (
+        pricing.AUDIO_PRICING
+    )
 
 
 def test_gateway_policy_prices_match_sdk_pricing():

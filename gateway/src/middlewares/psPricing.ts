@@ -5,8 +5,11 @@
  * gateway and the SDK report the same `cost` for the same usage. Both run
  * the shared golden vectors in `schemas/pricing/cost-vectors.v1.json`
  * (gateway: psPricing.test.ts). A change to one side's prices must be made
- * on the other; the generated price catalog (#7/#8) is meant to replace
- * these hand-copied tables, in `lookupRates` and `unitRate`.
+ * on the other. Token, long-context and audio rates are generated from the
+ * model catalog (schemas/catalog/source.v1.json -> scripts/build_catalog.py
+ * -> psPricingTables.json), as the SDK's are; the per-unit and image prices,
+ * multipliers and fallbacks are hand-copied from pricing.py and checked by
+ * psPricing.drift.test.ts.
  *
  * Usage fields use the SDK event names: `tokens_in` is the whole prompt
  * (cache reads and writes and audio included), `tokens_out` includes
@@ -14,7 +17,16 @@
  * cost means the call is unmetered, never zero.
  */
 
+import generatedJson from './psPricingTables.json';
+
 type Rates = readonly number[];
+
+// psPricingTables.json, keyed "<provider>/<model id>", rates per 1k tokens.
+const generatedTables = generatedJson as unknown as {
+  tokenPricing: Record<string, Rates>;
+  longContextPricing: Record<string, { threshold: number; rates: Rates }>;
+  audioPricing: Record<string, [number, number]>;
+};
 
 const key = (...parts: string[]) => parts.join('\u0000');
 
@@ -37,19 +49,27 @@ const SERVICE_TIER_MULTIPLIER: Record<string, Record<string, number>> = {
 // Per-request server tool fees in USD. Anthropic web search: $10 / 1,000.
 const WEB_SEARCH_FEE: Record<string, number> = { anthropic: 0.01 };
 
-// Prompts above the threshold are priced at the band's rates.
-const LONG_CONTEXT_PRICING = new Map<string, [number, Rates]>([
-  [
-    key('google', 'gemini-2.5-pro'),
-    [200_000, [0.0025, 0.015, 0.00025, 0.0025]],
-  ],
-  [key('anthropic', 'claude-sonnet-4-20250514'), [200_000, [0.006, 0.0225]]],
-]);
+// Generated from the model catalog (scripts/build_catalog.py), as the SDK
+// builds DEFAULT_PRICING, LONG_CONTEXT_PRICING and AUDIO_PRICING from it.
+/** `"<provider>/<model id>"` -> key(provider, model id). */
+function catalogMap<T>(entries: Record<string, T>): Map<string, T> {
+  return new Map(
+    Object.entries(entries).map(([k, v]) => {
+      const i = k.indexOf('/');
+      return [key(k.slice(0, i), k.slice(i + 1)), v];
+    })
+  );
+}
 
-const AUDIO_PRICING = new Map<string, [number, number]>([
-  [key('openai', 'gpt-4o-audio-preview'), [0.04, 0.08]],
-  [key('openai', 'gpt-4o-mini-audio-preview'), [0.01, 0.02]],
-]);
+// Prompts above the threshold are priced at the band's rates.
+const LONG_CONTEXT_PRICING = new Map<string, [number, Rates]>(
+  [...catalogMap(generatedTables.longContextPricing).entries()].map(
+    ([k, band]) => [k, [band.threshold, band.rates]]
+  )
+);
+
+// Audio token rates (input_per_1k, output_per_1k) in USD.
+const AUDIO_PRICING = catalogMap(generatedTables.audioPricing);
 
 // Vendors priced at another vendor's list prices when they have no entry.
 const PRICING_VENDOR_FALLBACK: Record<string, string> = {
@@ -96,66 +116,7 @@ const IMAGE_PRICING = new Map<string, Record<string, number>>([
 
 // (input_per_1k, output_per_1k[, cached_per_1k[, cache_write_per_1k
 // [, cache_write_1h_per_1k]]]) in USD, as pricing.py DEFAULT_PRICING.
-const DEFAULT_PRICING = new Map<string, Rates>([
-  // OpenAI
-  [key('openai', 'gpt-4o'), [0.0025, 0.01]],
-  [key('openai', 'gpt-4o-mini'), [0.00015, 0.0006]],
-  [key('openai', 'gpt-4-turbo'), [0.01, 0.03]],
-  [key('openai', 'gpt-4'), [0.03, 0.06]],
-  [key('openai', 'gpt-3.5-turbo'), [0.0005, 0.0015]],
-  [key('openai', 'o1'), [0.015, 0.06]],
-  [key('openai', 'o1-mini'), [0.003, 0.012]],
-  [key('openai', 'o3'), [0.002, 0.008, 0.0005]],
-  [key('openai', 'o4-mini'), [0.0011, 0.0044, 0.000275]],
-  [key('openai', 'gpt-4o-audio-preview'), [0.0025, 0.01]],
-  [key('openai', 'gpt-4o-mini-audio-preview'), [0.00015, 0.0006]],
-  // Anthropic
-  [key('anthropic', 'claude-opus-4-20250514'), [0.015, 0.075]],
-  [key('anthropic', 'claude-sonnet-4-20250514'), [0.003, 0.015]],
-  [key('anthropic', 'claude-3-5-sonnet-20241022'), [0.003, 0.015]],
-  [key('anthropic', 'claude-3-5-haiku-20241022'), [0.0008, 0.004]],
-  [key('anthropic', 'claude-3-opus-20240229'), [0.015, 0.075]],
-  // Google
-  [key('google', 'gemini-1.5-pro'), [0.00125, 0.005]],
-  [key('google', 'gemini-1.5-flash'), [0.000075, 0.0003]],
-  [key('google', 'gemini-2.0-flash'), [0.0001, 0.0004]],
-  [key('google', 'gemini-2.5-flash'), [0.0003, 0.0025, 0.00003, 0.0003]],
-  [key('google', 'gemini-2.5-pro'), [0.00125, 0.01, 0.000125, 0.00125]],
-  // Amazon Bedrock (on-demand, us-east-1)
-  [
-    key('bedrock', 'anthropic.claude-sonnet-4-20250514-v1:0'),
-    [0.003, 0.015, 0.0003, 0.00375],
-  ],
-  [
-    key('bedrock', 'anthropic.claude-3-5-sonnet-20241022-v2:0'),
-    [0.003, 0.015, 0.0003, 0.00375],
-  ],
-  [
-    key('bedrock', 'anthropic.claude-3-5-haiku-20241022-v1:0'),
-    [0.0008, 0.004, 0.00008, 0.001],
-  ],
-  [
-    key('bedrock', 'anthropic.claude-3-haiku-20240307-v1:0'),
-    [0.00025, 0.00125],
-  ],
-  [key('bedrock', 'amazon.nova-pro-v1:0'), [0.0008, 0.0032, 0.0002, 0.0]],
-  [key('bedrock', 'amazon.nova-lite-v1:0'), [0.00006, 0.00024, 0.000015, 0.0]],
-  [
-    key('bedrock', 'amazon.nova-micro-v1:0'),
-    [0.000035, 0.00014, 0.00000875, 0.0],
-  ],
-  [key('bedrock', 'meta.llama3-1-70b-instruct-v1:0'), [0.00072, 0.00072]],
-  // Mistral (La Plateforme)
-  [key('mistral', 'mistral-large-latest'), [0.002, 0.006]],
-  [key('mistral', 'mistral-medium-latest'), [0.0004, 0.002]],
-  [key('mistral', 'mistral-small-latest'), [0.0001, 0.0003]],
-  [key('mistral', 'codestral-latest'), [0.0003, 0.0009]],
-  // Cohere
-  [key('cohere', 'command-a-03-2025'), [0.0025, 0.01]],
-  [key('cohere', 'command-r-plus-08-2024'), [0.0025, 0.01]],
-  [key('cohere', 'command-r-08-2024'), [0.00015, 0.0006]],
-  [key('cohere', 'command-r7b-12-2024'), [0.0000375, 0.00015]],
-]);
+const DEFAULT_PRICING = catalogMap<Rates>(generatedTables.tokenPricing);
 
 /** Usage of one call, with the SDK's event field names. */
 export interface PricingUsage {
