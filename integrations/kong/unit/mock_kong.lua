@@ -80,8 +80,13 @@ function M.install()
 end
 
 
---- A fake `kong` global for one request.
--- @tparam table req { headers = {...}, serialized = {...} }
+--- A fake `kong` global (and the `ngx.req` calls the plugin makes) for one
+-- request.
+-- @tparam table req { headers = {...}, serialized = {...} }. Optional:
+--   truncated = n: get_headers() returns only n headers and "truncated";
+--   get_headers_error, get_all_headers_error, clear_header_error,
+--   serialize_error: error() from that call.
+-- @treturn table kong, table state, table ngx
 function M.new_kong(req)
   local logs = { err = {}, debug = {} }
   local cleared = {}
@@ -103,12 +108,25 @@ function M.new_kong(req)
         if req.get_headers_error then
           error(req.get_headers_error)
         end
+        if req.truncated then
+          -- Like ngx: the first n headers in order, and "truncated".
+          local out, n = {}, 0
+          for _, name in ipairs(req.order or {}) do
+            if n >= req.truncated then break end
+            out[name] = headers[name]
+            n = n + 1
+          end
+          return out, "truncated"
+        end
         return headers
       end,
     },
     service = {
       request = {
         clear_header = function(name)
+          if req.clear_header_error then
+            error(req.clear_header_error)
+          end
           cleared[#cleared + 1] = name
           headers[name] = nil
         end,
@@ -128,7 +146,24 @@ function M.new_kong(req)
     },
   }
 
-  return kong, { logs = logs, cleared = cleared }
+  local ngx_cleared = {}
+  local ngx = {
+    req = {
+      get_headers = function(max)
+        assert(max == 0, "expected an unlimited read")
+        if req.get_all_headers_error then
+          error(req.get_all_headers_error)
+        end
+        return headers
+      end,
+      clear_header = function(name)
+        ngx_cleared[#ngx_cleared + 1] = name
+        headers[name] = nil
+      end,
+    },
+  }
+
+  return kong, { logs = logs, cleared = cleared, ngx_cleared = ngx_cleared }, ngx
 end
 
 
