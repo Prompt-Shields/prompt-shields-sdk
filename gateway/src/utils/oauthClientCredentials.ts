@@ -7,8 +7,9 @@
  * - The token URL comes from the caller, so it must be https and pass
  *   isSafeUpstreamURL (no internal or metadata hosts). When the operator sets
  *   OAUTH_TOKEN_URL_ALLOWED_HOSTS the host must be on that list; otherwise IP
- *   literals and loopback / internal names are refused too. Redirects are not
- *   followed.
+ *   literals, loopback, single-label, `*.svc` and internal-TLD names are
+ *   refused too. Redirects are not followed. AWS `awsAuthType: oauth`
+ *   (./awsOAuthWebIdentity.ts) fetches its token through here as well.
  * - Tokens are cached per (token URL, client id, client secret, scope,
  *   audience) via a SHA-256 key, so a caller only gets a cached token if it
  *   presented the same secret. Nothing is shared across clients.
@@ -29,7 +30,21 @@ export interface OAuthClientCredentialsOptions {
   oauthAudience?: string;
 }
 
-const INTERNAL_SUFFIXES = ['.internal', '.local', '.localdomain'];
+// The internal special-use names isSafePluginEgressURL refuses, plus `.svc`
+// (Kubernetes services).
+const INTERNAL_SUFFIXES = [
+  '.internal',
+  '.local',
+  '.localdomain',
+  '.intranet',
+  '.lan',
+  '.home',
+  '.corp',
+  '.test',
+  '.invalid',
+  '.onion',
+  '.svc',
+];
 const MAX_CACHE_ENTRIES = 1000;
 const MAX_REFRESH_SKEW_MS = 60 * 1000;
 const DEFAULT_LIFETIME_MS = 5 * 60 * 1000;
@@ -85,8 +100,11 @@ export function assertSafeTokenUrl(
   }
   // isSafeUpstreamURL lets TRUSTED_CUSTOM_HOSTS through (localhost and
   // 127.0.0.1 by default, for custom_host dev setups). A caller-chosen token
-  // endpoint gets no such exemption: no IP literals, no loopback names.
+  // endpoint gets no such exemption: no IP literals, no loopback names, no
+  // single-label names (`redis`, `collector`: in-cluster services through
+  // the resolver's search domains) and no internal TLDs.
   if (
+    !host.includes('.') ||
     /^[\d.]+$/.test(host) ||
     host.includes(':') ||
     host === 'localhost' ||

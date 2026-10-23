@@ -31,6 +31,10 @@ import {
   getAwsEndpointDomain,
 } from '../../utils/awsAuth';
 import { GatewayError } from '../../errors/GatewayError';
+import {
+  AWS_OAUTH_AUTH_TYPE,
+  getAwsOAuthWebIdentityCredentials,
+} from '../../utils/awsOAuthWebIdentity';
 import { requestCache } from '../../services/cache/cacheService';
 
 // Re-export for backward compatibility
@@ -624,15 +628,28 @@ export const bedrockFinetuneToOpenAI = (finetune: BedrockFinetuneRecord) => {
 };
 
 /**
- * Resolves `assumedRole` and `serviceRole` credentials into providerOptions.
- * `serviceRole` signs with the gateway host's own AWS identity, so it is
- * refused unless AWS_AMBIENT_CREDENTIALS_ENABLED=true.
+ * Resolves `assumedRole`, `serviceRole` and `oauth` credentials into
+ * providerOptions. `serviceRole` signs with the gateway host's own AWS
+ * identity, so it is refused unless AWS_AMBIENT_CREDENTIALS_ENABLED=true.
+ * `oauth` (PS fork, #76) exchanges the caller's OAuth client credentials for
+ * role credentials via STS AssumeRoleWithWebIdentity; no host identity.
  */
 export async function providerAssumedRoleCredentials(
   providerOptions: Options,
   env?: Record<string, any>
 ) {
   const { awsAuthType } = providerOptions;
+  if (awsAuthType === AWS_OAUTH_AUTH_TYPE) {
+    const credentials = await getAwsOAuthWebIdentityCredentials(
+      providerOptions,
+      env
+    );
+    providerOptions.awsAccessKeyId = credentials.accessKeyId;
+    providerOptions.awsSecretAccessKey = credentials.secretAccessKey;
+    providerOptions.awsSessionToken = credentials.sessionToken;
+    providerOptions.awsRegion = providerOptions.awsRegion || 'us-east-1';
+    return;
+  }
   if (awsAuthType !== 'assumedRole' && awsAuthType !== 'serviceRole') return;
   if (awsAuthType === 'assumedRole' && !providerOptions.awsRoleArn) {
     // Without a role ARN, getAssumedRoleCredentials would hand back the

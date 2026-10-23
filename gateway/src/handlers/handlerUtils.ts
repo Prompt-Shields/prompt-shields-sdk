@@ -51,6 +51,7 @@ import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
 import { recordAttempt } from '../middlewares/psAttempts';
+import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
 import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
@@ -1123,7 +1124,18 @@ export function constructConfigFromRequestHeaders(
     anthropicVersion: requestHeaders[`x-${POWERED_BY}-anthropic-version`],
   };
 
+  // PS fork (#76): OAuth client credentials, for the `openai` provider and
+  // for AWS providers with awsAuthType oauth.
+  const oauthClientCredentialsConfig = {
+    oauthTokenUrl: requestHeaders[`x-${POWERED_BY}-oauth-token-url`],
+    oauthClientId: requestHeaders[`x-${POWERED_BY}-oauth-client-id`],
+    oauthClientSecret: requestHeaders[`x-${POWERED_BY}-oauth-client-secret`],
+    oauthScope: requestHeaders[`x-${POWERED_BY}-oauth-scope`],
+    oauthAudience: requestHeaders[`x-${POWERED_BY}-oauth-audience`],
+  };
+
   const awsConfig = {
+    ...oauthClientCredentialsConfig,
     awsAccessKeyId: requestHeaders[`x-${POWERED_BY}-aws-access-key-id`],
     awsSecretAccessKey: requestHeaders[`x-${POWERED_BY}-aws-secret-access-key`],
     awsSessionToken: requestHeaders[`x-${POWERED_BY}-aws-session-token`],
@@ -1195,11 +1207,7 @@ export function constructConfigFromRequestHeaders(
   };
 
   const openAiConfig = {
-    oauthTokenUrl: requestHeaders[`x-${POWERED_BY}-oauth-token-url`],
-    oauthClientId: requestHeaders[`x-${POWERED_BY}-oauth-client-id`],
-    oauthClientSecret: requestHeaders[`x-${POWERED_BY}-oauth-client-secret`],
-    oauthScope: requestHeaders[`x-${POWERED_BY}-oauth-scope`],
-    oauthAudience: requestHeaders[`x-${POWERED_BY}-oauth-audience`],
+    ...oauthClientCredentialsConfig,
     openaiOrganization: requestHeaders[`x-${POWERED_BY}-openai-organization`],
     openaiProject: requestHeaders[`x-${POWERED_BY}-openai-project`],
     openaiBeta:
@@ -1522,6 +1530,8 @@ export async function recursiveAfterRequestHookHandler(
         attempt
       )
   ));
+  // PS fork (#76): stable credential fingerprint for ps-telemetry (opt-in).
+  await recordCredentialFingerprint(c, providerOption, env(c));
 
   if (requestContext.customHost) {
     response = limitResponseSize(
