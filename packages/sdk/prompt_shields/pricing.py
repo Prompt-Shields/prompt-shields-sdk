@@ -1,8 +1,9 @@
 """Token-to-USD cost estimation per (vendor, model).
 
 Pricing tiers are point-in-time snapshots and update over time. The SDK
-ships sensible defaults; customers can override by passing a custom
-`pricing_table` to ShieldsClient at construction.
+ships sensible defaults, built from the bundled model catalog
+(`prompt_shields.catalog`, catalog v1); customers can override by passing a
+custom `pricing_table` to ShieldsClient at construction.
 
 Returns USD as a Decimal-compatible float. Returns None when the model is
 unknown — the collector treats None cost as "unmetered" rather than zero.
@@ -38,6 +39,8 @@ Further pricing dimensions (#71):
 """
 
 import math
+
+from prompt_shields import catalog as _catalog
 
 # Cache rates as a multiple of the input rate, when a table entry does not
 # give its own. OpenAI: cached input at 50% (gpt-4o / o1 families). Anthropic:
@@ -77,21 +80,16 @@ WEB_SEARCH_FEE: dict[str, float] = {
 
 # Long-context bands: (threshold, rates). When `tokens_in` (the whole prompt,
 # cache reads and writes included) exceeds `threshold`, the whole request is
-# priced at `rates` (same tuple layout as DEFAULT_PRICING).
-LONG_CONTEXT_PRICING: dict[tuple[str, str], tuple[int, tuple[float, ...]]] = {
-    # Gemini 2.5 Pro, prompts > 200k: $2.50 in / $15 out / $0.25 cached.
-    ("google", "gemini-2.5-pro"): (200_000, (0.0025, 0.015, 0.00025, 0.0025)),
-    # Claude Sonnet 4 1M context, prompts > 200k: $6 in / $22.50 out; cache
-    # multipliers apply to the $6 rate ($0.60 read, $7.50 / $12 write).
-    ("anthropic", "claude-sonnet-4-20250514"): (200_000, (0.006, 0.0225)),
-}
+# priced at `rates` (same tuple layout as DEFAULT_PRICING). Built from the
+# catalog's `*_above_200k_tokens` prices, e.g. Gemini 2.5 Pro and Claude
+# Sonnet 4 / 4.5 above 200k prompt tokens.
+LONG_CONTEXT_PRICING: dict[tuple[str, str], tuple[int, tuple[float, ...]]] = (
+    _catalog.long_context_pricing()
+)
 
 # Audio token rates (input_per_1k, output_per_1k) in USD, for models that
-# bill audio tokens apart from text tokens.
-AUDIO_PRICING: dict[tuple[str, str], tuple[float, float]] = {
-    ("openai", "gpt-4o-audio-preview"): (0.040, 0.080),
-    ("openai", "gpt-4o-mini-audio-preview"): (0.010, 0.020),
-}
+# bill audio tokens apart from text tokens (catalog `*_audio_token` prices).
+AUDIO_PRICING: dict[tuple[str, str], tuple[float, float]] = _catalog.audio_pricing()
 
 # Vendors that resell another vendor's models at its list prices: a missing
 # (vendor, model) entry is looked up under the fallback vendor, cache
@@ -167,67 +165,12 @@ IMAGE_PRICING: dict[tuple[str, str], dict[tuple[str, str], float]] = {
     },
 }
 
-# (input_per_1k_tokens, output_per_1k_tokens) in USD
-# Source: public pricing pages as of 2026-Q1. Override at runtime if needed.
-DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
-    # OpenAI
-    ("openai", "gpt-4o"): (0.0025, 0.010),
-    ("openai", "gpt-4o-mini"): (0.00015, 0.0006),
-    ("openai", "gpt-4-turbo"): (0.010, 0.030),
-    ("openai", "gpt-4"): (0.030, 0.060),
-    ("openai", "gpt-3.5-turbo"): (0.0005, 0.0015),
-    ("openai", "o1"): (0.015, 0.060),
-    ("openai", "o1-mini"): (0.003, 0.012),
-    # o3 / o4-mini cached input is 25% of input, not the OpenAI default 50%.
-    ("openai", "o3"): (0.002, 0.008, 0.0005),
-    ("openai", "o4-mini"): (0.0011, 0.0044, 0.000275),
-    # Text rates; audio tokens are priced from AUDIO_PRICING.
-    ("openai", "gpt-4o-audio-preview"): (0.0025, 0.010),
-    ("openai", "gpt-4o-mini-audio-preview"): (0.00015, 0.0006),
-
-    # Anthropic
-    ("anthropic", "claude-opus-4-20250514"): (0.015, 0.075),
-    ("anthropic", "claude-sonnet-4-20250514"): (0.003, 0.015),
-    ("anthropic", "claude-3-5-sonnet-20241022"): (0.003, 0.015),
-    ("anthropic", "claude-3-5-haiku-20241022"): (0.0008, 0.004),
-    ("anthropic", "claude-3-opus-20240229"): (0.015, 0.075),
-
-    # Google
-    ("google", "gemini-1.5-pro"): (0.00125, 0.005),
-    ("google", "gemini-1.5-flash"): (0.000075, 0.0003),
-    ("google", "gemini-2.0-flash"): (0.0001, 0.0004),
-    # Gemini 2.5 cached input is 10% of input (2.0 and 1.5: 25%).
-    ("google", "gemini-2.5-flash"): (0.0003, 0.0025, 0.00003, 0.0003),
-    ("google", "gemini-2.5-pro"): (0.00125, 0.010, 0.000125, 0.00125),  # <= 200k
-
-    # Amazon Bedrock (on-demand, us-east-1). Cache rates are per model:
-    # Claude reads 10% / writes 125%, Nova reads 25% / no write charge.
-    ("bedrock", "anthropic.claude-sonnet-4-20250514-v1:0"):
-        (0.003, 0.015, 0.0003, 0.00375),
-    ("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0"):
-        (0.003, 0.015, 0.0003, 0.00375),
-    ("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0"):
-        (0.0008, 0.004, 0.00008, 0.001),
-    ("bedrock", "anthropic.claude-3-haiku-20240307-v1:0"): (0.00025, 0.00125),
-    ("bedrock", "amazon.nova-pro-v1:0"): (0.0008, 0.0032, 0.0002, 0.0),
-    ("bedrock", "amazon.nova-lite-v1:0"): (0.00006, 0.00024, 0.000015, 0.0),
-    ("bedrock", "amazon.nova-micro-v1:0"): (0.000035, 0.00014, 0.00000875, 0.0),
-    ("bedrock", "meta.llama3-1-70b-instruct-v1:0"): (0.00072, 0.00072),
-
-    # Mistral (La Plateforme)
-    ("mistral", "mistral-large-latest"): (0.002, 0.006),
-    ("mistral", "mistral-medium-latest"): (0.0004, 0.002),
-    ("mistral", "mistral-small-latest"): (0.0001, 0.0003),
-    ("mistral", "codestral-latest"): (0.0003, 0.0009),
-
-    # Cohere
-    ("cohere", "command-a-03-2025"): (0.0025, 0.010),
-    ("cohere", "command-r-plus-08-2024"): (0.0025, 0.010),
-    ("cohere", "command-r-08-2024"): (0.00015, 0.0006),
-    ("cohere", "command-r7b-12-2024"): (0.0000375, 0.00015),
-
-    # Azure OpenAI: priced via PRICING_VENDOR_FALLBACK (OpenAI list prices).
-}
+# (input_per_1k, output_per_1k[, cached_input_per_1k[, cache_write_per_1k[,
+# cache_write_1h_per_1k]]]) in USD, built from the bundled catalog
+# (`catalog.json`, generated by scripts/build_catalog.py from
+# schemas/catalog/source.v1.json). Override at runtime with `pricing_table`.
+# Azure OpenAI is priced via PRICING_VENDOR_FALLBACK (OpenAI list prices).
+DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = _catalog.pricing_table()
 
 
 def _tier_multiplier(vendor: str, service_tier: str | None) -> float | None:
