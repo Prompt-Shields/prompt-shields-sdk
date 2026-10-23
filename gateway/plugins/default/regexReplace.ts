@@ -100,6 +100,7 @@ export const handler: PluginHandler = async (
     };
   } catch (e: any) {
     error = e;
+    verdict = false;
     data = {
       explanation: `An error occurred while processing the regex: ${e.message}`,
       regexPattern: parameters.rule,

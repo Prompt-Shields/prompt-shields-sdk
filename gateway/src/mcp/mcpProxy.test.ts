@@ -15,6 +15,12 @@ jest.mock('../../plugins', () => ({
 
 import { Hono } from 'hono';
 import { hooks } from '../middlewares/hooks';
+import { parseMcpGroupPolicy } from '../middlewares/psOidc/config';
+import {
+  OIDC_IDENTITY_KEY,
+  OidcIdentity,
+} from '../middlewares/psOidc/identity';
+import * as securityEvents from '../middlewares/psSecurityEvents';
 import { defaultRegistry } from '../middlewares/psMetrics/registry';
 import {
   McpConfigError,
@@ -43,8 +49,15 @@ const CLIENT_TOKEN = 'client-token-0123456789';
 const MODERN = '2026-07-28';
 const LEGACY = '2025-11-25';
 
-function makeApp() {
+function makeApp(identity?: OidcIdentity) {
   const app = new Hono();
+  // Stands in for psOidc, which sets the verified identity (see oidc.test.ts
+  // for the end-to-end path with a real token).
+  if (identity)
+    app.use('*', async (c, next) => {
+      c.set(OIDC_IDENTITY_KEY as any, identity);
+      await next();
+    });
   app.use('*', hooks);
   app.post('/v1/mcp/:server', mcpHandler);
   app.get('/v1/mcp/:server', mcpHandler);
@@ -82,6 +95,7 @@ function rpc(
     headers?: Record<string, string>;
     id?: number | null;
     server?: string;
+    identity?: OidcIdentity;
   } = {}
 ) {
   const version = opts.version ?? MODERN;
@@ -98,7 +112,7 @@ function rpc(
   const body: any = { jsonrpc: '2.0', method };
   if (opts.id !== null) body.id = opts.id ?? nextId++;
   if (params) body.params = params;
-  return makeApp().request(`/v1/mcp/${opts.server ?? 'fake'}`, {
+  return makeApp(opts.identity).request(`/v1/mcp/${opts.server ?? 'fake'}`, {
     method: 'POST',
     headers: { ...headers, ...opts.headers },
     body: JSON.stringify(body),
@@ -782,6 +796,326 @@ describe('MCP proxy', () => {
       );
       // A denied tool name never becomes a label.
       expect(text).not.toContain('tool="delete_everything"');
+    });
+  });
+
+  describe('OIDC group MCP policy', () => {
+    const SUBJECT_HASH = '0123456789abcdef0123456789abcdef';
+    const identity = (
+      mcp?: unknown,
+      telemetrySubject: 'hash' | 'raw' | 'off' = 'hash'
+    ): OidcIdentity => ({
+      subjectHash: SUBJECT_HASH,
+      subject: 'jane.doe@bank.example',
+      group: {
+        name: 'analysts',
+        match: ['analysts'],
+        ...(mcp === undefined
+          ? {}
+          : { mcp: parseMcpGroupPolicy('groups[0]', mcp) }),
+      },
+      config: { telemetrySubject } as any,
+    });
+    let denied: jest.SpyInstance;
+    beforeEach(() => {
+      denied = jest.spyOn(securityEvents, 'reportPolicyDenied');
+    });
+
+    test('a server the group does not list is a 403 and a policy.denied event', async () => {
+      const id = identity({ servers: { fakesse: {} } });
+      for (const server of ['fake', 'nope']) {
+        const res = await rpc('tools/list', undefined, {
+          server,
+          identity: id,
+        });
+        // Unconfigured ids answer the same: a group cannot probe for servers.
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as any).error.code).toBe(
+          MCP_ERRORS.SERVER_DENIED
+        );
+      }
+      expect(fake.requests).toHaveLength(0);
+      expect(denied).toHaveBeenCalledWith(
+        expect.anything(),
+        'mcp_server_not_allowed',
+        expect.objectContaining({
+          group: 'analysts',
+          userHash: SUBJECT_HASH,
+          mcpServer: 'fake',
+          status: 403,
+        })
+      );
+      // GET (2025-11-25 stream) is refused too.
+      const get = await makeApp(id).request('/v1/mcp/fake', {
+        method: 'GET',
+        headers: { accept: 'text/event-stream' },
+      });
+      expect(get.status).toBe(403);
+      expect(fake.requests).toHaveLength(0);
+      // A listed server works.
+      const ok = await rpc('tools/list', undefined, {
+        server: 'fakesse',
+        identity: id,
+      });
+      expect(ok.status).toBe(200);
+    });
+
+    test('group tool rules narrow the server policy; deny wins', async () => {
+      const id = identity({
+        servers: {
+          fake: { tools: { allow: ['echo', 'leak'], deny: ['LEAK'] } },
+        },
+      });
+      const ok = await rpc('tools/call', { name: 'echo' }, { identity: id });
+      expect(((await ok.json()) as any).result).toBeDefined();
+      for (const name of ['leak', 'fail', 'delete_everything']) {
+        const res = await rpc('tools/call', { name }, { identity: id });
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as any).error.code).toBe(
+          MCP_ERRORS.TOOL_DENIED
+        );
+      }
+      expect(fake.requests).toHaveLength(1);
+      // delete_everything is refused by the server's own policy first.
+      expect(denied).toHaveBeenCalledTimes(2);
+      expect(denied).toHaveBeenCalledWith(
+        expect.anything(),
+        'mcp_tool_not_allowed',
+        expect.objectContaining({
+          mcpServer: 'fake',
+          mcpTool: 'leak',
+          status: 200,
+        })
+      );
+      // Refused calls are not telemetry events.
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('tools/list shows the group only its tools', async () => {
+      process.env.PS_METRICS_ENABLED = 'true';
+      const id = identity({ servers: { fake: { tools: { deny: ['fail'] } } } });
+      const res = await rpc('tools/list', undefined, { identity: id });
+      const names = ((await res.json()) as any).result.tools.map(
+        (t: any) => t.name
+      );
+      expect(names).toEqual(['echo', 'leak', 'slow']);
+      expect(defaultRegistry.render()).toContain(
+        'ps_gateway_mcp_tools_removed_total{server="fake",reason="group"}'
+      );
+    });
+
+    test('a group without an mcp entry keeps the server policy alone', async () => {
+      const id = identity();
+      for (const name of ['echo', 'fail']) {
+        const res = await rpc('tools/call', { name }, { identity: id });
+        expect(((await res.json()) as any).error?.code).not.toBe(
+          MCP_ERRORS.TOOL_DENIED
+        );
+      }
+      expect(denied).not.toHaveBeenCalled();
+    });
+
+    test('telemetry carries the subject hash and group, never the raw subject', async () => {
+      for (const mode of ['hash', 'raw', 'off'] as const)
+        await rpc(
+          'tools/call',
+          { name: 'echo' },
+          { identity: identity(undefined, mode) }
+        );
+      const events = sendSpy.mock.calls.map(([e]) => e);
+      expect(events[0]).toMatchObject({
+        user_id: SUBJECT_HASH,
+        user_group: 'analysts',
+      });
+      expect(events[1]).toMatchObject({ user_id: SUBJECT_HASH });
+      expect(events[2].user_id).toBeUndefined();
+      expect(events[2].user_group).toBe('analysts');
+      expect(JSON.stringify(events)).not.toContain('jane.doe');
+    });
+
+    test('invalid group MCP policies are configuration errors', () => {
+      for (const bad of [
+        [],
+        { servers: [] },
+        { servers: { 'Bad Id': {} } },
+        { servers: { fake: { tools: { allow: ['bad name'] } } } },
+        { servers: { fake: { tools: { only: [] } } } },
+        { servers: { fake: { other: 1 } } },
+        { other: {} },
+      ])
+        expect(() => parseMcpGroupPolicy('g', bad)).toThrow();
+    });
+  });
+
+  describe('Mcp-Param-* headers', () => {
+    const regionTool = (extra: Record<string, any> = {}) => ({
+      name: 'echo',
+      description: 'Echoes its arguments.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          region: { type: 'string', 'x-mcp-header': 'Region' },
+          opts: {
+            type: 'object',
+            properties: {
+              limit: { type: 'integer', 'x-mcp-header': 'Limit' },
+            },
+          },
+          ...extra,
+        },
+      },
+    });
+    const listTools = async (tools: any[]) => {
+      fake.tools = tools;
+      await rpc('tools/list');
+      fake.requests.length = 0;
+    };
+    const call = (args: any, headers: Record<string, string>) =>
+      rpc('tools/call', { name: 'echo', arguments: args }, { headers });
+
+    test('matching headers are forwarded; mismatches are -32020 and never reach the upstream', async () => {
+      await listTools([regionTool()]);
+      const ok = await call(
+        { region: 'us-west1', opts: { limit: 42 } },
+        {
+          'mcp-param-region': 'us-west1',
+          'Mcp-Param-Limit': '42.0',
+          'mcp-param-other': 'unchecked',
+        }
+      );
+      expect(ok.status).toBe(200);
+      expect(((await ok.json()) as any).result).toBeDefined();
+      expect(fake.requests[0].headers['mcp-param-region']).toBe('us-west1');
+      expect(fake.requests[0].headers['mcp-param-other']).toBe('unchecked');
+
+      const encoded = await call(
+        { region: 'Hello, 世界' },
+        { 'mcp-param-region': '=?base64?SGVsbG8sIOS4lueVjA==?=' }
+      );
+      expect(((await encoded.json()) as any).result).toBeDefined();
+      expect(fake.requests).toHaveLength(2);
+
+      for (const [args, headers] of [
+        // A load balancer routing on the header, the server reading the body.
+        [{ region: 'eu-west1' }, { 'mcp-param-region': 'us-west1' }],
+        // The value is in the body but not in the header.
+        [{ region: 'us-west1' }, {}],
+        // A header without a value in the body.
+        [{}, { 'mcp-param-region': 'us-west1' }],
+        [{ opts: { limit: 42 } }, { 'mcp-param-limit': '43' }],
+        [{ opts: { limit: 42 } }, { 'mcp-param-limit': '0x2a' }],
+        [{ region: 'x' }, { 'mcp-param-region': '=?base64?***?=' }],
+        // Not a primitive: cannot be mirrored.
+        [{ region: { a: 1 } }, { 'mcp-param-region': '[object Object]' }],
+      ] as [any, Record<string, string>][]) {
+        const res = await call(args, headers);
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as any).error.code).toBe(
+          MCP_ERRORS.HEADER_MISMATCH
+        );
+      }
+      expect(fake.requests).toHaveLength(2);
+    });
+
+    test('null or absent values need no header', async () => {
+      await listTools([regionTool()]);
+      const res = await call({ region: null }, {});
+      expect(((await res.json()) as any).result).toBeDefined();
+    });
+
+    test('before 2026-07-28 a missing header is not required, a wrong one still fails', async () => {
+      await listTools([regionTool()]);
+      const legacy = (headers: Record<string, string>) =>
+        rpc(
+          'tools/call',
+          { name: 'echo', arguments: { region: 'eu' } },
+          {
+            version: LEGACY,
+            headers: { 'mcp-session-id': SESSION_ID, ...headers },
+          }
+        );
+      expect((await legacy({})).status).toBe(200);
+      expect((await legacy({ 'mcp-param-region': 'us' })).status).toBe(400);
+    });
+
+    test('a tool not yet seen in tools/list is forwarded unchecked', async () => {
+      const res = await call(
+        { region: 'eu' },
+        { 'mcp-param-region': 'us-west1' }
+      );
+      expect(res.status).toBe(200);
+      expect(fake.requests).toHaveLength(1);
+    });
+
+    test.each([
+      [
+        'inside items',
+        {
+          list: {
+            type: 'array',
+            items: { type: 'string', 'x-mcp-header': 'X' },
+          },
+        },
+      ],
+      [
+        'under anyOf',
+        { alt: { anyOf: [{ type: 'string', 'x-mcp-header': 'X' }] } },
+      ],
+      ['on a number', { n: { type: 'number', 'x-mcp-header': 'N' } }],
+      [
+        'with a repeated name',
+        { dup: { type: 'string', 'x-mcp-header': 'region' } },
+      ],
+      [
+        'that is not a token',
+        { bad: { type: 'string', 'x-mcp-header': 'a b' } },
+      ],
+    ])(
+      'a tool with an x-mcp-header %s is removed and not callable',
+      async (_, extra) => {
+        fake.tools = [
+          regionTool(extra),
+          { name: 'leak', inputSchema: { type: 'object' } },
+        ];
+        const list = (await (await rpc('tools/list')).json()) as any;
+        expect(list.result.tools.map((t: any) => t.name)).toEqual(['leak']);
+        fake.requests.length = 0;
+        const res = await call({}, {});
+        expect(((await res.json()) as any).error.code).toBe(
+          MCP_ERRORS.TOOL_DENIED
+        );
+        expect(fake.requests).toHaveLength(0);
+      }
+    );
+  });
+
+  describe('MRTR inputResponses and the blocked outcome', () => {
+    const noSecret = [{ 'default.regexMatch': { rule: 'SECRET', not: true } }];
+
+    test('input guardrails check inputResponses on a retried tools/call', async () => {
+      configure(fake, { input_guardrails: noSecret });
+      const res = await rpc('tools/call', {
+        name: 'echo',
+        arguments: { q: 'fine' },
+        inputResponses: {
+          github_login: { action: 'accept', content: { name: 'SECRET' } },
+        },
+        requestState: 'opaque',
+      });
+      expect(((await res.json()) as any).error.code).toBe(
+        MCP_ERRORS.GUARDRAIL_BLOCKED
+      );
+      expect(fake.requests).toHaveLength(0);
+    });
+
+    test('a blocked call is reported as blocked, not error', async () => {
+      configure(fake, { input_guardrails: noSecret });
+      await rpc('tools/call', { name: 'echo', arguments: { q: 'SECRET' } });
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(sendSpy.mock.calls[0][0]).toMatchObject({
+        tool_name: 'echo',
+        outcome: 'blocked',
+      });
     });
   });
 

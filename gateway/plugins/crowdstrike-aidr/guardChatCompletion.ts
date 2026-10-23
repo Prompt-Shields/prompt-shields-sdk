@@ -19,7 +19,7 @@ export const handler: PluginHandler = async (
   if (!parameters.credentials?.baseUrl) {
     return {
       error: `'parameters.credentials.baseUrl' must be set`,
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -27,7 +27,7 @@ export const handler: PluginHandler = async (
   if (!parameters.credentials?.apiKey) {
     return {
       error: `'parameters.credentials.apiKey' must be set`,
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -66,7 +66,7 @@ export const handler: PluginHandler = async (
   if (!response) {
     return {
       error,
-      verdict,
+      verdict: false,
       data,
     };
   }
@@ -75,7 +75,7 @@ export const handler: PluginHandler = async (
     error = errorToString(response);
     return {
       error,
-      verdict,
+      verdict: false,
       data,
     };
   }
@@ -84,7 +84,7 @@ export const handler: PluginHandler = async (
   if (!result) {
     return {
       error: `Missing result from response body: ${response}`,
-      verdict,
+      verdict: false,
       data,
     };
   }

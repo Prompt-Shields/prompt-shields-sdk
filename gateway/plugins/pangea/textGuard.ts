@@ -18,7 +18,7 @@ export const handler: PluginHandler = async (
   if (!parameters.credentials?.domain) {
     return {
       error: `'parameters.credentials.domain' must be set`,
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -26,7 +26,7 @@ export const handler: PluginHandler = async (
   if (!parameters.credentials?.apiKey) {
     return {
       error: `'parameters.credentials.apiKey' must be set`,
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -38,7 +38,7 @@ export const handler: PluginHandler = async (
   if (!text) {
     return {
       error: 'request or response text is empty',
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -70,6 +70,7 @@ export const handler: PluginHandler = async (
     } else {
       error = e as Error;
     }
+    verdict = false;
   }
 
   if (response) {
@@ -88,6 +89,7 @@ export const handler: PluginHandler = async (
       }
     } else {
       error = errorToString(response);
+      verdict = false;
     }
   }
 

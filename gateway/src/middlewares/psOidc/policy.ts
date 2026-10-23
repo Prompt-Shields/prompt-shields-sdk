@@ -10,7 +10,9 @@ import type { OidcConfig, OidcPolicy, PolicyGroup } from './config';
 export type PolicyDenyReason =
   | 'no_matching_group'
   | 'provider_not_allowed'
-  | 'model_not_allowed';
+  | 'model_not_allowed'
+  | 'mcp_server_not_allowed'
+  | 'mcp_tool_not_allowed';
 
 /** Values of the (dotted) groups claim: an array of strings or one string. */
 export function groupsFromClaims(
