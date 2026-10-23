@@ -244,3 +244,11 @@ def test_per_call_overhead_p50_under_10ms():
         extract_prompt_features(msgs, embed=True)
         samples.append(time.perf_counter() - t0)
     assert statistics.median(samples) < 0.010
+
+
+def test_teardown_uses_the_shared_extractor():
+    from prompt_shields.teardown import prompt_features
+
+    assert prompt_features(MESSAGES, "faq") == extract_prompt_features(
+        MESSAGES, use_case="faq"
+    ).to_dict()
