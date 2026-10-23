@@ -111,6 +111,27 @@ Requires Python 3.11+.
   </Card>
 </CardGroup>
 
+### Outcome signals
+
+Every event carries `outcome_signals`, a sorted list of classes the SDK works
+out locally, and `outcome_signals_version` (now `1`). They are inputs for the
+self-learning router; an empty list means none fired.
+
+| Class | When |
+|-------|------|
+| `max_tokens` | The answer stopped at the output token limit (`length`, `max_tokens`, `max_output_tokens`) |
+| `refusal` | A refusal or content filter (`refusal` field or stop reason, `content_filter`, Gemini `SAFETY`, Bedrock `guardrail_intervened`, ...) |
+| `schema_invalid` | `response_format` / Responses `text.format` asked for JSON and the answer is not valid JSON, or misses the schema's top-level type or required keys |
+| `tool_call_invalid` | A tool call's `arguments` are not a JSON object |
+| `fallback` | The event records a fallback (`fallback_chain`) |
+| `stream_error`, `abandoned` | A stream ended with an error, or the caller stopped reading early |
+| `regenerate` | The same request was sent again within 120 s (with `ps_metadata={"session_id": ...}`: the same last user message in that session, case and spacing ignored) |
+| `retry` | The same, after a call that raised |
+
+Prompt and answer text are only read in process, to parse JSON and to
+fingerprint requests (a bounded in-memory table of truncated SHA-256 digests);
+neither is sent. JSON and tool-call checks cover non-streamed calls.
+
 ## Per-Request Metadata
 
 For data that varies per call, use `ps_metadata`:
@@ -294,6 +315,7 @@ ran) so savings are provable. Works on the async clients too.
 | Token counts, latency, cost | Yes |
 | Tool call names | Yes |
 | PII category labels | Yes |
+| Outcome signal classes | Yes (class names only; `PS_OUTCOME_SIGNALS=0` turns them off) |
 | API key fingerprint | Yes (SHA-256, truncated) |
 | Business metadata | Yes (only what you pass) |
 | **Prompt content** | **No** (unless `send_prompt_text=True`) |

@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from prompt_shields.instrumentation import suppress_instrumentation
+from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import (
     add_usage_detail_fields,
@@ -292,8 +293,12 @@ class _CompletionsNamespace:
         start = time.monotonic()
         # This client emits its own event; keep instrument() from adding one.
         with suppress_instrumentation():
-            response = self._call_upstream(model=model, messages=messages,
-                                            max_tokens=max_tokens, **kwargs)
+            try:
+                response = self._call_upstream(model=model, messages=messages,
+                                                max_tokens=max_tokens, **kwargs)
+            except Exception:
+                record_failure(model, messages, (ps_metadata or {}).get("session_id"))
+                raise
 
         if streaming:
             return self._wrap_stream(
@@ -311,6 +316,8 @@ class _CompletionsNamespace:
             latency_ms=latency_ms,
             ps_metadata=ps_metadata,
         )
+        attach_outcome_signals(event, model=model, messages=messages,
+                               response=response, request=kwargs)
         self._send(event, messages)
         return response
 
@@ -339,6 +346,9 @@ class _CompletionsNamespace:
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):
                 event["tokens_estimated"] = True
+            attach_outcome_signals(
+                event, model=model, messages=messages,
+                reasons=adapter_fields.get("finish_reasons") or [])
             self._send(event, messages, flush=flush)
 
         try:
