@@ -162,6 +162,28 @@ class AIUsageEvent(Base):
     # SDK's sha256(api key)[:16] (#93), never the key. Matches a provider
     # key id through ProviderKeyFingerprint to corroborate platform_signal.
     api_key_fingerprint = Column(Text)
+    # Routing, sovereignty and savings metadata (PRD 0001 §7.12, #25), all
+    # optional. Metadata only, never prompt or response content.
+    # api_surface: the API the caller spoke (chat, messages, responses, ...).
+    api_surface = Column(Text)
+    # route_mode: gateway, local or none. route_est_cost is the router's
+    # estimate in USD before the call.
+    route_mode = Column(Text)
+    route_group = Column(Text)
+    route_reason = Column(Text)
+    route_est_cost = Column(Numeric(10, 6))
+    # sensitivity_source: declared, pii_escalated or default.
+    sensitivity_level = Column(Text)
+    sensitivity_source = Column(Text)
+    served_provider = Column(Text)
+    served_jurisdiction = Column(Text)
+    policy_version = Column(Text)
+    # Error class of each failed attempt, in order (["rate_limited", ...]).
+    # none_as_null: an event without one stores SQL NULL, not JSON null.
+    fallback_chain = Column(JSONB(none_as_null=True))
+    # What the call would have cost on the baseline model (baseline_id).
+    counterfactual_cost = Column(Numeric(10, 6))
+    baseline_id = Column(Text)
 
     asset = relationship("AIAsset", back_populates="usage_events")
 

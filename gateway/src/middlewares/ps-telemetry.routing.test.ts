@@ -40,7 +40,10 @@ describe('ps-telemetry routing fields', () => {
       },
     };
     mw.afterResponse(request, {
-      body: { model: 'gpt-4o-mini', usage: { prompt_tokens: 5, completion_tokens: 7 } },
+      body: {
+        model: 'gpt-4o-mini',
+        usage: { prompt_tokens: 5, completion_tokens: 7 },
+      },
       status: 200,
     });
     await flush();
@@ -49,6 +52,7 @@ describe('ps-telemetry routing fields', () => {
     expect(sent.events[0].served_model).toBe('gpt-4o-mini');
     expect(sent.events[0].route_group).toBe('cheap');
     expect(sent.events[0].route_reason).toBe('heuristic:simple');
+    expect(sent.events[0].route_mode).toBe('gateway');
   });
 
   test('omits routing fields when no decision was made', async () => {
@@ -64,5 +68,6 @@ describe('ps-telemetry routing fields', () => {
 
     expect(sent.events[0].requested_model).toBeUndefined();
     expect(sent.events[0].route_group).toBeUndefined();
+    expect(sent.events[0].route_mode).toBeUndefined();
   });
 });

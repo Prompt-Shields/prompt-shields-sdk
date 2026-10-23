@@ -180,7 +180,7 @@ describe('docs/sdks/typescript.mdx', () => {
         return json({ data: [], meta: { total: 0, confidence: 'high', current: { owner: status } } });
       }
       if (url.pathname.endsWith('/usage-summary')) {
-        return json({ total_requests: 1, total_tokens_in: 1000, total_tokens_out: 50, total_tokens_cached: 600, total_tokens_cache_write: 0, total_tokens_reasoning: 20, estimated_cost_usd: 0.1, unique_sessions: 1, avg_latency_ms: 10, period: '7d' });
+        return json({ total_requests: 1, total_tokens_in: 1000, total_tokens_out: 50, total_tokens_cached: 600, total_tokens_cache_write: 0, total_tokens_reasoning: 20, estimated_cost_usd: 0.1, unique_sessions: 1, avg_latency_ms: 10, savings_usd: null, fallback_rate: null, period: '7d' });
       }
       throw new Error(`unexpected ${url}`);
     });

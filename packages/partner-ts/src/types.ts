@@ -210,6 +210,16 @@ export interface UsageSummary {
   uniqueSessions: number;
   /** `null` when no event in the period reported a latency. */
   avgLatencyMs: number | null;
+  /**
+   * Sum of `counterfactual_cost - cost` (USD) over events that reported both.
+   * `null` when none did.
+   */
+  savingsUsd: number | null;
+  /**
+   * Share (0 to 1) of events reporting a fallback chain in which at least one
+   * attempt failed. `null` when no event reported one.
+   */
+  fallbackRate: number | null;
   period: UsagePeriod;
 }
 

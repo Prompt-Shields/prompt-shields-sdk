@@ -44,15 +44,18 @@ async def _seed(engine):
             # Tenant A, inside 7d
             ev(ta, asset_a, timedelta(hours=1), tokens_in=100, tokens_out=200,
                cost=Decimal("0.010000"), latency_ms=100, session_id="s1",
-               tokens_cached=60, tokens_reasoning=120),
+               tokens_cached=60, tokens_reasoning=120,
+               counterfactual_cost=Decimal("0.030000"), fallback_chain=["server_error"]),
             ev(ta, asset_a, timedelta(days=2), tokens_in=50, tokens_out=25,
-               cost=Decimal("0.005000"), latency_ms=300, session_id="s1"),
+               cost=Decimal("0.005000"), latency_ms=300, session_id="s1",
+               fallback_chain=[]),
             # Tenant A, nulls are ignored by SUM/AVG; NULL session not counted
-            ev(ta, asset_a, timedelta(days=3)),
+            # (an explicit None is SQL NULL, so not counted as reported)
+            ev(ta, asset_a, timedelta(days=3), fallback_chain=None),
             # Tenant A, 7d..30d
             ev(ta, asset_a, timedelta(days=10), tokens_in=1000, tokens_out=1000,
                cost=Decimal("1.000000"), latency_ms=500, session_id="s2",
-               tokens_cache_write=400),
+               tokens_cache_write=400, counterfactual_cost=Decimal("0.500000")),
             # Tenant A, 30d..90d
             ev(ta, asset_a, timedelta(days=60), tokens_in=7, tokens_out=7, session_id="s3"),
             # Tenant A, older than 90d
@@ -100,6 +103,8 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "estimated_cost_usd": 0.015,
         "unique_sessions": 1,
         "avg_latency_ms": 200,
+        "savings_usd": 0.02,
+        "fallback_rate": 0.5,
         "period": "7d",
     }
     assert r30.json() == {
@@ -112,6 +117,9 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "estimated_cost_usd": 1.015,
         "unique_sessions": 2,
         "avg_latency_ms": 300,
+        # 0.02 saved inside 7d, then a routed call that cost 0.5 more.
+        "savings_usd": -0.48,
+        "fallback_rate": 0.5,
         "period": "30d",
     }
     b90 = r90.json()

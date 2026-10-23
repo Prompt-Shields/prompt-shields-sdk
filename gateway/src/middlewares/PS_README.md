@@ -177,3 +177,10 @@ When the router made a decision, the telemetry event carries:
 - `route_group` — the resolved group (`cheap` / `frontier` / ...)
 - `route_reason` — why (`heuristic:simple`, `quality:critical`, `override`, `...+budget-clamp`)
 - `route_est_cost` — the router's pre-flight USD estimate
+- `route_mode` — `gateway` (the PRD 0001 §7.12 value for a gateway decision)
+
+When the gateway recorded upstream attempts (retries, fallback targets), the
+event also carries `fallback_chain`: the error class of each failed attempt,
+in order (`["server_error", "rate_limited"]`), or `[]` when the first attempt
+succeeded. Classes only, never error messages. The collector stores all of
+these on `ai_usage_events` (#25).

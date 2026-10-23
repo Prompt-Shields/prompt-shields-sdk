@@ -74,6 +74,7 @@ describe('psTelemetry (Hono adapter)', () => {
     expect(ev.requested_model).toBe('auto');
     expect(ev.served_model).toBe('gpt-4o-mini');
     expect(ev.route_group).toBe('cheap');
+    expect(ev.route_mode).toBe('gateway');
   });
 
   test('carries X-PS-* business headers into the event', async () => {

@@ -185,6 +185,8 @@ describe('assets', () => {
         estimated_cost_usd: 482.5,
         unique_sessions: 312,
         avg_latency_ms: 380,
+        savings_usd: 120.75,
+        fallback_rate: 0.0125,
         period: '7d',
       }),
     );
@@ -199,6 +201,8 @@ describe('assets', () => {
       estimatedCostUsd: 482.5,
       uniqueSessions: 312,
       avgLatencyMs: 380,
+      savingsUsd: 120.75,
+      fallbackRate: 0.0125,
       period: '7d',
     });
     expect(m.calls[0].url).toBe('https://api.promptshields.io/partner/v1/assets/id1/usage-summary?period=7d');

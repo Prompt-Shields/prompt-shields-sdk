@@ -122,6 +122,13 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         return sum(vals) if vals else None
 
     latencies = present("latency_ms")
+    savings = [
+        r.values["counterfactual_cost"] - r.values["cost"]
+        for r in rows
+        if r.values.get("counterfactual_cost") is not None
+        and r.values.get("cost") is not None
+    ]
+    chains = present("fallback_chain")
     computed = {
         "total_requests": len(rows),
         "total_tokens_in": total("tokens_in"),
@@ -134,6 +141,9 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         "avg_latency_ms": (
             Decimal(sum(latencies)) / len(latencies) if latencies else None
         ),
+        "savings_usd": sum(savings) if savings else None,
+        "fallback_reported": len(chains),
+        "fallback_requests": sum(1 for c in chains if c),
     }
     labels = [c.name for c in stmt.selected_columns]
     assert set(labels) == set(computed), labels
@@ -175,6 +185,8 @@ def _seed() -> dict[str, list[Row]]:
                 session_id="s1",
                 tokens_cached=40,
                 tokens_reasoning=150,
+                counterfactual_cost=Decimal("0.025000"),
+                fallback_chain=["rate_limited"],
             ),
             _event(
                 ASSET_A,
@@ -186,6 +198,7 @@ def _seed() -> dict[str, list[Row]]:
                 latency_ms=501,
                 session_id="s1",
                 tokens_cache_write=10,
+                fallback_chain=[],
             ),
             _event(
                 ASSET_A,
@@ -258,6 +271,8 @@ class TestUsageSummary:
             "estimated_cost_usd": 0.115,
             "unique_sessions": 2,
             "avg_latency_ms": 334,
+            "savings_usd": 0.015,
+            "fallback_rate": 0.5,
             "period": "30d",
         }
 
@@ -309,6 +324,8 @@ class TestUsageSummary:
             "estimated_cost_usd": None,
             "unique_sessions": 0,
             "avg_latency_ms": None,
+            "savings_usd": None,
+            "fallback_rate": None,
             "period": "30d",
         }
 
