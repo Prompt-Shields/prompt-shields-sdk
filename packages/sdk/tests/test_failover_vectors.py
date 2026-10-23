@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from prompt_shields.failover import (
     BreakerConfig,
     BreakerRegistry,
