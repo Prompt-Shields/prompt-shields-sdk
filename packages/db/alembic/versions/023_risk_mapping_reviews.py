@@ -19,8 +19,8 @@ each, with ``previous_status`` NULL since the earlier state is unknown.
 The table gets the tenant_isolation policy (same SQL as 015), enforced if
 RLS is already enforced on ai_assets (same as 020).
 
-Revision ID: 025
-Revises: 022 (renumbered at merge; other branches add 023 and 024)
+Revision ID: 023
+Revises: 022
 Create Date: 2026-10-23
 """
 
@@ -30,7 +30,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "025"
+revision: str = "023"
 down_revision: str | None = "022"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -81,7 +81,7 @@ def upgrade() -> None:
     )
 
     # Backfill reviews made before this table existed (one row each).
-    op.execute("SELECT set_config('app.rls_bypass', 'migration-025', true)")
+    op.execute("SELECT set_config('app.rls_bypass', 'migration-023', true)")
     op.execute(
         f"""
         INSERT INTO {TABLE} (
