@@ -4,16 +4,20 @@
  * Responses and Messages, streamed and not, for OpenAI, Anthropic, Bedrock
  * and Vertex AI (Gemini). Field names and semantics match the SDK's
  * provider adapters: `tokens_in` is the whole prompt, cache reads and writes
- * included, and `cost_source` is sent only with a provider-reported cost.
+ * included. `cost` is the provider-reported cost or, failing that, the
+ * SDK's price for the same usage (psPricing.ts, #71) at the served model,
+ * then the requested one; `cost_source` says which.
  */
 jest.mock('jose', () => ({}));
 
 import {
+  events,
   json,
   post,
   resetHarness,
   sse,
   telemetryEvent,
+  until,
   upstream,
 } from './harness';
 import app from '../../index';
@@ -85,6 +89,10 @@ describe('OpenAI', () => {
       tokens_cached: 1536,
       tokens_reasoning: 256,
       service_tier: 'flex',
+      // o3-mini has no price, so the requested gpt-4o is used (as in the
+      // SDK), at the flex rate: (464 x $2.50 + 1536 x $1.25 + 300 x $10) x 0.5.
+      cost: 0.00304,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -137,6 +145,8 @@ describe('OpenAI', () => {
       tokens_cached: 1024,
       tokens_reasoning: 64,
       service_tier: 'default',
+      cost: 0.00252,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -174,6 +184,9 @@ describe('OpenAI', () => {
       tokens_cached: 4096,
       tokens_reasoning: 768,
       service_tier: 'flex',
+      // Served o4-mini-2025-04-16 is priced as o4-mini, at the flex rate.
+      cost: 0.00304,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -223,10 +236,12 @@ describe('OpenAI', () => {
       tokens_cached: 2048,
       tokens_reasoning: 384,
       service_tier: 'default',
+      cost: 0.00381,
+      cost_source: 'pricing_table',
     });
   });
 
-  test('no details reported: no detail fields and no cost_source', async () => {
+  test('no details reported: no detail fields, a table-priced cost', async () => {
     upstream(/api\.openai\.com\/v1\/chat\/completions$/, () =>
       json({
         id: 'chatcmpl-3',
@@ -246,9 +261,44 @@ describe('OpenAI', () => {
     await post(app, '/v1/chat/completions', chatBody(), OPENAI);
     const ev = await telemetryEvent();
     expect(ev).toMatchObject({ tokens_in: 9, tokens_out: 1 });
-    // The gateway prices nothing itself: without a provider-reported cost
-    // there is no cost and so no cost_source (SDK add_usage_detail_fields).
-    expect(details(ev)).toEqual({});
+    // gpt-4o-2024-08-06 is priced as gpt-4o: 9 x $2.50 + 1 x $10 per 1M.
+    expect(details(ev)).toEqual({
+      cost: 0.000033,
+      cost_source: 'pricing_table',
+    });
+  });
+
+  test('a response served from the gateway cache is not priced', async () => {
+    upstream(/api\.openai\.com\/v1\/chat\/completions$/, () =>
+      json({
+        id: 'chatcmpl-4',
+        object: 'chat.completion',
+        created: 1,
+        model: 'gpt-4o-2024-08-06',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Hi' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 9, completion_tokens: 1, total_tokens: 10 },
+      })
+    );
+    const headers = { ...OPENAI, 'x-ps-cache': 'on' };
+    const body = chatBody({ messages: [{ role: 'user', content: 'cached' }] });
+    const usageEvents = () => events.filter((e) => e.tokens_in !== undefined);
+    await (await post(app, '/v1/chat/completions', body, headers)).text();
+    await until(() => usageEvents().length === 1, 'first event');
+    const hit = await post(app, '/v1/chat/completions', body, headers);
+    expect(hit.headers.get('x-portkey-cache-status')).toBe('HIT');
+    await until(() => usageEvents().length === 2, 'second event');
+    const [miss, cached] = usageEvents();
+    expect(details(miss)).toEqual({
+      cost: 0.000033,
+      cost_source: 'pricing_table',
+    });
+    expect(details(cached)).toEqual({});
   });
 });
 
@@ -402,6 +452,8 @@ describe('Anthropic', () => {
       tokens_cached: 1000,
       tokens_cache_write: 600,
       tokens_cache_write_1h: 400,
+      cost: 0.0039,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -426,6 +478,8 @@ describe('Anthropic', () => {
       tokens_cached: 1000,
       tokens_cache_write: 600,
       tokens_cache_write_1h: 400,
+      cost: 0.0039,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -452,6 +506,8 @@ describe('Anthropic', () => {
       tokens_cache_write: 600,
       tokens_cache_write_1h: 400,
       service_tier: 'standard',
+      cost: 0.0039,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -490,6 +546,8 @@ describe('Anthropic', () => {
       tokens_cache_write: 600,
       tokens_cache_write_1h: 400,
       service_tier: 'standard',
+      cost: 0.0039,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -518,6 +576,8 @@ describe('Anthropic', () => {
     expect(details(ev)).toEqual({
       tokens_cached: 1000,
       tokens_cache_write: 600,
+      cost: 0.003,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -542,6 +602,8 @@ describe('Anthropic', () => {
     expect(details(ev)).toEqual({
       tokens_cached: 1000,
       tokens_cache_write: 600,
+      cost: 0.003,
+      cost_source: 'pricing_table',
     });
   });
 });
@@ -578,6 +640,8 @@ describe('Bedrock', () => {
     expect(details(ev)).toEqual({
       tokens_cached: 500,
       tokens_cache_write: 300,
+      cost: 0.000384,
+      cost_source: 'pricing_table',
     });
   });
 
@@ -592,7 +656,10 @@ describe('Bedrock', () => {
     await post(app, '/v1/chat/completions', chatBody(), headers);
     const ev = await telemetryEvent();
     expect(ev).toMatchObject({ tokens_in: 30, tokens_out: 5 });
-    expect(details(ev)).toEqual({});
+    expect(details(ev)).toEqual({
+      cost: 0.000044,
+      cost_source: 'pricing_table',
+    });
   });
 });
 
@@ -629,6 +696,7 @@ describe('Vertex AI (Gemini)', () => {
 
   // As in the SDK: thinking tokens are billed as output, so tokens_out
   // includes them, and promptTokenCount already includes the cached tokens.
+  // The vertex-ai slug has no prices, so there is no cost.
   const expected = { tokens_in: 900, tokens_out: 160 };
   const expectedDetails = { tokens_cached: 512, tokens_reasoning: 120 };
 

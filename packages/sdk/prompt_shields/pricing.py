@@ -99,7 +99,8 @@ AUDIO_PRICING: dict[tuple[str, str], tuple[float, float]] = {
 # at OpenAI list prices.
 PRICING_VENDOR_FALLBACK: dict[str, str] = {
     "azure_openai": "openai",
-    # The gateway's provider slug for Mistral La Plateforme.
+    # The gateway's provider slugs for Azure OpenAI and Mistral La Plateforme.
+    "azure-openai": "openai",
     "mistral-ai": "mistral",
 }
 
