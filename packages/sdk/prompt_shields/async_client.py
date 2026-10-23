@@ -9,9 +9,10 @@ native async client avoids the thread overhead.
 
 import os
 import time
+from collections.abc import Callable
 from typing import Any
 
-from prompt_shields.client import _fingerprint
+from prompt_shields.client import _fingerprint, _openai_max_tokens
 from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import (
@@ -19,6 +20,7 @@ from prompt_shields.pricing import (
     resolve_pricing_model,
     usage_cost,
 )
+from prompt_shields.prompt_features import PromptFeatures, notify_prompt_features
 from prompt_shields.providers import get_adapter
 from prompt_shields.streaming import (
     AsyncShieldsStream,
@@ -54,6 +56,10 @@ class AsyncShieldsClient:
         scan_pii: bool = True,
         send_prompt_text: bool = False,
         pricing_table: dict | None = None,
+        # Local prompt features (#45): when set, called once per call with
+        # PromptFeatures (incl. a local embedding) before the provider call.
+        # Nothing from it is added to telemetry.
+        on_prompt_features: Callable[[PromptFeatures], Any] | None = None,
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
         **provider_kwargs,
@@ -78,6 +84,7 @@ class AsyncShieldsClient:
         self._scan_pii = scan_pii
         self._send_prompt_text = send_prompt_text
         self._pricing_table = pricing_table
+        self._on_prompt_features = on_prompt_features
         self._api_key_fingerprint = _fingerprint(api_key)
 
         self._metadata = {
@@ -208,6 +215,23 @@ class _AsyncCompletionsNamespace:
         max_tokens: int | None = None,
         **kwargs,
     ):
+        return await self._create(model=model, messages=messages,
+                                  ps_metadata=ps_metadata, route=route,
+                                  max_tokens=max_tokens, **kwargs)
+
+    async def _create(
+        self,
+        *,
+        model: str,
+        messages: list,
+        ps_metadata: PSMetadata | None = None,
+        route: RouteHint | None = None,
+        max_tokens: int | None = None,
+        _event_hook: Callable[[dict], None] | None = None,
+        **kwargs,
+    ):
+        """`create`, plus `_event_hook(event)` called on the telemetry event
+        before it is sent (AsyncShieldsRouter adds its route decision there)."""
         if route is not None:
             kwargs["extra_headers"] = {
                 **kwargs.get("extra_headers", {}),
@@ -223,6 +247,12 @@ class _AsyncCompletionsNamespace:
         ):
             hide_usage_chunk = request_openai_stream_usage(kwargs)
 
+        notify_prompt_features(
+            self._parent._on_prompt_features,
+            messages,
+            self._parent._metadata.get("use_case"),
+        )
+
         start = time.monotonic()
         # This client emits its own event; keep instrument() from adding one.
         with suppress_instrumentation():
@@ -234,7 +264,7 @@ class _AsyncCompletionsNamespace:
             return self._wrap_stream(
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
-                hide_usage_chunk=hide_usage_chunk,
+                hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
             )
 
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -243,6 +273,8 @@ class _AsyncCompletionsNamespace:
             model=model, messages=messages, response=response,
             latency_ms=latency_ms, ps_metadata=ps_metadata,
         )
+        if _event_hook is not None:
+            _event_hook(event)
         await self._send(event, messages)
         return response
 
@@ -261,7 +293,8 @@ class _AsyncCompletionsNamespace:
 
     def _wrap_stream(self, response: Any, *, model: str, messages: list,
                      ps_metadata: PSMetadata | None, start: float,
-                     hide_usage_chunk: bool) -> Any:
+                     hide_usage_chunk: bool,
+                     event_hook: Callable[[dict], None] | None = None) -> Any:
         """Wrap a stream so one event is emitted when it ends. Fail-open."""
 
         def stream_event(adapter_fields: dict, stream_fields: dict,
@@ -274,6 +307,8 @@ class _AsyncCompletionsNamespace:
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):
                 event["tokens_estimated"] = True
+            if event_hook is not None:
+                event_hook(event)
             return event
 
         async def on_finish(*args, flush: bool = True) -> None:
@@ -300,6 +335,8 @@ class _AsyncCompletionsNamespace:
         vendor = self._parent._vendor
 
         if vendor == "openai":
+            # max_tokens is a named parameter of create(); pass it on.
+            _openai_max_tokens(model, max_tokens, kwargs)
             return await upstream.chat.completions.create(
                 model=model, messages=messages, **kwargs
             )

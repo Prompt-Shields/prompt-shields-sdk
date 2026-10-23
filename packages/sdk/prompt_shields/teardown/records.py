@@ -52,13 +52,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from prompt_shields.prompt_features import extract_prompt_features
 from prompt_shields.providers import (
     anthropic_usage_extras,
     anthropic_usage_fields,
     gemini_usage_fields,
     openai_usage_fields,
 )
-from prompt_shields.route_policy import COMPLEX_TOKEN_THRESHOLD, estimate_input_tokens
 from prompt_shields.telemetry import hash_messages
 
 FORMATS = ("openai-usage", "anthropic-usage", "ps-events", "generic-jsonl")
@@ -301,39 +301,16 @@ def _pii(value: Any) -> tuple[str, ...]:
 
 # --- prompt features (#42) ---------------------------------------------------
 
-_JSON_SCHEMA = re.compile(r"json schema|response_format|strict json", re.IGNORECASE | re.ASCII)
 
+def prompt_features(messages: Any, use_case: str | None = None) -> dict[str, Any]:
+    """Exportable prompt features, computed locally (PRD §6.2, §7.13).
 
-def prompt_features(messages: Any) -> dict[str, Any]:
-    """Complexity features of a prompt, computed locally (PRD §6.2, §7.13).
-
-    The same signals the gateway heuristic uses: approximate input tokens,
-    code fences and JSON-schema wording, plus the message count and the
-    heuristic's own complexity label. No text, hash or embedding.
+    The shared extractor's :meth:`PromptFeatures.to_dict`
+    (:mod:`prompt_shields.prompt_features`, #45): approximate input tokens,
+    message count, code fences, JSON-schema wording, language, use case and
+    the router heuristic's complexity label. No text, hash or embedding.
     """
-    texts: list[str] = []
-    for m in messages if isinstance(messages, list) else []:
-        content = m.get("content") if isinstance(m, Mapping) else None
-        if isinstance(content, str):
-            texts.append(content)
-        elif isinstance(content, list):
-            texts.extend(
-                p["text"] for p in content
-                if isinstance(p, Mapping) and isinstance(p.get("text"), str)
-            )
-    approx = estimate_input_tokens(messages if isinstance(messages, list) else [])
-    has_code = any("```" in t for t in texts)
-    has_schema = any(_JSON_SCHEMA.search(t) for t in texts)
-    return {
-        "approx_input_tokens": approx,
-        "message_count": len(messages) if isinstance(messages, list) else 0,
-        "has_code": has_code,
-        "has_json_schema": has_schema,
-        "complexity": (
-            "complex" if approx > COMPLEX_TOKEN_THRESHOLD or has_code or has_schema
-            else "simple"
-        ),
-    }
+    return extract_prompt_features(messages, use_case=use_case).to_dict()
 
 
 # --- readers -----------------------------------------------------------------
@@ -644,7 +621,11 @@ def _generic_record(obj: Mapping[str, Any], file: str) -> TeardownRecord:
         data_classification=_str(pick("data_classification")),
         detected_pii_types=_pii(pick("detected_pii_types")),
         prompt_hash=hash_messages(messages) if isinstance(messages, list) else None,
-        features=prompt_features(messages) if isinstance(messages, list) else None,
+        features=(
+            prompt_features(messages, _str(pick("use_case", "use_case_name")))
+            if isinstance(messages, list)
+            else None
+        ),
     )
 
 

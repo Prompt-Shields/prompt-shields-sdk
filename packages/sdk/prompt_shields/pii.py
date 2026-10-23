@@ -78,10 +78,26 @@ def detect_pii_categories(text: str | None) -> list[str]:
     return sorted(found)
 
 
+def _content_text(content: object) -> str:
+    """String content, or the text parts of a list of content parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
+def messages_text(messages: Iterable[dict]) -> str:
+    """All message text: string content and text content parts alike."""
+    return " ".join(
+        _content_text(m.get("content")) if isinstance(m, dict) else ""
+        for m in messages or ()
+    )
+
+
 def scan_messages(messages: Iterable[dict]) -> list[str]:
     """Apply detection across all message contents in a chat completion."""
-    combined = " ".join(
-        m.get("content", "") if isinstance(m, dict) else ""
-        for m in messages
-    )
-    return detect_pii_categories(combined)
+    return detect_pii_categories(messages_text(messages))

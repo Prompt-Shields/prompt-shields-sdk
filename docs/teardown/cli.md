@@ -112,16 +112,19 @@ and will be replaced by the versioned catalog (#7 / #8).
 ```json
 {"schema": "ps-learning-tuple.v0", "timestamp": "2026-10-20T08:00:00Z",
  "business_unit": "Customer Care", "use_case": "faq", "data_classification": "public",
- "features": {"approx_input_tokens": 19, "message_count": 2, "has_code": false,
-              "has_json_schema": false, "complexity": "simple"},
+ "features": {"feature_schema": "ps-prompt-features.v1", "approx_input_tokens": 19,
+              "message_count": 2, "has_code": false, "has_json_schema": false,
+              "language": "en", "use_case": "faq", "complexity": "simple"},
  "features_source": "messages", "provider": "openai", "model": "gpt-4o-mini",
  "quality_score": null, "quality_source": "not_measured",
  "cost_usd": 0.000135, "cost_source": "pricing_table", "tokens_in": 420, "tokens_out": 120}
 ```
 
-Features are the gateway heuristic's signals (PRD §6.2): approximate input tokens, code
-fences, JSON-schema wording, message count and the resulting complexity. They are computed
-on the customer's machine. Inputs without message text get `features_source:
-"token_counts"`, with only the token count and a complexity label from it. No prompt text,
+Features come from the shared extractor `prompt_shields.prompt_features` (#45), the one the
+SDK clients use: the gateway heuristic's signals (PRD §6.2: approximate input tokens, code
+fences, JSON-schema wording and the resulting complexity), message count, a coarse language
+label and the use case, versioned by `feature_schema`. They are computed on the customer's
+machine. Inputs without message text get `features_source: "token_counts"`, with only the
+token count, the use case and a complexity label from the count (other fields null). No prompt text,
 hash or embedding is exported. `quality_score` stays null until the eval harness (#14)
 scores sampled calls, and the routed decision per call comes with policy replay (#13).
