@@ -13,20 +13,21 @@ route-policy.v1 document as parsed JSON (a ``dict``); it is not modified.
 
 Two entry points:
 
-* ``resolve_route`` decides what the gateway decides today: explicit group
+* ``resolve_route`` decides what the gateway decides for a policy without
+  ``sensitivity``, ``data_policy`` or ``use_cases`` sections: explicit group
   (``X-PS-Route``) > quality hint (``X-PS-Quality``) > ``heuristic``
   strategy, with the ``max_cost`` budget clamp and the unknown-group
-  fallback. It ignores the ``sensitivity``, ``data_policy`` and ``use_cases``
-  sections of a policy, as the gateway does.
+  fallback. It ignores those sections when a policy has them.
 * ``resolve_policy_route`` applies the whole policy, as policy replay needs
   it: sensitivity classification with escalate-only PII escalation
   (``classify_sensitivity``), the data-policy constraint with its fail-closed
   ``PolicyViolation``, and the per-use-case quality bar, then the same
   precedence and budget clamp as ``resolve_route`` over the remaining
-  candidates. The gateway does not implement these stages yet, so their
-  vectors (``sensitivity.json``, ``data-policy.json``, ``quality-bar.json``)
-  stay ``pending`` for it; the Python runner checks them against this
-  function.
+  candidates. It is the reference for the gateway's ``resolvePolicyRoute``
+  (``gateway/src/middlewares/router/index.ts``), which ``resolveRoute``
+  uses whenever a policy has one of those sections; both pass the
+  ``sensitivity.json``, ``data-policy.json`` and ``quality-bar.json``
+  vectors.
 """
 
 from __future__ import annotations
@@ -409,7 +410,8 @@ def resolve_route(req: RouteRequest, policy: Mapping[str, Any]) -> RouteDecision
     Precedence: explicit group > quality hint > the policy's strategy. The
     strategy is only consulted on the transparent path; only ``heuristic`` is
     implemented, and any other raises ``NotImplementedError`` there.
-    ``sensitivity``, ``data_policy`` and ``use_cases`` are not applied yet.
+    ``sensitivity``, ``data_policy`` and ``use_cases`` are not applied; use
+    ``resolve_policy_route`` for those.
     """
     if req.explicit_group:
         return _resolve_in_group(policy, req.explicit_group, req, "override")

@@ -12,10 +12,17 @@
  *
  * Fail-open: a non-JSON body, parse error, or routing error passes through
  * untouched. Only requests carrying a `messages` array are ever routed.
+ *
+ * Fail-closed under a data policy (#19): when no candidate meets the policy
+ * for the call's sensitivity level, the request is refused with a 403
+ * (`error.code: policy_violation`) before any upstream call, and a
+ * `policy.denied` security event (reason `no_compliant_candidate`) is
+ * recorded.
  */
 import { Context, Next } from 'hono';
 import { isMcpProxyPath } from '../../mcp/paths';
-import { psRouterMiddleware, PSRoute } from './middleware';
+import { reportPolicyDenied } from '../psSecurityEvents';
+import { psRouterMiddleware, PSRoute, PSRouteViolation } from './middleware';
 import { defaultPolicy } from './policy';
 import { RoutePolicy, RouterStrategy } from './types';
 
@@ -46,6 +53,9 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
         const headers = Object.fromEntries(c.req.raw.headers);
         const request = { url: c.req.url, headers, body };
         await mw.beforeRequest(request);
+        const violation: PSRouteViolation | undefined = (request as any)
+          ._psRouteViolation;
+        if (violation) return policyViolationResponse(c, violation);
         const route = (request as any)._psRoute;
         if (route) {
           c.set('psRoute', route);
@@ -59,4 +69,26 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
     }
     await next();
   };
+}
+
+/** The 403 for a call no compliant candidate can serve (fail closed). */
+function policyViolationResponse(c: Context, v: PSRouteViolation): Response {
+  reportPolicyDenied(c, 'no_compliant_candidate', {
+    group: v.group,
+    model: v.requestedModel,
+  });
+  const level = v.sensitivityLevel
+    ? ` (sensitivity: ${v.sensitivityLevel})`
+    : '';
+  return c.json(
+    {
+      error: {
+        message: `Forbidden by the routing data policy${level}: no allowed model can serve this request`,
+        type: 'permission_error',
+        param: null,
+        code: 'policy_violation',
+      },
+    },
+    403
+  );
 }

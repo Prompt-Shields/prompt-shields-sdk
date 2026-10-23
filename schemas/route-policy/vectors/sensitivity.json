@@ -5,8 +5,6 @@
   "vectors": [
     {
       "id": "unclassified-uses-default",
-      "status": "pending",
-      "pending_reason": "Sensitivity classification is not implemented yet (backlog item 13, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -19,8 +17,6 @@
     },
     {
       "id": "declared-level-kept-without-pii",
-      "status": "pending",
-      "pending_reason": "Sensitivity classification is not implemented yet (backlog item 13, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -33,8 +29,6 @@
     },
     {
       "id": "pii-escalates-declared-level",
-      "status": "pending",
-      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -48,8 +42,6 @@
     },
     {
       "id": "pii-never-lowers-level",
-      "status": "pending",
-      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -63,8 +55,6 @@
     },
     {
       "id": "pii-below-default-keeps-default",
-      "status": "pending",
-      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -77,8 +67,6 @@
     },
     {
       "id": "highest-pii-category-wins",
-      "status": "pending",
-      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,
@@ -92,8 +80,6 @@
     },
     {
       "id": "unmapped-pii-category-ignored",
-      "status": "pending",
-      "pending_reason": "PII escalation is not implemented yet (backlog item 13, P1).",
       "request": {
         "messages": [{ "role": "user", "content": "hi" }],
         "max_tokens": 100,

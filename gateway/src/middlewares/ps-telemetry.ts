@@ -59,6 +59,10 @@ interface TelemetryEvent {
   route_group?: string;
   route_reason?: string;
   route_est_cost?: number;
+  // Sensitivity-aware routing (#18): the call's effective level and whether
+  // it was declared, the policy default, or raised by detected PII.
+  route_sensitivity_level?: string;
+  route_sensitivity_source?: string;
   // Exact-match cache (populated by emitCacheTelemetry)
   cache_status?: string;
   est_tokens_saved?: number;
@@ -405,6 +409,10 @@ export function psTelemetryMiddleware() {
         event.route_group = route.group;
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
+        if (route.sensitivityLevel)
+          event.route_sensitivity_level = route.sensitivityLevel;
+        if (route.sensitivitySource)
+          event.route_sensitivity_source = route.sensitivitySource;
       }
 
       // Fire-and-forget
@@ -519,6 +527,10 @@ export function psTelemetry() {
         event.route_group = route.group;
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
+        if (route.sensitivityLevel)
+          event.route_sensitivity_level = route.sensitivityLevel;
+        if (route.sensitivitySource)
+          event.route_sensitivity_source = route.sensitivitySource;
       }
 
       const attempts = attemptsOf(c);

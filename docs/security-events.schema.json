@@ -942,14 +942,15 @@
           "enum": [
             "no_matching_group",
             "provider_not_allowed",
-            "model_not_allowed"
+            "model_not_allowed",
+            "no_compliant_candidate"
           ],
-          "description": "Why the OIDC group policy refused the caller."
+          "description": "Why the policy refused the call: the OIDC group policy refused the caller, or (no_compliant_candidate) the routing data policy allowed no model at the call's sensitivity level."
         },
         "ps.policy.group": {
           "type": "string",
           "maxLength": 128,
-          "description": "Configured name of the policy entry that applied, if any."
+          "description": "Configured name of the policy entry that applied, if any; for no_compliant_candidate, the route group that had no allowed model."
         },
         "user.hash": {
           "type": "string",

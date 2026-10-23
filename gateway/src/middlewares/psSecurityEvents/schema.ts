@@ -133,14 +133,22 @@ export interface AuthFailureEvent extends SecurityEventBase {
   'http.response.status_code': number;
 }
 
-/** An authenticated (OIDC) caller was refused by the group policy (403). */
+/**
+ * A policy refused the call (403): the OIDC group policy refused an
+ * authenticated caller, or (`no_compliant_candidate`) the routing data
+ * policy left no model allowed at the call's sensitivity level.
+ */
 export interface PolicyDeniedEvent extends SecurityEventBase {
   'event.name': 'policy.denied';
   'ps.policy.reason':
     | 'no_matching_group'
     | 'provider_not_allowed'
-    | 'model_not_allowed';
-  /** The policy entry that applied (its configured `name`), if any. */
+    | 'model_not_allowed'
+    | 'no_compliant_candidate';
+  /**
+   * The policy entry that applied (its configured `name`), if any; for
+   * `no_compliant_candidate`, the route group that had no allowed model.
+   */
   'ps.policy.group'?: string;
   /**
    * ECS user.hash: the pseudonymous subject (32 hex characters, see

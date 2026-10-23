@@ -26,7 +26,7 @@ the tool lands must do these steps by hand and say so in the methodology record.
 | Price at `served_model`, not `requested_model` | #6 | **Pending.** See [§4.2](#42-served-model-vs-requested-model). |
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
-| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
+| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. The sensitivity, data-policy and quality-bar vectors are active: both implementations pass them (gateway stages #18, #19). |
 | `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | **Pending.** |
 | Policy replay and sensitivity mix | #13 | **Built (Python), not yet in the CLI.** `packages/sdk/prompt_shields/teardown_replay.py` replays normalised records through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) and reports the sensitivity mix and projected spend per strategy. Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway does not apply sensitivity, data policy or the quality bar yet. |
 | Eval harness and sample re-execution (quality parity) | #14 | **Pending.** |
@@ -295,8 +295,9 @@ Python reference router that implements `route-policy.v1`, then prices the route
 decision. The router must pass the golden vectors in `schemas/route-policy/vectors/`
 before a report can use it. `route_policy.resolve_policy_route` applies the whole policy
 (sensitivity, data policy, use-case quality bar, then hints and strategy) and passes every
-vector, including the sensitivity, data-policy and quality-bar vectors that stay
-`pending` for the gateway (`packages/sdk/tests/test_route_policy_vectors.py`). The
+vector, including the sensitivity, data-policy and quality-bar vectors, which the
+gateway's `resolvePolicyRoute` also passes (`packages/sdk/tests/test_route_policy_vectors.py`,
+`gateway/src/middlewares/router/vectors.test.ts`). The
 strategy must be `heuristic`; replay refuses the others.
 
 Calls with an unpriced baseline, or an unpriced projection, are left out of the savings

@@ -92,6 +92,8 @@ with a per-route override.**
 | `X-PS-Max-Cost` | USD float, e.g. `0.02` | Per-call ceiling. The router downgrades to stay under it. |
 | `X-PS-Route` | group name, e.g. `frontier` | Explicit override — bypasses the router and pins a group. |
 | `X-PS-Cache` | `on` \| `off` \| `refresh` | The exact-match response cache (`PS_CACHE_DEFAULT` applies when absent); not part of routing. |
+| `X-PS-Data-Classification` | a sensitivity level, e.g. `confidential` | Declared level for the policy stages below (also telemetry). Does not engage routing by itself. |
+| `X-PS-Use-Case` | use-case name | Selects the policy's per-use-case quality bar (also telemetry). |
 
 A request whose model is `auto` signals "gateway, you choose." A concrete
 model name is a *soft preference* the router may downgrade to honor `X-PS-Max-Cost`.
@@ -106,10 +108,43 @@ model name is a *soft preference* the router may downgrade to honor `X-PS-Max-Co
 ### Resolution precedence
 
 ```
-X-PS-Route (explicit override)
+data policy (sensitivity level -> allowed candidates; fail closed)
+  >  X-PS-Route (explicit override)
   >  X-PS-Quality / X-PS-Max-Cost (hints)
+  >  use-case quality bar (X-PS-Use-Case)
   >  gateway default policy (transparent)
 ```
+
+### Policy stages (sensitivity, data policy, quality bar)
+
+They run only when the `RoutePolicy` has a `sensitivity`, `dataPolicy` or
+`useCases` section (route-policy.v1 `sensitivity`, `data_policy`,
+`use_cases`; `fromRoutePolicyDoc` converts a v1 document). Without them
+routing is unchanged. `resolveRoute` then calls `resolvePolicyRoute`, a port
+of `resolve_policy_route` in `packages/sdk/prompt_shields/route_policy.py`;
+both pass the golden vectors in `schemas/route-policy/vectors/`.
+
+1. **Sensitivity (#18).** Level = max(`X-PS-Data-Classification`, or
+   `unclassified_default` when it is missing or not a known level, the
+   `pii_escalation` level of every PII category detected in the messages).
+   Escalate-only. Detection (`router/pii.ts`) is a port of the SDK's pattern
+   detector (`pii.py`, `national_ids.py`) and runs only when the policy maps
+   PII categories. The source is `declared`, `default` or `pii_escalated`.
+2. **Data policy (#19).** Only candidates that meet the level's rule are
+   considered, in every group and in the `X-PS-Max-Cost` clamp. Facts come
+   from the policy's model tiers (`provider`, `jurisdiction`, `zdr`,
+   `usCloudActExposure`); a missing fact fails closed (`any` jurisdiction
+   aside). `EEA` in a rule allows EEA member countries. A custom
+   `RouterStrategy` only sees allowed tiers.
+3. **Quality bar (#23).** Off the explicit path, `minGroup` raises the group
+   (by `groupOrder`) and an `evalSet` limits candidates to `eligibleModels`.
+
+No allowed candidate is a `PolicyViolation`: `router/hono.ts` answers 403
+(`error.type: permission_error`, `error.code: policy_violation`) before any
+upstream call and records a `policy.denied` security event
+(`no_compliant_candidate`). Under a policy with a `dataPolicy`, any other
+routing error also fails closed. A concrete model sent without a routing
+hint is not routed, so it is not checked against the data policy.
 
 ### router/ (implemented)
 
@@ -122,7 +157,9 @@ the cache middleware (so the cache key reflects the resolved model). A pluggable
 | `router/types.ts` | `RouteRequest`, `RouteDecision`, `RouterStrategy`, `ModelTier`, `RoutePolicy` |
 | `router/policy.ts` | `defaultPolicy`, token/cost estimation, `pickCheapestIn`, `cheapestUnderBudget` |
 | `router/heuristic.ts` | `HeuristicStrategy` — the ship-first decision function |
-| `router/index.ts` | `parseRouteHeaders`, `buildRouteRequest`, `resolveRoute` (precedence) |
+| `router/index.ts` | `parseRouteHeaders`, `buildRouteRequest`, `resolveRoute` (precedence), `resolvePolicyRoute` |
+| `router/constraints.ts` | `classifySensitivity`, `tierComplies`, `PolicyViolation`, `fromRoutePolicyDoc` |
+| `router/pii.ts` | `detectPiiCategories` — PII categories for sensitivity escalation |
 | `router/middleware.ts` | `psRouterMiddleware` — `beforeRequest` hook that rewrites `body.model` |
 
 - `HeuristicStrategy` (shipped): input-token count, code-fence / JSON-schema
@@ -135,7 +172,7 @@ the cache middleware (so the cache key reflects the resolved model). A pluggable
 **Engagement:** transparent routing engages only when the request model is
 `auto`; a concrete model with no hint is left untouched. Any `X-PS-*` hint
 (quality / max-cost / route) also engages it. Fail-open — any routing error
-leaves the request unchanged.
+leaves the request unchanged, except under a data policy (fail closed, above).
 
 Model groups (`cheap` / `balanced` / `frontier`) and the `defaultGroup` are
 defined by a `RoutePolicy`. The mounted router uses `defaultPolicy`; there is
@@ -177,3 +214,7 @@ When the router made a decision, the telemetry event carries:
 - `route_group` — the resolved group (`cheap` / `frontier` / ...)
 - `route_reason` — why (`heuristic:simple`, `quality:critical`, `override`, `...+budget-clamp`)
 - `route_est_cost` — the router's pre-flight USD estimate
+- `route_sensitivity_level` / `route_sensitivity_source` — the call's
+  effective sensitivity level and `declared` / `default` / `pii_escalated`
+  (only under a policy with the policy stages; OTel: `ps.route.sensitivity_level`,
+  `ps.route.sensitivity_source`)
