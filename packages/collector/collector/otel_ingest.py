@@ -42,10 +42,18 @@ OTEL_SOURCE = "otel"
 # Same limit as /ingest/events (ingest.MAX_MODEL_NAME_LENGTH): a longer
 # requested/served model attribute is stored as null, not truncated.
 _MAX_MODEL_NAME_LENGTH = 256
+# ingest.MAX_LABEL_LENGTH, for gen_ai.operation.name stored as api_surface.
+_MAX_LABEL_LENGTH = 64
 
 
 def _bounded_model(value: str | None) -> str | None:
     if value is None or len(value) > _MAX_MODEL_NAME_LENGTH:
+        return None
+    return value
+
+
+def _bounded_label(value: str | None) -> str | None:
+    if value is None or len(value) > _MAX_LABEL_LENGTH:
         return None
     return value
 
@@ -136,6 +144,7 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
             session_id=span.session_id,
             requested_model=_bounded_model(span.requested_model),
             served_model=_bounded_model(span.served_model),
+            api_surface=_bounded_label(span.api_surface),
         )
         db.add(usage_event)
         await record_event_flows(

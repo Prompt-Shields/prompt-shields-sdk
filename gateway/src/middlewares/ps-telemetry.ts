@@ -56,6 +56,8 @@ interface TelemetryEvent {
   // Cost-aware routing (populated when ps-router made a decision)
   requested_model?: string;
   served_model?: string;
+  // gateway when ps-router made the decision (PRD 0001 §7.12).
+  route_mode?: string;
   route_group?: string;
   route_reason?: string;
   route_est_cost?: number;
@@ -88,6 +90,16 @@ interface TelemetryEvent {
   trace_id?: string;
   retry_count?: number;
   attempts?: AttemptRecord[];
+  // The error class of each failed attempt, in order (PRD 0001 §7.12):
+  // empty when the first attempt succeeded. Classes only, never messages.
+  fallback_chain?: string[];
+}
+
+/** The error classes of the failed attempts, in order. */
+export function fallbackChainOf(attempts: AttemptRecord[]): string[] {
+  return attempts
+    .map((a) => a.error_class)
+    .filter((c): c is string => typeof c === 'string');
 }
 
 /** The API surface of a gateway request, from its path. */
@@ -403,6 +415,7 @@ export function psTelemetryMiddleware() {
         // The provider echoes the concrete model it ran; prefer that as served.
         event.served_model = response.body?.model || route.servedModel;
         event.route_group = route.group;
+        event.route_mode = 'gateway';
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
       }
@@ -517,6 +530,7 @@ export function psTelemetry() {
         event.requested_model = route.requestedModel;
         event.served_model = responseBody?.model || route.servedModel;
         event.route_group = route.group;
+        event.route_mode = 'gateway';
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
       }
@@ -527,6 +541,7 @@ export function psTelemetry() {
         event.trace_id = traceIdOf(headers['x-portkey-trace-id']);
         event.retry_count = Math.max(attemptCountOf(c), attempts.length) - 1;
         event.attempts = attempts.map((a) => ({ ...a }));
+        event.fallback_chain = fallbackChainOf(attempts);
       }
 
       // A streamed response carries its usage at the end of the stream, so

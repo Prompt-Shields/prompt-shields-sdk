@@ -435,6 +435,25 @@ components:
           nullable: true
           description: Null when no event in the period reported a latency
           example: 380
+        savings_usd:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Sum of `counterfactual_cost - cost` (USD) over events that reported
+            both: what routed calls would have cost on their baseline model,
+            minus what they cost. Negative when routing cost more. Null when
+            no event in the period reported both.
+          example: 120.75
+        fallback_rate:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Share (0 to 1) of events reporting a `fallback_chain` whose chain
+            is not empty, i.e. at least one upstream attempt failed before the
+            call was served. Null when no event in the period reported one.
+          example: 0.0125
         period:
           type: string
           description: Time period for this summary
@@ -449,6 +468,8 @@ components:
         - estimated_cost_usd
         - unique_sessions
         - avg_latency_ms
+        - savings_usd
+        - fallback_rate
         - period
 
     ChangeEvent:
