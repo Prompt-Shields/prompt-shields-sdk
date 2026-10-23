@@ -275,7 +275,7 @@ export const transformToProviderRequest = (
   if (imageEditTransform) {
     const form = new FormData();
     (requestBody as FormData).forEach((value, key) => form.append(key, value));
-    return imageEditTransform(form, requestHeaders);
+    return imageEditTransform(form, requestHeaders, providerOptions);
   }
 
   if (requestBody instanceof FormData || requestBody instanceof ArrayBuffer)

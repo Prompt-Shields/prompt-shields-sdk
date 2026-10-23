@@ -362,6 +362,41 @@ describe('provider fixes (#60)', () => {
     }
   );
 
+  test.each([
+    ['2025-04-01-preview', false],
+    ['v1', true],
+  ])(
+    'azure-openai image edit via x-portkey-config, api_version %s: model forwarded = %s',
+    async (apiVersion, keepsModel) => {
+      upstream(/regres\.openai\.azure\.com\/openai\/.*images\/edits/, () =>
+        json({ created: 1, data: [{ b64_json: 'AAAA' }] })
+      );
+      const form = new FormData();
+      form.append('image', new Blob(['png'], { type: 'image/png' }), 'a.png');
+      form.append('model', 'gpt-image-1');
+      form.append('prompt', 'add a hat');
+      const res = await app.request('/v1/images/edits', {
+        method: 'POST',
+        headers: {
+          'x-portkey-config': JSON.stringify({
+            provider: 'azure-openai',
+            api_key: 'az-key',
+            resource_name: 'regres',
+            deployment_id: 'img1',
+            api_version: apiVersion,
+          }),
+        },
+        body: form,
+      });
+      expect(res.status).toBe(200);
+      expect(upstreamCalls[0].url).toContain(
+        keepsModel ? '/openai/v1/images/edits' : `api-version=${apiVersion}`
+      );
+      const sent = upstreamCalls[0].body as FormData;
+      expect(sent.has('model')).toBe(keepsModel);
+    }
+  );
+
   test('z-ai: image generation, user mapped to user_id', async () => {
     upstream(/^https:\/\/api\.z\.ai\/api\/paas\/v4\/images\/generations$/, () =>
       json({ created: 1, data: [{ url: 'https://cdn.z.ai/i.png' }] })
