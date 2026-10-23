@@ -1112,6 +1112,57 @@ describe('MCP proxy', () => {
     expect(mcpCalls()).toHaveLength(0);
   });
 
+  test('a group MCP policy limits servers and tools; denials are policy.denied events', async () => {
+    process.env.PS_OIDC_POLICY = JSON.stringify({
+      default: 'deny',
+      groups: [
+        {
+          name: 'quant-analysts',
+          match: ['quants'],
+          mcp: { servers: { docs: { tools: { deny: ['search'] } } } },
+        },
+        { name: 'staff', match: ['staff'], mcp: { servers: {} } },
+        { name: 'everyone-else', match: ['other'] },
+      ],
+    });
+    const quant = await mcpCall(bearer(await token()));
+    expect(quant.status).toBe(200);
+    expect(((await quant.json()) as any).error.code).toBe(-32010);
+    const staff = await mcpCall(
+      bearer(await token({ claims: { groups: ['staff'] } }))
+    );
+    expect(staff.status).toBe(403);
+    expect(((await staff.json()) as any).error.code).toBe(-32016);
+    expect(mcpCalls()).toHaveLength(0);
+    // A group without an mcp entry: the server's policy alone, as before.
+    const other = await mcpCall(
+      bearer(await token({ claims: { groups: ['other'] } }))
+    );
+    expect(((await other.json()) as any).result).toBeDefined();
+    expect(mcpCalls()).toHaveLength(1);
+
+    const denials = (await securityEvents()).filter(
+      (e) => e['event.name'] === 'policy.denied'
+    );
+    expect(denials).toEqual([
+      expect.objectContaining({
+        'ps.policy.reason': 'mcp_tool_not_allowed',
+        'ps.policy.group': 'quant-analysts',
+        'ps.mcp.server': 'docs',
+        'ps.mcp.tool': 'search',
+        'user.hash': expect.stringMatching(/^[0-9a-f]{32}$/),
+        'http.response.status_code': 200,
+      }),
+      expect.objectContaining({
+        'ps.policy.reason': 'mcp_server_not_allowed',
+        'ps.policy.group': 'staff',
+        'ps.mcp.server': 'docs',
+        'http.response.status_code': 403,
+      }),
+    ]);
+    expect(JSON.stringify(denials)).not.toContain('user-00u1abcd');
+  });
+
   test('a gateway provider key set by psOidc is not sent to the MCP server', async () => {
     const res = await mcpCall({
       ...bearer(await token()),

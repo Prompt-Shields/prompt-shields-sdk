@@ -314,9 +314,12 @@ class ProviderKeyFingerprint(Base):
 class McpToolUsage(Base):
     """Observed MCP tool calls, aggregated (#63, Phase 0: observe only).
 
-    One row per (tenant, source, server, tool, calling service, environment)
-    with call and error counts and first/last seen. Names only: tool
-    arguments, results, descriptions and server URLs are never stored.
+    One row per (tenant, source, server, tool, calling service, environment,
+    user hash, user group) with call, error and blocked counts and
+    first/last seen. Names only: tool arguments, results, descriptions and
+    server URLs are never stored. ``user_hash`` is a pseudonymous hex hash
+    (the gateway's OIDC subject hash) and ``user_group`` the gateway policy
+    group name; "" when not reported.
 
     ``server_name`` is the server's identity: the name it reports
     (``serverInfo.name``, SDK), the OTel ``server.address`` host (client
@@ -340,6 +343,10 @@ class McpToolUsage(Base):
     transport = Column(Text)
     call_count = Column(BigInteger, nullable=False, default=0, server_default="0")
     error_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    # Calls a guardrail blocked (gateway); not counted as errors.
+    blocked_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    user_hash = Column(Text, nullable=False, default="", server_default="")
+    user_group = Column(Text, nullable=False, default="", server_default="")
     # Sum over calls that reported a latency, and how many did (for a mean).
     latency_ms_total = Column(BigInteger, nullable=False, default=0, server_default="0")
     latency_count = Column(BigInteger, nullable=False, default=0, server_default="0")
@@ -351,7 +358,7 @@ class McpToolUsage(Base):
         Index(
             "ux_mcp_tool_usage_key",
             "tenant_id", "source", "server_name", "tool_name", "calling_service",
-            "environment",
+            "environment", "user_hash", "user_group",
             unique=True,
         ),
         Index("ix_mcp_tool_usage_tenant_last_seen", "tenant_id", "last_seen"),

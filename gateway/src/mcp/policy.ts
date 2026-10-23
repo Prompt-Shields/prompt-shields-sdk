@@ -8,7 +8,11 @@
  *   controlled: names outside the spec's character set are dropped,
  *   descriptions are stripped of invisible and control characters and capped;
  * - tool definitions pinned by hash: a changed definition is blocked or
- *   flagged, per server.
+ *   flagged, per server;
+ * - `Mcp-Param-*` headers (2026-07-28, `x-mcp-header`) checked against the
+ *   arguments of a `tools/call`, for tools whose definition the gateway has
+ *   seen in a `tools/list`;
+ * - an OIDC group's tool rules (`./groupPolicy.ts`) on top of the server's.
  */
 import type { McpServerConfig } from './config';
 
@@ -87,8 +91,16 @@ export async function toolDefinitionHash(tool: any): Promise<string> {
  */
 const drifted = new Map<string, Set<string>>();
 
+/**
+ * The `x-mcp-header` annotations of each tool, per server, from the last
+ * `tools/list` that showed the tool (in memory, per process); `invalid`
+ * when the annotations broke the spec's rules.
+ */
+const paramHeaders = new Map<string, Map<string, ParamHeader[] | 'invalid'>>();
+
 export function _resetPolicyStateForTests() {
   drifted.clear();
+  paramHeaders.clear();
 }
 
 const driftedSet = (server: string) => {
@@ -102,7 +114,10 @@ const driftedSet = (server: string) => {
 
 export type ToolDecision =
   | { allowed: true }
-  | { allowed: false; reason: 'invalid_name' | 'policy' | 'pin' };
+  | {
+      allowed: false;
+      reason: 'invalid_name' | 'policy' | 'pin' | 'invalid_header';
+    };
 
 export function toolCallDecision(
   server: McpServerConfig,
@@ -116,13 +131,23 @@ export function toolCallDecision(
     drifted.get(server.id)?.has(name)
   )
     return { allowed: false, reason: 'pin' };
+  // Removed from tools/list for a broken x-mcp-header annotation, so not
+  // callable either: its Mcp-Param-* headers cannot be checked.
+  if (paramHeaders.get(server.id)?.get(name) === 'invalid')
+    return { allowed: false, reason: 'invalid_header' };
   return { allowed: true };
 }
 
 // ---------------------------------------------------------------------------
 // tools/list
 
-export type FilterReason = 'invalid_name' | 'policy' | 'pin' | 'duplicate';
+export type FilterReason =
+  | 'invalid_name'
+  | 'policy'
+  | 'pin'
+  | 'duplicate'
+  | 'invalid_header'
+  | 'group';
 
 export interface FilteredList {
   result: any;
@@ -135,11 +160,14 @@ export interface FilteredList {
 /**
  * The `tools/list` result with disallowed, invalid and (in `block` mode)
  * changed tools removed, and the rest sanitised. Never returns a tool the
- * policy does not allow.
+ * policy does not allow. `groupAllows` is the caller's OIDC group tool rule
+ * (`./groupPolicy.ts`); it is applied last, so the pin and `x-mcp-header`
+ * state, which is per server, does not depend on who listed the tools.
  */
 export async function filterToolsList(
   server: McpServerConfig,
-  result: any
+  result: any,
+  groupAllows: (name: string) => boolean = () => true
 ): Promise<FilteredList> {
   const removed: FilteredList['removed'] = [];
   const flagged: FilteredList['flagged'] = [];
@@ -151,6 +179,8 @@ export async function filterToolsList(
   const seen = new Set<string>();
   const kept: any[] = [];
   const drift = driftedSet(server.id);
+  let headers = paramHeaders.get(server.id);
+  if (!headers) paramHeaders.set(server.id, (headers = new Map()));
   for (const tool of result.tools) {
     const name = tool?.name;
     if (!isValidToolName(name) || !tool || typeof tool !== 'object') {
@@ -180,6 +210,18 @@ export async function filterToolsList(
       } else {
         drift.delete(name);
       }
+    }
+    const annotations = paramHeadersOf(tool.inputSchema);
+    if (annotations === 'invalid') {
+      headers.set(name, 'invalid');
+      removed.push({ name, reason: 'invalid_header' });
+      continue;
+    }
+    if (annotations.length) headers.set(name, annotations);
+    else headers.delete(name);
+    if (!groupAllows(name)) {
+      removed.push({ name, reason: 'group' });
+      continue;
     }
     const clean: any = { ...tool };
     if (typeof clean.description === 'string')
@@ -218,6 +260,151 @@ function sanitizeSchema(value: any, max: number, depth = 0): any {
         : sanitizeSchema(v, max, depth + 1);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// x-mcp-header annotations (2026-07-28 Streamable HTTP, "Custom Headers from
+// Tool Parameters")
+
+export interface ParamHeader {
+  /** The name part of `Mcp-Param-{name}`, lower-cased. */
+  name: string;
+  /** The chain of `properties` keys from the schema root. */
+  path: string[];
+}
+
+// RFC 9110 token (tchar).
+const TOKEN_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/;
+const HEADER_TYPES = new Set(['string', 'integer', 'boolean']);
+// Keywords whose values are data, not schemas.
+const DATA_KEYWORDS = new Set([
+  'const',
+  'default',
+  'enum',
+  'examples',
+  'example',
+]);
+const MAX_PARAM_HEADERS = 64;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * The `x-mcp-header` annotations in a tool's `inputSchema`, or `invalid` when
+ * one breaks the spec's rules: a header name that is not a token or is used
+ * twice (case-insensitively), a non-primitive parameter type, or an
+ * annotation that is not reached from the root through `properties` keys
+ * alone. Clients must drop such a tool from `tools/list`; so does the gateway.
+ */
+export function paramHeadersOf(schema: unknown): ParamHeader[] | 'invalid' {
+  const found: ParamHeader[] = [];
+  const seen = new Set<string>();
+  let invalid = false;
+  const visit = (
+    node: unknown,
+    path: string[],
+    reachable: boolean,
+    depth: number
+  ) => {
+    if (invalid) return;
+    if (depth > 64) {
+      invalid = true;
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, path, false, depth + 1);
+      return;
+    }
+    if (!isPlainObject(node)) return;
+    if (Object.hasOwn(node, 'x-mcp-header')) {
+      const name = node['x-mcp-header'];
+      if (
+        !reachable ||
+        !path.length ||
+        typeof name !== 'string' ||
+        !TOKEN_RE.test(name) ||
+        seen.has(name.toLowerCase()) ||
+        typeof node.type !== 'string' ||
+        !HEADER_TYPES.has(node.type) ||
+        found.length >= MAX_PARAM_HEADERS
+      ) {
+        invalid = true;
+        return;
+      }
+      seen.add(name.toLowerCase());
+      found.push({ name: name.toLowerCase(), path });
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'x-mcp-header' || DATA_KEYWORDS.has(key)) continue;
+      if (key === 'properties' && isPlainObject(value)) {
+        for (const [prop, sub] of Object.entries(value))
+          visit(sub, [...path, prop], reachable, depth + 1);
+      } else {
+        visit(value, path, false, depth + 1);
+      }
+    }
+  };
+  visit(schema, [], true, 0);
+  return invalid ? 'invalid' : found;
+}
+
+const INTEGER_TEXT_RE = /^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+
+/** Whether a decoded header value stands for the body value. */
+function headerMatchesValue(header: string, value: unknown): boolean {
+  if (typeof value === 'string') return header === value;
+  if (typeof value === 'boolean') return header === String(value);
+  if (typeof value === 'number' && Number.isInteger(value))
+    // Compared as numbers: `42.0` and `42` are equal.
+    return INTEGER_TEXT_RE.test(header) && Number(header) === value;
+  return false;
+}
+
+function valueAt(args: unknown, path: string[]): unknown {
+  let value: unknown = args;
+  for (const key of path) {
+    if (!isPlainObject(value) || !Object.hasOwn(value, key)) return undefined;
+    value = value[key];
+  }
+  return value;
+}
+
+/**
+ * Why the `Mcp-Param-*` headers of a `tools/call` do not match its
+ * arguments, or undefined when they do. Only headers the tool's definition
+ * declares (seen in a `tools/list`) are recognised; others are forwarded
+ * unchecked, as the spec asks of intermediaries. A recognised header must be
+ * well formed and equal its argument after decoding; it must be absent when
+ * the argument is absent or null, and present (from 2026-07-28 on) when the
+ * argument has a value.
+ */
+export function paramHeaderMismatch(
+  server: McpServerConfig,
+  headers: Headers,
+  message: any
+): string | undefined {
+  const declared = paramHeaders.get(server.id)?.get(message?.params?.name);
+  if (!declared || declared === 'invalid') return undefined;
+  const version = headers.get('mcp-protocol-version');
+  const required = version !== null && version >= HEADERS_REQUIRED_FROM;
+  for (const { name, path } of declared) {
+    const label = `Mcp-Param-${name}`;
+    const raw = headers.get(`mcp-param-${name}`);
+    const value = valueAt(message.params?.arguments, path);
+    if (value === undefined || value === null) {
+      if (raw !== null) return `${label} header has no value in the body`;
+      continue;
+    }
+    if (raw === null) {
+      if (required) return `${label} header is missing`;
+      continue;
+    }
+    const decoded = decodeHeaderValue(raw);
+    if (decoded === undefined) return `${label} header is malformed`;
+    if (!headerMatchesValue(decoded, value))
+      return `${label} header does not match the body`;
+  }
+  return undefined;
 }
 
 function toolAllowedByList(server: McpServerConfig, name: string) {
