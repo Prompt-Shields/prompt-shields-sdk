@@ -144,8 +144,7 @@ class UsageRecord:
         kwargs = {k: v for k, v in data.items() if k in names}
         if "requested_model" not in kwargs and data.get("model") is not None:
             kwargs["requested_model"] = data["model"]
-        pii = kwargs.get("detected_pii_types")
-        kwargs["detected_pii_types"] = tuple(pii or ())
+        kwargs["detected_pii_types"] = _pii_list(kwargs.get("detected_pii_types"))
         return cls(**kwargs)
 
     def usage_fields(self) -> dict[str, Any]:
@@ -181,6 +180,30 @@ class CallReplay:
     baseline_null_reason: str | None
     projected_cost: float | None
     projected_pricing: str | None
+
+
+def _pii_list(value: Any) -> tuple[str, ...]:
+    """PII categories as a tuple of lower-case names.
+
+    A bare string (``"iban"`` or ``"iban,email"``) is split on commas, never
+    iterated per character, so a recorded category always escalates.
+    """
+    if not value:
+        return ()
+    if isinstance(value, str):
+        value = value.split(",")
+    return tuple(str(v).strip().lower() for v in value if str(v).strip())
+
+
+def _declared_level(value: Any) -> str | None:
+    """Declared classification, trimmed and lower-cased like policy levels.
+
+    ``"Restricted"`` must not fall back to ``unclassified_default`` and so be
+    replayed under a laxer rule than the caller declared.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().lower()
 
 
 def _to_record(item: UsageRecord | Mapping[str, Any] | Any) -> UsageRecord:
@@ -298,7 +321,8 @@ def replay_call(
     record = _to_record(record)
     messages = record.messages if scan_prompts and record.messages else []
 
-    pii = set(record.detected_pii_types)
+    declared = _declared_level(record.data_classification)
+    pii = set(_pii_list(record.detected_pii_types))
     if messages:
         pii.update(scan_messages(messages))
     pii_categories = tuple(sorted(pii))
@@ -318,14 +342,12 @@ def replay_call(
         quality=record.quality,  # type: ignore[arg-type]
         max_cost=record.max_cost,
         explicit_group=record.route_group,
-        data_classification=record.data_classification,
+        data_classification=declared,
         pii_detected=list(pii_categories),
         use_case=record.use_case,
     )
 
-    level, source = classify_sensitivity(
-        policy, record.data_classification, pii_categories
-    )
+    level, source = classify_sensitivity(policy, declared, pii_categories)
     baseline_cost, null_reason = _baseline(record)
     baseline_model = record.baseline_model()
     baseline_tier = _find_tier(policy, baseline_model, record.vendor)

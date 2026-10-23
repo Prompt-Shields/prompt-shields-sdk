@@ -333,3 +333,34 @@ def test_main_writes_report(tmp_path, no_network, capsys):
     assert main([str(FIXTURES / "records.jsonl"), "--policy", str(POLICY_PATH)]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["mode"] == "cost_only"
+
+
+def test_declared_level_and_pii_types_are_normalised_never_lowered():
+    """Case/whitespace or a bare-string PII field must not loosen the policy."""
+    base = {
+        "vendor": "openai",
+        "served_model": "gpt-4o",
+        "tokens_in": 100,
+        "tokens_out": 50,
+        "quality": "balanced",
+    }
+    upper = replay_call({**base, "data_classification": " RESTRICTED"}, POLICY)
+    assert (upper.sensitivity_level, upper.sensitivity_source) == (
+        "restricted",
+        "declared",
+    )
+    as_string = replay_call(
+        {
+            **base,
+            "data_classification": "internal",
+            "detected_pii_types": "national_id",
+        },
+        POLICY,
+    )
+    assert as_string.pii_categories == ("national_id",)
+    assert as_string.sensitivity_level == "restricted"
+    assert as_string.routed_model == "berget-llama-70b"
+    mixed = UsageRecord(
+        data_classification="internal", detected_pii_types=("IBAN", " Email ")
+    )
+    assert replay_call(mixed, POLICY).sensitivity_level == "confidential"
