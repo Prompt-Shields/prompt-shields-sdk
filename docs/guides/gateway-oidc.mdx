@@ -21,6 +21,8 @@ OIDC is opt-in (`PS_OIDC_ENABLED=true`) and covers every `/v1/*` route (model ro
 | IdP keys cannot be fetched and none are cached | 503 | `idp_unavailable` | `auth.failure`, `ps.auth.detail: jwks_unavailable` |
 | No policy entry matches (with `default: deny`) | 403 | `policy_denied` | `policy.denied`, `no_matching_group` |
 | Provider or model not allowed for the entry | 403 | `policy_denied` | `policy.denied`, `provider_not_allowed` / `model_not_allowed` |
+| MCP server not listed in the entry's `mcp` | 403 | JSON-RPC `-32016` | `policy.denied`, `mcp_server_not_allowed` |
+| MCP tool not allowed by the entry's `mcp` | 200 | JSON-RPC `-32010` | `policy.denied`, `mcp_tool_not_allowed` |
 | Entry's rate limit used up | 429 + `Retry-After` | `rate_limit_exceeded` | `rate_limit.hit`, `ps.rate_limit.source: gateway` |
 | Invalid OIDC configuration | 500 | `oidc_misconfigured` | none (the reason is logged once) |
 
@@ -55,7 +57,13 @@ On Cloudflare Workers set these as bindings (secrets for the two marked secret);
       "match": ["6f1c2a3b-1d2e-4f50-9a8b-7c6d5e4f3a2b", "quants"],
       "providers": ["azure-openai", "openai"],
       "models": ["gpt-4o-mini", "gpt-4.1*"],
-      "rate_limit": { "requests_per_minute": 60 }
+      "rate_limit": { "requests_per_minute": 60 },
+      "mcp": {
+        "servers": {
+          "github": { "tools": { "allow": ["search_issues", "get_issue"] } },
+          "docs": {}
+        }
+      }
     },
     {
       "name": "everyone",
@@ -72,7 +80,8 @@ On Cloudflare Workers set these as bindings (secrets for the two marked secret);
 - `providers`: allowed providers (gateway provider names, e.g. `openai`, `azure-openai`, `anthropic`, `bedrock`). Omitted: any provider. A request that names no provider is denied when this is set.
 - `models`: allowed models, exact or with a trailing `*` as a prefix wildcard. Omitted: any model. For `azure-openai` the deployment (`x-portkey-azure-deployment-id`) must be allowed as well as the body's `model`, so list your deployment names. A chat, completion, embedding, Messages or Responses request without a model is denied when this is set, because some providers would otherwise fill in a default model.
 - `rate_limit.requests_per_minute`: requests per fixed one-minute window; `per` is `user` (default: each user has the budget) or `group` (shared by everyone in the entry).
-- `default`: `deny` (default) refuses users who match no entry; `allow` lets them through without restrictions.
+- `mcp`: which [MCP proxy](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/gateway/docs/mcp-proxy.md) servers the entry may use. Omitted: every configured server, within each server's own tool policy (the behaviour without this key). `servers` maps server ids (the `/v1/mcp/{server}` path segment) to the entry's rules there; a server not listed is refused with a 403 for every request, including the 2025-11-25 GET stream. `{}` uses the server's tool policy as it is. `tools.allow` and `tools.deny` (both optional) narrow it further: a tool must pass the server's policy and the entry's `allow` list, and the entry's `deny` list wins over both (it matches regardless of case). `tools/list` shows the user only those tools. `"mcp": {"servers": {}}` allows no MCP server.
+- `default`: `deny` (default) refuses users who match no entry; `allow` lets them through without restrictions (MCP included).
 
 The provider and model are checked **for every target the gateway actually calls**, after `x-portkey-config`, `override_params` and cost-aware routing have been applied, and before guardrails, the cache and the upstream call. In a fallback config, a denied target counts as a failed target, so the next target is tried. Requests that name no model (files, batches, most proxied `GET`s) are checked on the provider only. A batch runs the models named inside its input file, which the gateway does not read, so give a group with a model allowlist no provider that it may run batches against, or accept that limit.
 
@@ -159,7 +168,7 @@ The collector event for each request gets `user_id` (a 32-character pseudonym: H
 ## Limitations
 
 - Rate limits are counted **in memory, per gateway replica**: with N replicas behind a load balancer a user can get up to N times the limit. Set limits accordingly.
-- The collector currently accepts but does not yet store `user_id` / `user_group`.
-- The MCP proxy (`/v1/mcp/{server}`) accepts the IdP token instead of `PS_MCP_TOKEN` when OIDC is on. Default deny and group rate limits apply to it; provider and model allowlists do not (an MCP call names neither), so every admitted user reaches every configured MCP server within its tool policy. See `gateway/docs/mcp-proxy.md`.
+- The collector does not yet store `user_id` / `user_group` of LLM events. It does store them for MCP tool calls (`GET /api/v1/registry/mcp-tools`), and there `user_id` is always the pseudonym: the gateway sends the hash even with `PS_OIDC_TELEMETRY_SUBJECT=raw` (nothing with `off`), and the collector drops any `user_id` that is not a hex hash.
+- The MCP proxy (`/v1/mcp/{server}`) accepts the IdP token instead of `PS_MCP_TOKEN` when OIDC is on. Default deny, group rate limits and the entry's `mcp` rules apply to it; provider and model allowlists do not (an MCP call names neither). See `gateway/docs/mcp-proxy.md`.
 - Browsers cannot set `Authorization` on a WebSocket, so `/v1/realtime` with OIDC on needs a non-browser client.
 - A policy given as a file path is read again only when the gateway restarts (the Helm chart restarts pods when `gateway.oidc` changes).
