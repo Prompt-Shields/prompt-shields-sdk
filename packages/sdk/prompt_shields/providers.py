@@ -13,6 +13,14 @@ model or the equivalent raw JSON dict.
 import re
 from typing import Any
 
+from prompt_shields.pricing import resolve_pricing_model
+
+# OpenAI (and Azure) served models carry a version date, e.g.
+# "gpt-4o-2024-08-06"; the pricing table keys the base name.
+_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+# Gemini stable versions, e.g. "gemini-1.5-pro-002".
+_GEMINI_VERSION_SUFFIX = re.compile(r"-\d{3}$")
+
 
 def _field(obj: Any, name: str) -> Any:
     """Read `name` from an SDK object or a plain dict (raw JSON responses)."""
@@ -209,14 +217,44 @@ class ProviderAdapter:
         """Return event-shaped fields parsed from a provider response."""
         raise NotImplementedError
 
-    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
-        """The model name to look up in the pricing table.
+    def pricing_candidates(
+        self, model: str | None, served_model: str | None
+    ) -> list[str]:
+        """Model ids to price a call at, best first.
 
-        Defaults to the requested model. Adapters override it where the
-        requested name is not a priced model id (Azure deployment names,
-        Bedrock cross-region inference profiles).
+        The served model comes first (what actually ran: the model a router
+        picked for `model="auto"`, the snapshot behind an alias), then the
+        served id without an OpenAI-style version date (`gpt-4o-2024-08-06`
+        -> `gpt-4o`), then the requested model. Adapters override this where
+        the names need mapping (Azure deployments, Bedrock inference
+        profiles, Gemini resource names).
         """
-        return model
+        served = (
+            [served_model, _DATE_SUFFIX.sub("", served_model)]
+            if isinstance(served_model, str) else []
+        )
+        return _unique([*served, model])
+
+    def pricing_model(
+        self,
+        model: str | None,
+        served_model: str | None,
+        pricing_table: dict | None = None,
+    ) -> str | None:
+        """The model id the pricing table prices this call at: the first of
+        `pricing_candidates` with a price, else the requested model."""
+        return resolve_pricing_model(
+            self.vendor, self.pricing_candidates(model, served_model), pricing_table
+        )
+
+
+def _unique(names: list) -> list[str]:
+    """Non-empty strings in order, without duplicates."""
+    out: list[str] = []
+    for name in names:
+        if isinstance(name, str) and name and name not in out:
+            out.append(name)
+    return out
 
 
 class OpenAIAdapter(ProviderAdapter):
@@ -310,15 +348,22 @@ class GeminiAdapter(ProviderAdapter):
             "served_model": served_model,
         }
 
-    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
+    def pricing_candidates(
+        self, model: str | None, served_model: str | None
+    ) -> list[str]:
         # google-genai accepts "models/gemini-2.5-flash" and Vertex resource
-        # names ".../publishers/google/models/gemini-2.5-flash".
-        return model.rsplit("models/", 1)[-1] if model else model
+        # names ".../publishers/google/models/gemini-2.5-flash". A served
+        # stable version ("gemini-1.5-pro-002") is priced as its base model.
+        def base(name: Any) -> str | None:
+            return name.rsplit("models/", 1)[-1] if isinstance(name, str) else None
 
+        served = base(served_model)
+        return _unique([
+            served,
+            _GEMINI_VERSION_SUFFIX.sub("", served) if served else None,
+            base(model),
+        ])
 
-# Azure echoes the underlying model with a version date, e.g.
-# "gpt-4o-2024-08-06"; the pricing table keys the base name.
-_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 
 
 class AzureOpenAIAdapter(ProviderAdapter):
@@ -339,12 +384,12 @@ class AzureOpenAIAdapter(ProviderAdapter):
     def extract(self, response: Any) -> dict:
         return _openai_like_extract(response)
 
-    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
-        if model in self.deployments:
-            return self.deployments[model]
-        if served_model and served_model != model:
-            return _DATE_SUFFIX.sub("", served_model)
-        return model
+    def pricing_candidates(
+        self, model: str | None, served_model: str | None
+    ) -> list[str]:
+        # An explicit deployment mapping is the operator's choice and wins.
+        mapped = [self.deployments[model]] if model in self.deployments else []
+        return _unique([*mapped, *super().pricing_candidates(model, served_model)])
 
 
 class MistralAdapter(ProviderAdapter):
@@ -476,8 +521,13 @@ class BedrockAdapter(ProviderAdapter):
             "served_model": served_model,
         }
 
-    def pricing_model(self, model: str | None, served_model: str | None) -> str | None:
-        return _BEDROCK_PROFILE_PREFIX.sub("", model) if model else model
+    def pricing_candidates(
+        self, model: str | None, served_model: str | None
+    ) -> list[str]:
+        return _unique([
+            _BEDROCK_PROFILE_PREFIX.sub("", name) if isinstance(name, str) else None
+            for name in (served_model, model)
+        ])
 
 
 def _first_count(obj: Any, *names: str) -> int | None:

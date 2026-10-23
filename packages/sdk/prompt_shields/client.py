@@ -19,7 +19,11 @@ from typing import Any
 
 from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.pii import scan_messages
-from prompt_shields.pricing import add_usage_detail_fields, usage_cost
+from prompt_shields.pricing import (
+    add_usage_detail_fields,
+    resolve_pricing_model,
+    usage_cost,
+)
 from prompt_shields.providers import get_adapter
 from prompt_shields.streaming import (
     ShieldsStream,
@@ -158,9 +162,15 @@ class ShieldsClient:
             "tokens_out": tokens_out,
             "latency_ms": latency_ms,
             "tool_calls_used": adapter_fields.get("tool_calls_used"),
+            # Priced at the served model (#6), the requested one if the
+            # served id has no price.
             "cost": usage_cost(
                 self._vendor,
-                self._adapter.pricing_model(model, served_model),
+                resolve_pricing_model(
+                    self._vendor,
+                    self._adapter.pricing_candidates(model, served_model),
+                    self._pricing_table,
+                ),
                 adapter_fields,
                 pricing_table=self._pricing_table,
             ),
