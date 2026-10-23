@@ -83,8 +83,10 @@ extensions created.
 
 CI runs only a small smoke version (`tests/test_ingest_load_smoke_db.py`). To
 measure `/ingest/events` throughput, latency percentiles and per-tenant rate
-limiting, run the full load test against a scratch database. It adds tenants
-and events and does not delete them:
+limiting, run the full load test against a scratch database. It seeds its
+own tenants and deletes them, with their events, when it ends (`--keep-data`
+keeps them). A database host other than localhost or a unix socket is refused
+unless you pass `--allow-remote-database`:
 
 ```bash
 PYTHONPATH=packages:packages/collector python -m benchmarks.ingest_load \

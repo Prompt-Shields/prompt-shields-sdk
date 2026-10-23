@@ -16,8 +16,11 @@ The clients deliberately ignore Retry-After, so the limiter is under pressure.
 The SDK's side of a 429 (back off, re-buffer, never block the caller) is
 covered by tests/test_sdk_rate_limit_e2e_db.py.
 
-Run it from the repository root, against a scratch database (it adds tenants
-and events and never deletes them; tables are created if missing):
+Run it from the repository root, against a scratch database. Tables are
+created if missing; the tenants it seeds, and every row they own, are deleted
+when the run ends (``--keep-data`` keeps them). It refuses a database URL whose
+host is not local unless ``--allow-remote-database`` is given, so it cannot be
+pointed at a shared database by accident:
 
     PYTHONPATH=packages:packages/collector python -m benchmarks.ingest_load \\
         --database-url postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/ps_load \\
@@ -64,6 +67,8 @@ class LoadConfig:
     events_per_request: int = 10
     rate_limit: int = 300  # PS_RATE_LIMIT_PER_MINUTE for the run; 0 = off
     timeout: float = 30.0
+    keep_data: bool = False  # keep the seeded tenants and their rows
+    allow_remote_database: bool = False
 
 
 @dataclass
@@ -201,6 +206,21 @@ def percentile(sorted_values: list[float], pct: float) -> float:
     return sorted_values[int(rank) - 1]
 
 
+LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
+
+
+def is_local_database(database_url: str) -> bool:
+    """True when the URL's host is this machine (or a unix socket)."""
+    from sqlalchemy.engine import make_url
+
+    url = make_url(database_url)
+    hosts = [url.host or ""]
+    query_host = url.query.get("host")
+    if query_host:
+        hosts += [query_host] if isinstance(query_host, str) else list(query_host)
+    return all(h in LOCAL_HOSTS or h.startswith("/") for h in hosts)
+
+
 # --- collector under test -----------------------------------------------------
 
 
@@ -323,6 +343,27 @@ async def seed_tenants(database_url: str, n: int, *, create_schema: bool = True)
         await engine.dispose()
 
 
+async def delete_tenants(database_url: str, tenant_ids: list) -> None:
+    """Delete the given tenants and every row that references them."""
+    from db.models import Base, Tenant
+    from sqlalchemy import delete
+
+    if not tenant_ids:
+        return
+    engine, sessions = _bypass_sessions(database_url)
+    try:
+        async with sessions() as session:
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name != Tenant.__tablename__ and "tenant_id" in table.c:
+                    await session.execute(
+                        delete(table).where(table.c.tenant_id.in_(tenant_ids))
+                    )
+            await session.execute(delete(Tenant).where(Tenant.id.in_(tenant_ids)))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
 async def count_events(database_url: str, tenant_ids: list) -> tuple[dict, dict]:
     """(stored ai_usage_events, events counted rate_limited) per tenant index."""
     from db.models import AIUsageEvent, TelemetryClientStats
@@ -418,13 +459,25 @@ async def drive(base_url: str, keys: list[str], cfg: LoadConfig) -> tuple[list[S
 
 
 def run(cfg: LoadConfig) -> LoadReport:
-    """Seed tenants, serve the collector, drive the load, verify the database."""
+    """Seed tenants, serve the collector, drive the load, verify the database,
+    then delete the seeded tenants (unless cfg.keep_data)."""
+    if not cfg.allow_remote_database and not is_local_database(cfg.database_url):
+        raise ValueError(
+            "refusing a non-local database: the load test seeds tenants and "
+            "writes events; pass allow_remote_database / --allow-remote-database "
+            "if this really is a scratch database"
+        )
     tenants = asyncio.run(seed_tenants(cfg.database_url, cfg.tenants))
-    with collector_server(cfg.database_url, rate_limit=cfg.rate_limit) as base_url:
-        samples, duration = asyncio.run(drive(base_url, [k for _, k in tenants], cfg))
-    stored, rejected = asyncio.run(
-        count_events(cfg.database_url, [t for t, _ in tenants])
-    )
+    tenant_ids = [t for t, _ in tenants]
+    try:
+        with collector_server(cfg.database_url, rate_limit=cfg.rate_limit) as base_url:
+            samples, duration = asyncio.run(
+                drive(base_url, [k for _, k in tenants], cfg)
+            )
+        stored, rejected = asyncio.run(count_events(cfg.database_url, tenant_ids))
+    finally:
+        if not cfg.keep_data:
+            asyncio.run(delete_tenants(cfg.database_url, tenant_ids))
     return LoadReport(cfg, duration, samples, stored, rejected)
 
 
@@ -466,7 +519,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rate-limit", type=int, default=300,
                    help="PS_RATE_LIMIT_PER_MINUTE for the run (0 = off)")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
+    p.add_argument("--keep-data", action="store_true",
+                   help="keep the seeded tenants and their events after the run")
+    p.add_argument("--allow-remote-database", action="store_true",
+                   help="allow a database host other than localhost/unix socket")
     args = p.parse_args(argv)
+    if not args.allow_remote_database and not is_local_database(args.database_url):
+        p.error("--database-url is not local; pass --allow-remote-database if it "
+                "really is a scratch database")
     cfg = LoadConfig(
         database_url=args.database_url,
         tenants=args.tenants,
@@ -474,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
         requests=args.requests,
         events_per_request=args.events_per_request,
         rate_limit=args.rate_limit,
+        keep_data=args.keep_data,
+        allow_remote_database=args.allow_remote_database,
     )
     report = run(cfg)
     print(json.dumps(report.as_dict(), indent=2) if args.json else format_report(report))

@@ -6,7 +6,22 @@ Retry-After, and the database holds exactly the accepted events. The full
 load test is run by hand; see the module docstring.
 """
 
-from benchmarks.ingest_load import LoadConfig, LoadReport, Sample, percentile, run
+import asyncio
+
+import pytest
+from benchmarks.ingest_load import (
+    LoadConfig,
+    LoadReport,
+    Sample,
+    _bypass_sessions,
+    delete_tenants,
+    is_local_database,
+    percentile,
+    run,
+    seed_tenants,
+)
+from db.models import Tenant
+from sqlalchemy import func, select
 
 
 def test_percentile_nearest_rank():
@@ -22,6 +37,43 @@ def test_report_flags_a_window_over_the_limit():
     samples = [Sample(0, 200, 1.0, window="60") for _ in range(3)]
     report = LoadReport(cfg, 1.0, samples, stored_events={0: 3}, rejected_events={0: 0})
     assert report.failures() == ["tenant 0 window 60: 3 accepted > limit 2"]
+
+
+@pytest.mark.parametrize(
+    "url, local",
+    [
+        ("postgresql+asyncpg://u:p@localhost:5432/db", True),
+        ("postgresql+asyncpg://u:p@127.0.0.1/db", True),
+        ("postgresql+asyncpg://u:p@[::1]:5432/db", True),
+        ("postgresql+asyncpg://u:p@/db?host=/var/run/postgresql", True),
+        ("postgresql+asyncpg://u:p@db.prod.example.com:5432/db", False),
+        ("postgresql+asyncpg://u:p@localhost/db?host=db.prod.example.com", False),
+    ],
+)
+def test_is_local_database(url, local):
+    assert is_local_database(url) is local
+
+
+def test_run_refuses_a_remote_database():
+    cfg = LoadConfig(database_url="postgresql+asyncpg://u:p@db.example.com/db")
+    with pytest.raises(ValueError, match="non-local"):
+        run(cfg)
+
+
+def test_delete_tenants_removes_seeded_tenants(test_database_url):
+    async def scenario():
+        ids = [t for t, _ in await seed_tenants(test_database_url, 2)]
+        await delete_tenants(test_database_url, ids)
+        engine, sessions = _bypass_sessions(test_database_url)
+        try:
+            async with sessions() as session:
+                return await session.scalar(
+                    select(func.count()).where(Tenant.id.in_(ids))
+                )
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(scenario()) == 0
 
 
 def test_ingest_load_smoke_enforces_limit_per_tenant(test_database_url):
