@@ -402,3 +402,22 @@ export function costFields(
         : COST_SOURCE_PRICING_TABLE,
   };
 }
+
+/**
+ * The price tables, for the drift test against the SDK's pricing.py
+ * (psPricing.drift.test.ts). Not for pricing: use usageCost / costFields.
+ */
+export const PRICE_TABLES = {
+  CACHE_READ_MULTIPLIER,
+  CACHE_WRITE_MULTIPLIER,
+  CACHE_WRITE_1H_MULTIPLIER,
+  STANDARD_SERVICE_TIERS,
+  SERVICE_TIER_MULTIPLIER,
+  WEB_SEARCH_FEE,
+  LONG_CONTEXT_PRICING,
+  AUDIO_PRICING,
+  PRICING_VENDOR_FALLBACK,
+  UNIT_PRICING,
+  IMAGE_PRICING,
+  DEFAULT_PRICING,
+} as const;
