@@ -310,7 +310,7 @@ describe('Javelin Guardrails Tests', () => {
       );
     });
 
-    it('should handle API errors gracefully without blocking', async () => {
+    it('should return verdict false with the error on API errors', async () => {
       (global.fetch as any).mockRejectedValueOnce(new Error('API Error'));
 
       const context = {
@@ -337,8 +337,9 @@ describe('Javelin Guardrails Tests', () => {
         'beforeRequestHook'
       );
 
-      // Should still return verdict true on API errors so request isn't blocked
-      expect(result.verdict).toBe(true);
+      // PS fork: an API error returns verdict false; the hook's failOnError
+      // decides whether it blocks (fail-open without it).
+      expect(result.verdict).toBe(false);
       expect(result.error).toBeDefined();
       expect(result.error.message).toBe('API Error');
     });

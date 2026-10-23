@@ -127,7 +127,7 @@ export const mistralGuardrailHandler: PluginHandler = async (
     }
   } catch (err) {
     error = err;
-    verdict = true;
+    verdict = false;
   }
 
   return { error, verdict, data };

@@ -27,13 +27,13 @@ the tool lands must do these steps by hand and say so in the methodology record.
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
 | `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
-| `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | **Pending.** |
+| `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | Built: `prompt_shields/teardown/`, see [cli.md](cli.md). Re-prices at `served_model` from token counts. |
 | Policy replay and sensitivity mix | #13 | **Built (Python), not yet in the CLI.** `packages/sdk/prompt_shields/teardown_replay.py` replays normalised records through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) and reports the sensitivity mix and projected spend per strategy. Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway does not apply sensitivity, data policy or the quality bar yet. |
-| Eval harness and sample re-execution (quality parity) | #14 | **Pending.** |
-| Learning-tuple export | #42 | **Pending.** Out of scope for this appendix. |
+| Eval harness and sample re-execution (quality parity) | #14 | **Partly built.** `prompt_shields.evals` and the `ps-eval` CLI: stratified sample, re-execution (opt-in, spend cap, rate limit, per-level model allowlist), exact match / schema validity / similarity / pairwise judge, Wilson parity per (use case, model), savings at parity with a bootstrap interval, sections 9–10 of the report. Pending: PII escalation of the sampled level (#13), a judge constrained by `route-policy.v1` data policy (#13), savings through policy replay rather than a per-use-case model swap (#13). |
+| Learning-tuple export | #42 | **Partly built.** `ps-teardown run --learning-tuples` exports (features, model, cost) per call with no prompt text ([cli.md](cli.md#learning-tuples-42)); quality score pending #14, replayed decision pending #13. Out of scope for this appendix. |
 
-Until #12, #13 and #14 land, a report can only contain what can be computed by hand
-from the customer's data with `pricing.py`. Every section that depends on a pending
+Until #13 and #14 are wired into the CLI, a report contains what `ps-teardown` computes in cost-only mode
+(or what can be computed by hand from the customer's data with `pricing.py`). Every section that depends on a pending
 item must say so in the report. It must not be filled in with estimates.
 
 ## 2. Data collected and consent
@@ -41,7 +41,7 @@ item must say so in the report. It must not be filled in with estimates.
 ### 2.1 Inputs
 
 A teardown reads one or more of these sources (PRD §7.6). The CLI input formats are
-defined in #12. **Pending #12.**
+defined in [cli.md](cli.md#input-formats) (#12).
 
 | Source | Typical fields | Prompt text? |
 |---|---|---|
@@ -67,7 +67,7 @@ defined in #12. **Pending #12.**
 - The teardown runs on the customer's machine or in their environment (PRD §7.6). Logs
   and prompts do not leave it. In the concierge offer we either run the tool on a
   machine the customer controls or the customer runs it while we watch.
-- Re-execution (**pending #14**) uses the customer's own provider keys. A sampled
+- Re-execution (`ps-eval --mode live`, #14) uses the customer's own provider keys. A sampled
   prompt is sent only to candidate models, and a judge model, that the customer's
   route policy allows for that prompt's sensitivity level.
 - What leaves the customer environment is the report: aggregates by business unit,
@@ -322,7 +322,7 @@ Each report shows projected spend for:
 - **Baseline:** the observed mix ([§3](#3-baseline)).
 - **Same-model arbitrage:** the same model from the cheapest provider that serves it
   and is allowed by the call's data policy (e.g. an open-weight model offered by
-  several hosts, or a regional endpoint). Cost-only mode can compute this (**pending #12**).
+  several hosts, or a regional endpoint). Cost-only mode computes this (`ps-teardown`, #12).
 - **Policy, cheapest:** the cheapest compliant candidate in the group the policy picks.
 - **Policy, at parity:** like *Policy, cheapest*, but only models that passed the
   parity bar for that use case ([§7.2](#72-quality-parity)) are allowed. **Pending #14.**
@@ -351,7 +351,7 @@ Replay is a counterfactual on logged traffic. It assumes:
 ### 6.4 Cache-hit potential
 
 Cache-hit potential is the share of calls, and their cost, whose request repeats an
-earlier one exactly within a chosen TTL (record it; default 1 hour). **Pending #12.**
+earlier one exactly within a chosen TTL (record it; default 1 hour). Computed by `ps-teardown` (#12).
 
 - On SDK events the key is `prompt_hash`: SHA-256 of the concatenated string message
   contents. It does **not** include the model, system parameters, tools, temperature or
@@ -376,7 +376,8 @@ earlier one exactly within a chosen TTL (record it; default 1 hour). **Pending #
 
 ### 7.2 Quality parity
 
-**Pending #14.** Parity is measured on a stratified sample, re-run on candidate models.
+**Partly built (#14):** `ps-eval` implements this section. Parity is measured on a
+stratified sample, re-run on candidate models.
 
 - **Sampling.** Stratify by use case × sensitivity level × complexity band. Sample at
   random within each stratum, with a recorded seed. Record the sample size per stratum,
@@ -403,7 +404,9 @@ earlier one exactly within a chosen TTL (record it; default 1 hour). **Pending #
 
 ### 7.3 Judge
 
-**Pending #14.**
+**Partly built (#14):** `ps-eval` judges both orders, counts disagreement as a tie
+and applies the eval policy's per-level allowlist to the judge. It notes a same-family
+judge; it does not pick another one.
 
 - The judge model is subject to the same data policy as the candidates. A prompt at
   `restricted` is never sent to a judge that the policy would not allow to serve it.
@@ -460,7 +463,7 @@ A field for a step that has not been built reads "pending #N".
 | Customer (or anonymised label) | |
 | Consent: signer, date, scope ([§2.4](#24-consent-checklist)) | |
 | Mode | cost-only / full |
-| Tool and version | `ps-teardown x.y.z` (pending #12) or "manual, sdk-0.2.0" |
+| Tool and version | `ps-teardown x.y.z` or "manual, sdk-0.2.0" |
 | Input sources and row counts | per source: rows read, rows kept, rows dropped and why |
 | Window (UTC) | start – end, days |
 | Window typical? (customer answer) | |
