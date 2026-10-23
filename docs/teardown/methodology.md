@@ -27,13 +27,13 @@ the tool lands must do these steps by hand and say so in the methodology record.
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
 | `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
-| `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | **Pending.** |
+| `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | Built: `prompt_shields/teardown/`, see [cli.md](cli.md). Re-prices at `served_model` from token counts. |
 | Policy replay and sensitivity mix | #13 | **Partly built.** Python reference router (`packages/sdk/prompt_shields/route_policy.py`) for precedence, heuristic strategy, budget clamp and unknown-group fallback. Sensitivity, data policy, quality bar, the replay itself and the sensitivity mix are pending. |
 | Eval harness and sample re-execution (quality parity) | #14 | **Pending.** |
-| Learning-tuple export | #42 | **Pending.** Out of scope for this appendix. |
+| Learning-tuple export | #42 | **Partly built.** `ps-teardown run --learning-tuples` exports (features, model, cost) per call with no prompt text ([cli.md](cli.md#learning-tuples-42)); quality score pending #14, replayed decision pending #13. Out of scope for this appendix. |
 
-Until #12, #13 and #14 land, a report can only contain what can be computed by hand
-from the customer's data with `pricing.py`. Every section that depends on a pending
+Until #13 and #14 land, a report contains what `ps-teardown` computes in cost-only mode
+(or what can be computed by hand from the customer's data with `pricing.py`). Every section that depends on a pending
 item must say so in the report. It must not be filled in with estimates.
 
 ## 2. Data collected and consent
@@ -41,7 +41,7 @@ item must say so in the report. It must not be filled in with estimates.
 ### 2.1 Inputs
 
 A teardown reads one or more of these sources (PRD §7.6). The CLI input formats are
-defined in #12. **Pending #12.**
+defined in [cli.md](cli.md#input-formats) (#12).
 
 | Source | Typical fields | Prompt text? |
 |---|---|---|
@@ -315,7 +315,7 @@ Each report shows projected spend for:
 - **Baseline:** the observed mix ([§3](#3-baseline)).
 - **Same-model arbitrage:** the same model from the cheapest provider that serves it
   and is allowed by the call's data policy (e.g. an open-weight model offered by
-  several hosts, or a regional endpoint). Cost-only mode can compute this (**pending #12**).
+  several hosts, or a regional endpoint). Cost-only mode computes this (`ps-teardown`, #12).
 - **Policy, cheapest:** the cheapest compliant candidate in the group the policy picks.
 - **Policy, at parity:** like *Policy, cheapest*, but only models that passed the
   parity bar for that use case ([§7.2](#72-quality-parity)) are allowed. **Pending #14.**
@@ -344,7 +344,7 @@ Replay is a counterfactual on logged traffic. It assumes:
 ### 6.4 Cache-hit potential
 
 Cache-hit potential is the share of calls, and their cost, whose request repeats an
-earlier one exactly within a chosen TTL (record it; default 1 hour). **Pending #12.**
+earlier one exactly within a chosen TTL (record it; default 1 hour). Computed by `ps-teardown` (#12).
 
 - On SDK events the key is `prompt_hash`: SHA-256 of the concatenated string message
   contents. It does **not** include the model, system parameters, tools, temperature or
@@ -453,7 +453,7 @@ A field for a step that has not been built reads "pending #N".
 | Customer (or anonymised label) | |
 | Consent: signer, date, scope ([§2.4](#24-consent-checklist)) | |
 | Mode | cost-only / full |
-| Tool and version | `ps-teardown x.y.z` (pending #12) or "manual, sdk-0.2.0" |
+| Tool and version | `ps-teardown x.y.z` or "manual, sdk-0.2.0" |
 | Input sources and row counts | per source: rows read, rows kept, rows dropped and why |
 | Window (UTC) | start – end, days |
 | Window typical? (customer answer) | |
