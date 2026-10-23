@@ -230,6 +230,55 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, ...]] = {
 }
 
 
+def _lookup_rates(
+    vendor: str, model: str, pricing_table: dict | None
+) -> tuple[str, tuple[float, ...]] | None:
+    """`(pricing_vendor, rates)` for a model, or None when it has no price.
+
+    The one place token rates are looked up. `pricing_vendor` differs from
+    `vendor` when the rates come from `PRICING_VENDOR_FALLBACK`. A generated
+    price catalog (#7/#8) plugs in here.
+    """
+    table = pricing_table if pricing_table is not None else DEFAULT_PRICING
+    rates = table.get((vendor, model))
+    if rates is None and vendor in PRICING_VENDOR_FALLBACK:
+        vendor = PRICING_VENDOR_FALLBACK[vendor]
+        rates = table.get((vendor, model))
+    return (vendor, rates) if rates is not None else None
+
+
+def has_price(vendor: str, model: str | None, pricing_table: dict | None = None) -> bool:
+    """True when `(vendor, model)` has token or per-unit prices."""
+    if not model:
+        return False
+    if _lookup_rates(vendor, model, pricing_table) is not None:
+        return True
+    if pricing_table is not None:
+        return any(
+            isinstance(key, tuple) and len(key) == 3 and key[:2] == (vendor, model)
+            for key in pricing_table
+        )
+    return (vendor, model) in IMAGE_PRICING or any(
+        key[:2] == (vendor, model) for key in UNIT_PRICING
+    )
+
+
+def resolve_pricing_model(
+    vendor: str, candidates: list[str], pricing_table: dict | None = None
+) -> str | None:
+    """The first candidate model id with a price, else the last candidate.
+
+    Adapters list the served model first and the requested model last
+    (`ProviderAdapter.pricing_candidates`), so a call is priced at the model
+    that actually ran, and at the requested one when the served id has no
+    price (an unlisted snapshot).
+    """
+    for model in candidates:
+        if has_price(vendor, model, pricing_table):
+            return model
+    return candidates[-1] if candidates else None
+
+
 def _tier_multiplier(vendor: str, service_tier: str | None) -> float | None:
     if service_tier is None or service_tier in STANDARD_SERVICE_TIERS:
         return 1.0
@@ -262,13 +311,10 @@ def estimate_cost(
     if model is None or tokens_in is None or tokens_out is None:
         return None
 
-    table = pricing_table if pricing_table is not None else DEFAULT_PRICING
-    rates = table.get((vendor, model))
-    if rates is None and vendor in PRICING_VENDOR_FALLBACK:
-        vendor = PRICING_VENDOR_FALLBACK[vendor]
-        rates = table.get((vendor, model))
-    if rates is None:
+    found = _lookup_rates(vendor, model, pricing_table)
+    if found is None:
         return None
+    vendor, rates = found
 
     tier = _tier_multiplier(vendor, service_tier)
     if tier is None:

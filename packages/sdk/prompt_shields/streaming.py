@@ -133,7 +133,7 @@ class StreamAccumulator:
         self._mcp_calls: list[dict] = []
 
     def observe(self, chunk: Any) -> None:
-        if self._vendor == "openai":
+        if self._vendor in ("openai", "azure_openai"):
             self._observe_openai(chunk)
         elif self._vendor == "anthropic":
             self._observe_anthropic(chunk)
