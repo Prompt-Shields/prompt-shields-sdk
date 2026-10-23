@@ -10,6 +10,7 @@ dependencies = [
 [project.scripts]
 ps-scan = "prompt_shields.scan:main"
 prompt-shields-instrument = "prompt_shields.autoinstrument:main"
+ps-eval = "prompt_shields.evals.cli:main"
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
