@@ -25,6 +25,8 @@ import { oidcTelemetryFields } from './psOidc/telemetry';
 
 // Set by psOidc (./psOidc/index.ts OIDC_IDENTITY_KEY).
 const OIDC_IDENTITY_KEY = 'psOidcIdentity';
+// Set by recordCredentialFingerprint (../utils/credentialFingerprint.ts).
+const CREDENTIAL_FINGERPRINT_KEY = 'psCredentialFingerprint';
 
 interface PSConfig {
   collectorUrl: string;
@@ -78,6 +80,10 @@ interface TelemetryEvent {
   stream?: boolean;
   stream_truncated?: boolean;
   stream_cancelled?: boolean;
+  // Stable fingerprint of the upstream credential's identity (#76), only
+  // with PS_TELEMETRY_CREDENTIAL_FINGERPRINT=true; see
+  // utils/credentialFingerprint.ts. Never a key or token.
+  api_key_fingerprint?: string;
   // OIDC (PS_OIDC_ENABLED): the caller's pseudonymous subject and the name
   // of the gateway policy group that applied. See psOidc/telemetry.ts.
   user_id?: string;
@@ -512,6 +518,11 @@ export function psTelemetry() {
         ...psHeaders,
         ...oidcTelemetryFields(c.get(OIDC_IDENTITY_KEY)),
       };
+
+      const fingerprint = c.get(CREDENTIAL_FINGERPRINT_KEY);
+      if (typeof fingerprint === 'string' && fingerprint) {
+        event.api_key_fingerprint = fingerprint;
+      }
 
       if (route) {
         event.requested_model = route.requestedModel;

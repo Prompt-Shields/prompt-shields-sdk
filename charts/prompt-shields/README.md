@@ -450,6 +450,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_SHUTDOWN_TIMEOUT_MS` (*chart*) | Drain deadline on SIGTERM |
 | `PS_MCP_CONFIG_FILE`, `PS_MCP_TOKEN` (secret), `PS_MCP_ALLOW_UNAUTHENTICATED` | MCP proxy (`/v1/mcp/{server}`): the `mcp_servers` file (mount it from a ConfigMap with `gateway.extraVolumes` / `extraVolumeMounts`) and the client bearer token. See `gateway/docs/mcp-proxy.md` |
 | `PS_TELEMETRY_MAX_ATTEMPTS`, `PS_TELEMETRY_RETRY_BASE_MS`, `PS_TELEMETRY_MAX_PENDING`, `PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS` | Telemetry delivery to the collector |
+| `PS_TELEMETRY_CREDENTIAL_FINGERPRINT` | `true` adds a stable `api_key_fingerprint` (static key hash, or client identity hash for keyless auth; never a token) to gateway telemetry. Default off |
 | `PS_OTEL_ENDPOINT`, `PS_OTEL_HEADERS`, `PS_OTEL_CAPTURE_CONTENT`, `PS_OTEL_MAX_BATCH`, `PS_OTEL_FLUSH_MS`, `PS_OTEL_MAX_QUEUE` | OpenTelemetry GenAI spans |
 | `PS_SECURITY_EVENTS_LOG`, `PS_SECURITY_EVENTS_TENANT` | Security events as JSON lines on stdout |
 | `PS_SECURITY_EVENTS_OTLP`, `PS_SECURITY_EVENTS_OTLP_ENDPOINT`, `PS_SECURITY_EVENTS_OTLP_HEADERS` | Security events as OTLP log records |

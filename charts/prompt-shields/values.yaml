@@ -189,6 +189,7 @@ gateway:
   #   MAX_JSON_PAYLOAD_SIZE_IN_MB: "100"
   #   TRUSTED_CUSTOM_HOSTS: "llm.internal.example.com"
   #   AWS_AMBIENT_CREDENTIALS_ENABLED: "true"
+  #   PS_TELEMETRY_CREDENTIAL_FINGERPRINT: "true"
   #   HTTPS_PROXY: "http://egress-proxy.example.com:3128"
   #   PS_OTEL_ENDPOINT: "http://otel-collector:4318/v1/traces"
   #   PS_CACHE_DEFAULT: "simple"
