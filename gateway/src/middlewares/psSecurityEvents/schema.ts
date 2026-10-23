@@ -133,13 +133,23 @@ export interface AuthFailureEvent extends SecurityEventBase {
   'http.response.status_code': number;
 }
 
-/** An authenticated (OIDC) caller was refused by the group policy (403). */
+/**
+ * An authenticated (OIDC) caller was refused by the group policy: a 403, or
+ * for an MCP tool the group may not call, the MCP proxy's JSON-RPC error
+ * (HTTP 200, like the server's own tool policy).
+ */
 export interface PolicyDeniedEvent extends SecurityEventBase {
   'event.name': 'policy.denied';
   'ps.policy.reason':
     | 'no_matching_group'
     | 'provider_not_allowed'
-    | 'model_not_allowed';
+    | 'model_not_allowed'
+    | 'mcp_server_not_allowed'
+    | 'mcp_tool_not_allowed';
+  /** MCP denials: the server id from the path (`other` when not an id). */
+  'ps.mcp.server'?: string;
+  /** `mcp_tool_not_allowed`: the tool name (`other` when not a valid name). */
+  'ps.mcp.tool'?: string;
   /** The policy entry that applied (its configured `name`), if any. */
   'ps.policy.group'?: string;
   /**
@@ -147,7 +157,7 @@ export interface PolicyDeniedEvent extends SecurityEventBase {
    * PS_OIDC_SUBJECT_SALT). Absent with PS_OIDC_TELEMETRY_SUBJECT=off.
    */
   'user.hash'?: string;
-  'http.response.status_code': 403;
+  'http.response.status_code': 403 | 200;
 }
 
 export interface RateLimitHitEvent extends SecurityEventBase {

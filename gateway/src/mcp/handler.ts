@@ -11,7 +11,9 @@
  * 2. the body must be one JSON-RPC message; the mirrored headers must match
  *    it (`HeaderMismatch`, -32020, as the spec requires of servers);
  * 3. `tools/call`: the tool must pass the server's allow/deny list and
- *    description pin, then the input guardrails on its arguments;
+ *    description pin, and the OIDC group's MCP policy (`./groupPolicy.ts`),
+ *    its `Mcp-Param-*` headers must match its arguments, then the input
+ *    guardrails run on its arguments and MRTR `inputResponses`;
  * 4. the request goes to the configured URL only, with the server's own
  *    credentials (the client's Authorization header is never forwarded), the
  *    URL re-checked by `isSafeUpstreamURL`, and redirects refused;
@@ -33,11 +35,21 @@ import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { upstreamFetch } from '../utils/fetch';
 import { checkMcpClient } from './auth';
 import { getMcpServer, McpServerConfig } from './config';
-import { mcpGuardrailsBlock, toolResultText } from './guardrails';
+import {
+  groupServerAccess,
+  groupToolAllowed,
+  reportMcpPolicyDenied,
+} from './groupPolicy';
+import {
+  mcpGuardrailsBlock,
+  toolCallInputText,
+  toolResultText,
+} from './guardrails';
 import {
   displayToolName,
   filterToolsList,
   headerMismatch,
+  paramHeaderMismatch,
   toolCallDecision,
 } from './policy';
 import { filterSseStream, isResponseTo } from './sse';
@@ -61,6 +73,8 @@ export const MCP_ERRORS = {
   UPSTREAM_ERROR: -32013,
   UNAUTHORIZED: -32014,
   UNKNOWN_SERVER: -32015,
+  /** The caller's OIDC group may not use this server. */
+  SERVER_DENIED: -32016,
   HEADER_MISMATCH: -32020,
 } as const;
 
@@ -323,6 +337,19 @@ export async function mcpHandler(c: Context): Promise<Response> {
     recordRequest(c, 'unknown', undefined, 'invalid');
     return rpcError(auth.status, null, MCP_ERRORS.UNAUTHORIZED, auth.message);
   }
+  // Before the server lookup, so a group cannot probe which ids exist.
+  const access = groupServerAccess(c, serverId);
+  if (access.restricted && !access.rule) {
+    recordRequest(c, 'unknown', undefined, 'denied');
+    reportMcpPolicyDenied(c, 'mcp_server_not_allowed', serverId);
+    return rpcError(
+      403,
+      null,
+      MCP_ERRORS.SERVER_DENIED,
+      'Forbidden by gateway policy: this MCP server is not allowed for your group'
+    );
+  }
+  const groupRule = access.restricted ? access.rule : undefined;
   const server = getMcpServer(serverId);
   if (!server) {
     recordRequest(c, 'unknown', undefined, 'invalid');
@@ -437,7 +464,11 @@ export async function mcpHandler(c: Context): Promise<Response> {
         'Invalid JSON-RPC request'
       );
     }
-    const mismatch = headerMismatch(c.req.raw.headers, message);
+    const mismatch =
+      headerMismatch(c.req.raw.headers, message) ??
+      (method === 'tools/call'
+        ? paramHeaderMismatch(server, c.req.raw.headers, message)
+        : undefined);
     if (mismatch) {
       recordRequest(c, server.id, method, 'invalid');
       return rpcError(
@@ -486,16 +517,27 @@ export async function mcpHandler(c: Context): Promise<Response> {
           : MCP_ERRORS.TOOL_DENIED,
         decision.reason === 'pin'
           ? `Tool ${displayToolName(toolName)} changed since it was approved`
-          : `Tool ${displayToolName(toolName)} is not allowed on this server`
+          : decision.reason === 'invalid_header'
+            ? `Tool ${displayToolName(toolName)} has an invalid x-mcp-header annotation`
+            : `Tool ${displayToolName(toolName)} is not allowed on this server`
       );
     }
-    const args = message.params?.arguments;
+    if (!groupToolAllowed(groupRule, toolName)) {
+      recordRequest(c, server.id, method, 'denied');
+      reportMcpPolicyDenied(c, 'mcp_tool_not_allowed', server.id, toolName);
+      return rpcError(
+        200,
+        id,
+        MCP_ERRORS.TOOL_DENIED,
+        `Tool ${displayToolName(toolName)} is not allowed for your group`
+      );
+    }
     if (
       await mcpGuardrailsBlock(
         c,
         server.inputGuardrails,
         'input',
-        JSON.stringify(args === undefined ? {} : args)
+        toolCallInputText(message.params)
       )
     ) {
       recordRequest(c, server.id, method, 'blocked');
@@ -568,7 +610,9 @@ export async function mcpHandler(c: Context): Promise<Response> {
         finish('error');
         return undefined;
       }
-      const filtered = await filterToolsList(server, response.result);
+      const filtered = await filterToolsList(server, response.result, (name) =>
+        groupToolAllowed(groupRule, name)
+      );
       reportFiltered(c, server, filtered);
       finish('ok');
       return { ...response, result: filtered.result };
