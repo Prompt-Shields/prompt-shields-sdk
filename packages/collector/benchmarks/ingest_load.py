@@ -19,7 +19,7 @@ covered by tests/test_sdk_rate_limit_e2e_db.py.
 Run it from the repository root, against a scratch database (it adds tenants
 and events and never deletes them; tables are created if missing):
 
-    PYTHONPATH=packages:packages/collector python -m loadtest.ingest_load \\
+    PYTHONPATH=packages:packages/collector python -m benchmarks.ingest_load \\
         --database-url postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/ps_load \\
         --tenants 4 --concurrency 32 --requests 2000 --events-per-request 10 \\
         --rate-limit 300

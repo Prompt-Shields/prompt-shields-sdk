@@ -87,14 +87,14 @@ limiting, run the full load test against a scratch database. It adds tenants
 and events and does not delete them:
 
 ```bash
-PYTHONPATH=packages:packages/collector python -m loadtest.ingest_load \
+PYTHONPATH=packages:packages/collector python -m benchmarks.ingest_load \
   --database-url postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/ps_load \
   --tenants 4 --concurrency 32 --requests 2000 --events-per-request 10 --rate-limit 300
 ```
 
 `--rate-limit 0` turns the limit off, and `--json` prints a JSON report. The
 command exits non-zero when a check fails. See the docstring of
-`packages/collector/loadtest/ingest_load.py` for the checks it makes.
+`packages/collector/benchmarks/ingest_load.py` for the checks it makes.
 
 ## Two licenses live in this repository
 

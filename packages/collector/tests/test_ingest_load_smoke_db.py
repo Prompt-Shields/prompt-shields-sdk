@@ -1,4 +1,4 @@
-"""Smoke run of the ingest load test (loadtest/ingest_load.py, #82).
+"""Smoke run of the ingest load test (benchmarks/ingest_load.py, #82).
 
 A few dozen requests against the real collector on a local port and the test
 database: the per-tenant limit holds under concurrency, 429s carry
@@ -6,7 +6,7 @@ Retry-After, and the database holds exactly the accepted events. The full
 load test is run by hand; see the module docstring.
 """
 
-from loadtest.ingest_load import LoadConfig, LoadReport, Sample, percentile, run
+from benchmarks.ingest_load import LoadConfig, LoadReport, Sample, percentile, run
 
 
 def test_percentile_nearest_rank():

@@ -1,6 +1,6 @@
 """SDK <-> collector end to end when the collector rate limits (#82).
 
-The real collector serves on a local port (loadtest.ingest_load's
+The real collector serves on a local port (benchmarks.ingest_load's
 collector_server) against the test database, with PS_RATE_LIMIT_PER_MINUTE=3.
 The real SDK client sends its telemetry there over HTTP; only the LLM
 provider is faked. Checked:
@@ -24,10 +24,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from benchmarks.ingest_load import _bypass_sessions, collector_server, seed_tenants
 from collector import partner_rate_limit
 from collector.partner_rate_limit import FixedWindowRateLimiter
 from db.models import AIUsageEvent, TelemetryClientStats
-from loadtest.ingest_load import _bypass_sessions, collector_server, seed_tenants
 from sqlalchemy import func, select
 
 # The SDK is a sibling package in this repository, not a collector dependency.
