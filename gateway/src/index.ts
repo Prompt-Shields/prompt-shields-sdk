@@ -17,6 +17,7 @@ import { hooks } from './middlewares/hooks';
 import { memoryCache } from './middlewares/cache';
 import { psRouter } from './middlewares/router/hono';
 import { psTelemetry } from './middlewares/ps-telemetry';
+import { psFeedbackHandler } from './middlewares/psFeedback';
 import { otelConfig, psOtel } from './middlewares/psOtel';
 
 // Handlers
@@ -140,6 +141,11 @@ if (getRuntimeKey() === 'node') {
 
 // Support the /v1/models endpoint
 app.get('/v1/models', modelsHandler);
+
+// Explicit feedback on one call by its X-PS-Call-Id (#43): checked,
+// rate-limited per user and forwarded to the collector. Mounted before the
+// router, telemetry, hooks and cache: it is not an LLM call.
+app.post('/v1/feedback', psFeedbackHandler);
 
 // Prompt Shields cost-aware routing (opt-in). Runs before hooks and cache so
 // the resolved model flows into cache-key computation and downstream handlers.

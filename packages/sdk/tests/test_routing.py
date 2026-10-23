@@ -121,14 +121,15 @@ def test_create_merges_route_headers_with_caller_headers():
 
 def test_create_without_route_sends_no_ps_routing_headers():
     client = _client_with_mock_upstream()
-    client.chat.completions.create(
+    response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": "hi"}],
     )
     _, kwargs = client._upstream.chat.completions.create.call_args
-    assert not any(
-        k.lower().startswith("x-ps-") for k in kwargs.get("extra_headers", {})
-    )
+    headers = dict(kwargs.get("extra_headers", {}))
+    # Only the per-call id (#43), which never changes routing.
+    assert headers.pop("X-PS-Call-Id") == response.ps_call_id
+    assert not any(k.lower().startswith("x-ps-") for k in headers)
 
 
 @pytest.mark.asyncio

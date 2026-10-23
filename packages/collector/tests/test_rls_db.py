@@ -31,6 +31,7 @@ from db.models import (
     AssetAttestation,
     AuditEvent,
     Base,
+    CallFeedback,
     DataFlow,
     McpToolUsage,
     PartnerAuditLog,
@@ -151,6 +152,12 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     server_name=f"server-{name}",
                     tool_name="search",
                     call_count=1,
+                ),
+                CallFeedback(
+                    tenant_id=tenant_id,
+                    call_id=f"seed-call-{name}",
+                    score=1.0,
+                    source="sdk",
                 ),
                 TenantApiKey(
                     tenant_id=tenant_id,
@@ -529,6 +536,44 @@ async def test_mcp_tool_usage_under_rls(rls_db):
         await s.rollback()
 
 
+async def test_call_feedback_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    head_a = {"Authorization": f"Bearer {KEY_A}"}
+    head_b = {"Authorization": f"Bearer {KEY_B}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/ingest/events", headers=head_a, json={"events": [
+            {"vendor": "openai", "model": "gpt-4o", "call_id": "call-a1"}]})
+        assert resp.status_code == 200, resp.text
+        resp = await c.post("/ingest/feedback", headers=head_a,
+                            json={"call_id": "call-a1", "score": 0})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"call_id": "call-a1", "created": True, "matched": True}
+        # Tenant b cannot see a's event, and its feedback is its own row.
+        resp = await c.post("/ingest/feedback", headers=head_b,
+                            json={"call_id": "call-a1", "score": 1})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"call_id": "call-a1", "created": True, "matched": False}
+
+    async with rls_db["admin"]() as s:
+        rows = (await s.execute(
+            select(CallFeedback.tenant_id, CallFeedback.score)
+            .where(CallFeedback.call_id == "call-a1")
+        )).all()
+    assert sorted((str(t), sc) for t, sc in rows) == sorted(
+        [(str(a), 0.0), (str(b), 1.0)])
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        s.add(CallFeedback(tenant_id=b, call_id="evil", score=1.0, source="sdk"))
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        hit = await s.execute(text("UPDATE call_feedback SET score = 0.5"))
+        assert hit.rowcount == 2  # the seed row and call-a1, tenant a only
+        await s.rollback()
+
+
 async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, caplog):
     monkeypatch.setattr(settings, "admin_token", TOKEN)
     a, b = rls_db["a"], rls_db["b"]
@@ -549,6 +594,7 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         assert resp.json()["rows_deleted"]["webhook_deliveries"] == 1
         assert resp.json()["rows_deleted"]["webhook_subscriptions"] == 1
         assert resp.json()["rows_deleted"]["mcp_tool_usage"] == 1
+        assert resp.json()["rows_deleted"]["call_feedback"] == 1
 
     assert any(
         "rls bypass granted reason=operator:POST /api/v1/operator/retention/purge"

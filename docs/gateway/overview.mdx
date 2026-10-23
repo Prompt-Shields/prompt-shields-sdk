@@ -34,11 +34,24 @@ and `/metrics` needs `PS_METRICS_TOKEN` as a bearer token when that is set.
 | `x-ps-route`, `x-ps-quality`, `x-ps-max-cost` | Cost-aware routing hints (`PS_ROUTER_ENABLED=true`) | Never |
 | `x-ps-cache` | `on`, `off` or `refresh` | Never |
 | `x-ps-business-unit`, `x-ps-use-case`, `x-ps-owner`, `x-ps-data-classification`, `x-ps-environment` | Business context for telemetry, OTel spans and metrics labels | Never |
+| `x-ps-call-id` | Your id for the call (1-128 of `A-Za-z0-9._:-`; the Python SDK sends one), kept as the telemetry event's `call_id`. Without one the gateway makes a UUID. Either way it comes back in the `x-ps-call-id` response header (when telemetry is on, `PS_API_KEY`) | Never |
 
 Headers named in `x-portkey-forward-headers` are forwarded on every route, except `x-ps-*` headers, which the gateway never sends upstream.
 Provider credential headers (`x-portkey-aws-secret-access-key`,
 `x-portkey-vertex-service-account-json` and similar) are accepted but are
 deliberately not part of the spec.
+
+## Call Feedback
+
+`POST /v1/feedback` records how good a call's answer was, naming the call by
+its `x-ps-call-id`: `{"call_id": "...", "score": 0.0-1.0 or true/false,
+"reason": "incomplete", "user_id": "..."}`. Metadata only: `reason` is one
+of a fixed set of labels and there is no field for free text. The gateway
+forwards it to the collector with `PS_API_KEY` (503 without it). It is
+rate-limited per user and per replica (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`,
+default 60, `0` turns it off): the OIDC subject with `PS_OIDC_ENABLED` (whose
+pseudonym is also the `user_id` forwarded), else the caller's credential
+header, else one shared anonymous bucket.
 
 ## Errors
 

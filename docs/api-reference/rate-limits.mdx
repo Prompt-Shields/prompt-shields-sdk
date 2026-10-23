@@ -44,6 +44,14 @@ events per process), so the default leaves room for many processes per tenant.
 off). Kong's http-log plugin sends one request per proxied call unless
 batching is on, and retries a `429`.
 
+`POST /ingest/feedback` (call feedback from the SDK and the gateway) has two
+limits of its own: per tenant, `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE` (default
+600), and per `user_id` within the tenant when one is sent,
+`PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE` (default 30), so one user cannot
+flood the routing learner. `0` turns either off. The gateway's
+`POST /v1/feedback` adds a per-user limit before forwarding
+(`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE` on the gateway, default 60).
+
 <Info>
   The limiter is in-process, so each collector worker counts separately.
   Running N workers allows up to N times the configured limit.

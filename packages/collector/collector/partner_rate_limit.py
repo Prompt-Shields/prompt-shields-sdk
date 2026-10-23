@@ -110,3 +110,11 @@ _MCP_LIMITER = FixedWindowRateLimiter()
 
 def get_mcp_rate_limiter() -> FixedWindowRateLimiter:
     return _MCP_LIMITER
+
+
+# /ingest/feedback: per-tenant and per-user buckets, apart from the rest.
+_FEEDBACK_LIMITER = FixedWindowRateLimiter()
+
+
+def get_feedback_rate_limiter() -> FixedWindowRateLimiter:
+    return _FEEDBACK_LIMITER

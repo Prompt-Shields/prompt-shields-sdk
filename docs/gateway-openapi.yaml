@@ -102,6 +102,8 @@ tags:
     description: Pass-through to any provider path
   - name: Operations
     description: Health and Prometheus metrics
+  - name: Feedback
+    description: Explicit feedback on one call, for the routing learner
 
 paths:
   /:
@@ -187,6 +189,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createChatCompletion
       tags: [Chat]
@@ -212,6 +215,8 @@ paths:
           headers:
             x-portkey-trace-id:
               $ref: '#/components/headers/TraceId'
+            x-ps-call-id:
+              $ref: '#/components/headers/CallId'
             x-portkey-cache-status:
               $ref: '#/components/headers/CacheStatus'
             x-portkey-retry-attempt-count:
@@ -267,6 +272,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createCompletion
       tags: [Chat]
@@ -333,6 +339,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createResponse
       tags: [Responses]
@@ -572,6 +579,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createMessage
       tags: [Messages]
@@ -681,6 +689,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createEmbedding
       tags: [Embeddings]
@@ -737,6 +746,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createRerank
       tags: [Embeddings]
@@ -789,6 +799,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createImage
       tags: [Images]
@@ -836,6 +847,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createImageEdit
       tags: [Images]
@@ -885,6 +897,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createSpeech
       tags: [Audio]
@@ -931,6 +944,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createTranscription
       tags: [Audio]
@@ -980,6 +994,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createTranslation
       tags: [Audio]
@@ -1029,6 +1044,7 @@ paths:
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
+      - $ref: '#/components/parameters/XPsCallId'
     post:
       operationId: createOcr
       tags: [OCR]
@@ -1590,6 +1606,91 @@ paths:
         default:
           $ref: '#/components/responses/UpstreamError'
 
+  /v1/feedback:
+    post:
+      operationId: createCallFeedback
+      tags: [Feedback]
+      summary: Record feedback on one call
+      description: |
+        Records how good a call's answer was, naming the call by the
+        `x-ps-call-id` the gateway returned (#43). Metadata only: a score
+        from 0 (bad) to 1 (good) or a boolean, optionally a reason label and
+        an opaque user id. There is no field for free text; other fields
+        are dropped. The gateway forwards it to the collector's
+        `/ingest/feedback` with `PS_API_KEY`, which keeps one feedback per
+        call (a later one replaces it).
+
+        Rate-limited per user and per replica
+        (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, default 60, `0` turns it off):
+        the OIDC subject with `PS_OIDC_ENABLED`, else the caller's
+        credential header, else one shared anonymous bucket. With OIDC the
+        `user_id` forwarded is the subject pseudonym, not the body's.
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - GatewayOidc: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CallFeedbackRequest'
+      responses:
+        '200':
+          description: Stored by the collector
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallFeedbackResponse'
+        '400':
+          description: The body is not JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
+        '413':
+          description: The body exceeds 4096 bytes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: |
+            Invalid feedback (call id, score, reason or user id), or a string
+            with a NUL character or an unpaired surrogate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: The user's (or the collector's) feedback rate limit is exhausted
+          headers:
+            Retry-After:
+              description: Seconds until the limit resets
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: The collector could not be reached or refused the gateway's key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Feedback is off (`PS_API_KEY` is not set)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /v1/realtime:
     parameters:
       - $ref: '#/components/parameters/XPortkeyProvider'
@@ -2113,6 +2214,20 @@ components:
         type: string
       example: production
       x-ps-sent-upstream: never
+    XPsCallId:
+      name: x-ps-call-id
+      in: header
+      required: false
+      description: |
+        The caller's id for this call (1-128 of `A-Za-z0-9._:-`; the Prompt
+        Shields SDK sends one on every call), kept as the telemetry event's
+        `call_id` and returned in the `x-ps-call-id` response header. Any
+        other value is replaced by a new UUID. Never sent upstream.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._:-]{1,128}$'
+      example: 0b1e6a58-3f43-4c43-9d1e-2f0f6d3b9c11
+      x-ps-sent-upstream: never
 
     # --- Portkey-compatible headers (x-portkey-*), never sent upstream ----
     XPortkeyProvider:
@@ -2267,6 +2382,13 @@ components:
         type: string
     LastUsedOptionIndex:
       description: Index of the config target that served the request (fallback / load balance)
+      schema:
+        type: string
+    CallId:
+      description: |
+        The call's id (#43), on every LLM call the gateway reports to the
+        collector (`PS_API_KEY` set): the caller's `x-ps-call-id`, else a new
+        UUID. Name the call by it in `POST /v1/feedback`.
       schema:
         type: string
 
@@ -2538,6 +2660,42 @@ components:
           description: Config validation issues (`Invalid config passed`)
           items:
             type: string
+    CallFeedbackRequest:
+      type: object
+      required: [call_id, score]
+      properties:
+        call_id:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,128}$'
+          description: The call's `x-ps-call-id`
+        score:
+          description: 0 (bad) to 1 (good); `true` is 1 and `false` is 0
+          oneOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+            - type: boolean
+        reason:
+          type: string
+          enum: [correct, helpful, incorrect, incomplete, hallucination, off_topic, refusal, format_error, unsafe, too_slow, too_long, other]
+        user_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Opaque user id (ignored with OIDC, which uses the subject pseudonym)
+      additionalProperties: true
+    CallFeedbackResponse:
+      type: object
+      required: [call_id, created, matched]
+      properties:
+        call_id:
+          type: string
+        created:
+          type: boolean
+          description: False when it replaced an earlier feedback for the call
+        matched:
+          type: boolean
+          description: Whether the collector has the call's usage event yet
     ErrorResponse:
       type: object
       description: OpenAI-shaped error

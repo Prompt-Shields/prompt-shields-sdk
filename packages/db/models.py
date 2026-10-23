@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -162,6 +163,8 @@ class AIUsageEvent(Base):
     # SDK's sha256(api key)[:16] (#93), never the key. Matches a provider
     # key id through ProviderKeyFingerprint to corroborate platform_signal.
     api_key_fingerprint = Column(Text)
+    # Per-call id from the SDK or gateway (#43): what call feedback names.
+    call_id = Column(Text)
 
     asset = relationship("AIAsset", back_populates="usage_events")
 
@@ -169,6 +172,7 @@ class AIUsageEvent(Base):
         Index("ix_usage_events_tenant_ts", "tenant_id", "timestamp"),
         Index("ix_usage_events_asset_ts", "asset_id", "timestamp"),
         Index("ix_usage_events_tenant_key_fp", "tenant_id", "api_key_fingerprint"),
+        Index("ix_usage_events_tenant_call_id", "tenant_id", "call_id"),
     )
 
 
@@ -362,6 +366,36 @@ class McpToolUsage(Base):
             unique=True,
         ),
         Index("ix_mcp_tool_usage_tenant_last_seen", "tenant_id", "last_seen"),
+    )
+
+
+class CallFeedback(Base):
+    """Explicit feedback on one LLM call (#43), for the routing learner.
+
+    One row per (tenant, call_id): a later submission for the same call
+    replaces the earlier one. Metadata only: a score in [0, 1], an optional
+    reason from a fixed set of labels (collector/feedback.py), the caller's
+    opaque user id and the source. Never free text. ``call_id`` is the id
+    the SDK or gateway put on the call's usage event; the feedback is kept
+    even when that event has not arrived (it may follow). Rows not updated
+    within the tenant's retention period are purged with the events.
+    """
+
+    __tablename__ = "call_feedback"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    call_id = Column(Text, nullable=False)
+    score = Column(Float, nullable=False)
+    reason = Column(Text)
+    user_id = Column(Text)
+    source = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "call_id", name="ux_call_feedback_call"),
+        Index("ix_call_feedback_tenant_updated", "tenant_id", "updated_at"),
     )
 
 

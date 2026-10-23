@@ -349,6 +349,43 @@ decision to the gateway instead: calls go to the gateway with the hints and the
 business context as `X-PS-*` headers, and responses come back in the same
 `RoutedChatCompletion` shape with `resp.ps.route.mode == "gateway"`.
 
+## Call IDs and Feedback
+
+Every call made through a Prompt Shields client gets a `call_id`, a UUID
+generated before the call. It is on the call's telemetry event, it is sent
+upstream as `X-PS-Call-Id` (a Prompt Shields gateway reports the call under
+the same id), and it comes back to you:
+
+```python
+from prompt_shields import ShieldsOpenAI, last_call_id
+
+client = ShieldsOpenAI(api_key="sk-...", ps_api_key="ps-...")
+resp = client.chat.completions.create(model="gpt-4o", messages=[...])
+resp.ps_call_id   # also on a stream object; last_call_id() for this thread/task
+
+# Later, when the user rates the answer: a score from 0 (bad) to 1 (good),
+# or True/False, and optionally one reason label. Never free text.
+client.feedback(resp.ps_call_id, 0.2, reason="incomplete", user_id=hashed_user)
+```
+
+`ps_call_id` is a plain attribute: it is not one of the response's fields
+and is not in `model_dump()`. To use your own id, pass
+`ps_metadata={"call_id": "..."}` (1-128 of `A-Za-z0-9._:-`). Auto-instrumented
+calls (`instrument()`) get a `call_id` too (`response.ps_call_id` where the
+response object takes one, else `last_call_id()`).
+
+Reasons: `correct`, `helpful`, `incorrect`, `incomplete`, `hallucination`,
+`off_topic`, `refusal`, `format_error`, `unsafe`, `too_slow`, `too_long`,
+`other` (`prompt_shields.FEEDBACK_REASONS`). Feedback goes to the
+collector's `POST /ingest/feedback`, which keeps one feedback per call (a
+later one replaces it) and rate-limits it per tenant and per `user_id`.
+Without a client, use `send_feedback(call_id, score, reason, ps_api_key=...,
+ps_collector_url=...)` (or `send_feedback_async`). Unlike telemetry,
+feedback is not fail-open: invalid arguments raise `ValueError` (or
+`TypeError`) before anything is sent, and a refused or failed request raises
+`FeedbackError` (with `status_code` and, on a 429, `retry_after`). The
+async clients have `await client.feedback(...)`.
+
 ## Configuration Reference
 
 | Argument | Type | Default | Notes |

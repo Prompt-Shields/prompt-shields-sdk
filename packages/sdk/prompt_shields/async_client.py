@@ -13,6 +13,12 @@ from collections.abc import Callable
 from typing import Any
 
 from prompt_shields.client import _fingerprint, _openai_max_tokens
+from prompt_shields.feedback import (
+    attach_call_id,
+    call_id_headers,
+    new_call_id,
+    send_feedback_async,
+)
 from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import (
@@ -67,6 +73,7 @@ class AsyncShieldsClient:
         self._vendor = vendor
         self._adapter = get_adapter(vendor)
         self._ps_api_key = ps_api_key
+        self._ps_collector_url = ps_collector_url
         self._telemetry = TelemetrySender(ps_collector_url, ps_api_key)
         atlas_url = atlas_url if atlas_url is not None else os.environ.get("PS_ATLAS_URL")
         atlas_api_key = (
@@ -118,6 +125,7 @@ class AsyncShieldsClient:
         latency_ms: int,
         ps_metadata: PSMetadata | None = None,
         adapter_fields: dict | None = None,
+        call_id: str | None = None,
     ) -> dict:
         # Streams pass fields accumulated from their chunks instead.
         if adapter_fields is None:
@@ -151,6 +159,8 @@ class AsyncShieldsClient:
             ),
             "api_key_fingerprint": self._api_key_fingerprint,
         }
+        if call_id is not None:
+            event["call_id"] = call_id
         add_usage_detail_fields(event, adapter_fields)
 
         field_mapping = {"use_case": "use_case_name", "owner": "owner_email"}
@@ -179,6 +189,15 @@ class AsyncShieldsClient:
                 event["detected_pii_types"] = categories
 
         return event
+
+    async def feedback(self, call_id: str, score: float | bool,
+                       reason: str | None = None, *,
+                       user_id: str | None = None) -> dict:
+        """``ShieldsClient.feedback`` for asyncio."""
+        return await send_feedback_async(
+            call_id, score, reason, user_id=user_id,
+            ps_api_key=self._ps_api_key, ps_collector_url=self._ps_collector_url,
+        )
 
     def telemetry_stats(self) -> dict:
         """Delivery counters per destination: enqueued, sent, buffered and
@@ -237,6 +256,9 @@ class _AsyncCompletionsNamespace:
                 **kwargs.get("extra_headers", {}),
                 **route.to_headers(),
             }
+        # One id per call (#43); see ShieldsClient.
+        call_id = new_call_id(ps_metadata)
+        call_id_headers(kwargs, call_id)
 
         streaming = kwargs.get("stream") is True
         hide_usage_chunk = False
@@ -261,22 +283,23 @@ class _AsyncCompletionsNamespace:
             )
 
         if streaming:
-            return self._wrap_stream(
+            return attach_call_id(self._wrap_stream(
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
                 hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
-            )
+                call_id=call_id,
+            ), call_id)
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
         event = self._parent._build_event(
             model=model, messages=messages, response=response,
-            latency_ms=latency_ms, ps_metadata=ps_metadata,
+            latency_ms=latency_ms, ps_metadata=ps_metadata, call_id=call_id,
         )
         if _event_hook is not None:
             _event_hook(event)
         await self._send(event, messages)
-        return response
+        return attach_call_id(response, call_id)
 
     async def _send(self, event: dict, messages: list,
                     flush: bool = True) -> None:
@@ -294,7 +317,8 @@ class _AsyncCompletionsNamespace:
     def _wrap_stream(self, response: Any, *, model: str, messages: list,
                      ps_metadata: PSMetadata | None, start: float,
                      hide_usage_chunk: bool,
-                     event_hook: Callable[[dict], None] | None = None) -> Any:
+                     event_hook: Callable[[dict], None] | None = None,
+                     call_id: str | None = None) -> Any:
         """Wrap a stream so one event is emitted when it ends. Fail-open."""
 
         def stream_event(adapter_fields: dict, stream_fields: dict,
@@ -302,7 +326,7 @@ class _AsyncCompletionsNamespace:
             event = self._parent._build_event(
                 model=model, messages=messages, response=None,
                 latency_ms=latency_ms, ps_metadata=ps_metadata,
-                adapter_fields=adapter_fields,
+                adapter_fields=adapter_fields, call_id=call_id,
             )
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):

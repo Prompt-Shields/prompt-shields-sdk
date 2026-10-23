@@ -22,6 +22,7 @@ from db.models import (
     AIAsset,
     AIUsageEvent,
     Base,
+    CallFeedback,
     DataFlow,
     McpToolUsage,
     PartnerAuditLog,
@@ -64,6 +65,7 @@ TENANT_TABLES = (
     AIAsset,
     TelemetryClientStats,
     McpToolUsage,
+    CallFeedback,
 )
 
 
@@ -160,6 +162,7 @@ async def seed_full_tenant(db, name: str, **tenant_settings) -> uuid.UUID:
                 tool_name="create_issue",
                 call_count=3,
             ),
+            CallFeedback(tenant_id=tid, call_id="c-1", score=1.0, source="sdk"),
         ]
     )
     await db.commit()
@@ -313,6 +316,23 @@ class TestPurge:
             assert await count(db, McpToolUsage, b) == 2  # other tenant untouched
             audit = (await db.execute(select(RetentionAuditLog))).scalar_one()
             assert audit.details == {"ai_usage_events": 0, "mcp_tool_usage": 2}
+
+    async def test_purges_feedback_not_updated_within_retention(self, session_factory):
+        async with session_factory() as db:
+            a = await make_tenant(db, "a", retention_days=30)
+            for i, age in enumerate((1, 29, 31, 400)):
+                ts = NOW - timedelta(days=age)
+                db.add(CallFeedback(tenant_id=a, call_id=f"c-{i}", score=0.5,
+                                    source="sdk", created_at=ts, updated_at=ts))
+            await db.commit()
+
+            dry = await retention.purge_tenant_events(db, a, now=NOW, dry_run=True)
+            assert dry.call_feedback_deleted == 2
+            result = await retention.purge_tenant_events(db, a, now=NOW, actor="test")
+            assert result.call_feedback_deleted == 2
+            assert await count(db, CallFeedback, a) == 2
+            audit = (await db.execute(select(RetentionAuditLog))).scalar_one()
+            assert audit.details == {"ai_usage_events": 0, "call_feedback": 2}
 
     async def test_single_tenant_purge_leaves_other_tenant_alone(self, session_factory):
         async with session_factory() as db:
