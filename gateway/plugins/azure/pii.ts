@@ -113,7 +113,7 @@ export const handler: PluginHandler<{ pii: AzureCredentials }> = async (
   if (!credentials?.resourceName) {
     return {
       error: new Error('PII credentials must include resourceName'),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -123,7 +123,7 @@ export const handler: PluginHandler<{ pii: AzureCredentials }> = async (
       error: new Error(
         'PII credentials must include either apiKey or azureAuthMode'
       ),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -133,7 +133,7 @@ export const handler: PluginHandler<{ pii: AzureCredentials }> = async (
   if (!content) {
     return {
       error: new Error('request or response json is empty'),
-      verdict: true,
+      verdict: false,
       data: null,
       transformedData,
       transformed,
@@ -167,7 +167,8 @@ export const handler: PluginHandler<{ pii: AzureCredentials }> = async (
     }
   } catch (e) {
     error = e;
-    verdict = !(e instanceof AzureHostIdentityDisabledError);
+    // On error the verdict is false; failOnError decides the outcome.
+    verdict = false;
     data = null;
   }
 

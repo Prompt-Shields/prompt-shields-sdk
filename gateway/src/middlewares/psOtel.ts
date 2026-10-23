@@ -17,6 +17,12 @@
  *
  * No dependencies: spans are plain OTLP JSON and sent with `fetch`, so this
  * runs on Node and Cloudflare Workers alike. Export is batched and fail-open.
+ *
+ * Egress (as the OTLP logs exporter): the endpoint must pass
+ * `isSafeUpstreamURL` (no metadata, private or loopback addresses unless
+ * listed in `TRUSTED_CUSTOM_HOSTS`), and sends go through `upstreamFetch`,
+ * which never follows a redirect. Spans for a refused endpoint are dropped
+ * and counted (`reason="unsafe_endpoint"`); nothing is sent.
  */
 
 import {
@@ -32,6 +38,8 @@ import {
   StreamSummary,
 } from './psStreamObserver';
 import { telemetryDroppedTotal } from './psMetrics/security';
+import { isSafeUpstreamURL } from './requestValidator';
+import { upstreamFetch } from '../utils/fetch';
 
 export interface OtelConfig {
   endpoint: string;
@@ -527,6 +535,8 @@ export function buildExportRequest(spans: BuiltSpan[], serviceName: string) {
   };
 }
 
+type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
+
 export class OtlpJsonExporter {
   private queue: BuiltSpan[] = [];
   private timer: any;
@@ -534,7 +544,7 @@ export class OtlpJsonExporter {
 
   constructor(
     private config: OtelConfig,
-    private fetchFn: typeof fetch = (...a) => fetch(...a)
+    private fetchFn: FetchFn = upstreamFetch
   ) {}
 
   get pending() {
@@ -587,6 +597,18 @@ export class OtlpJsonExporter {
   }
 
   private async send(batch: BuiltSpan[]): Promise<void> {
+    // Checked per send: TRUSTED_CUSTOM_HOSTS is read from the environment.
+    if (!isSafeUpstreamURL(this.config.endpoint)) {
+      telemetryDroppedTotal.inc(
+        { sink: 'otel', reason: 'unsafe_endpoint' },
+        batch.length
+      );
+      this.warn(
+        'endpoint is not an allowed egress target (list private or ' +
+          'loopback hosts in TRUSTED_CUSTOM_HOSTS)'
+      );
+      return;
+    }
     try {
       const timeout = (AbortSignal as any).timeout?.(10_000);
       const res = await this.fetchFn(this.config.endpoint, {
@@ -597,6 +619,12 @@ export class OtlpJsonExporter {
         ),
         ...(timeout ? { signal: timeout } : {}),
       });
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* nothing to discard */
+      }
+      // A 3xx is never followed: upstreamFetch turns it into an error.
       if (!res.ok) {
         telemetryDroppedTotal.inc(
           { sink: 'otel', reason: 'http_error' },

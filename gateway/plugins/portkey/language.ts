@@ -22,7 +22,7 @@ export const handler: PluginHandler = async (
     if (!content) {
       return {
         error: { message: 'request or response json is empty' },
-        verdict: true,
+        verdict: false,
         data: null,
       };
     }
