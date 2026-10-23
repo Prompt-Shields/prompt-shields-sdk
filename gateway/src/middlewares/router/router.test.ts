@@ -7,6 +7,8 @@ import {
   resolveRoute,
   RoutePolicy,
 } from './index';
+import { DEFAULT_POLICY_CATALOG_VERSION } from './policy';
+import generatedPolicy from './defaultPolicy.json';
 
 // A small deterministic policy for assertions that don't need the defaults.
 const policy: RoutePolicy = {
@@ -301,5 +303,22 @@ describe('resolveRoute precedence', () => {
   test('the default policy is a usable, non-empty RoutePolicy', () => {
     expect(Object.keys(defaultPolicy.groups).length).toBeGreaterThan(0);
     expect(defaultPolicy.groups[defaultPolicy.defaultGroup]).toBeDefined();
+  });
+
+  test('the default policy is the catalog-generated defaultPolicy.json', () => {
+    // Prices come from scripts/build_catalog.py; the SDK test suite fails
+    // when this file drifts from the catalog source.
+    expect(defaultPolicy.groups).toEqual(generatedPolicy.groups);
+    expect(defaultPolicy.qualityToGroup).toEqual(
+      generatedPolicy.qualityToGroup
+    );
+    expect(DEFAULT_POLICY_CATALOG_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}/);
+    const mini = defaultPolicy.groups.cheap.find(
+      (t) => t.model === 'gpt-4o-mini'
+    );
+    expect(mini).toMatchObject({
+      inputCostPer1k: 0.00015,
+      outputCostPer1k: 0.0006,
+    });
   });
 });

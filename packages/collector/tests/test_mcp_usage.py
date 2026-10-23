@@ -108,6 +108,37 @@ def test_parse_event_skips_unstorable_events(event):
     assert parse_event(event) is None
 
 
+def test_parse_event_blocked_and_user():
+    call = parse_event({
+        "tool_name": "t", "source": "gateway", "outcome": "blocked",
+        "user_id": "ab" * 16, "user_group": "quant-analysts",
+    })
+    assert (call.is_blocked, call.is_error) == (True, False)
+    assert (call.user_hash, call.user_group) == ("ab" * 16, "quant-analysts")
+
+
+@pytest.mark.parametrize(
+    "user_id",
+    ["jane.doe@bank.example", "user-00u1abcd", "AB" * 16, "ab" * 40, 7, None],
+)
+def test_parse_event_keeps_only_hashed_users(user_id):
+    call = parse_event({"tool_name": "t", "user_id": user_id, "user_group": "a b"})
+    assert (call.user_hash, call.user_group) == ("", "")
+
+
+def test_aggregate_counts_blocked_apart_per_user():
+    tid = uuid.uuid4()
+    rows = aggregate(tid, [
+        McpCall("gateway", "docs", "search", False, 5, is_blocked=True, user_hash="a" * 32),
+        McpCall("gateway", "docs", "search", True, 5, user_hash="a" * 32),
+        McpCall("gateway", "docs", "search", False, 5, user_hash="b" * 32),
+    ], NOW)
+    assert sorted(
+        (r["user_hash"], r["call_count"], r["error_count"], r["blocked_count"])
+        for r in rows
+    ) == [("a" * 32, 2, 1, 1), ("b" * 32, 1, 0, 0)]
+
+
 def test_parse_event_drops_bad_optional_fields():
     call = parse_event(
         {
