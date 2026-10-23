@@ -186,7 +186,7 @@ export const handler: PluginHandler = async (
     if (!content) {
       return {
         error: { message: 'request or response json is empty' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,
@@ -233,6 +233,7 @@ export const handler: PluginHandler = async (
   } catch (e: any) {
     delete e.stack;
     error = e;
+    verdict = false;
   }
 
   return { error, verdict, data, transformedData, transformed };

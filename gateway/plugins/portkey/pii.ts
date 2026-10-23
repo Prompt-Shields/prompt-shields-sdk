@@ -70,7 +70,7 @@ export const handler: PluginHandler = async (
     if (context.requestType === 'embed' && parameters?.redact) {
       return {
         error: { message: 'PII redaction is not supported for embed requests' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,
@@ -84,7 +84,7 @@ export const handler: PluginHandler = async (
     if (!content) {
       return {
         error: { message: 'request or response json is empty' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,
@@ -95,7 +95,7 @@ export const handler: PluginHandler = async (
     if (!parameters.categories?.length) {
       return {
         error: { message: 'No PII categories are configured' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,
@@ -106,7 +106,7 @@ export const handler: PluginHandler = async (
     if (!parameters.credentials) {
       return {
         error: { message: 'Credentials not found' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,

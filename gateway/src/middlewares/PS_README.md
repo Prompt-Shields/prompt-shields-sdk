@@ -21,6 +21,12 @@ for any application that routes LLM traffic through the gateway.
 
 Set these environment variables:
 - `PS_COLLECTOR_URL` — URL of the Prompt Shields collector (default: `http://localhost:8000`)
+  It must pass `isSafeUpstreamURL`, and redirects are not followed. Public
+  hosts and in-cluster service names (`http://prompt-shields-collector:8000`,
+  `*.svc.cluster.local`) work as they are. A loopback host (`localhost`,
+  `127.0.0.1`) works only while `TRUSTED_CUSTOM_HOSTS` is unset or lists it,
+  and an IP literal in a private range (`10.0.0.5`) only when it is listed.
+  Otherwise events are dropped (`send_failed`, one warning in the log).
 - `PS_API_KEY` — Prompt Shields API key for authentication
 - `PS_TELEMETRY_MAX_ATTEMPTS` — collector send attempts per event (default 3);
   `PS_TELEMETRY_RETRY_BASE_MS` — first retry delay, doubled per attempt
@@ -66,6 +72,10 @@ An inbound `traceparent` makes the span a child of the caller's span.
 - `PS_OTEL_MAX_BATCH` (64), `PS_OTEL_FLUSH_MS` (5000), `PS_OTEL_MAX_QUEUE` (2048) — batching on Node. On Workers each request flushes the queue under `waitUntil`.
 
 Export never blocks or fails a request; failed batches are dropped.
+The endpoint must pass `isSafeUpstreamURL` (list a private or loopback host in
+`TRUSTED_CUSTOM_HOSTS`), and redirects are never followed. Spans for a refused
+endpoint are dropped and counted in
+`ps_gateway_telemetry_dropped_total{sink="otel",reason="unsafe_endpoint"}`.
 
 **Do not point this exporter at the Prompt Shields collector while `PS_API_KEY`
 telemetry (`ps-telemetry.ts`) is also on.** Both paths ingest the same call, so

@@ -135,7 +135,7 @@ export const handler: PluginHandler = async (
     console.error('[Javelin] Missing API key after all checks');
     return {
       error: `'parameters.credentials.apiKey' must be set. Received parameters keys: ${Object.keys(parameters).join(', ')}`,
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -144,7 +144,7 @@ export const handler: PluginHandler = async (
     console.error('[Javelin] Missing application name');
     return {
       error: `'parameters.credentials.application' must be set. Received: ${JSON.stringify(credentials)}`,
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -154,7 +154,7 @@ export const handler: PluginHandler = async (
     console.error('[Javelin] No content to check');
     return {
       error: { message: 'request or response json is empty' },
-      verdict: true,
+      verdict: false,
       data: null,
     };
   }
@@ -172,7 +172,7 @@ export const handler: PluginHandler = async (
       console.warn('[Javelin] No assessments in response');
       return {
         error: { message: 'No assessments in Javelin response' },
-        verdict: true,
+        verdict: false,
         data: null,
       };
     }
@@ -251,7 +251,7 @@ export const handler: PluginHandler = async (
       };
     }
   } catch (e: any) {
-    // Handle API errors - still return verdict true so Portkey doesn't block
+    // Handle API errors: verdict false, so failOnError decides the outcome
     console.error('[Javelin] Error calling API:', e.message);
     console.error('[Javelin] Error details:', e);
 
@@ -261,7 +261,7 @@ export const handler: PluginHandler = async (
       name: e.name,
       ...(e.cause && { cause: e.cause }),
     };
-    verdict = true; // Don't block on API errors
+    verdict = false;
     data = {
       error_occurred: true,
       error_message: e.message,

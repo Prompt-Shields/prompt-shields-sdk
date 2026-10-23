@@ -20,7 +20,7 @@ export const handler: PluginHandler = async (
       error: {
         message: 'Patronus guardrails only support after_request_hooks.',
       },
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -36,7 +36,7 @@ export const handler: PluginHandler = async (
         message:
           'Profile parameter is required. Format: "evaluator:criteria" (e.g., "judge:my-custom-criteria") or shorthand "my-custom" (defaults to judge evaluator)',
       },
-      verdict: true,
+      verdict: false,
       data,
     };
   }

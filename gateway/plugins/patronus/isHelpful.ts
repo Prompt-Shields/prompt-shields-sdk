@@ -23,7 +23,7 @@ export const handler: PluginHandler = async (
       error: {
         message: 'Patronus guardrails only support after_request_hooks.',
       },
-      verdict: true,
+      verdict: false,
       data,
     };
   }

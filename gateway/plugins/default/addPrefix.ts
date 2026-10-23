@@ -187,7 +187,7 @@ export const handler: PluginHandler = async (
     if (!prefix || typeof prefix !== 'string') {
       return {
         error: { message: 'Prefix parameter is required and must be a string' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,
@@ -198,7 +198,7 @@ export const handler: PluginHandler = async (
     if (!context.request?.json) {
       return {
         error: { message: 'Request JSON is empty or missing' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,
@@ -241,6 +241,7 @@ export const handler: PluginHandler = async (
       message: `Error in addPrefix plugin: ${e.message || 'Unknown error'}`,
       originalError: e,
     };
+    verdict = false;
   }
 
   return { error, verdict, data, transformedData, transformed };

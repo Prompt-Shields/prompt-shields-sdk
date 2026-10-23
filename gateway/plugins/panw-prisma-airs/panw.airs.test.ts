@@ -127,7 +127,7 @@ describe('PANW Prisma AIRS Guardrail', () => {
     expect(mockPost).toHaveBeenCalledTimes(1);
   });
 
-  it('should allow traffic when API key is missing (no HTTP call)', async () => {
+  it('should report an error (verdict false) when API key is missing (no HTTP call)', async () => {
     // Temporarily clear the environment variable
     const originalEnvKey = process.env.AIRS_API_KEY;
     delete process.env.AIRS_API_KEY;
@@ -150,7 +150,8 @@ describe('PANW Prisma AIRS Guardrail', () => {
       delete process.env.AIRS_API_KEY;
     }
 
-    expect(result.verdict).toBe(true);
+    // PS fork: verdict false with the error; failOnError decides.
+    expect(result.verdict).toBe(false);
     expect(result.error).toContain(
       'AIRS_API_KEY is required but not configured'
     );
@@ -158,7 +159,7 @@ describe('PANW Prisma AIRS Guardrail', () => {
     expect(mockPost).not.toHaveBeenCalled(); // No HTTP call made
   });
 
-  it('should allow traffic when API key is empty string (no HTTP call)', async () => {
+  it('should report an error (verdict false) when API key is empty string (no HTTP call)', async () => {
     // Temporarily clear the environment variable
     const originalEnvKey = process.env.AIRS_API_KEY;
     delete process.env.AIRS_API_KEY;
@@ -181,7 +182,8 @@ describe('PANW Prisma AIRS Guardrail', () => {
       delete process.env.AIRS_API_KEY;
     }
 
-    expect(result.verdict).toBe(true);
+    // PS fork: verdict false with the error; failOnError decides.
+    expect(result.verdict).toBe(false);
     expect(result.error).toContain(
       'AIRS_API_KEY is required but not configured'
     );

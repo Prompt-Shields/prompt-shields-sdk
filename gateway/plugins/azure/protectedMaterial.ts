@@ -23,7 +23,7 @@ export const handler = async (
       error: new Error(
         'Protected Material is not supported for beforeRequestHook'
       ),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -33,7 +33,7 @@ export const handler = async (
   if (!credentials) {
     return {
       error: new Error('parameters.credentials must be set'),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -44,7 +44,7 @@ export const handler = async (
       error: new Error(
         'Protected Material credentials must include resourceName'
       ),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -55,7 +55,7 @@ export const handler = async (
       error: new Error(
         'Protected Material credentials must include either apiKey or azureAuthMode'
       ),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -64,7 +64,7 @@ export const handler = async (
   if (!text) {
     return {
       error: new Error('request or response text is empty'),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -73,11 +73,7 @@ export const handler = async (
 
   const url = `https://${credentials.resourceName}.cognitiveservices.azure.com/contentsafety/text:detectProtectedMaterial?api-version=${apiVersion}`;
 
-  const {
-    token,
-    error: tokenError,
-    denied,
-  } = await getAccessToken(
+  const { token, error: tokenError } = await getAccessToken(
     credentials as any,
     'protectedMaterial',
     pluginOptions,
@@ -87,7 +83,7 @@ export const handler = async (
   if (tokenError) {
     return {
       error: tokenError,
-      verdict: !denied,
+      verdict: false,
       data,
     };
   }
@@ -114,7 +110,7 @@ export const handler = async (
     assertAzureResourceName(credentials.resourceName);
     response = await post(url, request, { headers }, timeout);
   } catch (e) {
-    return { error: e, verdict: true, data };
+    return { error: e, verdict: false, data };
   }
 
   if (response) {

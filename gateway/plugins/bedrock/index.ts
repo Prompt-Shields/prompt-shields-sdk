@@ -127,7 +127,7 @@ export const pluginHandler: PluginHandler<
     if (!content) {
       return {
         error: { message: 'request or response json is empty' },
-        verdict: true,
+        verdict: false,
         data: null,
         transformedData,
         transformed,
@@ -202,6 +202,7 @@ export const pluginHandler: PluginHandler<
     } else {
       error = { message: (e as Error).message };
     }
+    verdict = false;
   }
   return {
     verdict,
