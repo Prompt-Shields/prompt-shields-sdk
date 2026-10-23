@@ -3,6 +3,8 @@
 --
 -- access: stash the X-PS-* business headers in kong.ctx.plugin and, by
 --         default, remove every X-PS-* header from the upstream request.
+--         The two steps fail separately: an error while reading or stashing
+--         the headers never skips the strip.
 -- log:    build a compact event (event.build below) from Kong's AI analytics
 --         and the stashed headers, and queue it.
 -- queue:  kong.tools.queue batches events per plugin instance and posts them
@@ -302,6 +304,7 @@ end
 ---------------------------------------------------------------------------
 
 local kong = kong
+local ngx = ngx
 local pcall = pcall
 local concat = table.concat
 local random = math.random
@@ -313,9 +316,16 @@ local USER_AGENT = "kong-plugin-prompt-shields/" .. VERSION
 -- (including Authorization), which the event never uses. Versions of Kong
 -- that do not know the flag ignore it.
 local SERIALIZE_OPTS = { __skip_fetch_headers__ = true }
--- Up to Kong's own cap, so a request cannot hide an X-PS-* header behind 100
--- others.
+-- Kong's own cap for kong.request.get_headers(). A request with more
+-- headers than this is re-read with ngx.req.get_headers(0) (no limit), so it
+-- cannot hide an X-PS-* header behind 1,000 others.
 local MAX_HEADERS = 1000
+-- Largest request body sent to the collector. Its limit is 4 MiB
+-- (otel_ingest.MAX_BODY_BYTES); this leaves some room. A batch is split into
+-- as many POSTs as it takes to stay under it: one event can reach tens of KB
+-- (long model and header values, JSON escaping), so max_batch_size events do
+-- not always fit in one request.
+local MAX_BATCH_BYTES = 4000000
 
 -- Statuses worth retrying with the queue's backoff: timeouts, rate limits
 -- and server errors. Any other non-2xx status will never succeed on retry,
@@ -344,10 +354,10 @@ local PromptShieldsHandler = {
 }
 
 
--- Queue handler: post one batch of JSON-encoded events as a JSON array.
--- Returns true when the batch is done with (delivered or dropped for good),
--- or nil and an error to have the queue retry it.
-local function send_batch(conf, entries)
+-- Post entries[first..last] as one JSON array. Returns true when that part
+-- is done with (delivered or dropped for good), or nil and an error to have
+-- the queue retry.
+local function post(conf, entries, first, last)
   local httpc = http.new()
   httpc:set_timeout(conf.timeout)
 
@@ -358,7 +368,7 @@ local function send_batch(conf, entries)
       ["Authorization"] = "Bearer " .. conf.ingest_key,
       ["User-Agent"] = USER_AGENT,
     },
-    body = "[" .. concat(entries, ",") .. "]",
+    body = "[" .. concat(entries, ",", first, last) .. "]",
     keepalive_timeout = conf.keepalive,
     ssl_verify = conf.ssl_verify,
   })
@@ -379,23 +389,86 @@ local function send_batch(conf, entries)
   -- Never logs the key or the body: only the status.
   kong.log.err("collector returned ", status, " (",
                DROP_STATUSES[status] or "not retryable", "); dropping ",
-               #entries, " event(s)")
+               last - first + 1, " event(s)")
+  return true
+end
+
+
+-- How far a batch got before a retryable failure, so that a retry does not
+-- post the parts already delivered again. The queue retries a batch with the
+-- same table; weak keys let finished batches be collected.
+local delivered = setmetatable({}, { __mode = "k" })
+
+
+-- Queue handler: post one batch of JSON-encoded events, as one JSON array
+-- per MAX_BATCH_BYTES. Returns true when the batch is done with (delivered
+-- or dropped for good), or nil and an error to have the queue retry the
+-- parts not delivered yet.
+local function send_batch(conf, entries)
+  local n = #entries
+  local first = (delivered[entries] or 0) + 1
+  while first <= n do
+    -- "[" and "]", plus a "," between entries.
+    local last, size = first, #entries[first] + 2
+    while last < n and size + 1 + #entries[last + 1] <= MAX_BATCH_BYTES do
+      last = last + 1
+      size = size + 1 + #entries[last]
+    end
+    local ok, err = post(conf, entries, first, last)
+    if not ok then
+      return nil, err
+    end
+    delivered[entries] = last
+    first = last + 1
+  end
+  delivered[entries] = nil
   return true
 end
 PromptShieldsHandler._send_batch = send_batch -- for tests
 PromptShieldsHandler._event = event        -- for tests
+PromptShieldsHandler._MAX_BATCH_BYTES = MAX_BATCH_BYTES -- for tests
 
 
-local function access(conf)
-  local headers = kong.request.get_headers(MAX_HEADERS)
-  kong.ctx.plugin.ps_headers = event.collect_ps_headers(headers)
-
-  if conf.strip_ps_headers then
-    local clear_header = kong.service.request.clear_header
-    for _, name in ipairs(event.ps_header_names(headers)) do
-      clear_header(name)
-    end
+-- Every request header. kong.request.get_headers() stops at MAX_HEADERS
+-- and says "truncated"; ngx.req.get_headers(0) then reads them all.
+local function read_headers()
+  local headers, err = kong.request.get_headers(MAX_HEADERS)
+  if err == "truncated" then
+    headers = ngx.req.get_headers(0)
   end
+  return headers
+end
+
+
+-- Remove the X-PS-* headers from the upstream request. The five mapped names
+-- are cleared by name first, which needs no header list; then every other
+-- X-PS-* name in `headers`, read here when the caller could not read them.
+local function strip(headers)
+  local clear_header = kong.service.request.clear_header
+  for _, name in ipairs(event.PS_HEADERS) do
+    clear_header(name)
+  end
+  if type(headers) ~= "table" then
+    headers = ngx.req.get_headers(0)
+  end
+  for _, name in ipairs(event.ps_header_names(headers)) do
+    clear_header(name)
+  end
+end
+
+
+-- Last resort when strip() failed: clear the five mapped names straight
+-- through ngx, one at a time, so one failure cannot skip the others.
+local function strip_fallback()
+  local clear = ngx.req.clear_header
+  for _, name in ipairs(event.PS_HEADERS) do
+    pcall(clear, name)
+  end
+end
+
+
+local function stash(headers)
+  kong.ctx.plugin.ps_headers = event.collect_ps_headers(headers)
 end
 
 
@@ -426,9 +499,31 @@ end
 
 
 function PromptShieldsHandler:access(conf)
-  local ok, err = pcall(access, conf)
+  -- Read before stripping: the values are reported, though the provider
+  -- never sees them. Each step has its own pcall, so a failure in one does
+  -- not skip the next.
+  local ok, headers = pcall(read_headers)
   if not ok then
-    kong.log.err("access phase failed, request continues: ", err)
+    kong.log.err("access phase could not read the request headers: ", headers)
+    headers = nil
+  end
+
+  if headers then
+    local err
+    ok, err = pcall(stash, headers)
+    if not ok then
+      kong.log.err("access phase could not stash the X-PS-* headers, request continues: ", err)
+    end
+  end
+
+  if conf.strip_ps_headers then
+    local err
+    ok, err = pcall(strip, headers)
+    if not ok then
+      kong.log.err("access phase could not strip every X-PS-* header,"
+                   .. " clearing the five mapped ones: ", err)
+      strip_fallback()
+    end
   end
 end
 

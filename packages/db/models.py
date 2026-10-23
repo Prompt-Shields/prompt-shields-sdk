@@ -8,6 +8,7 @@ from sqlalchemy import (
     TIMESTAMP,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     ForeignKey,
     Index,
@@ -579,6 +580,8 @@ class AuditEvent(Base):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "seq", name="uq_audit_events_tenant_seq"),
+        # Chains start at 1; verify_chain also flags rows below it (023).
+        CheckConstraint("seq >= 1", name="ck_audit_events_seq_positive"),
         Index("ix_audit_events_tenant_ts", "tenant_id", "created_at"),
         Index("ix_audit_events_action_ts", "action", "created_at"),
     )

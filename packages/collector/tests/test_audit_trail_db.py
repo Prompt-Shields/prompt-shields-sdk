@@ -233,6 +233,123 @@ async def test_verify_endpoint_reports_the_first_break(env):
     assert body["data"][0]["first_break"]["seq"] == 1
 
 
+async def _insert_raw(conn, tenant_id, seq: int) -> None:
+    await conn.execute(
+        text(
+            "INSERT INTO audit_events (id, tenant_id, seq, created_at, action, outcome, "
+            "actor_type, details, prev_hash, row_hash) VALUES (:id, :t, :seq, now(), "
+            "'forged', 'success', 'system', '{}', :h, :h)"
+        ),
+        {"id": uuid.uuid4(), "t": tenant_id, "seq": seq, "h": audit_chain.GENESIS_HASH},
+    )
+
+
+async def test_row_below_seq_1_is_refused_and_reported(env):
+    f, t = env["factory"], env["tenant"]
+    await _write(f, t, 2)
+    # The CHECK constraint refuses it...
+    with pytest.raises(IntegrityError):
+        async with env["engine"].begin() as conn:
+            await _insert_raw(conn, t, 0)
+    # ...and verify reports one that got in anyway (constraint dropped, or
+    # a row from before migration 023), though the walk starts at seq 1.
+    async with env["engine"].begin() as conn:
+        await conn.execute(
+            text("ALTER TABLE audit_events DROP CONSTRAINT ck_audit_events_seq_positive")
+        )
+        await _insert_raw(conn, t, -5)
+    result = await _verify(f, t)
+    assert result.ok is False
+    assert result.first_break["seq"] == -5
+    assert "below 1" in result.first_break["reason"]
+
+
+def _load_migration_021():
+    import importlib.util
+    from pathlib import Path
+
+    pytest.importorskip("alembic")
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "db" / "alembic" / "versions" / "021_audit_chain.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_021", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_backfill_canonicalises_details_so_they_verify(env):
+    """021 backfills retention_audit_log rows into the chain. Their details
+    are canonicalised like the collector's. Hashed as a raw float, the JSONB
+    number 12345678901234567890.5 reads back as 1.2345678901234567e+19, is
+    stored as 12345678901234567000, comes back as an int and no longer
+    matches its hash."""
+    m = _load_migration_021()
+    f = env["factory"]
+    t = uuid.uuid4()  # retention_audit_log has no foreign key to tenants
+    async with env["engine"].begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO retention_audit_log (id, tenant_id, action, actor, cutoff, "
+                "details, created_at) VALUES (:id, :t, 'purge', 'operator-api', :cutoff, "
+                "CAST(:d AS jsonb), now())"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "t": t,
+                "cutoff": datetime(2026, 1, 1, tzinfo=UTC),
+                "d": '{"ai_usage_events": 3, "big": 12345678901234567890.5, "share": 0.25}',
+            },
+        )
+    async with env["engine"].begin() as conn:
+        await conn.run_sync(m._backfill)
+
+    (row,) = await _rows(f, t)
+    assert row.action == "retention.purge"
+    assert row.details["big"] == "1.2345678901234567e+19"
+    assert row.details["share"] == "0.25"
+    assert row.details["ai_usage_events"] == 3
+    result = await _verify(f, t)
+    assert (result.ok, result.anchor, result.rows) == (True, "genesis", 1)
+
+
+async def test_erasure_succeeds_when_its_audit_write_fails(env, monkeypatch, caplog):
+    """The erasure commits in batches before the audit rows are written; a
+    failing audit write must not turn a completed erasure into a 500."""
+    f, t = env["factory"], env["tenant"]
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(retention, "_audit", broken)
+    with caplog.at_level("ERROR", logger="collector.retention"):
+        async with _client() as c:
+            resp = await c.delete(
+                f"/api/v1/operator/tenants/{t}", headers=OP, params={"confirm": str(t)}
+            )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["rows_deleted"]["tenants"] == 1
+    async with f() as s:
+        assert await s.get(Tenant, t) is None
+    assert any("audit record could not be written" in r.getMessage() for r in caplog.records)
+
+
+async def test_erasure_counts_are_not_redacted(env):
+    """Table names such as admin_tokens and tenant_api_keys look like secret
+    keys, but their values are counts."""
+    f, t = env["factory"], env["tenant"]
+    async with _client() as c:
+        resp = await c.delete(
+            f"/api/v1/operator/tenants/{t}", headers=OP, params={"confirm": str(t)}
+        )
+    assert resp.status_code == 200, resp.text
+    erase = (await _rows(f, t))[-1]
+    assert erase.action == "tenant.erase"
+    assert isinstance(erase.details["admin_tokens"], int)
+    assert isinstance(erase.details["tenant_api_keys"], int)
+
+
 # ── concurrent writers ────────────────────────────────────────────────
 
 
