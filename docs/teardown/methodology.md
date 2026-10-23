@@ -29,10 +29,10 @@ the tool lands must do these steps by hand and say so in the methodology record.
 | `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
 | `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | Built: `prompt_shields/teardown/`, see [cli.md](cli.md). Re-prices at `served_model` from token counts. |
 | Policy replay and sensitivity mix | #13 | **Built (Python), not yet in the CLI.** `packages/sdk/prompt_shields/teardown_replay.py` replays normalised records through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) and reports the sensitivity mix and projected spend per strategy. Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway does not apply sensitivity, data policy or the quality bar yet. |
-| Eval harness and sample re-execution (quality parity) | #14 | **Pending.** |
+| Eval harness and sample re-execution (quality parity) | #14 | **Partly built.** `prompt_shields.evals` and the `ps-eval` CLI: stratified sample, re-execution (opt-in, spend cap, rate limit, per-level model allowlist), exact match / schema validity / similarity / pairwise judge, Wilson parity per (use case, model), savings at parity with a bootstrap interval, sections 9–10 of the report. Pending: PII escalation of the sampled level (#13), a judge constrained by `route-policy.v1` data policy (#13), savings through policy replay rather than a per-use-case model swap (#13). |
 | Learning-tuple export | #42 | **Partly built.** `ps-teardown run --learning-tuples` exports (features, model, cost) per call with no prompt text ([cli.md](cli.md#learning-tuples-42)); quality score pending #14, replayed decision pending #13. Out of scope for this appendix. |
 
-Until #13 is wired into the CLI and #14 lands, a report contains what `ps-teardown` computes in cost-only mode
+Until #13 and #14 are wired into the CLI, a report contains what `ps-teardown` computes in cost-only mode
 (or what can be computed by hand from the customer's data with `pricing.py`). Every section that depends on a pending
 item must say so in the report. It must not be filled in with estimates.
 
@@ -67,7 +67,7 @@ defined in [cli.md](cli.md#input-formats) (#12).
 - The teardown runs on the customer's machine or in their environment (PRD §7.6). Logs
   and prompts do not leave it. In the concierge offer we either run the tool on a
   machine the customer controls or the customer runs it while we watch.
-- Re-execution (**pending #14**) uses the customer's own provider keys. A sampled
+- Re-execution (`ps-eval --mode live`, #14) uses the customer's own provider keys. A sampled
   prompt is sent only to candidate models, and a judge model, that the customer's
   route policy allows for that prompt's sensitivity level.
 - What leaves the customer environment is the report: aggregates by business unit,
@@ -376,7 +376,8 @@ earlier one exactly within a chosen TTL (record it; default 1 hour). Computed by
 
 ### 7.2 Quality parity
 
-**Pending #14.** Parity is measured on a stratified sample, re-run on candidate models.
+**Partly built (#14):** `ps-eval` implements this section. Parity is measured on a
+stratified sample, re-run on candidate models.
 
 - **Sampling.** Stratify by use case × sensitivity level × complexity band. Sample at
   random within each stratum, with a recorded seed. Record the sample size per stratum,
@@ -403,7 +404,9 @@ earlier one exactly within a chosen TTL (record it; default 1 hour). Computed by
 
 ### 7.3 Judge
 
-**Pending #14.**
+**Partly built (#14):** `ps-eval` judges both orders, counts disagreement as a tie
+and applies the eval policy's per-level allowlist to the judge. It notes a same-family
+judge; it does not pick another one.
 
 - The judge model is subject to the same data policy as the candidates. A prompt at
   `restricted` is never sent to a judge that the policy would not allow to serve it.
