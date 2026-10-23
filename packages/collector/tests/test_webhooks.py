@@ -434,8 +434,11 @@ def _signature_cases() -> list[tuple[str, object]]:
 EXPECTED_VALID = {"valid", "rotated", "valid with junk item", "junk item first"}
 
 
-@pytest.mark.parametrize("name, header", _signature_cases())
-def test_verify_signature_never_raises(name, header):
+# Parametrize on case names only: the headers are signed inside the test, so
+# a long run cannot push a collection-time timestamp past the 300s tolerance.
+@pytest.mark.parametrize("name", [name for name, _ in _signature_cases()])
+def test_verify_signature_never_raises(name):
+    header = dict(_signature_cases())[name]
     assert webhooks.verify_signature("whsec_x", BODY, header) is (name in EXPECTED_VALID)
 
 
