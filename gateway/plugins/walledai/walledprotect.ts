@@ -32,7 +32,7 @@ export const handler: PluginHandler = async (
   if (!parameters.credentials?.apiKey) {
     return {
       error: `'parameters.credentials.apiKey' must be set`,
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -41,7 +41,7 @@ export const handler: PluginHandler = async (
   if (!content) {
     return {
       error: { message: 'request or response json is empty' },
-      verdict: true,
+      verdict: false,
       data: null,
     };
   }
@@ -80,7 +80,7 @@ export const handler: PluginHandler = async (
   } catch (e) {
     console.log(e);
     error = e instanceof Error ? e.message : String(e);
-    verdict = true;
+    verdict = false;
     data = null;
   }
   return {

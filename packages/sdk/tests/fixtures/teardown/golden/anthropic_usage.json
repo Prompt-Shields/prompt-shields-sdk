@@ -1,0 +1,187 @@
+{
+  "schema": "ps-teardown-report.v1",
+  "report": {
+    "id": "golden",
+    "date": "2026-10-23",
+    "customer_label": "Golden Co",
+    "mode": "cost-only",
+    "tool_version": "ps-teardown test",
+    "catalog_version": "test-catalog",
+    "currency": "USD",
+    "min_cell_calls": 1,
+    "sensitivity_input": "declared data_classification only; PII escalation pending #13"
+  },
+  "window": {
+    "start": "2026-10-20T00:00:00Z",
+    "end": "2026-10-22T00:00:00Z",
+    "days": 2.0,
+    "records_without_timestamp": 0
+  },
+  "summary": {
+    "baseline_window": 14.9075,
+    "baseline_month": 223.6125,
+    "arbitrage_window": 14.9075,
+    "arbitrage_month": 223.6125,
+    "arbitrage_saving_pct": 0.0,
+    "cache_window": 0.0,
+    "cache_month": 0.0,
+    "cache_pct": 0.0,
+    "parity": {
+      "pending": "#14"
+    },
+    "sovereign": {
+      "pending": "#13"
+    },
+    "gate1": {
+      "pending": "#14"
+    }
+  },
+  "trust": {
+    "priced_calls_pct": null,
+    "priced_tokens_pct": 68.4,
+    "estimated_spend_pct": 0.0,
+    "null_tokens_pct": 31.6,
+    "caveats": [
+      "31.6% of tokens could not be priced; savings figures cover only the priced part of the traffic (M\u00a74.5)."
+    ]
+  },
+  "sources": [
+    {
+      "source": "anthropic-usage",
+      "file": "anthropic_usage.json",
+      "rows_read": 4,
+      "rows_used": 4,
+      "dropped": {}
+    }
+  ],
+  "baseline": {
+    "spend": 14.9075,
+    "total_calls": 0,
+    "total_calls_unknown_rows": 4,
+    "rows": [
+      {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-20250514",
+        "calls": 0,
+        "calls_unknown_rows": 3,
+        "tokens_in": 6900000,
+        "tokens_out": 510000,
+        "tokens_cached": 4500000,
+        "spend": 13.3075,
+        "share_pct": 89.27
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-3-5-haiku-20241022",
+        "calls": 0,
+        "calls_unknown_rows": 1,
+        "tokens_in": 2000000,
+        "tokens_out": 400000,
+        "tokens_cached": 0,
+        "spend": 1.6,
+        "share_pct": 10.73
+      }
+    ],
+    "by_cost_source": {
+      "null": {
+        "calls": 0,
+        "calls_unknown_rows": 1,
+        "spend": null
+      },
+      "pricing_table": {
+        "calls": 0,
+        "calls_unknown_rows": 3,
+        "spend": 14.9075
+      }
+    },
+    "null_cost_by_reason": {
+      "unpriced_service_tier": {
+        "calls": 0,
+        "calls_unknown_rows": 1,
+        "tokens": 3100000
+      }
+    },
+    "requested_ne_served_calls": 0,
+    "requested_ne_served_pct": null,
+    "priced_at_requested_calls": 0,
+    "repriced_from_tokens": true
+  },
+  "attribution": {
+    "rows": [
+      {
+        "business_unit": "Legal",
+        "use_case": "contract-review",
+        "calls": 0,
+        "calls_unknown_rows": 3,
+        "tokens_in": 6900000,
+        "tokens_out": 510000,
+        "tokens_cached": 4500000,
+        "spend": 13.3075,
+        "share_pct": 89.27,
+        "main_model": "claude-sonnet-4-20250514"
+      },
+      {
+        "business_unit": "Operations",
+        "use_case": "ticket-triage",
+        "calls": 0,
+        "calls_unknown_rows": 1,
+        "tokens_in": 2000000,
+        "tokens_out": 400000,
+        "tokens_cached": 0,
+        "spend": 1.6,
+        "share_pct": 10.73,
+        "main_model": "claude-3-5-haiku-20241022"
+      }
+    ],
+    "drivers": [
+      {
+        "use_case": "contract-review",
+        "model": "claude-sonnet-4-20250514",
+        "calls": 0,
+        "calls_unknown_rows": 3,
+        "spend": 13.3075,
+        "share_pct": 89.27,
+        "avg_input_tokens_per_call": null,
+        "cached_input_pct": 65.22
+      },
+      {
+        "use_case": "ticket-triage",
+        "model": "claude-3-5-haiku-20241022",
+        "calls": 0,
+        "calls_unknown_rows": 1,
+        "spend": 1.6,
+        "share_pct": 10.73,
+        "avg_input_tokens_per_call": null,
+        "cached_input_pct": 0.0
+      }
+    ]
+  },
+  "arbitrage": {
+    "projected_spend": 14.9075,
+    "saving": 0.0,
+    "saving_pct": 0.0,
+    "rows": [],
+    "allowed_providers": null,
+    "compliance_checked": false
+  },
+  "cache": {
+    "ttl_seconds": 3600,
+    "cache_off_at": "confidential",
+    "unclassified_default": "confidential",
+    "calls_with_hash": 0,
+    "calls_with_hash_pct": null,
+    "hit_calls": 0,
+    "hit_calls_pct": null,
+    "saving": 0.0,
+    "saving_pct": 0.0,
+    "excluded_cache_off_calls": 0,
+    "excluded_cache_off_spend": 0.0,
+    "excluded_no_timestamp_calls": 0
+  },
+  "pending": {
+    "sensitivity_mix": "#13",
+    "policy_replay": "#13",
+    "quality_parity": "#14",
+    "savings_at_parity": "#14"
+  }
+}

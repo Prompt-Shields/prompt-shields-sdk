@@ -28,7 +28,7 @@ export const handler: PluginHandler<{
   if (!credentials) {
     return {
       error: new Error('parameters.credentials.contentSafety must be set'),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -37,7 +37,7 @@ export const handler: PluginHandler<{
   if (!credentials?.resourceName) {
     return {
       error: new Error('Content Safety credentials must include resourceName'),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -48,7 +48,7 @@ export const handler: PluginHandler<{
       error: new Error(
         'Content Safety credentials must include either apiKey or azureAuthMode'
       ),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -57,7 +57,7 @@ export const handler: PluginHandler<{
   if (!text) {
     return {
       error: new Error('request or response text is empty'),
-      verdict: true,
+      verdict: false,
       data,
     };
   }
@@ -66,11 +66,7 @@ export const handler: PluginHandler<{
 
   const url = `${credentials.customHost || `https://${credentials.resourceName}.cognitiveservices.azure.com`}/contentsafety/text:analyze?api-version=${apiVersion}`;
 
-  const {
-    token,
-    error: tokenError,
-    denied,
-  } = await getAccessToken(
+  const { token, error: tokenError } = await getAccessToken(
     credentials as any,
     'contentSafety',
     pluginOptions,
@@ -80,7 +76,7 @@ export const handler: PluginHandler<{
   if (tokenError) {
     return {
       error: tokenError,
-      verdict: !denied,
+      verdict: false,
       data,
     };
   }
@@ -125,7 +121,7 @@ export const handler: PluginHandler<{
     }
     response = await post(url, request, requestOptions, timeout);
   } catch (e) {
-    return { error: e, verdict: true, data };
+    return { error: e, verdict: false, data };
   }
 
   if (response) {

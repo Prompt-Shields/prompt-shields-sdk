@@ -29,7 +29,7 @@ export const handler: PluginHandler = async (
   // Return verdict=true with error for missing credentials to allow traffic flow
   if (!apiKey || apiKey.trim() === '') {
     return {
-      verdict: true,
+      verdict: false,
       error:
         'AIRS_API_KEY is required but not configured. Please add your API key in the Portkey dashboard.',
       data: null,

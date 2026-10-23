@@ -17,7 +17,11 @@ export const handler: PluginHandler = async (
   let data = null;
 
   if (parameters.scanners.length === 0) {
-    return { error: { message: 'No scanners specified' }, verdict: true, data };
+    return {
+      error: { message: 'No scanners specified' },
+      verdict: false,
+      data,
+    };
   }
 
   let scannerObject: any = {};

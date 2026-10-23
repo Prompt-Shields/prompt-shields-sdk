@@ -16,7 +16,7 @@ export const handler: PluginHandler = async (
       error: {
         message: 'Qualifire Policy guardrail requires policies to be provided.',
       },
-      verdict: true,
+      verdict: false,
       data: null,
     };
   }
