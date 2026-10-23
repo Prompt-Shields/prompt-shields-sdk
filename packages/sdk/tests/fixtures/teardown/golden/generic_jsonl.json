@@ -1,0 +1,232 @@
+{
+  "schema": "ps-teardown-report.v1",
+  "report": {
+    "id": "golden",
+    "date": "2026-10-23",
+    "customer_label": "Golden Co",
+    "mode": "cost-only",
+    "tool_version": "ps-teardown test",
+    "catalog_version": "test-catalog",
+    "currency": "USD",
+    "min_cell_calls": 1,
+    "sensitivity_input": "declared data_classification only; PII escalation pending #13"
+  },
+  "window": {
+    "start": "2026-10-20T08:00:00Z",
+    "end": "2026-10-20T12:00:00Z",
+    "days": 0.17,
+    "records_without_timestamp": 0
+  },
+  "summary": {
+    "baseline_window": 0.014965,
+    "baseline_month": 2.640882,
+    "arbitrage_window": 0.014965,
+    "arbitrage_month": 2.640882,
+    "arbitrage_saving_pct": 0.0,
+    "cache_window": 0.000134,
+    "cache_month": 0.023647,
+    "cache_pct": 0.9,
+    "parity": {
+      "pending": "#14"
+    },
+    "sovereign": {
+      "pending": "#13"
+    },
+    "gate1": {
+      "pending": "#14"
+    }
+  },
+  "trust": {
+    "priced_calls_pct": 85.71,
+    "priced_tokens_pct": 100.0,
+    "estimated_spend_pct": 0.0,
+    "null_tokens_pct": 0.0,
+    "caveats": []
+  },
+  "sources": [
+    {
+      "source": "generic-jsonl",
+      "file": "generic.jsonl",
+      "rows_read": 9,
+      "rows_used": 7,
+      "dropped": {
+        "no_model": 1,
+        "not_an_object": 1
+      }
+    }
+  ],
+  "baseline": {
+    "spend": 0.014965,
+    "total_calls": 7,
+    "total_calls_unknown_rows": 0,
+    "rows": [
+      {
+        "provider": "anthropic",
+        "model": "claude-3-5-sonnet-20241022",
+        "calls": 2,
+        "calls_unknown_rows": 0,
+        "tokens_in": 1700,
+        "tokens_out": 580,
+        "tokens_cached": 1200,
+        "spend": 0.01056,
+        "share_pct": 70.56
+      },
+      {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "calls": 1,
+        "calls_unknown_rows": 0,
+        "tokens_in": 5000,
+        "tokens_out": 1000,
+        "tokens_cached": 0,
+        "spend": 0.004,
+        "share_pct": 26.73
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "calls": 3,
+        "calls_unknown_rows": 0,
+        "tokens_in": 1260,
+        "tokens_out": 359,
+        "tokens_cached": 0,
+        "spend": 0.000405,
+        "share_pct": 2.71
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "calls": 1,
+        "calls_unknown_rows": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "tokens_cached": 0,
+        "spend": null,
+        "share_pct": null
+      }
+    ],
+    "by_cost_source": {
+      "null": {
+        "calls": 1,
+        "calls_unknown_rows": 0,
+        "spend": null
+      },
+      "pricing_table": {
+        "calls": 6,
+        "calls_unknown_rows": 0,
+        "spend": 0.014965
+      }
+    },
+    "null_cost_by_reason": {
+      "missing_tokens": {
+        "calls": 1,
+        "calls_unknown_rows": 0,
+        "tokens": 0
+      }
+    },
+    "requested_ne_served_calls": 0,
+    "requested_ne_served_pct": 0.0,
+    "priced_at_requested_calls": 7,
+    "repriced_from_tokens": true
+  },
+  "attribution": {
+    "rows": [
+      {
+        "business_unit": "Engineering",
+        "use_case": "code-assist",
+        "calls": 3,
+        "calls_unknown_rows": 0,
+        "tokens_in": 1700,
+        "tokens_out": 580,
+        "tokens_cached": 1200,
+        "spend": 0.01056,
+        "share_pct": 70.56,
+        "main_model": "claude-3-5-sonnet-20241022"
+      },
+      {
+        "business_unit": "(none)",
+        "use_case": "summaries",
+        "calls": 1,
+        "calls_unknown_rows": 0,
+        "tokens_in": 5000,
+        "tokens_out": 1000,
+        "tokens_cached": 0,
+        "spend": 0.004,
+        "share_pct": 26.73,
+        "main_model": "gemini-2.5-flash"
+      },
+      {
+        "business_unit": "Customer Care",
+        "use_case": "faq",
+        "calls": 3,
+        "calls_unknown_rows": 0,
+        "tokens_in": 1260,
+        "tokens_out": 359,
+        "tokens_cached": 0,
+        "spend": 0.000405,
+        "share_pct": 2.71,
+        "main_model": "gpt-4o-mini"
+      }
+    ],
+    "drivers": [
+      {
+        "use_case": "code-assist",
+        "model": "claude-3-5-sonnet-20241022",
+        "calls": 2,
+        "calls_unknown_rows": 0,
+        "spend": 0.01056,
+        "share_pct": 70.56,
+        "avg_input_tokens_per_call": 850,
+        "cached_input_pct": 70.59
+      },
+      {
+        "use_case": "summaries",
+        "model": "gemini-2.5-flash",
+        "calls": 1,
+        "calls_unknown_rows": 0,
+        "spend": 0.004,
+        "share_pct": 26.73,
+        "avg_input_tokens_per_call": 5000,
+        "cached_input_pct": 0.0
+      },
+      {
+        "use_case": "faq",
+        "model": "gpt-4o-mini",
+        "calls": 3,
+        "calls_unknown_rows": 0,
+        "spend": 0.000405,
+        "share_pct": 2.71,
+        "avg_input_tokens_per_call": 420,
+        "cached_input_pct": 0.0
+      }
+    ]
+  },
+  "arbitrage": {
+    "projected_spend": 0.014965,
+    "saving": 0.0,
+    "saving_pct": 0.0,
+    "rows": [],
+    "allowed_providers": null,
+    "compliance_checked": false
+  },
+  "cache": {
+    "ttl_seconds": 3600,
+    "cache_off_at": "confidential",
+    "unclassified_default": "confidential",
+    "calls_with_hash": 6,
+    "calls_with_hash_pct": 85.71,
+    "hit_calls": 1,
+    "hit_calls_pct": 14.29,
+    "saving": 0.000134,
+    "saving_pct": 0.9,
+    "excluded_cache_off_calls": 2,
+    "excluded_cache_off_spend": 0.004,
+    "excluded_no_timestamp_calls": 0
+  },
+  "pending": {
+    "sensitivity_mix": "#13",
+    "policy_replay": "#13",
+    "quality_parity": "#14",
+    "savings_at_parity": "#14"
+  }
+}
