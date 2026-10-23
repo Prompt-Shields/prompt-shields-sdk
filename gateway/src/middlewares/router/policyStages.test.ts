@@ -21,7 +21,8 @@ import {
   RouterStrategy,
   tierComplies,
 } from './index';
-import { dataPolicyRule } from './constraints';
+import { dataPolicyRule, modelComplies } from './constraints';
+import { requestText, scanRequestBody } from './pii';
 import { psRouter } from './hono';
 import { psRouterMiddleware } from './middleware';
 import { ModelTier } from './types';
@@ -407,5 +408,160 @@ describe('psRouter (Hono) under a data policy', () => {
     });
     expect(json.error.message).toContain('restricted');
     expect(handled()).toBe(0);
+  });
+});
+
+// --- every request shape, ReDoS, directly named models ---------------------
+
+describe('requestText / scanRequestBody', () => {
+  const id = '19121212-1212';
+  test.each<[string, any]>([
+    ['chat string content', { messages: [{ role: 'user', content: id }] }],
+    [
+      'chat content parts',
+      { messages: [{ role: 'user', content: [{ type: 'text', text: id }] }] },
+    ],
+    [
+      'chat tool call arguments',
+      {
+        messages: [
+          {
+            role: 'assistant',
+            tool_calls: [
+              { function: { name: 'f', arguments: `{"pnr":"${id}"}` } },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      'Anthropic system blocks',
+      { system: [{ type: 'text', text: id }], messages: hi },
+    ],
+    [
+      'Anthropic tool_use input object',
+      {
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', name: 'f', input: { pnr: id } }],
+          },
+        ],
+      },
+    ],
+    [
+      'Anthropic tool_result',
+      {
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', content: [{ text: id }] }],
+          },
+        ],
+      },
+    ],
+    ['Responses string input', { input: id }],
+    [
+      'Responses items',
+      {
+        instructions: 'be brief',
+        input: [{ role: 'user', content: [{ type: 'input_text', text: id }] }],
+      },
+    ],
+    [
+      'Responses function_call_output',
+      { input: [{ type: 'function_call_output', output: id }] },
+    ],
+    ['completions prompt', { prompt: [id] }],
+    ['embeddings input', { input: ['x', id] }],
+    ['rerank', { query: 'q', documents: [{ text: id }] }],
+  ])('%s', (_name, body) => {
+    expect(scanRequestBody(body)).toContain('national_id');
+  });
+
+  test('images, URLs, tools and the model are not request text', () => {
+    const text = requestText({
+      model: 'jane@acme.com',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: { url: 'https://x/jane@acme.com' },
+            },
+            {
+              type: 'image',
+              source: { type: 'base64', data: '4111111111111111' },
+            },
+          ],
+        },
+      ],
+      tools: [{ function: { description: '19121212-1212' } }],
+    });
+    expect(scanRequestBody({ t: text, content: text })).toEqual([]);
+  });
+});
+
+describe('PII detection stays linear on large bodies', () => {
+  test.each([
+    ['letters', 'a'.repeat(200_000)],
+    ['dotted', 'a.'.repeat(100_000)],
+    ['digits', '1'.repeat(200_000)],
+    ['local part then @', 'a'.repeat(200_000) + '@'],
+    ['many @', 'a@'.repeat(100_000)],
+  ])('%s', (_name, text) => {
+    const t = Date.now();
+    detectPiiCategories(text);
+    expect(Date.now() - t).toBeLessThan(1000);
+  });
+
+  test('the anchored email pattern still finds addresses mid-run', () => {
+    expect(detectPiiCategories('xx..jane.doe+1@acme.co.uk')).toContain('email');
+    expect(detectPiiCategories('a'.repeat(5000) + '@acme.com')).toContain(
+      'email'
+    );
+    expect(detectPiiCategories('a@b')).not.toContain('email');
+  });
+});
+
+describe('modelComplies (directly named models)', () => {
+  const restricted = dataPolicyRule(nordic, 'restricted');
+  test('a listed model uses its tier facts', () => {
+    expect(modelComplies(nordic, 'mistral-small-eu', restricted)).toBe(true);
+    expect(modelComplies(nordic, 'gpt-4o', restricted)).toBe(false);
+  });
+  test('an unlisted or missing model fails closed unless the rule allows any', () => {
+    expect(modelComplies(nordic, 'unlisted', restricted)).toBe(false);
+    expect(modelComplies(nordic, undefined, restricted)).toBe(false);
+    const pub = dataPolicyRule(nordic, 'public');
+    expect(modelComplies(nordic, 'unlisted', pub)).toBe(true);
+  });
+  test('no rule, no constraint', () => {
+    expect(modelComplies(nordic, 'unlisted', undefined)).toBe(true);
+  });
+});
+
+describe('psRouter (Hono) realtime under a data policy', () => {
+  test('a non-compliant realtime model is refused before the upgrade', async () => {
+    const app = new Hono();
+    let handled = 0;
+    app.use('*', psRouter(nordic));
+    app.get('/v1/realtime', (c) => {
+      handled++;
+      return c.text('upgrade');
+    });
+    const res = await app.request('/v1/realtime?model=gpt-4o', {
+      headers: { 'x-portkey-provider': 'openai' },
+    });
+    expect(res.status).toBe(403);
+    expect(handled).toBe(0);
+    const ok = await app.request('/v1/realtime?model=gpt-4o', {
+      headers: {
+        'x-portkey-provider': 'openai',
+        'x-ps-data-classification': 'internal',
+      },
+    });
+    expect(ok.status).toBe(200);
   });
 });

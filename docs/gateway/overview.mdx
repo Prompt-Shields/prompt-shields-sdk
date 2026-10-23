@@ -46,7 +46,7 @@ deliberately not part of the spec.
 |--------|------|------|
 | 400 | Missing or invalid provider, config, custom host or content type | `{"status": "failure", "message": ...}` |
 | 400 | Guardrails are configured and a proxied request cannot be inspected (fail closed, before any upstream call) | `error.code: "unsupported_guardrail"` |
-| 403 | The router's data policy allows no model at the call's sensitivity level (fail closed, before any upstream call) | `error.code: "policy_violation"` |
+| 403 | The router's data policy allows no model at the call's sensitivity level, or not the model the request or its config names (fail closed, before any upstream call) | `error.code: "policy_violation"` |
 | 408 | `x-portkey-request-timeout` exceeded | OpenAI-shaped `error` |
 | 411 | `MAX_FILE_PAYLOAD_SIZE_IN_MB` set and a multipart upload has no `content-length` | `{"status": "failure", ...}` |
 | 413 | `content-length` over `MAX_JSON_PAYLOAD_SIZE_IN_MB` (JSON) or `MAX_FILE_PAYLOAD_SIZE_IN_MB` (multipart uploads) | `{"status": "failure", ...}` |

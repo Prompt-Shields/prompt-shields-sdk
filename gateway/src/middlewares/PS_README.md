@@ -136,7 +136,7 @@ both pass the golden vectors in `schemas/route-policy/vectors/`.
 
 1. **Sensitivity (#18).** Level = max(`X-PS-Data-Classification`, or
    `unclassified_default` when it is missing or not a known level, the
-   `pii_escalation` level of every PII category detected in the messages).
+   `pii_escalation` level of every PII category detected in the request text).
    Escalate-only. Detection (`router/pii.ts`) is a port of the SDK's pattern
    detector (`pii.py`, `national_ids.py`) and runs only when the policy maps
    PII categories. The source is `declared`, `default` or `pii_escalated`.
@@ -153,8 +153,24 @@ No allowed candidate is a `PolicyViolation`: `router/hono.ts` answers 403
 (`error.type: permission_error`, `error.code: policy_violation`) before any
 upstream call and records a `policy.denied` security event
 (`no_compliant_candidate`). Under a policy with a `dataPolicy`, any other
-routing error also fails closed. A concrete model sent without a routing
-hint is not routed, so it is not checked against the data policy.
+routing error also fails closed.
+
+The data policy also applies to calls the router does not decide
+(`router/dataPolicyGate.ts`): a concrete model with no hint, a config
+`override_params.model` (or fallback / load-balance target) that replaces
+the routed model, and every model endpoint (Responses, Messages,
+completions, embeddings, images, audio, proxied bodies naming a model;
+realtime via its `model` query). Under a policy with a `dataPolicy` section
+the Hono adapter classifies every request (PII found in any request text:
+messages, `system`, Responses `input` / `instructions`, `prompt`, tool
+arguments and outputs) and `tryPost` checks the model each target actually
+runs (after `override_params`, plus the Azure deployment name) before hooks,
+cache or upstream. The facts come from the policy tiers that list that
+model name; a model the policy does not list has no facts and fails closed
+(only a rule allowing `any` jurisdiction with no other condition lets it
+through), so list Azure deployment names as tier models. Same 403 and
+security event as above. Calls with no model on a non-model endpoint
+(files, batches) are not checked.
 
 ### router/ (implemented)
 

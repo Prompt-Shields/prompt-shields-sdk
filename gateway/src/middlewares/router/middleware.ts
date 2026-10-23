@@ -15,7 +15,7 @@
 import { HeuristicStrategy } from './heuristic';
 import { defaultPolicy } from './policy';
 import { PolicyViolation } from './constraints';
-import { scanMessages } from './pii';
+import { scanRequestBody } from './pii';
 import { buildRouteRequest, parseRouteHeaders, resolveRoute } from './index';
 import { RoutePolicy, RouterStrategy, SensitivitySource } from './types';
 
@@ -40,7 +40,7 @@ export interface PSRouteViolation {
 }
 
 /** True when the policy escalates sensitivity on detected PII. */
-function escalatesOnPii(policy: RoutePolicy): boolean {
+export function escalatesOnPii(policy: RoutePolicy): boolean {
   const map = policy.sensitivity?.piiEscalation;
   return !!map && Object.keys(map).length > 0;
 }
@@ -72,7 +72,11 @@ export function psRouterMiddleware(
 
         const routeReq = buildRouteRequest(body, hints);
         if (escalatesOnPii(policy)) {
-          routeReq.piiDetected = scanMessages(body.messages);
+          // The Hono adapter may have scanned the body already (data policy).
+          const pre = (request as any)._psPii;
+          routeReq.piiDetected = Array.isArray(pre)
+            ? pre
+            : scanRequestBody(body);
         }
         let decision;
         try {

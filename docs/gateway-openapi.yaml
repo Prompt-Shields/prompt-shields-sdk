@@ -2098,11 +2098,12 @@ components:
       description: |
         Data classification for telemetry and OTel spans. With the router on
         and a route policy that has a `sensitivity` / `data_policy` section,
-        it is the declared sensitivity level: PII found in the messages can
+        it is the declared sensitivity level: PII found in the request can
         only raise it, an unknown or missing level counts as the policy's
         `unclassified_default`, and only models allowed at the resulting
-        level are routed to (403 `policy_violation` when none is). Never
-        sent upstream.
+        level are routed to or, when named directly (including by a config
+        `override_params.model`), served (403 `policy_violation`
+        otherwise). Never sent upstream.
       schema:
         type: string
       example: confidential
@@ -2415,7 +2416,8 @@ components:
         `default: deny`), or the entry does not allow the provider or model
         of the target being called (`error.code: policy_denied`). Or the
         router's data policy allows no model at the call's sensitivity level
-        (`X-PS-Data-Classification`, raised by detected PII): the call fails
+        (`X-PS-Data-Classification`, raised by detected PII), or does not
+        allow the model the request or its config names: the call fails
         closed and is never served by a non-compliant model
         (`error.code: policy_violation`).
       content:

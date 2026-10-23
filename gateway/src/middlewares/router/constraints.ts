@@ -164,6 +164,35 @@ export function tierComplies(
   );
 }
 
+/**
+ * True when a model named directly (not chosen by the router: a concrete
+ * body model, a config's `override_params.model`, an Azure deployment) meets
+ * the rule. The facts come from the policy tiers listing that model; a model
+ * the policy does not list has no facts and fails closed (only an `any`
+ * jurisdiction rule with no other condition lets it through).
+ */
+export function modelComplies(
+  policy: RoutePolicy,
+  model: string | undefined,
+  rule: DataPolicyRule | undefined
+): boolean {
+  if (!rule) return true;
+  const tiers: ModelTier[] = [];
+  if (model) {
+    for (const group of Object.keys(policy.groups)) {
+      for (const tier of policy.groups[group])
+        if (tier.model === model) tiers.push(tier);
+    }
+  }
+  if (!tiers.length) {
+    return tierComplies(
+      { model: model ?? '', group: '', inputCostPer1k: 0, outputCostPer1k: 0 },
+      rule
+    );
+  }
+  return tiers.some((tier) => tierComplies(tier, rule));
+}
+
 /** Index of a group in `groupOrder`, or undefined when it is not listed. */
 export function groupRank(
   policy: RoutePolicy,

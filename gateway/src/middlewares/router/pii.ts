@@ -18,7 +18,16 @@ const R = `(?!${W})(?![-.]\\d)`;
 const re = (source: string) => new RegExp(source.replace(/\\b/g, B), 'u');
 
 const PATTERNS: [string, RegExp][] = [
-  ['email', re(String.raw`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)],
+  // The SDK's pattern, anchored at the start of a local-part run so a long
+  // run without a match is scanned once, not once per start position
+  // (quadratic: 100 KB of letters took ~8 s). Same yes/no answer: any match
+  // inside a run implies one from the run's start.
+  [
+    'email',
+    re(
+      String.raw`(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
+    ),
+  ],
   [
     'phone',
     re(String.raw`(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}`),
@@ -209,20 +218,74 @@ export function detectPiiCategories(text: string | undefined | null): string[] {
   return [...found].sort();
 }
 
+// Keys whose string values are request text (messages, Responses input and
+// instructions, Anthropic system, completions prompt, embeddings input,
+// rerank query/documents, speech input, tool arguments and outputs).
+const TEXT_KEYS = new Set([
+  'content',
+  'text',
+  'input',
+  'prompt',
+  'instructions',
+  'system',
+  'arguments',
+  'output',
+  'query',
+  'documents',
+]);
+// Tool-call arguments given as objects (Anthropic tool_use `input`, parsed
+// `arguments`): every string below them is request text.
+const ARG_KEYS = new Set(['input', 'arguments', 'args']);
+// Binary payloads, URLs and schema/config blocks: never request text, and
+// base64 would only add false positives.
+const SKIP_KEYS = new Set([
+  'model',
+  'image_url',
+  'file',
+  'file_data',
+  'file_id',
+  'b64_json',
+  'data',
+  'audio',
+  'input_audio',
+  'source',
+  'image',
+  'mask',
+  'url',
+  'tools',
+  'functions',
+  'tool_choice',
+  'response_format',
+  'metadata',
+]);
+
 /**
- * Detection over every message's text: string content and the `text` of
- * content parts, joined with spaces as the SDK's `scan_messages` does.
+ * Request text of any JSON request shape the gateway serves (chat, Responses,
+ * Anthropic Messages, completions, embeddings, rerank, images, speech and
+ * proxied bodies): see TEXT_KEYS. Strings are joined with spaces.
  */
-export function scanMessages(messages: any[]): string[] {
-  const texts: string[] = [];
-  for (const m of messages || []) {
-    const content = m?.content;
-    if (typeof content === 'string') texts.push(content);
-    else if (Array.isArray(content)) {
-      for (const part of content) {
-        if (typeof part?.text === 'string') texts.push(part.text);
+export function requestText(body: unknown): string {
+  const out: string[] = [];
+  const walk = (node: unknown, key: string, all: boolean, depth: number) => {
+    if (depth > 64 || node == null) return;
+    if (typeof node === 'string') {
+      if (all || TEXT_KEYS.has(key)) out.push(node);
+    } else if (Array.isArray(node)) {
+      for (const item of node) walk(item, key, all, depth + 1);
+    } else if (typeof node === 'object') {
+      for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+        if (SKIP_KEYS.has(k)) continue;
+        const args =
+          ARG_KEYS.has(k) && typeof v === 'object' && !Array.isArray(v);
+        walk(v, k, all || args, depth + 1);
       }
     }
-  }
-  return detectPiiCategories(texts.join(' '));
+  };
+  walk(body, '', false, 0);
+  return out.join(' ');
+}
+
+/** PII categories in any JSON request body (see requestText). */
+export function scanRequestBody(body: unknown): string[] {
+  return detectPiiCategories(requestText(body));
 }

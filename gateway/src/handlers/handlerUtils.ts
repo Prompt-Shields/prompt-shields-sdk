@@ -62,6 +62,7 @@ import {
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
+import { dataPolicyTargetDenied } from '../middlewares/router/dataPolicyGate';
 import {
   MODEL_ENDPOINTS,
   oidcTargetDenied,
@@ -351,6 +352,16 @@ export async function tryPost(
     MODEL_ENDPOINTS.has(fn)
   );
   if (policyDenied) return policyDenied;
+  // PS fork (#19): the routing data policy on the model this target actually
+  // runs, so naming a model directly or overriding the routed one in a
+  // config cannot bypass it (fail closed).
+  const dataDenied = dataPolicyTargetDenied(
+    c,
+    providerOption.provider,
+    targetModels(providerOption, requestBody),
+    MODEL_ENDPOINTS.has(fn)
+  );
+  if (dataDenied) return dataDenied;
   const isRawBody =
     requestBody instanceof FormData ||
     requestBody instanceof ReadableStream ||
