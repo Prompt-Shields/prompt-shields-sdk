@@ -403,7 +403,7 @@ can follow the images if those change.
 | `*.serviceMonitor.*` | off | ServiceMonitor (needs `*.metrics.enabled`); `bearerTokenSecret` defaults to `*.metrics.tokenSecret` |
 | `*.nodeSelector` | `kubernetes.io/arch: amd64` | The images are amd64 only |
 | `*.podAnnotations` / `podLabels` / `tolerations` / `affinity` / `topologySpreadConstraints` / `priorityClassName` | empty | Scheduling |
-| `gateway.collectorUrl` | in-cluster collector | `PS_COLLECTOR_URL` |
+| `gateway.collectorUrl` | in-cluster collector | `PS_COLLECTOR_URL`; a loopback or private-IP URL must also be in `gateway.config.TRUSTED_CUSTOM_HOSTS`, or telemetry is dropped |
 | `gateway.metrics.enabled` / `.path` | `false` / `/metrics` | `PS_METRICS_ENABLED` |
 | `*.metrics.tokenSecret` / `.tokenEnvName` | `{}` / `PS_METRICS_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN` | Metrics bearer token from a Secret key |
 | `gateway.shutdown.timeoutMs` / `.envName` | `25000` / `PS_SHUTDOWN_TIMEOUT_MS` | Drain on SIGTERM |

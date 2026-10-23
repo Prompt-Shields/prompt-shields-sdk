@@ -17,7 +17,7 @@ export const handler: PluginHandler = async (
         message:
           'Qualifire Grounding guardrail only supports after_request_hooks.',
       },
-      verdict: true,
+      verdict: false,
       data: null,
     };
   }
