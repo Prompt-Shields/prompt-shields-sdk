@@ -25,6 +25,7 @@ from collector import (
     partner_admin,
     provider_credentials_api,
     provider_usage_admin,
+    risk_reviews,
     risk_suggestions,
     servicenow,
     tenant_keys,
@@ -141,12 +142,50 @@ def test_webhook_schemas_match_serializers():
         ("CreateTenantRequest", operator_admin.CreateTenantBody),
         ("UpdateTenantRequest", operator_admin.UpdateTenantBody),
         ("BootstrapAdminTokenRequest", operator_admin.BootstrapAdminTokenBody),
+        ("RiskReviewRequest", risk_reviews.ReviewBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
     assert _props(schema) == set(model.model_fields)
     required = {n for n, f in model.model_fields.items() if f.is_required()}
     assert set(SCHEMAS[schema].get("required", [])) == required
+
+
+def test_risk_review_schemas_match_serializers():
+    now = datetime.now(UTC)
+    mapping = SimpleNamespace(
+        id=uuid.uuid4(),
+        risk_category="employment",
+        risk_level="high",
+        framework="EU_AI_ACT",
+        status="confirmed",
+        source="rules",
+        rule_id="r",
+        ruleset_version="1",
+        framework_ref="Annex III",
+        confidence="high",
+        evidence=None,
+        reviewed_at=now,
+        reviewed_by="dpo@example.com",
+        review_comment="ok",
+    )
+    assert _props("RiskMapping") == set(risk_suggestions.risk_dict(mapping))
+    review = SimpleNamespace(
+        id=uuid.uuid4(),
+        risk_mapping_id=uuid.uuid4(),
+        asset_id=uuid.uuid4(),
+        status="rejected",
+        previous_status="suggested",
+        comment="not in scope",
+        reviewed_by="dpo@example.com",
+        created_at=now,
+        actor_type="partner",
+        partner_id=uuid.uuid4(),
+        snapshot={},
+    )
+    keys = set(risk_reviews.serialize_review(review))
+    assert _props("RiskMappingReview") == keys
+    assert set(SCHEMAS["RiskMappingReview"]["required"]) == keys
 
 
 def test_provider_credential_schemas_match_serializers():
@@ -199,6 +238,7 @@ ADMIN_ROUTERS = (
     provider_credentials_api.tenant_router,
     lifecycle.router,
     risk_suggestions.router,
+    risk_reviews.admin_router,
     provider_usage_admin.router,
     cloud_inventory.router,
     leanix.router,
