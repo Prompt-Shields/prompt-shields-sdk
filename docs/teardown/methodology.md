@@ -22,7 +22,7 @@ the tool lands must do these steps by hand and say so in the methodology record.
 
 | Step | Issue | State on `main` |
 |---|---|---|
-| Per-call cost: cache read/write (5m and 1h), reasoning, service tier (batch/flex), long-context bands, audio, web-search fees, provider-reported cost, non-token units (seconds, characters, pages, search units, images) | #9, #71 (PRs #138, #157) | Built, in `packages/sdk/prompt_shields/pricing.py`. Checked by `schemas/pricing/cost-vectors.v1.json`. |
+| Per-call cost: cache read/write (5m and 1h), reasoning, service tier (batch/flex), long-context bands, audio, web-search fees, provider-reported cost, non-token units (seconds, characters, pages, search units, images) | #9, #71 (PRs #138, #157) | Built, in `packages/sdk/prompt_shields/pricing.py` and, for gateway events, its port `gateway/src/middlewares/psPricing.ts`. Both run `schemas/pricing/cost-vectors.v1.json`. |
 | Price at `served_model`, not `requested_model` | #6 | **Pending.** See [§4.2](#42-served-model-vs-requested-model). |
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
@@ -133,7 +133,8 @@ must then be given as a percentage of the baseline, not as an absolute amount.
 ### 4.1 Per-call cost
 
 Cost is in USD and comes from `prompt_shields.pricing.usage_cost` /
-`estimate_cost`. Every case below has a worked example in
+`estimate_cost` (SDK events) or its port `psPricing.usageCost` (gateway events,
+priced at the served model like the SDK). Every case below has a worked example in
 `schemas/pricing/cost-vectors.v1.json`.
 
 | Dimension | Treatment |

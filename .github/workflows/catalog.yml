@@ -2,6 +2,7 @@ name: Catalog
 
 # Fails when the generated model catalog (packages/sdk/prompt_shields/catalog.json)
 # or the gateway's default route policy (gateway/src/middlewares/router/defaultPolicy.json)
+# and pricing tables (gateway/src/middlewares/psPricingTables.json)
 # drift from their source, schemas/catalog/source.v1.json. Fix by running
 # `python scripts/build_catalog.py` and committing the result. The same check
 # also runs in the SDK test suite (packages/sdk/tests/test_catalog.py).
@@ -16,6 +17,7 @@ on:
       - 'packages/sdk/prompt_shields/pricing.py'
       - 'gateway/src/middlewares/router/defaultPolicy.json'
       - 'gateway/src/middlewares/router/policy.ts'
+      - 'gateway/src/middlewares/psPricingTables.json'
       - '.github/workflows/catalog.yml'
   push:
     branches: [main]
@@ -27,6 +29,7 @@ on:
       - 'packages/sdk/prompt_shields/pricing.py'
       - 'gateway/src/middlewares/router/defaultPolicy.json'
       - 'gateway/src/middlewares/router/policy.ts'
+      - 'gateway/src/middlewares/psPricingTables.json'
       - '.github/workflows/catalog.yml'
 
 permissions:
