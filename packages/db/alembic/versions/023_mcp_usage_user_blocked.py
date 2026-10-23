@@ -60,6 +60,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Fold per-user rows back into one row per old key before the old
     # unique index is restored; blocked calls count as errors again.
+    # The bypass covers a database where RLS is enforced (FORCE binds the
+    # owner too): without it the merge sees no rows and the index fails.
+    op.execute("SELECT set_config('app.rls_bypass', 'migration-023', true)")
     keys = ", ".join(OLD_KEY)
     op.execute(
         f"""
