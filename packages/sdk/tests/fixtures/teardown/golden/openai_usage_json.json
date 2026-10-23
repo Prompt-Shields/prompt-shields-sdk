@@ -1,0 +1,231 @@
+{
+  "schema": "ps-teardown-report.v1",
+  "report": {
+    "id": "golden",
+    "date": "2026-10-23",
+    "customer_label": "Golden Co",
+    "mode": "cost-only",
+    "tool_version": "ps-teardown test",
+    "catalog_version": "test-catalog",
+    "currency": "USD",
+    "min_cell_calls": 1,
+    "sensitivity_input": "declared data_classification only; PII escalation pending #13"
+  },
+  "window": {
+    "start": "2026-10-20T00:00:00Z",
+    "end": "2026-10-22T00:00:00Z",
+    "days": 2.0,
+    "records_without_timestamp": 0
+  },
+  "summary": {
+    "baseline_window": 11.87,
+    "baseline_month": 178.05,
+    "arbitrage_window": 11.87,
+    "arbitrage_month": 178.05,
+    "arbitrage_saving_pct": 0.0,
+    "cache_window": 0.0,
+    "cache_month": 0.0,
+    "cache_pct": 0.0,
+    "parity": {
+      "pending": "#14"
+    },
+    "sovereign": {
+      "pending": "#13"
+    },
+    "gate1": {
+      "pending": "#14"
+    }
+  },
+  "trust": {
+    "priced_calls_pct": 99.83,
+    "priced_tokens_pct": 98.92,
+    "estimated_spend_pct": 0.0,
+    "null_tokens_pct": 1.08,
+    "caveats": []
+  },
+  "sources": [
+    {
+      "source": "openai-usage",
+      "file": "openai_usage.json",
+      "rows_read": 6,
+      "rows_used": 5,
+      "dropped": {
+        "zero_usage": 1
+      }
+    }
+  ],
+  "baseline": {
+    "spend": 11.87,
+    "total_calls": 7012,
+    "total_calls_unknown_rows": 0,
+    "rows": [
+      {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "calls": 2800,
+        "calls_unknown_rows": 0,
+        "tokens_in": 2200000,
+        "tokens_out": 550000,
+        "tokens_cached": 900000,
+        "spend": 9.875,
+        "share_pct": 83.19
+      },
+      {
+        "provider": "openai",
+        "model": "o3",
+        "calls": 200,
+        "calls_unknown_rows": 0,
+        "tokens_in": 300000,
+        "tokens_out": 90000,
+        "tokens_cached": 0,
+        "spend": 1.32,
+        "share_pct": 11.12
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "calls": 4000,
+        "calls_unknown_rows": 0,
+        "tokens_in": 5000000,
+        "tokens_out": 1000000,
+        "tokens_cached": 0,
+        "spend": 0.675,
+        "share_pct": 5.69
+      },
+      {
+        "provider": "openai",
+        "model": "ft:gpt-4o-mini:acme::abc123",
+        "calls": 12,
+        "calls_unknown_rows": 0,
+        "tokens_in": 80000,
+        "tokens_out": 20000,
+        "tokens_cached": 0,
+        "spend": null,
+        "share_pct": null
+      }
+    ],
+    "by_cost_source": {
+      "null": {
+        "calls": 12,
+        "calls_unknown_rows": 0,
+        "spend": null
+      },
+      "pricing_table": {
+        "calls": 7000,
+        "calls_unknown_rows": 0,
+        "spend": 11.87
+      }
+    },
+    "null_cost_by_reason": {
+      "unknown_model": {
+        "calls": 12,
+        "calls_unknown_rows": 0,
+        "tokens": 100000
+      }
+    },
+    "requested_ne_served_calls": 0,
+    "requested_ne_served_pct": 0.0,
+    "priced_at_requested_calls": 0,
+    "repriced_from_tokens": true
+  },
+  "attribution": {
+    "rows": [
+      {
+        "business_unit": "Customer Care",
+        "use_case": "support-bot",
+        "calls": 2800,
+        "calls_unknown_rows": 0,
+        "tokens_in": 2200000,
+        "tokens_out": 550000,
+        "tokens_cached": 900000,
+        "spend": 9.875,
+        "share_pct": 83.19,
+        "main_model": "gpt-4o"
+      },
+      {
+        "business_unit": "(unattributed)",
+        "use_case": null,
+        "calls": 212,
+        "calls_unknown_rows": 0,
+        "tokens_in": 380000,
+        "tokens_out": 110000,
+        "tokens_cached": 0,
+        "spend": 1.32,
+        "share_pct": 11.12,
+        "main_model": "o3"
+      },
+      {
+        "business_unit": "Product",
+        "use_case": "search-rerank",
+        "calls": 4000,
+        "calls_unknown_rows": 0,
+        "tokens_in": 5000000,
+        "tokens_out": 1000000,
+        "tokens_cached": 0,
+        "spend": 0.675,
+        "share_pct": 5.69,
+        "main_model": "gpt-4o-mini"
+      }
+    ],
+    "drivers": [
+      {
+        "use_case": "support-bot",
+        "model": "gpt-4o",
+        "calls": 2800,
+        "calls_unknown_rows": 0,
+        "spend": 9.875,
+        "share_pct": 83.19,
+        "avg_input_tokens_per_call": 786,
+        "cached_input_pct": 40.91
+      },
+      {
+        "use_case": "(unattributed)",
+        "model": "o3",
+        "calls": 200,
+        "calls_unknown_rows": 0,
+        "spend": 1.32,
+        "share_pct": 11.12,
+        "avg_input_tokens_per_call": 1500,
+        "cached_input_pct": 0.0
+      },
+      {
+        "use_case": "search-rerank",
+        "model": "gpt-4o-mini",
+        "calls": 4000,
+        "calls_unknown_rows": 0,
+        "spend": 0.675,
+        "share_pct": 5.69,
+        "avg_input_tokens_per_call": 1250,
+        "cached_input_pct": 0.0
+      }
+    ]
+  },
+  "arbitrage": {
+    "projected_spend": 11.87,
+    "saving": 0.0,
+    "saving_pct": 0.0,
+    "rows": [],
+    "allowed_providers": null,
+    "compliance_checked": false
+  },
+  "cache": {
+    "ttl_seconds": 3600,
+    "cache_off_at": "confidential",
+    "unclassified_default": "confidential",
+    "calls_with_hash": 0,
+    "calls_with_hash_pct": 0.0,
+    "hit_calls": 0,
+    "hit_calls_pct": 0.0,
+    "saving": 0.0,
+    "saving_pct": 0.0,
+    "excluded_cache_off_calls": 0,
+    "excluded_cache_off_spend": 0.0,
+    "excluded_no_timestamp_calls": 0
+  },
+  "pending": {
+    "sensitivity_mix": "#13",
+    "policy_replay": "#13",
+    "quality_parity": "#14",
+    "savings_at_parity": "#14"
+  }
+}
