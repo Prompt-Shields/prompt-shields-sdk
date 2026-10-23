@@ -8,7 +8,8 @@ Safety rules, enforced before any call is made:
 - **Spend cap.** Such a run also needs ``max_spend_usd``. Every call (judge
   calls included) is checked against the cap with a worst-case estimate first
   (see :mod:`prompt_shields.evals.budget`). A call whose worst case has no
-  list price is not made, because its spend cannot be bounded.
+  list price, or whose prompt has non-text parts (images, audio, files), is
+  not made, because its spend cannot be bounded.
 - **Rate limit.** ``requests_per_minute`` spaces calls out.
 - **Policy.** A prompt is sent only to candidates, and judged only by a judge,
   that :class:`EvalPolicy` allows for the prompt's sensitivity level (M§2.3,
@@ -21,7 +22,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from prompt_shields.evals.budget import RateLimiter, SpendCap
+from prompt_shields.evals.budget import RateLimiter, SpendCap, worst_case_input_tokens
 from prompt_shields.evals.executors import Candidate, Completion, Executor
 from prompt_shields.evals.records import SENSITIVITY_LEVELS
 from prompt_shields.evals.sampling import Sample, StratumKey
@@ -169,9 +170,14 @@ class _Guard:
         temperature: float | None,
     ) -> Completion | str:
         """A completion, or a refusal status string."""
+        tokens_in = worst_case_input_tokens(messages)
+        if tokens_in is None:
+            if self.executor.sends_prompts:
+                return SKIPPED_UNPRICED
+            tokens_in = estimate_input_tokens(messages)
         worst = estimate_cost(
-            candidate.vendor, candidate.model,
-            estimate_input_tokens(messages), max_tokens, self.pricing_table,
+            candidate.vendor, candidate.model, tokens_in, max_tokens,
+            self.pricing_table,
         )
         if worst is None:
             if self.executor.sends_prompts:

@@ -34,6 +34,7 @@ from prompt_shields.evals import (
     stratified_sample,
     wilson_interval,
 )
+from prompt_shields.evals.budget import worst_case_input_tokens
 from prompt_shields.evals.harness import (
     SCORED,
     SKIPPED_BUDGET,
@@ -340,6 +341,42 @@ def test_spend_cap_accounting():
     assert cap.remaining == pytest.approx(0.4)
     with pytest.raises(ValueError):
         SpendCap(-1)
+    # NaN compares False with everything and would allow every call.
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            SpendCap(bad)
+        with pytest.raises(ValueError):
+            RateLimiter(bad)
+
+
+def test_worst_case_input_tokens_is_an_upper_bound():
+    # ~4 characters per token undercounts CJK text by about 4x.
+    cjk = [{"role": "user", "content": "漢" * 1000}]
+    assert worst_case_input_tokens(cjk) >= 3000
+    image = [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+    ]}]
+    assert worst_case_input_tokens(image) is None
+
+
+def test_prompt_with_unbounded_parts_is_never_called_live():
+    client = _FakeOpenAI()
+    executor = ProviderExecutor({"openai": client})
+    record = _record(1, prompt_text=None, messages=[{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+    ]}])
+    sample = stratified_sample([record], per_stratum=1, seed=0)
+    run = run_eval(sample, executor, _config(allow_prompt_reexecution=True,
+                                             max_spend_usd=100))
+    assert [t.status for t in run.trials] == [SKIPPED_UNPRICED]
+    assert client.calls == []
+
+
+def test_unknown_sensitivity_label_is_restricted():
+    assert _record(1, data_classification="Secret").sensitivity() == "restricted"
+    assert _record(1, data_classification=" Public ").sensitivity() == "public"
+    assert _record(1, data_classification=None).sensitivity() == "confidential"
 
 
 # --- policy ------------------------------------------------------------------------
@@ -625,6 +662,10 @@ def test_cli_live_requires_opt_in_and_cap(tmp_path, capsys):
     assert "--allow-prompt-reexecution" in capsys.readouterr().err
     assert cli.main([*args, "--allow-prompt-reexecution"]) == 2
     assert "--max-spend-usd" in capsys.readouterr().err
+    for bad in ("nan", "inf", "-1"):
+        assert cli.main([*args, "--allow-prompt-reexecution",
+                         "--max-spend-usd", bad]) == 2
+        assert "--max-spend-usd" in capsys.readouterr().err
 
 
 def test_cli_mock_and_replay_write_reports(tmp_path):

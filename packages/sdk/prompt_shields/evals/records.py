@@ -165,9 +165,15 @@ class EvalRecord:
         return self.expected if self.expected is not None else self.response_text
 
     def sensitivity(self, unclassified_default: str = "confidential") -> str:
-        """Declared level, else the policy default (M§5.1; PII escalation is #13)."""
-        level = (self.data_classification or "").lower()
-        return level if level in SENSITIVITY_LEVELS else unclassified_default
+        """Declared level, else the policy default (M§5.1; PII escalation is #13).
+
+        A declared label that is not a known level is treated as
+        ``restricted``: an unrecognised label must not loosen the policy.
+        """
+        level = (self.data_classification or "").strip().lower()
+        if not level:
+            return unclassified_default
+        return level if level in SENSITIVITY_LEVELS else "restricted"
 
     def input_tokens(self) -> int:
         """Logged input tokens, else ~4 characters per token over the messages."""

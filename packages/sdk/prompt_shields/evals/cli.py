@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections import Counter
 from pathlib import Path
 
+from prompt_shields.evals.budget import worst_case_input_tokens
 from prompt_shields.evals.executors import (
     Candidate,
     FakeExecutor,
@@ -35,7 +37,6 @@ from prompt_shields.evals.report import build_report
 from prompt_shields.evals.sampling import Sample, stratified_sample
 from prompt_shields.evals.scoring import scorer_from_name
 from prompt_shields.pricing import estimate_cost
-from prompt_shields.route_policy import estimate_input_tokens
 
 
 def _pairs(values: list[str], flag: str) -> dict[str, str]:
@@ -133,9 +134,10 @@ def plan(sample: Sample, config: EvalConfig) -> dict:
             calls += 1
             max_tokens = (min(record.max_tokens, config.max_tokens)
                           if record.max_tokens else config.max_tokens)
-            cost = estimate_cost(candidate.vendor, candidate.model,
-                                 estimate_input_tokens(record.messages or []),
-                                 max_tokens, config.pricing_table)
+            tokens_in = worst_case_input_tokens(record.messages or [])
+            cost = (None if tokens_in is None else
+                    estimate_cost(candidate.vendor, candidate.model, tokens_in,
+                                  max_tokens, config.pricing_table))
             if cost is None:
                 unpriced += 1
             else:
@@ -173,6 +175,13 @@ def _echo_reference(records: list[EvalRecord]):
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    for flag, value, low in (("--max-spend-usd", args.max_spend_usd, 0.0),
+                             ("--rpm", args.rpm, None)):
+        if value is not None and not (math.isfinite(value)
+                                      and (value >= low if low is not None else value > 0)):
+            print(f"ps-eval: {flag} must be a finite number "
+                  f"{'>= 0' if low is not None else '> 0'}", file=sys.stderr)
+            return 2
     try:
         candidates = [Candidate.parse(c) for c in args.candidate]
         judge = Candidate.parse(args.judge) if args.judge else None
