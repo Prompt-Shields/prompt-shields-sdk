@@ -264,6 +264,20 @@ export const transformToProviderRequest = (
     );
   }
 
+  // Ported from Portkey 2.0.0 (#60): a provider may rewrite an image-edit
+  // form (Azure OpenAI drops `model` outside its v1 API). Upstream runs every
+  // `requestTransforms[fn]`; here only this one, on a copy so a fallback
+  // target still gets the caller's form.
+  const imageEditTransform =
+    fn === 'imageEdit' && requestBody instanceof FormData
+      ? ProviderConfigs[provider].requestTransforms?.imageEdit
+      : undefined;
+  if (imageEditTransform) {
+    const form = new FormData();
+    (requestBody as FormData).forEach((value, key) => form.append(key, value));
+    return imageEditTransform(form, requestHeaders, providerOptions);
+  }
+
   if (requestBody instanceof FormData || requestBody instanceof ArrayBuffer)
     return requestBody;
 

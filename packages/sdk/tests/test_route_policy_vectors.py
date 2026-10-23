@@ -11,8 +11,11 @@ The SDK client does not route: it only encodes intent as ``X-PS-*`` headers
 path as the gateway runner: hints -> ``X-PS-*`` headers ->
 ``parse_route_headers`` -> ``build_route_request`` -> ``resolve_route``.
 Vectors with status ``pending`` (sensitivity, PII escalation, data policy,
-quality bar) are skipped with their pending_reason. Nothing is counted as
-passing that was not run.
+quality bar) are skipped there with their pending_reason, because
+``resolve_route`` mirrors the gateway, which does not apply those stages yet.
+``test_full_policy_vector`` runs every vector in those files, pending or not,
+through ``resolve_policy_route`` (the whole policy, as policy replay uses it).
+Nothing is counted as passing that was not run.
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ jsonschema = pytest.importorskip("jsonschema")
 
 from prompt_shields import RouteHint
 from prompt_shields.route_policy import (
+    PolicyViolation,
     build_route_request,
     parse_route_headers,
+    resolve_policy_route,
     resolve_route,
 )
 
@@ -209,3 +214,79 @@ def test_decision_vector(policy_name, vector):
     assert {k: getattr(decision, k) for k in expected} == expected
     if est_cost is not None:
         assert abs(decision.est_cost - est_cost) <= 1e-9 * abs(est_cost) + 1e-15
+
+
+# --- decisions under the whole policy (policy replay, #13) -------------------
+
+# Vector files whose stages only resolve_policy_route implements. They stay
+# ``pending`` in the shared files until the gateway implements them too.
+FULL_POLICY_FILES = ("sensitivity", "data-policy", "quality-bar")
+
+
+def _full_policy_vectors():
+    for stem in FULL_POLICY_FILES:
+        doc = _load(SCHEMA_DIR / "vectors" / f"{stem}.json")
+        for vector in doc["vectors"]:
+            yield pytest.param(doc["policy"], vector, id=f"{stem}/{vector['id']}")
+
+
+@pytest.mark.parametrize("policy_name,vector", list(_full_policy_vectors()))
+def test_full_policy_vector(policy_name, vector):
+    policy = _load(SCHEMA_DIR / "examples" / f"{policy_name}.json")
+    request = vector["request"]
+    req = build_route_request(
+        {
+            "model": request.get("model", "auto"),
+            "messages": request["messages"],
+            "max_tokens": request.get("max_tokens"),
+        },
+        parse_route_headers(RouteHint(**request.get("hints", {})).to_headers()),
+    )
+    if request.get("approx_input_tokens") is not None:
+        req.approx_input_tokens = request["approx_input_tokens"]
+    req.data_classification = request.get("data_classification")
+    req.pii_detected = list(request.get("pii_detected", []))
+    req.use_case = request.get("use_case")
+
+    expected = dict(vector["expected"])
+    if expected.pop("error", None) == "PolicyViolation":
+        with pytest.raises(PolicyViolation):
+            resolve_policy_route(req, policy)
+        return
+
+    decision = resolve_policy_route(req, policy)
+    est_cost = expected.pop("est_cost", None)
+    assert {k: getattr(decision, k) for k in expected} == expected
+    if est_cost is not None:
+        assert abs(decision.est_cost - est_cost) <= 1e-9 * abs(est_cost) + 1e-15
+
+
+def test_full_policy_router_agrees_on_active_vectors_without_constraints():
+    """Without sensitivity/data_policy/use_cases, both entry points agree."""
+    policy = _load(SCHEMA_DIR / "examples" / "deterministic.json")
+    for path in VECTOR_FILES:
+        doc = _load(path)
+        if doc["policy"] != "deterministic":
+            continue
+        for vector in doc["vectors"]:
+            if vector.get("status") == "pending":
+                continue
+            request = vector["request"]
+            req = build_route_request(
+                {
+                    "model": request.get("model", "auto"),
+                    "messages": request["messages"],
+                    "max_tokens": request.get("max_tokens"),
+                },
+                parse_route_headers(RouteHint(**request.get("hints", {})).to_headers()),
+            )
+            if request.get("approx_input_tokens") is not None:
+                req.approx_input_tokens = request["approx_input_tokens"]
+            plain = resolve_route(req, policy)
+            full = resolve_policy_route(req, policy)
+            assert (full.model, full.group, full.reason) == (
+                plain.model,
+                plain.group,
+                plain.reason,
+            ), vector["id"]
+            assert full.est_cost == pytest.approx(plain.est_cost, rel=1e-12)
