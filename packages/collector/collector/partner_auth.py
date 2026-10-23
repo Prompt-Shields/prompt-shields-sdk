@@ -305,7 +305,12 @@ def _rate_limit_for(partner: PartnerCredential) -> int:
 # refused one of them is an auth.failure in the tenant's audit trail
 # (collector.audit_trail); read-scope refusals stay in partner_audit_log.
 ADMIN_SCOPES = frozenset(
-    {"webhooks:manage", "attestations:write", "provider-credentials:manage"}
+    {
+        "webhooks:manage",
+        "attestations:write",
+        "risks:review",
+        "provider-credentials:manage",
+    }
 )
 
 

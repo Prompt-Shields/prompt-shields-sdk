@@ -415,6 +415,9 @@ class RiskMapping(Base):
     # Who reviewed (a person, e.g. an email) and the tenant key prefix used.
     reviewed_by = Column(Text)
     reviewed_key_prefix = Column(Text)
+    # The reviewer's comment on the latest review. Every review is also kept
+    # in risk_mapping_reviews (append-only history).
+    review_comment = Column(Text)
 
     asset = relationship("AIAsset", back_populates="risk_mappings")
 
@@ -772,8 +775,87 @@ BEFORE DELETE ON asset_attestations
 FOR EACH ROW EXECUTE FUNCTION asset_attestations_no_delete()
 """
 
+class RiskMappingReview(Base):
+    """Append-only history of human reviews of a risk mapping (#98).
+
+    One row per decision: who (`reviewed_by`, plus the authenticated tenant
+    key, admin token or partner), when, the status chosen, the status it
+    replaced, a comment and a snapshot of the mapping (category, level,
+    framework, rule) at that moment. `risk_mappings` keeps the latest
+    decision. Rows are never updated or deleted outside tenant erasure
+    (triggers, as on asset_attestations). `risk_mapping_id` and `asset_id`
+    have no foreign key on purpose: a duplicate-asset merge can drop a
+    mapping or re-point it to another asset, and the history must outlive
+    both. See collector/risk_reviews.py.
+    """
+
+    __tablename__ = "risk_mapping_reviews"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    risk_mapping_id = Column(UUID(as_uuid=True), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), nullable=False)  # at review time
+    status = Column(Text, nullable=False)  # confirmed | rejected
+    previous_status = Column(Text)  # suggested | confirmed | rejected
+    comment = Column(Text)
+    reviewed_by = Column(Text, nullable=False)  # the human, e.g. an email
+    actor_type = Column(Text, nullable=False)  # 'tenant_key' | 'admin_token' | 'partner'
+    partner_id = Column(UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True)
+    # SHA-256 lookup prefix of the tenant key / admin token, never the secret.
+    api_key_prefix = Column(Text)
+    # The mapping as reviewed: risk_category, risk_level, framework, rule_id,
+    # ruleset_version, framework_ref.
+    snapshot = Column(JSONB)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index(
+            "ix_risk_mapping_reviews_tenant_mapping_ts",
+            "tenant_id", "risk_mapping_id", "created_at",
+        ),
+    )
+
+
+RISK_REVIEW_IMMUTABLE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION risk_mapping_reviews_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'risk_mapping_reviews rows are immutable; insert a new row instead';
+END;
+$$ LANGUAGE plpgsql
+"""
+RISK_REVIEW_IMMUTABLE_TRIGGER_SQL = """
+CREATE TRIGGER risk_mapping_reviews_no_update
+BEFORE UPDATE ON risk_mapping_reviews
+FOR EACH ROW EXECUTE FUNCTION risk_mapping_reviews_immutable()
+"""
+# Same erasure exception as asset_attestations (ATTESTATION_ERASE_SETTING).
+RISK_REVIEW_NO_DELETE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION risk_mapping_reviews_no_delete() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('prompt_shields.erasing_tenant', true) = OLD.tenant_id::text THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'risk_mapping_reviews rows are append-only; only tenant erasure may delete them';
+END;
+$$ LANGUAGE plpgsql
+"""
+RISK_REVIEW_NO_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER risk_mapping_reviews_no_delete
+BEFORE DELETE ON risk_mapping_reviews
+FOR EACH ROW EXECUTE FUNCTION risk_mapping_reviews_no_delete()
+"""
+
 # Install the triggers when the schema is built with create_all too (tests).
 for _table, _ddls in (
+    (
+        RiskMappingReview.__table__,
+        (
+            RISK_REVIEW_IMMUTABLE_FUNCTION_SQL,
+            RISK_REVIEW_IMMUTABLE_TRIGGER_SQL,
+            RISK_REVIEW_NO_DELETE_FUNCTION_SQL,
+            RISK_REVIEW_NO_DELETE_TRIGGER_SQL,
+        ),
+    ),
     (
         AssetAttestation.__table__,
         (

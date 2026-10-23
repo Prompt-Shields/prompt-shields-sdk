@@ -85,6 +85,7 @@ components:
             changes:read: Access delta feed endpoint
             webhooks:manage: Manage webhook subscriptions (never granted by default)
             attestations:write: Record human attestations, including retiring and un-retiring assets (never granted by default)
+            risks:review: Confirm or reject risk mappings, with reviewer and comment (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
             audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
@@ -388,6 +389,11 @@ components:
           nullable: true
           description: The person who confirmed or rejected the mapping
           example: "dpo@example.com"
+        review_comment:
+          type: string
+          nullable: true
+          description: The reviewer's comment on the latest review
+          example: "Screens applicants for open roles; in scope of Annex III 4(a)."
       required:
         - id
         - risk_category
@@ -556,6 +562,110 @@ components:
         - attested_at
         - actor_type
         - partner_id
+
+    RiskMappingReview:
+      type: object
+      description: |
+        One immutable review of a risk mapping (append-only history). The
+        mapping's latest review is also on the mapping itself (`status`,
+        `reviewed_at`, `reviewed_by`, `review_comment`).
+      properties:
+        id:
+          type: string
+          format: uuid
+        risk_mapping_id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+          description: The asset the mapping belonged to when it was reviewed
+        status:
+          type: string
+          enum: [confirmed, rejected]
+        previous_status:
+          type: string
+          nullable: true
+          enum: [suggested, confirmed, rejected, null]
+          description: Status before this review; null for reviews made before the history existed
+        comment:
+          type: string
+          nullable: true
+        reviewed_by:
+          type: string
+          example: "dpo@example.com"
+        reviewed_at:
+          type: string
+          format: date-time
+        actor_type:
+          type: string
+          description: The credential that recorded the review
+          enum: [tenant_key, admin_token, partner]
+        partner_id:
+          type: string
+          format: uuid
+          nullable: true
+        mapping:
+          type: object
+          nullable: true
+          description: |
+            The mapping as reviewed: `risk_category`, `risk_level`,
+            `framework`, `rule_id`, `ruleset_version`, `framework_ref`.
+      required:
+        - id
+        - risk_mapping_id
+        - asset_id
+        - status
+        - previous_status
+        - comment
+        - reviewed_by
+        - reviewed_at
+        - actor_type
+        - partner_id
+        - mapping
+
+    RiskReviewRequest:
+      type: object
+      required: [status, reviewed_by]
+      properties:
+        status:
+          type: string
+          enum: [confirmed, rejected]
+        reviewed_by:
+          type: string
+          minLength: 1
+          maxLength: 320
+          description: >-
+            The person deciding, e.g. an email. Asserted by the caller (API
+            keys and partner tokens are machine credentials); the authenticated
+            credential is recorded alongside it.
+          example: "dpo@example.com"
+        comment:
+          type: string
+          nullable: true
+          maxLength: 4000
+          description: Why the mapping was confirmed or rejected
+
+    RiskReviewHistory:
+      type: object
+      properties:
+        data:
+          type: array
+          description: Newest first
+          items:
+            $ref: '#/components/schemas/RiskMappingReview'
+        meta:
+          type: object
+          properties:
+            total:
+              type: integer
+            current:
+              description: The mapping now; null if it no longer exists
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/RiskMapping'
+          required: [total, current]
+      required: [data, meta]
 
     AttestationRequest:
       type: object
@@ -2035,6 +2145,108 @@ paths:
                     reviewed_by: null
         '404':
           description: Asset not found
+
+  /partner/v1/assets/{asset_id}/risks/{risk_id}/reviews:
+    parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: risk_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getRiskMappingReviews
+      tags: [Assets]
+      summary: Get the review history of a risk mapping
+      description: |
+        Immutable history of human reviews (confirm or reject) of one risk
+        mapping, newest first: who, when, the new and previous status, the
+        comment and the mapping as reviewed. `meta.current` is the mapping
+        now. Requires `risks:read`.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+      security:
+        - OAuth2: [risks:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: Review history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskReviewHistory'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Risk mapping not found on this asset
+
+  /partner/v1/assets/{asset_id}/risks/{risk_id}/review:
+    parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: risk_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: reviewAssetRiskMapping
+      tags: [Assets]
+      summary: Confirm or reject a risk mapping
+      description: |
+        Records a human decision on a risk mapping, typically a rule-based
+        suggestion: `confirmed` or `rejected`, the person deciding and an
+        optional comment. The suggestion engine keeps the decision. A mapping
+        can be reviewed again; every review is appended to its history.
+        Never changes `confidence`. The asset then appears in `/changes`.
+        Requires the `risks:review` scope.
+      security:
+        - OAuth2: [risks:review]
+        - PartnerApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RiskReviewRequest'
+      responses:
+        '201':
+          description: Review recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RiskMappingReview'
+                  meta:
+                    type: object
+                    properties:
+                      current:
+                        $ref: '#/components/schemas/RiskMapping'
+                    required: [current]
+                required: [data, meta]
+        '403':
+          description: Token lacks `risks:review`
+        '404':
+          description: Risk mapping not found on this asset
 
   /partner/v1/assets/{asset_id}/attestations:
     parameters:
@@ -3585,7 +3797,11 @@ paths:
       operationId: reviewRiskMapping
       tags: [Admin]
       summary: Confirm or reject a risk mapping
-      description: A human decision the suggestion engine keeps. Audited.
+      description: |
+        A human decision the suggestion engine keeps, with an optional
+        comment. Each review is appended to the mapping's history
+        (`GET .../reviews`) and the admin audit trail. Never changes
+        `confidence`.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -3595,17 +3811,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                status:
-                  type: string
-                  enum: [confirmed, rejected]
-                reviewed_by:
-                  type: string
-                  minLength: 1
-                  maxLength: 320
-                  description: The person deciding, e.g. an email
-              required: [status, reviewed_by]
+              $ref: '#/components/schemas/RiskReviewRequest'
       responses:
         '200':
           description: The reviewed risk mapping
@@ -3613,6 +3819,48 @@ paths:
             application/json:
               schema:
                 type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/risk-mappings/{risk_id}/reviews:
+    parameters:
+      - name: risk_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: listRiskMappingReviews
+      tags: [Admin]
+      summary: Review history of a risk mapping
+      description: |
+        Append-only history of reviews of one risk mapping, newest first.
+        Still answers for a mapping a duplicate-asset merge removed
+        (`meta.current` is then null).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:registry
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: Review history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskReviewHistory'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

@@ -46,7 +46,9 @@ Entry points:
 
 * :func:`suggest_risks` for one tenant (the caller commits).
 * ``POST /api/v1/admin/risk-suggestions/run`` for the caller's tenant.
-* ``POST /api/v1/admin/risk-mappings/{risk_id}/review`` to confirm or reject.
+* ``POST /api/v1/admin/risk-mappings/{risk_id}/review`` (and the Partner API)
+  to confirm or reject, with a comment and an append-only review history:
+  see :mod:`collector.risk_reviews`.
 * ``python -m collector.risk_suggestions --tenant <id>`` or ``--all-tenants``.
 """
 
@@ -66,17 +68,15 @@ from typing import Any, Literal
 from uuid import UUID
 
 from db.models import AIAsset, DataFlow, RiskMapping, Tenant, uuid7
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import rls
 from collector.admin_auth import AdminPrincipal, require_admin
-from collector.audit import bearer_key_prefix, record_read
 from collector.dedup import CLASSIFICATION_ORDER
-from collector.sanitize import BoundedJsonRoute, StorableStr
+from collector.sanitize import BoundedJsonRoute
 
 RULES_DIR = Path(__file__).parent / "risk_rules"
 
@@ -631,6 +631,7 @@ def risk_dict(r: RiskMapping) -> dict:
         "evidence": r.evidence,
         "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
         "reviewed_by": r.reviewed_by,
+        "review_comment": r.review_comment,
     }
 
 
@@ -643,18 +644,6 @@ router = APIRouter(prefix="/api/v1/admin", tags=["Admin"], route_class=BoundedJs
 _REGISTRY = Depends(require_admin("admin:registry"))
 
 
-def _not_found(detail: str) -> HTTPException:
-    return HTTPException(
-        status_code=404,
-        detail={
-            "type": "about:blank",
-            "title": "Not Found",
-            "status": 404,
-            "detail": detail,
-        },
-    )
-
-
 @router.post(
     "/risk-suggestions/run",
     summary="Re-evaluate risk classification suggestions for the tenant's assets",
@@ -665,46 +654,6 @@ async def run_suggestions(request: Request, principal: AdminPrincipal = _REGISTR
     result = await suggest_risks(db, tenant_id)
     await db.commit()
     return asdict(result)
-
-
-class ReviewBody(BaseModel):
-    status: Literal["confirmed", "rejected"]
-    # A tenant API key is a machine credential, so the human who decided is
-    # named here (as for attestations); the key prefix is stored next to it.
-    reviewed_by: StorableStr = Field(
-        ..., min_length=1, max_length=320, description="The person deciding, e.g. an email"
-    )
-
-
-@router.post(
-    "/risk-mappings/{risk_id}/review",
-    summary="Confirm or reject a risk mapping (a human decision the engine keeps)",
-)
-async def review_risk(
-    risk_id: UUID, body: ReviewBody, request: Request, principal: AdminPrincipal = _REGISTRY
-) -> dict:
-    tenant_id = principal.tenant_id
-    db = request.state.db
-    row = (
-        await db.execute(
-            select(RiskMapping).where(
-                RiskMapping.id == risk_id, RiskMapping.tenant_id == tenant_id
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        await record_read(request, tenant_id=tenant_id, status_code=404, response_count=0)
-        raise _not_found("Risk mapping not found")
-    now = datetime.now(UTC)
-    row.status = body.status
-    row.reviewed_at = now
-    row.reviewed_by = body.reviewed_by.strip()
-    row.reviewed_key_prefix = bearer_key_prefix(request)
-    row.updated_at = now
-    out = risk_dict(row)
-    await db.commit()
-    await record_read(request, tenant_id=tenant_id, status_code=200, response_count=1)
-    return out
 
 
 # ──────────────────────────────────────────────────────────────────────

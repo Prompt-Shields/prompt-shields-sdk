@@ -39,6 +39,7 @@ from db.models import (
     ProviderKeyFingerprint,
     RetentionAuditLog,
     RiskMapping,
+    RiskMappingReview,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
@@ -119,6 +120,14 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 ),
                 RiskMapping(
                     tenant_id=tenant_id, asset_id=a.id, risk_category="pii", risk_level="high"
+                ),
+                RiskMappingReview(
+                    tenant_id=tenant_id,
+                    risk_mapping_id=uuid.uuid4(),
+                    asset_id=a.id,
+                    status="confirmed",
+                    reviewed_by=f"dpo@{name}.example",
+                    actor_type="tenant_key",
                 ),
                 PartnerAuditLog(
                     tenant_id=tenant_id, endpoint="/x", method="GET", status_code=200
@@ -546,6 +555,7 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         assert resp.status_code == 200, resp.text
         assert resp.json()["rows_deleted"]["tenants"] == 1
         assert resp.json()["rows_deleted"]["asset_attestations"] == 1
+        assert resp.json()["rows_deleted"]["risk_mapping_reviews"] == 1
         assert resp.json()["rows_deleted"]["webhook_deliveries"] == 1
         assert resp.json()["rows_deleted"]["webhook_subscriptions"] == 1
         assert resp.json()["rows_deleted"]["mcp_tool_usage"] == 1
@@ -568,6 +578,67 @@ async def test_attestation_delete_stays_blocked_under_a_bypass(rls_db):
     async with rls_db["admin"]() as s:
         with pytest.raises(DBAPIError, match="append-only"):
             await s.execute(text("DELETE FROM asset_attestations"))
+
+
+async def test_risk_review_delete_stays_blocked_under_a_bypass(rls_db):
+    async with rls_db["admin"]() as s:
+        with pytest.raises(DBAPIError, match="append-only"):
+            await s.execute(text("DELETE FROM risk_mapping_reviews"))
+
+
+async def test_risk_reviews_admin_and_partner_routes_under_rls(rls_db):
+    """Reviews written through the admin and Partner API land in the
+    caller's tenant only, and the other tenant cannot read or write them."""
+    a, b = rls_db["a"], rls_db["b"]
+    async with rls_db["admin"]() as s:
+        p = (
+            await s.execute(
+                select(PartnerCredential).where(PartnerCredential.tenant_id == a)
+            )
+        ).scalar_one()
+        p.scopes = ["risks:read", "risks:review"]
+        risk_a = (
+            await s.execute(select(RiskMapping).where(RiskMapping.tenant_id == a))
+        ).scalar_one()
+        risk_a_id, asset_a = risk_a.id, risk_a.asset_id
+        await s.commit()
+    body = {"status": "rejected", "reviewed_by": "dpo@a.example", "comment": "n/a"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        ha = {"Authorization": f"Bearer {KEY_A}"}
+        hb = {"Authorization": f"Bearer {KEY_B}"}
+        pa = {"Authorization": f"Bearer {PARTNER_KEY_A}"}
+        pb = {"Authorization": f"Bearer {PARTNER_KEY_B}"}
+        path = f"/api/v1/admin/risk-mappings/{risk_a_id}"
+        resp = await c.post(f"{path}/review", headers=ha, json=body)
+        assert resp.status_code == 200, resp.text
+        resp = await c.post(
+            f"/partner/v1/assets/{asset_a}/risks/{risk_a_id}/review",
+            headers=pa,
+            json={**body, "status": "confirmed"},
+        )
+        assert resp.status_code == 201, resp.text
+        resp = await c.get(f"{path}/reviews", headers=ha)
+        assert resp.status_code == 200, resp.text
+        assert [r["status"] for r in resp.json()["data"]] == ["confirmed", "rejected"]
+        # Tenant B: not found, through either API.
+        assert (await c.get(f"{path}/reviews", headers=hb)).status_code == 404
+        assert (await c.post(f"{path}/review", headers=hb, json=body)).status_code == 404
+        resp = await c.get(
+            f"/partner/v1/assets/{asset_a}/risks/{risk_a_id}/reviews", headers=pb
+        )
+        assert resp.status_code == 404
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        assert set(await _tenant_ids(s, "risk_mapping_reviews")) == {b}
+    async with rls_db["admin"]() as s:
+        mine = (
+            await s.execute(
+                select(RiskMappingReview.tenant_id).where(
+                    RiskMappingReview.risk_mapping_id == risk_a_id
+                )
+            )
+        ).scalars().all()
+    assert mine == [a, a]
 
 
 async def test_disable_turns_enforcement_off(rls_db):
