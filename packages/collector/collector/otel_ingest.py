@@ -2,8 +2,11 @@
 
 Exporters point ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` (or the base
 ``OTEL_EXPORTER_OTLP_ENDPOINT`` set to ``<collector>/ingest/otel``) here with
-``Authorization: Bearer <tenant ingest key>``. Only JSON encoding is accepted
-for now; protobuf requests get 415.
+``Authorization: Bearer <tenant ingest key>``. Both OTLP/HTTP encodings are
+accepted: JSON (``application/json``) and protobuf (``application/x-protobuf``,
+the default of OpenLLMetry and most OTel SDKs; collector/otlp_protobuf.py).
+The response uses the request's encoding. Compressed bodies
+(``Content-Encoding: gzip``) are not supported.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import contextlib
 from uuid import UUID
 
 from db.models import AIUsageEvent
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import metrics
@@ -32,6 +35,12 @@ from collector.otel_mapping import (
     map_mcp_span,
     map_span,
     safe_attributes,
+)
+from collector.otlp_protobuf import (
+    PROTOBUF_CONTENT_TYPES,
+    PROTOBUF_MEDIA_TYPE,
+    decode_traces,
+    encode_response,
 )
 from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
 from collector.webhooks import AssetChanges
@@ -151,20 +160,23 @@ async def ingest_otel_traces(request: Request):
     tenant_id = await resolve_tenant(request)
 
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
-    if content_type != "application/json":
+    is_protobuf = content_type in PROTOBUF_CONTENT_TYPES
+    if content_type != "application/json" and not is_protobuf:
         raise _problem(
             415,
             "Unsupported Media Type",
-            "Only OTLP/HTTP JSON (application/json) is supported",
+            "Use OTLP/HTTP JSON (application/json) or protobuf"
+            " (application/x-protobuf)",
         )
 
     raw = await _read_bounded_body(request)
     try:
-        payload = loads_bounded(raw)
+        payload = decode_traces(raw) if is_protobuf else loads_bounded(raw)
     except BodyTooDeep:
         raise too_deep_problem() from None
     except ValueError:  # UnicodeDecodeError included
-        raise _problem(400, "Bad Request", "Body is not valid JSON") from None
+        what = "an OTLP protobuf message" if is_protobuf else "valid JSON"
+        raise _problem(400, "Bad Request", f"Body is not {what}") from None
     if not isinstance(payload, dict):
         raise _problem(
             400, "Bad Request", "Expected an ExportTraceServiceRequest object"
@@ -214,13 +226,21 @@ async def ingest_otel_traces(request: Request):
         metrics.record_ingest("otel", "accepted", len(mapped))
         metrics.record_assets_created("otel", assets_created)
     metrics.record_ingest("otel", "rejected", rejected)
+    error_message = (
+        "GenAI spans without gen_ai.provider.name or gen_ai.system"
+        if rejected
+        else ""
+    )
+    if is_protobuf:
+        return Response(
+            content=encode_response(rejected, error_message),
+            media_type=PROTOBUF_MEDIA_TYPE,
+        )
     if rejected:
         return {
             "partialSuccess": {
                 "rejectedSpans": rejected,
-                "errorMessage": (
-                    "GenAI spans without gen_ai.provider.name or gen_ai.system"
-                ),
+                "errorMessage": error_message,
             }
         }
     return {}
