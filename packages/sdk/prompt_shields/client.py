@@ -14,6 +14,7 @@ if telemetry delivery fails. See `telemetry.py` for buffering details.
 
 import hashlib
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -40,6 +41,21 @@ from prompt_shields.telemetry import (
     unregister_exit_flush,
 )
 from prompt_shields.types import PSMetadata, RouteHint
+
+# OpenAI reasoning models (o1, o3-mini, o4-mini, gpt-5, ...) reject
+# `max_tokens` and take `max_completion_tokens` instead.
+_REASONING_MODEL = re.compile(r"^(?:o\d+(?:-|$)|gpt-5)")
+
+
+def _openai_max_tokens(model: str, max_tokens: int | None, kwargs: dict) -> None:
+    """Pass create()'s named `max_tokens` on to an OpenAI chat call, as
+    `max_completion_tokens` for reasoning models. An explicit
+    `max_completion_tokens` wins."""
+    if max_tokens is None or "max_completion_tokens" in kwargs:
+        return
+    name = model.rsplit("/", 1)[-1] if isinstance(model, str) else ""
+    key = "max_completion_tokens" if _REASONING_MODEL.match(name) else "max_tokens"
+    kwargs[key] = max_tokens
 
 
 def _fingerprint(api_key: str) -> str:
@@ -385,8 +401,7 @@ class _CompletionsNamespace:
 
         if vendor == "openai":
             # max_tokens is a named parameter of create(); pass it on.
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
+            _openai_max_tokens(model, max_tokens, kwargs)
             return upstream.chat.completions.create(
                 model=model, messages=messages, **kwargs
             )

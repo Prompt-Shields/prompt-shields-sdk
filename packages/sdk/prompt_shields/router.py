@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from prompt_shields.pii import scan_messages
+from prompt_shields.pii import detect_pii_categories
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
     PolicyViolation,
@@ -409,6 +409,22 @@ def to_anthropic_request(messages: list, kwargs: dict) -> tuple[list, dict]:
     return out, kwargs
 
 
+def _scan_pii(messages: Any) -> list[str]:
+    """PII categories in everything the router may send: dict or object
+    messages (an SDK message object from an earlier response), text content
+    parts, and assistant tool-call arguments. Unlike ``scan_messages`` it
+    reads attribute objects too, so no message text bypasses escalation."""
+    texts: list[str] = []
+    for message in messages or ():
+        texts.extend(_part_texts(_field(message, "content")))
+        for tc in _field(message, "tool_calls") or ():
+            fn = _field(tc, "function")
+            for value in (_field(fn, "name"), _field(fn, "arguments")):
+                if isinstance(value, str):
+                    texts.append(value)
+    return detect_pii_categories(" ".join(texts))
+
+
 # --- policy and providers ---------------------------------------------------------
 
 
@@ -623,7 +639,7 @@ class _RouterCore:
         req.use_case = use_case
         # Always scanned, also with scan_pii=False: escalation is a safety
         # control and nothing leaves the process here.
-        found = set(scan_messages(messages))
+        found = set(_scan_pii(messages))
         found.update(pii_detected or ())
         req.pii_detected = sorted(found)
         return req
@@ -972,7 +988,12 @@ class _RouterCompletions:
             return r._gateway_result(model, response, captured, attempt)
 
         _refuse_stream(kwargs)
-        plan = r._plan(messages, model, route, max_tokens, data_classification, use_case)
+        plan = r._plan(
+            messages, model, route,
+            max_tokens if max_tokens is not None
+            else kwargs.get("max_completion_tokens"),
+            data_classification, use_case,
+        )
         call_messages, call_max, call_kwargs = r._call_args(
             plan, messages, max_tokens, kwargs
         )
@@ -1024,7 +1045,12 @@ class _AsyncRouterCompletions:
             return r._gateway_result(model, response, captured, attempt)
 
         _refuse_stream(kwargs)
-        plan = r._plan(messages, model, route, max_tokens, data_classification, use_case)
+        plan = r._plan(
+            messages, model, route,
+            max_tokens if max_tokens is not None
+            else kwargs.get("max_completion_tokens"),
+            data_classification, use_case,
+        )
         call_messages, call_max, call_kwargs = r._call_args(
             plan, messages, max_tokens, kwargs
         )

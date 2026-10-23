@@ -335,6 +335,53 @@ def test_pii_in_content_parts_is_scanned_even_with_scan_pii_off():
     assert decision.sensitivity_level == "restricted"
 
 
+def test_pii_in_object_messages_and_tool_arguments_is_scanned():
+    """An SDK message object from an earlier response, and assistant tool-call
+    arguments, are sent upstream too, so they must escalate as well."""
+    router = _router()
+    obj = SimpleNamespace(role="user", content="Summarise this medical record")
+    decision = router.route(
+        [obj], route=RouteHint(quality="draft"), data_classification="public",
+    )
+    assert decision.sensitivity_level == "restricted"
+    tool_turn = {
+        "role": "assistant", "content": None,
+        "tool_calls": [{"id": "c1", "type": "function", "function": {
+            "name": "lookup", "arguments": '{"q": "medical record 7"}'}}],
+    }
+    decision = router.route(
+        [{"role": "user", "content": "hi"}, tool_turn],
+        route=RouteHint(quality="draft"), data_classification="public",
+    )
+    assert decision.sensitivity_level == "restricted"
+
+
+@pytest.mark.parametrize("model, key", [
+    ("gpt-4o-mini", "max_tokens"),
+    ("o3-mini", "max_completion_tokens"),
+    ("o1", "max_completion_tokens"),
+    ("gpt-5", "max_completion_tokens"),
+])
+def test_openai_max_tokens_reaches_upstream(model, key):
+    """create(max_tokens=) is sent on, as max_completion_tokens for reasoning
+    models (which reject max_tokens); an explicit max_completion_tokens wins."""
+    client = ShieldsClient(api_key="sk", ps_api_key="ps")
+    fake = _FakeUpstream("openai", is_async=False)
+    client._upstream = fake
+    client._telemetry.enqueue = lambda e: None
+    client._telemetry.flush_sync = lambda: None
+    client.chat.completions.create(model=model, messages=HI, max_tokens=50)
+    call = fake.calls[0]
+    assert call[key] == 50
+    other = "max_tokens" if key == "max_completion_tokens" else "max_completion_tokens"
+    assert other not in call
+    client.chat.completions.create(
+        model=model, messages=HI, max_tokens=50, max_completion_tokens=70
+    )
+    assert fake.calls[1]["max_completion_tokens"] == 70
+    assert "max_tokens" not in fake.calls[1]
+
+
 def test_unconfigured_provider_is_never_used():
     # Without berget/mistral-eu keys, nothing may serve restricted data.
     router = _router(providers={

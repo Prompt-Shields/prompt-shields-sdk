@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from prompt_shields.client import _fingerprint
+from prompt_shields.client import _fingerprint, _openai_max_tokens
 from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import (
@@ -324,8 +324,7 @@ class _AsyncCompletionsNamespace:
 
         if vendor == "openai":
             # max_tokens is a named parameter of create(); pass it on.
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
+            _openai_max_tokens(model, max_tokens, kwargs)
             return await upstream.chat.completions.create(
                 model=model, messages=messages, **kwargs
             )
