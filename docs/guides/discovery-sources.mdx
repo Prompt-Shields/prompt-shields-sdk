@@ -16,7 +16,7 @@ Prompt Shields uses multiple independent channels to discover AI usage. When the
 | **SDK** | Developer API calls with rich business context | Drop-in OpenAI wrapper captures metadata |
 | **Gateway** | All LLM API traffic (zero code change) | Proxy intercepts and logs requests |
 | **Platform Signal** | Enterprise platform audit logs | Pulls from Microsoft Purview, Defender, Azure |
-| **OTel** (`otel`) | Apps already instrumented with OpenTelemetry GenAI | Collector OTLP/HTTP receiver maps `gen_ai.*` spans to usage events |
+| **OTel** (`otel`) | Apps already instrumented with OpenTelemetry GenAI | Collector OTLP/HTTP receiver (`/ingest/otel/v1/traces`, JSON or protobuf, so OpenLLMetry's default exporter works as is) maps `gen_ai.*` spans to usage events |
 | **Kong** (`kong`) | LLM traffic through Kong AI Gateway (ai-proxy) | Kong's stock `http-log` plugin posts to `/ingest/kong`; see [Prompt Shields with Kong](/integrations/kong) |
 | **MCP tool calls** | MCP servers and tools your services call | SDK `instrument()` wraps `mcp.ClientSession.call_tool`; MCP `tools/call` spans on the OTLP receiver. Names, counts and outcome only. Read with `GET /api/v1/registry/mcp-tools` |
 | **Code Scan** (`code_scan`) | AI SDKs, models and endpoints referenced in source, before they run | `ps-scan` CLI or GitHub Action scans the repository locally |
