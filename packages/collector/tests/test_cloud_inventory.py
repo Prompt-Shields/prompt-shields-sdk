@@ -236,6 +236,86 @@ async def test_azure_token_is_renewed_before_it_expires():
     assert state["n"] >= 3
 
 
+async def test_azure_token_refused_mid_run_is_renewed_and_the_page_retried():
+    # The clock never moves (e.g. the host was suspended, which a monotonic
+    # clock does not count), but ARM starts refusing the first token after
+    # a few calls: a new one is requested and the refused page read again.
+    state = {"tokens": 0, "refused": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            state["tokens"] += 1
+            return httpx.Response(
+                200,
+                json={"access_token": f"tok-{state['tokens']}", "expires_in": 3600},
+            )
+        path = request.url.path
+        if request.headers["authorization"] == "Bearer tok-1" and path.endswith(
+            "/deployments"
+        ):
+            state["refused"].append(path)
+            return httpx.Response(
+                401, json={"error": {"code": "ExpiredAuthenticationToken"}}
+            )
+        if path.endswith("/Microsoft.CognitiveServices/accounts"):
+            return httpx.Response(
+                200,
+                json={
+                    "value": [{"id": ACCOUNT, "kind": "OpenAI", "location": "eastus"}]
+                },
+            )
+        assert path == f"{ACCOUNT}/deployments"
+        assert request.headers["authorization"] == "Bearer tok-2"
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "name": "chat-prod",
+                        "properties": {"model": {"name": "gpt-4o"}},
+                    }
+                ]
+            },
+        )
+
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+        clock=lambda: 0.0,
+    )
+    assert state["tokens"] == 2
+    assert state["refused"] == [f"{ACCOUNT}/deployments"]
+    assert summary == {"accounts": 1}
+    assert [(d.resource_id, d.model) for d in deps] == [
+        (f"{ACCOUNT}/deployments/chat-prod", "gpt-4o")
+    ]
+
+
+async def test_azure_401_after_renewal_is_reported_not_looped():
+    state = {"tokens": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            state["tokens"] += 1
+            return httpx.Response(200, json={"access_token": TOKEN})
+        if SUB_DENIED in request.url.path:
+            return httpx.Response(401)
+        return httpx.Response(200, json={"value": []})
+
+    summary, _ = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB_DENIED, SUB]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+        clock=lambda: 0.0,
+    )
+    assert summary["subscription_errors"] == {
+        SUB_DENIED: "azure: account list returned HTTP 401"
+    }
+    # The initial token, and one renewal for the refused page.
+    assert state["tokens"] == 2
+
+
 async def test_configured_subscriptions_skip_enumeration():
     calls: list[httpx.Request] = []
     await ci.fetch_azure_deployments(
