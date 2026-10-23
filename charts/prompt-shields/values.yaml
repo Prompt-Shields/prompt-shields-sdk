@@ -139,6 +139,9 @@ gateway:
     envName: PS_SHUTDOWN_TIMEOUT_MS
   # PS_COLLECTOR_URL. Empty: the in-cluster collector Service (or nothing
   # when collector.enabled is false).
+  # A loopback or private-IP URL must also be listed in
+  # config.TRUSTED_CUSTOM_HOSTS (default "none"), or telemetry is dropped;
+  # service names and public hosts need nothing.
   collectorUrl: ""
   metrics:
     # PS_METRICS_ENABLED: Prometheus metrics on GET /metrics.
