@@ -11,22 +11,29 @@ order, case-insensitive regex) this module follows the JavaScript behaviour.
 Pure and deterministic: no network, no clock, no randomness. The policy is the
 route-policy.v1 document as parsed JSON (a ``dict``); it is not modified.
 
-What it decides today, as the gateway does: explicit group (``X-PS-Route``) >
-quality hint (``X-PS-Quality``) > ``heuristic`` strategy, with the
-``max_cost`` budget clamp and the unknown-group fallback. Not implemented yet
-(P1, the vectors for them are ``pending``): sensitivity classification and PII
-escalation, the data-policy constraint and its fail-closed ``PolicyViolation``,
-and the per-use-case quality bar. ``resolve_route`` ignores the
-``sensitivity``, ``data_policy`` and ``use_cases`` sections of a policy, so a
-replay with a policy that sets them must not report its results as
-policy-compliant.
+Two entry points:
+
+* ``resolve_route`` decides what the gateway decides today: explicit group
+  (``X-PS-Route``) > quality hint (``X-PS-Quality``) > ``heuristic``
+  strategy, with the ``max_cost`` budget clamp and the unknown-group
+  fallback. It ignores the ``sensitivity``, ``data_policy`` and ``use_cases``
+  sections of a policy, as the gateway does.
+* ``resolve_policy_route`` applies the whole policy, as policy replay needs
+  it: sensitivity classification with escalate-only PII escalation
+  (``classify_sensitivity``), the data-policy constraint with its fail-closed
+  ``PolicyViolation``, and the per-use-case quality bar, then the same
+  precedence and budget clamp as ``resolve_route`` over the remaining
+  candidates. The gateway does not implement these stages yet, so their
+  vectors (``sensitivity.json``, ``data-policy.json``, ``quality-bar.json``)
+  stay ``pending`` for it; the Python runner checks them against this
+  function.
 """
 
 from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -66,16 +73,47 @@ class RouteRequest:
     quality: Quality | None = None
     max_cost: float | None = None
     explicit_group: str | None = None
+    # Only read by resolve_policy_route.
+    data_classification: str | None = None
+    pii_detected: list[str] = field(default_factory=list)
+    use_case: str | None = None
 
 
 @dataclass(frozen=True)
 class RouteDecision:
-    """The router's answer: a concrete model, its group, why, and its cost."""
+    """The router's answer: a concrete model, its group, why, and its cost.
+
+    ``sensitivity_level`` and ``sensitivity_source`` are set by
+    ``resolve_policy_route`` only.
+    """
 
     model: str
     group: str
     reason: str
     est_cost: float
+    sensitivity_level: str | None = None
+    sensitivity_source: str | None = None
+
+
+class PolicyViolation(Exception):
+    """No candidate the data policy (and use-case bar) allows: fail closed.
+
+    ``fallback.no_compliant_candidate`` is always ``fail_closed``: the call is
+    never served by a non-compliant model.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        sensitivity_level: str | None = None,
+        sensitivity_source: str | None = None,
+        group: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.sensitivity_level = sensitivity_level
+        self.sensitivity_source = sensitivity_source
+        self.group = group
 
 
 @dataclass(frozen=True)
@@ -249,17 +287,23 @@ def _pick_cheapest_in(
 
 
 def _cheapest_under_budget(
-    policy: Mapping[str, Any], max_cost: float, req: RouteRequest
+    policy: Mapping[str, Any],
+    max_cost: float,
+    req: RouteRequest,
+    allow: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> _Pick | None:
     """Most capable (highest-cost) tier across all groups with cost <= max_cost.
 
     When nothing fits, the globally cheapest tier with ``under_budget=False``.
+    ``allow`` limits the tiers considered (data policy, use-case bar).
     """
     out = _out_tokens(req)
     under: _Pick | None = None
     cheapest: _Pick | None = None
     for group in _js_keys(policy["groups"]):
         for tier in _tiers(policy, group):
+            if allow is not None and not allow(tier):
+                continue
             cost = estimate_tier_cost(tier, req.approx_input_tokens, out)
             if cheapest is None or cost < cheapest.est_cost:
                 cheapest = _Pick(tier["model"], group, cost)
@@ -325,13 +369,17 @@ def _message_strings(messages: list[Any]) -> list[str]:
     return out
 
 
-def _heuristic(req: RouteRequest, policy: Mapping[str, Any]) -> RouteDecision:
+def _is_complex(req: RouteRequest) -> bool:
     texts = _message_strings(req.messages)
-    complex_ = (
+    return (
         req.approx_input_tokens > COMPLEX_TOKEN_THRESHOLD
         or any("```" in t for t in texts)
         or any(_JSON_SCHEMA.search(t) for t in texts)
     )
+
+
+def _heuristic(req: RouteRequest, policy: Mapping[str, Any]) -> RouteDecision:
+    complex_ = _is_complex(req)
     label = "complex" if complex_ else "simple"
     group = "frontier" if complex_ else "cheap"
     picked = _pick_cheapest_in(_tiers(policy, group), group, req)
@@ -378,3 +426,210 @@ def resolve_route(req: RouteRequest, policy: Mapping[str, Any]) -> RouteDecision
             f"route-policy strategy {strategy!r} is not implemented"
         )
     return _heuristic(req, policy)
+
+
+# --- full policy: sensitivity, data policy, use-case quality bar --------------
+
+DEFAULT_LEVELS: tuple[str, ...] = ("public", "internal", "confidential", "restricted")
+
+#: Country codes inside the European Economic Area. A rule that allows ``EEA``
+#: also allows a candidate whose jurisdiction is one of these. The reverse is
+#: not true: a rule that allows only ``NO`` does not allow a candidate that is
+#: only known to be somewhere in the ``EEA``.
+# fmt: off
+EEA_COUNTRIES = frozenset({
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
+    "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
+    "SI", "ES", "SE", "IS", "LI", "NO",
+})
+# fmt: on
+
+
+def classify_sensitivity(
+    policy: Mapping[str, Any],
+    declared: str | None,
+    pii_detected: Iterable[str] = (),
+) -> tuple[str | None, str]:
+    """Effective sensitivity level of one call and where it came from.
+
+    ``effective = max(declared, or unclassified_default if none,
+    every pii_escalation level for each detected category)``. Escalate-only:
+    detection never lowers a level. A declared level that is not one of the
+    policy's ``levels`` counts as unclassified. The source is ``declared``,
+    ``default`` or ``pii_escalated`` (only when a detection raised the level).
+
+    A policy without a ``sensitivity`` section has no levels: the declared
+    value is passed through (``None`` when there is none) and nothing escalates.
+    """
+    sensitivity = policy.get("sensitivity")
+    if not sensitivity:
+        return (declared, "declared") if declared else (None, "default")
+    levels = list(sensitivity.get("levels") or DEFAULT_LEVELS)
+    rank = {level: i for i, level in enumerate(levels)}
+    if declared in rank:
+        level, source = declared, "declared"
+    else:
+        level, source = sensitivity["unclassified_default"], "default"
+    escalation = sensitivity.get("pii_escalation") or {}
+    for category in pii_detected or ():
+        escalated = escalation.get(category)
+        if escalated in rank and rank[escalated] > rank.get(level, -1):
+            level, source = escalated, "pii_escalated"
+    return level, source
+
+
+def data_policy_rule(
+    policy: Mapping[str, Any], level: str | None
+) -> Mapping[str, Any] | None:
+    """The ``data_policy`` rule for ``level``; ``None`` means no constraint."""
+    if level is None:
+        return None
+    return (policy.get("data_policy") or {}).get(level)
+
+
+def _jurisdiction_allowed(jurisdiction: Any, allowed: Iterable[str]) -> bool:
+    allowed = set(allowed)
+    if "any" in allowed:
+        return True
+    if not isinstance(jurisdiction, str):
+        return False
+    return jurisdiction in allowed or (
+        "EEA" in allowed and jurisdiction in EEA_COUNTRIES
+    )
+
+
+def tier_complies(tier: Mapping[str, Any], rule: Mapping[str, Any] | None) -> bool:
+    """True when a ``modelTier`` meets a ``dataPolicyRule``.
+
+    Fails closed on missing metadata: a candidate with no ``jurisdiction``
+    only passes ``any``, one with no ``provider`` never passes a provider
+    allow-list, ``require_zdr`` needs ``zdr: true`` and
+    ``us_cloud_act_exposure: false`` needs the candidate to state ``false``.
+    """
+    if rule is None:
+        return True
+    if not _jurisdiction_allowed(tier.get("jurisdiction"), rule["jurisdictions"]):
+        return False
+    providers = rule.get("providers")
+    if providers is not None and tier.get("provider") not in providers:
+        return False
+    if rule.get("require_zdr") and tier.get("zdr") is not True:
+        return False
+    return not (
+        rule.get("us_cloud_act_exposure") is False
+        and tier.get("us_cloud_act_exposure") is not False
+    )
+
+
+def _group_rank(policy: Mapping[str, Any], group: str) -> int | None:
+    order = policy.get("group_order") or []
+    return order.index(group) if group in order else None
+
+
+def resolve_policy_route(req: RouteRequest, policy: Mapping[str, Any]) -> RouteDecision:
+    """Decide the model for one call under the whole route-policy.v1 ``policy``.
+
+    Precedence: data policy > explicit group > hints > use-case quality bar >
+    strategy.
+
+    1. ``classify_sensitivity`` gives the effective level.
+    2. Only candidates that meet the level's ``data_policy`` rule are kept,
+       in every group and in the budget clamp.
+    3. The group comes from the explicit group, else the quality hint, else
+       the ``heuristic`` strategy; an unknown or empty group (as written in
+       the policy, before filtering) falls back to ``default_group``.
+    4. Unless the group was given explicitly, the use case's bar applies:
+       ``min_group`` raises the group (by ``group_order``) and an ``eval_set``
+       limits candidates to ``eligible_models``. When no eligible candidate
+       is left in the group, the next groups up ``group_order`` are tried.
+    5. Cheapest remaining candidate in the group, then the ``max_cost`` clamp
+       over all allowed candidates.
+
+    Raises ``PolicyViolation`` when no allowed candidate is left. It never
+    falls back to a non-compliant model.
+    """
+    level, source = classify_sensitivity(
+        policy, req.data_classification, req.pii_detected
+    )
+    rule = data_policy_rule(policy, level)
+
+    bar = None
+    if req.explicit_group is None and req.use_case is not None:
+        bar = (policy.get("use_cases") or {}).get(req.use_case)
+    eligible: set[str] | None = None
+    if bar and bar.get("eval_set"):
+        eligible = set(bar.get("eligible_models") or ())
+
+    def allow(tier: Mapping[str, Any]) -> bool:
+        if eligible is not None and tier["model"] not in eligible:
+            return False
+        return tier_complies(tier, rule)
+
+    def violation(msg: str, group: str | None) -> PolicyViolation:
+        return PolicyViolation(
+            msg, sensitivity_level=level, sensitivity_source=source, group=group
+        )
+
+    # 3. Pick the group as resolve_route would.
+    if req.explicit_group:
+        group, reason = req.explicit_group, "override"
+        if not _tiers(policy, group):
+            group, reason = policy["default_group"], "override:unknown-group-default"
+    elif req.quality:
+        group = policy["quality_to_group"].get(req.quality) or policy["default_group"]
+        reason = f"quality:{req.quality}"
+        if not _tiers(policy, group):
+            group = policy["default_group"]
+            reason += ":unknown-group-default"
+    else:
+        strategy = policy.get("strategy", "heuristic")
+        if strategy not in SUPPORTED_STRATEGIES:
+            raise NotImplementedError(
+                f"route-policy strategy {strategy!r} is not implemented"
+            )
+        label = "complex" if _is_complex(req) else "simple"
+        group = "frontier" if label == "complex" else "cheap"
+        reason = f"heuristic:{label}"
+        if not _tiers(policy, group):
+            group, reason = policy["default_group"], "heuristic:empty-group-fallback"
+
+    # 4. Use-case quality bar (not on the explicit path).
+    if bar and bar.get("min_group"):
+        have, need = _group_rank(policy, group), _group_rank(policy, bar["min_group"])
+        if need is not None and (have is None or have < need):
+            group = bar["min_group"]
+            reason += "+use-case-min-group"
+
+    candidates = [t for t in _tiers(policy, group) if allow(t)]
+    if not candidates and eligible is not None:
+        order = policy.get("group_order") or []
+        start = _group_rank(policy, group)
+        for higher in order[(start + 1 if start is not None else len(order)) :]:
+            candidates = [t for t in _tiers(policy, higher) if allow(t)]
+            if candidates:
+                group = higher
+                reason += "+use-case-eligible"
+                break
+    if not candidates:
+        raise violation(
+            f"no candidate in group {group!r} is allowed at sensitivity {level!r}",
+            group,
+        )
+
+    # 5. Cheapest allowed candidate, then the budget clamp.
+    picked = _pick_cheapest_in(candidates, group, req)
+    assert picked is not None
+    if req.max_cost is not None and picked.est_cost > req.max_cost:
+        clamped = _cheapest_under_budget(policy, req.max_cost, req, allow)
+        if clamped is not None:
+            # Same reason strings as resolve_route for the same path.
+            if clamped.under_budget:
+                reason += "+budget-clamp"
+            elif reason.startswith("heuristic:") and "+" not in reason:
+                reason = "heuristic:budget-unsatisfiable-cheapest"
+            else:
+                reason += "+budget-unsatisfiable"
+            picked = clamped
+    return RouteDecision(
+        picked.model, picked.group, reason, picked.est_cost, level, source
+    )
