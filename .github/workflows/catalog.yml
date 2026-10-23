@@ -1,0 +1,52 @@
+name: Catalog
+
+# Fails when the generated model catalog (packages/sdk/prompt_shields/catalog.json)
+# or the gateway's default route policy (gateway/src/middlewares/router/defaultPolicy.json)
+# drift from their source, schemas/catalog/source.v1.json. Fix by running
+# `python scripts/build_catalog.py` and committing the result. The same check
+# also runs in the SDK test suite (packages/sdk/tests/test_catalog.py).
+
+on:
+  pull_request:
+    paths:
+      - 'schemas/catalog/**'
+      - 'scripts/build_catalog.py'
+      - 'packages/sdk/prompt_shields/catalog.json'
+      - 'packages/sdk/prompt_shields/catalog.py'
+      - 'packages/sdk/prompt_shields/pricing.py'
+      - 'gateway/src/middlewares/router/defaultPolicy.json'
+      - 'gateway/src/middlewares/router/policy.ts'
+      - '.github/workflows/catalog.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'schemas/catalog/**'
+      - 'scripts/build_catalog.py'
+      - 'packages/sdk/prompt_shields/catalog.json'
+      - 'packages/sdk/prompt_shields/catalog.py'
+      - 'packages/sdk/prompt_shields/pricing.py'
+      - 'gateway/src/middlewares/router/defaultPolicy.json'
+      - 'gateway/src/middlewares/router/policy.ts'
+      - '.github/workflows/catalog.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: Catalog drift (SDK vs gateway)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Generated files match the catalog source
+        run: python scripts/build_catalog.py --check

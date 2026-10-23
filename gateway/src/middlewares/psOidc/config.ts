@@ -49,7 +49,30 @@ export interface PolicyGroup {
   /** Allowed models: exact names or `prefix*`. Undefined: any. */
   models?: string[];
   rateLimit?: RateLimitRule;
+  /** MCP servers and tools (see McpGroupPolicy). Undefined: every server. */
+  mcp?: McpGroupPolicy;
 }
+
+/**
+ * Per-group MCP access, layered on each server's own tool policy: the group
+ * reaches only the servers listed, and on each one only the tools that pass
+ * both the server's policy and the group's `allow` / `deny` (deny wins).
+ */
+export interface McpGroupPolicy {
+  /** Server id -> the group's tool rules on it. */
+  servers: Map<string, McpGroupToolRule>;
+}
+
+export interface McpGroupToolRule {
+  /** Exact tool names. Undefined: any tool the server allows. */
+  allow?: Set<string>;
+  /** Lower-cased tool names, matched regardless of case. */
+  denyLower?: Set<string>;
+}
+
+// Same rules as the MCP config (src/mcp/config.ts, src/mcp/policy.ts).
+const MCP_SERVER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+const MCP_TOOL_NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 
 export interface OidcPolicy {
   /** What happens to an authenticated user who matches no group. */
@@ -149,6 +172,62 @@ const httpsUrl = (name: string, v: string): string => {
   return v;
 };
 
+const isObject = (v: unknown): v is Record<string, any> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+function toolNames(where: string, v: unknown): string[] {
+  if (!Array.isArray(v) || !v.every((s) => typeof s === 'string'))
+    fail(`${where} must be an array of tool names`);
+  for (const name of v as string[])
+    if (!MCP_TOOL_NAME_RE.test(name))
+      fail(`${where} has an invalid tool name: ${JSON.stringify(name)}`);
+  return v as string[];
+}
+
+/**
+ * `"mcp": {"servers": {"<server id>": {"tools": {"allow": [...], "deny":
+ * [...]}}}}`. A server listed with `{}` is reachable with the server's own
+ * tool policy only.
+ */
+export function parseMcpGroupPolicy(
+  where: string,
+  raw: unknown
+): McpGroupPolicy {
+  if (!isObject(raw)) fail(`${where}.mcp must be an object`);
+  const m = raw as Record<string, any>;
+  for (const k of Object.keys(m))
+    if (k !== 'servers') fail(`${where}.mcp: unknown key "${k}"`);
+  if (!isObject(m.servers))
+    fail(`${where}.mcp.servers must be an object keyed by MCP server id`);
+  const servers = new Map<string, McpGroupToolRule>();
+  for (const [id, rule] of Object.entries(m.servers as object)) {
+    const at = `${where}.mcp.servers.${id}`;
+    if (!MCP_SERVER_ID_RE.test(id))
+      fail(`${at}: the server id must match [a-z0-9][a-z0-9_-]{0,62}`);
+    if (!isObject(rule)) fail(`${at} must be an object`);
+    for (const k of Object.keys(rule))
+      if (k !== 'tools') fail(`${at}: unknown key "${k}"`);
+    const out: McpGroupToolRule = {};
+    if (rule.tools !== undefined) {
+      if (!isObject(rule.tools))
+        fail(`${at}.tools must be {"allow": [...]} and/or {"deny": [...]}`);
+      for (const k of Object.keys(rule.tools))
+        if (k !== 'allow' && k !== 'deny')
+          fail(`${at}.tools: unknown key "${k}"`);
+      if (rule.tools.allow !== undefined)
+        out.allow = new Set(toolNames(`${at}.tools.allow`, rule.tools.allow));
+      if (rule.tools.deny !== undefined)
+        out.denyLower = new Set(
+          toolNames(`${at}.tools.deny`, rule.tools.deny).map((n) =>
+            n.toLowerCase()
+          )
+        );
+    }
+    servers.set(id, out);
+  }
+  return { servers };
+}
+
 export function parsePolicy(raw: unknown): OidcPolicy {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw))
     fail('PS_OIDC_POLICY must be a JSON object');
@@ -171,6 +250,7 @@ export function parsePolicy(raw: unknown): OidcPolicy {
       'providers',
       'models',
       'rate_limit',
+      'mcp',
     ]);
     for (const k of Object.keys(g))
       if (!groupKeys.has(k)) fail(`${where}: unknown key "${k}"`);
@@ -200,6 +280,7 @@ export function parsePolicy(raw: unknown): OidcPolicy {
         fail(`${where}.rate_limit.per must be "user" or "group"`);
       group.rateLimit = { requestsPerMinute: rpm, per };
     }
+    if (g.mcp !== undefined) group.mcp = parseMcpGroupPolicy(where, g.mcp);
     return group;
   });
   return { defaultAction, groups };
