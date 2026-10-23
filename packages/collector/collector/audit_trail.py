@@ -74,7 +74,6 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from uuid import UUID
 
 from db import audit_chain
@@ -161,48 +160,11 @@ def actor_from_name(name: str) -> Actor:
 # Details: ids, counts and names only
 # ──────────────────────────────────────────────────────────────────────
 
-_SECRET_MARKERS = ("secret", "password", "token", "authorization", "admin_key", "api_key")
-MAX_DETAIL_STRING = 256
-MAX_DETAIL_ITEMS = 50
-REDACTED = "[REDACTED]"
-
-
-def _clean(value: Any, depth: int = 0) -> Any:
-    if value is None or isinstance(value, bool | int):
-        return value
-    if isinstance(value, float):
-        return str(value)  # floats don't survive JSONB round trips byte for byte
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, datetime):
-        return audit_chain.format_ts(value)
-    if isinstance(value, str):
-        return value[:MAX_DETAIL_STRING]
-    if depth >= 2:
-        return None
-    if isinstance(value, dict):
-        return sanitize_details(value, depth + 1)
-    if isinstance(value, list | tuple | set | frozenset):
-        items = sorted(value, key=str) if isinstance(value, set | frozenset) else value
-        return [_clean(v, depth + 1) for v in list(items)[:MAX_DETAIL_ITEMS]]
-    return str(value)[:MAX_DETAIL_STRING]
-
-
-def sanitize_details(details: dict | None, depth: int = 0) -> dict:
-    """Details safe to store and hash: secret-looking keys redacted,
-    strings truncated, plain JSON types only."""
-    out: dict = {}
-    for key, value in (details or {}).items():
-        name = str(key)[:64]
-        lowered = name.lower()
-        # "api_key_id" (a provider's key id) and "*_count" are not secrets.
-        if any(m in lowered for m in _SECRET_MARKERS) and not lowered.endswith(
-            ("_id", "_count", "_ids")
-        ):
-            out[name] = REDACTED
-        else:
-            out[name] = _clean(value, depth)
-    return out
+# Canonicalisation lives in db/audit_chain.py, shared with the 021 backfill.
+MAX_DETAIL_STRING = audit_chain.MAX_DETAIL_STRING
+MAX_DETAIL_ITEMS = audit_chain.MAX_DETAIL_ITEMS
+REDACTED = audit_chain.REDACTED
+sanitize_details = audit_chain.sanitize_details
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -483,6 +445,23 @@ async def verify_chain(
 ) -> VerifyResult:
     """Walk one tenant's chain in seq order and report the first break."""
     result = VerifyResult(tenant_id=str(tenant_id), ok=True)
+    # seq counts from 1 and the walk starts there, so a row below 1 would
+    # never be looked at. The CHECK constraint (migration 023) refuses new
+    # ones; a row from before it, or with the constraint dropped, is a break.
+    below = (
+        await db.execute(
+            select(AuditEvent)
+            .where(AuditEvent.tenant_id == tenant_id, AuditEvent.seq < 1)
+            .order_by(AuditEvent.seq)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if below is not None:
+        result.ok = False
+        result.first_break = _break(
+            below, None, f"seq {below.seq} is below 1 (row added outside the chain)"
+        )
+        return result
     checkpoints = {
         (r.details or {}).get("through_seq"): (r.details or {}).get("through_hash")
         for r in (
