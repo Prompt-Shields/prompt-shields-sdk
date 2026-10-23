@@ -13,7 +13,9 @@ Supported so far:
     model deployments, via Azure Resource Manager.
   - AWS: Amazon Bedrock provisioned throughput, custom (fine-tuned) models,
     imported models and application inference profiles, per configured
-    region, via the Bedrock control plane (SigV4-signed, read-only).
+    region, via the Bedrock control plane (SigV4-signed, read-only); and,
+    opt-in, the foundation models and cross-region inference profiles the
+    account has access to (reported in the summary, not stored as assets).
   - GCP: Vertex AI models deployed to endpoints (including Model Garden
     deployments) and tuned models, per configured project and region, via
     the regional Vertex AI API with a service-account JWT-bearer token.
@@ -128,6 +130,26 @@ _FOUNDATION_MODEL_ARN = re.compile(
     r"^arn:aws(?:-us-gov)?:bedrock:[a-z0-9-]+:\d{0,12}:"
     r"(?:foundation-model|inference-profile)/(?P<id>[A-Za-z0-9._:-]{1,256})$"
 )
+# A Bedrock foundation model id, e.g. "anthropic.claude-3-haiku-20240307-v1:0"
+# or "amazon.titan-text-express-v1:0:8k".
+_FOUNDATION_MODEL_ID = re.compile(
+    r"^[a-z0-9-]{1,64}\.[A-Za-z0-9._-]{1,200}(?::[A-Za-z0-9._-]{1,32}){0,2}$"
+)
+# Cross-region and global (system-defined) inference profile ARNs, and the
+# region of a foundation model ARN that a profile routes to.
+_SYSTEM_PROFILE_ARN = re.compile(
+    r"^arn:aws(?:-us-gov)?:bedrock:(?P<region>[a-z0-9-]+):\d{0,12}:"
+    r"inference-profile/(?P<id>[a-z]{2,8}\.[A-Za-z0-9._:-]{1,256})$"
+)
+_REGIONAL_MODEL_ARN = re.compile(
+    r"^arn:aws(?:-us-gov)?:bedrock:(?P<region>[a-z0-9-]+):\d{0,12}:"
+    r"foundation-model/(?P<id>[A-Za-z0-9._:-]{1,256})$"
+)
+# Foundation models whose access is checked: those invocable without
+# provisioned throughput (which is inventoried as its own asset).
+BEDROCK_ACCESS_INFERENCE_TYPES = {"ON_DEMAND", "INFERENCE_PROFILE"}
+# At most this many availability checks per region.
+MAX_MODEL_ACCESS_CHECKS = 400
 # Bedrock states that are not (or no longer) usable.
 AWS_INACTIVE_STATES = {"failed", "deleting", "deleted"}
 # A custom model is an asset only once its training job has finished.
@@ -238,6 +260,10 @@ class AwsInventoryCredentials(BaseModel):
     regions: list[str]
     # Also report whether model invocation logging is enabled per region.
     check_invocation_logging: bool = False
+    # Also report, per region, which foundation models and cross-region
+    # inference profiles the account has access to (one extra read per
+    # on-demand model per region).
+    check_model_access: bool = False
 
     @field_validator("access_key_id")
     @classmethod
@@ -441,7 +467,12 @@ def credentials_for_tenant(
 
 
 class CloudInventoryError(Exception):
-    """A cloud call failed. The message never contains credentials."""
+    """A cloud call failed. The message never contains credentials.
+    ``status`` is the HTTP status when the cloud answered with an error."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -501,7 +532,8 @@ async def _request(
         if resp.status_code != 200:
             # The body is not echoed: token errors can quote the request.
             raise CloudInventoryError(
-                f"{cloud}: {what} returned HTTP {resp.status_code}"
+                f"{cloud}: {what} returned HTTP {resp.status_code}",
+                status=resp.status_code,
             )
         if as_text:
             return resp.text
@@ -534,15 +566,32 @@ async def _arm_list(
     url: str | None = f"https://{AZURE_ARM_HOST}{path}"
     params: dict | None = {"api-version": api_version}
     for _ in range(MAX_PAGES):
-        body = await _request(
-            client,
-            "GET",
-            url,
-            what=what,
-            sleep=sleep,
-            params=params,
-            headers=await auth.headers(),
-        )
+        try:
+            body = await _request(
+                client,
+                "GET",
+                url,
+                what=what,
+                sleep=sleep,
+                params=params,
+                headers=await auth.headers(),
+            )
+        except CloudInventoryError as exc:
+            # The token was refused before its stated expiry (revoked,
+            # or the host was suspended and the monotonic clock did not
+            # count it): get a new one and try the page once more.
+            if exc.status != 401:
+                raise
+            auth.invalidate()
+            body = await _request(
+                client,
+                "GET",
+                url,
+                what=what,
+                sleep=sleep,
+                params=params,
+                headers=await auth.headers(),
+            )
         items = body.get("value") if isinstance(body, dict) else None
         if not isinstance(body, dict) or not isinstance(items, list | None):
             raise CloudInventoryError(f"azure: {what} returned an unexpected body")
@@ -596,7 +645,8 @@ def _token_lifetime(value) -> float:
 class _AzureAuth:
     """Bearer headers for ARM calls. The access token (60-90 minutes) is
     requested again shortly before it expires, so a run over many
-    subscriptions does not fail part-way."""
+    subscriptions does not fail part-way, and again when ARM refuses it
+    with 401 before then (``invalidate``)."""
 
     def __init__(
         self,
@@ -620,6 +670,10 @@ class _AzureAuth:
             )
             self._expires = issued + lifetime
         return {"Authorization": f"Bearer {self._token}"}
+
+    def invalidate(self) -> None:
+        """Forget the token, so the next ``headers`` requests a new one."""
+        self._token = None
 
 
 def _tags(value) -> dict[str, str]:
@@ -789,7 +843,9 @@ def sigv4_headers(
     """AWS Signature Version 4 headers for one request.
 
     ``query`` must already be canonical (``canonical_query``) and is sent
-    exactly as signed; ``path`` must not need encoding. The returned headers
+    exactly as signed. ``path`` is sent as given, already URI-encoded (a
+    model id's ``:`` as ``%3A``); the canonical request encodes it once
+    more, as AWS does for every service but S3. The returned headers
     include ``host`` because it is signed.
     """
     amz_date = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -803,7 +859,7 @@ def sigv4_headers(
     canonical_request = "\n".join(
         [
             method,
-            path,
+            quote(path, safe="/-_.~"),
             query,
             "".join(f"{h}:{' '.join(headers[h].split())}\n" for h in signed),
             ";".join(signed),
@@ -1201,6 +1257,134 @@ async def _bedrock_logging_enabled(
     return bool(config.get("cloudWatchConfig") or config.get("s3Config"))
 
 
+async def _bedrock_model_access(
+    client: httpx.AsyncClient,
+    region: str,
+    keys: AwsKeys | _AwsAuth,
+    sleep: Sleep,
+    clock: Clock,
+) -> dict:
+    """Foundation models the account can invoke in ``region``, and the
+    system-defined (cross-region / global) inference profiles over them
+    with the regions each routes requests to.
+
+    These exist in the catalog of every account, so they are reported in
+    the summary rather than stored as assets: access is not use.
+    """
+    host = AWS_BEDROCK_HOST.format(region=region)
+    # ListFoundationModels is not paginated.
+    body = await _aws_call(
+        client,
+        "GET",
+        host,
+        "/foundation-models",
+        region=region,
+        service="bedrock",
+        keys=keys,
+        what=f"foundation model list ({region})",
+        sleep=sleep,
+        clock=clock,
+    )
+    candidates: list[str] = []
+    for m in body.get("modelSummaries") or []:
+        if not isinstance(m, dict):
+            continue
+        model_id = m.get("modelId")
+        if not isinstance(model_id, str) or not _FOUNDATION_MODEL_ID.match(model_id):
+            continue
+        lifecycle = m.get("modelLifecycle")
+        status = lifecycle.get("status") if isinstance(lifecycle, dict) else None
+        types = m.get("inferenceTypesSupported")
+        if str(status or "ACTIVE").upper() not in {"ACTIVE", "LEGACY"}:
+            continue
+        if not isinstance(types, list) or not BEDROCK_ACCESS_INFERENCE_TYPES & {
+            t for t in types if isinstance(t, str)
+        }:
+            continue
+        candidates.append(model_id)
+    candidates = list(dict.fromkeys(candidates))
+    if len(candidates) > MAX_MODEL_ACCESS_CHECKS:
+        raise CloudInventoryError(
+            f"aws: foundation model list ({region}): more than "
+            f"{MAX_MODEL_ACCESS_CHECKS} models"
+        )
+
+    accessible: list[str] = []
+    # Accessible, but the model's Marketplace agreement is not (yet) in
+    # place; AWS may accept it on first use.
+    no_agreement: list[str] = []
+    for model_id in candidates:
+        try:
+            availability = await _aws_call(
+                client,
+                "GET",
+                host,
+                # Encoded here (":" -> "%3A"); validated by _FOUNDATION_MODEL_ID.
+                f"/foundation-model-availability/{_aws_quote(model_id)}",
+                region=region,
+                service="bedrock",
+                keys=keys,
+                what=f"model availability ({region})",
+                sleep=sleep,
+                clock=clock,
+            )
+        except CloudInventoryError as exc:
+            # One model unknown to the availability API does not void the
+            # region; a missing permission (403) does.
+            if exc.status in (400, 404):
+                continue
+            raise
+        if not isinstance(availability, dict):
+            continue
+        agreement = availability.get("agreementAvailability")
+        agreement = agreement if isinstance(agreement, dict) else {}
+        if (
+            availability.get("authorizationStatus") == "AUTHORIZED"
+            and availability.get("entitlementAvailability") == "AVAILABLE"
+            and availability.get("regionAvailability") == "AVAILABLE"
+        ):
+            accessible.append(model_id)
+            if agreement.get("status", "AVAILABLE") != "AVAILABLE":
+                no_agreement.append(model_id)
+
+    usable = set(accessible)
+    profiles: dict[str, list[str]] = {}
+    async for p in _bedrock_list(
+        client,
+        region,
+        "/inference-profiles",
+        "inferenceProfileSummaries",
+        keys,
+        "system inference profile list",
+        sleep,
+        clock,
+        params={"type": "SYSTEM_DEFINED"},
+    ):
+        m = _SYSTEM_PROFILE_ARN.match(str(p.get("inferenceProfileArn") or ""))
+        if (
+            m is None
+            or m["region"] != region
+            or str(p.get("status") or "").upper() != "ACTIVE"
+        ):
+            continue
+        targets = [
+            _REGIONAL_MODEL_ARN.match(t.get("modelArn") or "")
+            for t in p.get("models") or []
+            if isinstance(t, dict) and isinstance(t.get("modelArn"), str)
+        ]
+        targets = [t for t in targets if t and _AWS_REGION.match(t["region"])]
+        # Usable only when the account has access to the model it serves.
+        if targets and any(t["id"] in usable for t in targets):
+            profiles[m["id"]] = sorted({t["region"] for t in targets})
+    result: dict = {
+        "foundation_models": sorted(accessible),
+        "inference_profiles": dict(sorted(profiles.items())),
+    }
+    if no_agreement:
+        result["agreement_not_accepted"] = sorted(no_agreement)
+    return result
+
+
 async def fetch_aws_deployments(
     creds: AwsInventoryCredentials,
     *,
@@ -1213,11 +1397,16 @@ async def fetch_aws_deployments(
     A failing region is reported in ``summary["region_errors"]`` and does
     not stop the others. Failing to assume the role, or every region
     failing, raises ``CloudInventoryError``. Assumed-role keys are renewed
-    before they expire.
+    before they expire. With ``check_model_access``, the foundation models
+    and cross-region inference profiles the account can use are reported
+    per region in ``summary["model_access"]`` (failures under
+    ``summary["model_access_errors"]``).
     """
     deployments: list[CloudDeployment] = []
     errors: dict[str, str] = {}
     logging_enabled: dict[str, bool] = {}
+    model_access: dict[str, dict] = {}
+    model_access_errors: dict[str, str] = {}
     async with httpx.AsyncClient(
         transport=transport, timeout=30.0, follow_redirects=False
     ) as client:
@@ -1233,6 +1422,15 @@ async def fetch_aws_deployments(
                     )
             except CloudInventoryError as exc:
                 errors[region] = str(exc)
+            if creds.check_model_access:
+                # Reported apart from region_errors: the region's assets
+                # are complete without it.
+                try:
+                    model_access[region] = await _bedrock_model_access(
+                        client, region, keys, sleep, clock
+                    )
+                except CloudInventoryError as exc:
+                    model_access_errors[region] = str(exc)
     if len(errors) == len(creds.regions):
         raise CloudInventoryError("; ".join(errors.values()))
     summary: dict = {"regions": len(creds.regions)}
@@ -1240,6 +1438,10 @@ async def fetch_aws_deployments(
         summary["region_errors"] = errors
     if creds.check_invocation_logging:
         summary["invocation_logging"] = logging_enabled
+    if creds.check_model_access:
+        summary["model_access"] = model_access
+        if model_access_errors:
+            summary["model_access_errors"] = model_access_errors
     return summary, deployments
 
 

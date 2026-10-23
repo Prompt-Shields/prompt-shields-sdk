@@ -148,7 +148,7 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"azure": {
 }}}'
 ```
 
-Leave `subscription_ids` empty to inventory every subscription the principal can read. Run the inventory with `python -m collector.cloud_inventory --tenant <uuid>`, or `POST /api/v1/admin/cloud-inventory/pull` with `Authorization: Bearer $PS_ADMIN_TOKEN` and `{"tenant_id": "<uuid>"}`. Re-runs update the same assets. Deployments that disappear are not deleted; they go `stale` through the normal lifecycle sweep.
+Leave `subscription_ids` empty to inventory every subscription the principal can read. Run the inventory with `python -m collector.cloud_inventory --tenant <uuid>`, or `POST /api/v1/admin/cloud-inventory/pull` with `Authorization: Bearer $PS_ADMIN_TOKEN` and `{"tenant_id": "<uuid>"}`. Re-runs update the same assets. Deployments that disappear are not deleted; they go `stale` through the normal lifecycle sweep. The ARM access token is renewed five minutes before it expires, and also when ARM rejects it with 401 before that time (for example after the token is revoked, or after the host was suspended). In that case the collector gets a new token and retries the rejected page once, so a long run does not fail part-way.
 
 ### AWS: Amazon Bedrock
 
@@ -162,6 +162,15 @@ Bedrock is regional, so list every region to inventory. In each region the colle
 | Application inference profile | Created to route and meter use of a model | Id of the profile's first model |
 
 Failed or deleting resources are skipped. A provisioned custom model inherits the custom model's tags; its own tags win. System-defined (cross-region) inference profiles and the foundation-model catalog exist in every account whether or not they are used, so they are not recorded; on-demand use of a foundation model shows up through the SDK, the gateway or Bedrock invocation logs instead. Set `check_invocation_logging` to also report, per region, whether model invocation logging is enabled.
+
+Set `check_model_access` to also report, per region, which foundation models the account can invoke and which system-defined (cross-region or global) inference profiles it can use. This is reported in the pull result under `model_access`, not stored as assets, because access is not use. Each profile lists the regions it routes requests to, which matters for sovereignty: a `eu.` profile called in `eu-central-1` may be served from `eu-west-3`. Only models invocable on demand or through an inference profile are checked (provisioned throughput is inventoried above), one `GetFoundationModelAvailability` read per model per region. Models that are accessible but whose Marketplace agreement is not yet accepted are also listed under `agreement_not_accepted`. If the check fails in a region (for example, a missing permission), the error is reported under `model_access_errors`, and that region's assets are still recorded.
+
+```json
+"model_access": {"eu-central-1": {
+  "foundation_models": ["anthropic.claude-3-haiku-20240307-v1:0"],
+  "inference_profiles": {"eu.anthropic.claude-3-haiku-20240307-v1:0": ["eu-central-1", "eu-west-1", "eu-west-3"]}
+}}
+```
 
 Minimal read-only IAM policy (these list actions do not support resource-level permissions). It grants no `bedrock:Invoke*`, so the principal cannot call models:
 
@@ -185,7 +194,7 @@ Minimal read-only IAM policy (these list actions do not support resource-level p
 }
 ```
 
-Add `bedrock:GetModelInvocationLoggingConfiguration` only if you set `check_invocation_logging`.
+Add `bedrock:GetModelInvocationLoggingConfiguration` only if you set `check_invocation_logging`, and `bedrock:ListFoundationModels` and `bedrock:GetFoundationModelAvailability` only if you set `check_model_access`.
 
 Attach the policy to an IAM user whose access keys you configure or, preferably, to a role in the inventoried account that those keys assume. With a role, the configured user needs only `sts:AssumeRole` on it, and the role's trust policy should require an external id:
 
@@ -212,7 +221,8 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"aws": {
   "role_arn": "arn:aws:iam::<account id>:role/PromptShieldsInventory",
   "external_id": "<external id>",
   "regions": ["eu-central-1", "us-east-1"],
-  "check_invocation_logging": false
+  "check_invocation_logging": false,
+  "check_model_access": false
 }}}'
 ```
 
