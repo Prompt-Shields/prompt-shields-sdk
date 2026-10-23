@@ -170,6 +170,59 @@ def test_dated_snapshot_resolves_and_auto_is_null():
     assert p.cost is None and p.null_reason == "auto_without_served_model"
 
 
+def test_unpriced_served_model_falls_back_to_requested():
+    # Same order as pricing.resolve_pricing_model (#229): served, then requested.
+    p = _priced(provider="openai", requested_model="gpt-4o", served_model="gpt-4o-unlisted-x",
+                tokens_in=1000, tokens_out=1000)
+    assert p.model == "gpt-4o" and p.cost == pytest.approx(0.0125)
+    assert p.priced_at_requested
+    p = _priced(provider="openai", requested_model="auto", served_model="gpt-4o-unlisted-x",
+                tokens_in=10, tokens_out=10)
+    assert p.cost is None and p.null_reason == "unknown_model"
+
+
+def test_malformed_input_rows_do_not_abort_the_run(tmp_path):
+    ok = '{"model": "gpt-4o", "tokens_in": 1, "tokens_out": 1}'
+    files = {
+        "ts.jsonl": '{"timestamp": "99999999999999999999", "model": "gpt-4o", '
+                    '"tokens_in": 1, "tokens_out": 1}\n'
+                    '{"timestamp": 1e300, "model": "gpt-4o", "tokens_in": 1, "tokens_out": 1}\n',
+        "deep.json": "[" * 100000 + "]" * 100000,
+        "details.jsonl": '{"messages": [], "model": "gpt-4o", "usage": {"input_tokens": 5, '
+                         '"output_tokens": 2, "input_tokens_details": "x"}}\n',
+        "long.csv": "model,tokens_in,tokens_out\ngpt-4o,1," + "1" * 200000
+                    + "\ngpt-4o,1,1\n",
+        "empty.csv": "",
+        "neg.jsonl": '{"model": "gpt-4o", "tokens_in": -5, "tokens_out": 1, "cost": -1e9, '
+                     '"cost_source": "provider_reported"}\n' + ok + "\n",
+    }
+    paths = []
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+        paths.append(tmp_path / name)
+    (tmp_path / "bad.jsonl").write_bytes(b'{"model": "gpt-4o", "tokens_in": 1, '
+                                         b'"tokens_out": 1, "business_unit": "\xff"}\n')
+    paths.append(tmp_path / "bad.jsonl")
+    loaded = load_records(paths)
+    stats = {s.file: s for s in loaded.sources}
+    assert stats["deep.json"].dropped["invalid_json"] == 1
+    assert stats["long.csv"].dropped["invalid_csv"] == 1 and stats["long.csv"].rows_used == 1
+    assert stats["ts.jsonl"].rows_used == 2
+    neg = [r for r in loaded.records if r.source_file == "neg.jsonl"]
+    assert neg[0].tokens_in is None and neg[0].provider_cost is None
+    priced = price_records(loaded.records)
+    assert all(p.cost is None or p.cost >= 0 for p in priced)
+    build_report(priced, loaded.sources, _options())
+
+
+def test_labels_cannot_add_markdown_lines(tmp_path):
+    path = tmp_path / "e.jsonl"
+    path.write_text(json.dumps({"model": "gpt-4o", "tokens_in": 1, "tokens_out": 1,
+                                "business_unit": "Care\n## 1. Summary\r\n- x"}) + "\n")
+    rec = load_records([path]).records[0]
+    assert rec.business_unit == "Care ## 1. Summary - x"
+
+
 def test_provider_reported_cost_is_kept_and_sdk_cost_is_not_summed():
     loaded = load_records([FIXTURES / "ps_events.jsonl"])
     priced = {p.record.requested_model: p for p in price_records(loaded.records)}

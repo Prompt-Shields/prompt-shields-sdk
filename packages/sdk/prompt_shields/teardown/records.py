@@ -24,7 +24,7 @@ Input formats (``FORMATS``), all read locally:
     Prompt Shields SDK events, gateway telemetry events and registry
     (``ai_usage_events``) rows: JSONL, a JSON array, or CSV with the event
     field names. The event's own ``cost`` is not summed (methodology M§4.2:
-    SDK events are priced at the requested model until #6); calls are
+    SDK events before #229 were priced at the requested model); calls are
     re-priced from token counts at ``served_model``. A ``provider_reported``
     cost is kept as the provider's billed amount.
 ``generic-jsonl``
@@ -217,34 +217,41 @@ def infer_provider(model: str | None) -> str | None:
 
 
 def _int(value: Any) -> int | None:
+    """A non-negative integer count, else None (a negative count is invalid)."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
+        return value if value >= 0 else None
     if isinstance(value, float) and math.isfinite(value) and value.is_integer():
-        return int(value)
+        return int(value) if value >= 0 else None
     if isinstance(value, str) and value.strip():
         try:
             f = float(value)
         except ValueError:
             return None
-        return int(f) if math.isfinite(f) and f.is_integer() else None
+        return int(f) if math.isfinite(f) and f.is_integer() and f >= 0 else None
     return None
 
 
 def _float(value: Any) -> float | None:
+    """A finite, non-negative amount (cost, usage units), else None."""
     if isinstance(value, bool) or value is None:
         return None
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return f if math.isfinite(f) else None
+    return f if math.isfinite(f) and f >= 0 else None
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 def _str(value: Any) -> str | None:
+    """A trimmed string label. Control characters (newlines included) become
+    one space, so an input value cannot add lines to the Markdown report."""
     if isinstance(value, str):
-        value = value.strip()
+        value = _CONTROL.sub(" ", value).strip()
         return value or None
     return None
 
@@ -265,7 +272,10 @@ def parse_time(value: Any) -> datetime | None:
         seconds = float(value)
         if seconds > 1e11:  # milliseconds
             seconds /= 1000.0
-        return datetime.fromtimestamp(seconds, tz=UTC)
+        try:
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (OverflowError, OSError, ValueError):  # out of range
+            return None
     if isinstance(value, str) and value.strip():
         text = value.strip().replace("Z", "+00:00").replace("z", "+00:00")
         try:
@@ -335,7 +345,7 @@ def _read_json_rows(text: str, stats: SourceStats) -> Iterator[Any]:
     if stripped.startswith("["):
         try:
             doc = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             doc = None
         if isinstance(doc, list):
             yield from doc
@@ -343,7 +353,7 @@ def _read_json_rows(text: str, stats: SourceStats) -> Iterator[Any]:
     if stripped.startswith("{"):
         try:
             doc = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             doc = None
         if doc is not None:
             yield doc
@@ -352,30 +362,45 @@ def _read_json_rows(text: str, stats: SourceStats) -> Iterator[Any]:
         if not line.strip():
             continue
         try:
-            yield json.loads(line)
-        except ValueError:
+            value = json.loads(line)
+        except (ValueError, RecursionError):
             stats.rows_read += 1
             stats.drop("invalid_json")
+            continue
+        yield value
 
 
-def _read_csv_rows(text: str) -> Iterator[dict[str, Any]]:
+def _read_csv_rows(text: str, stats: SourceStats) -> Iterator[dict[str, Any]]:
     reader = csv.DictReader(io.StringIO(text))
-    for row in reader:
+    while True:
+        try:
+            row = next(reader)
+        except StopIteration:
+            return
+        except csv.Error:  # e.g. a field over the csv module's size limit
+            stats.rows_read += 1
+            stats.drop("invalid_csv")
+            continue
         yield {k.strip(): (v if v != "" else None) for k, v in row.items() if k}
+
+
+def _first_line(text: str) -> str:
+    lines = text.lstrip().splitlines()
+    return lines[0] if lines else ""
 
 
 def _is_csv(path: Path, text: str) -> bool:
     if path.suffix.lower() == ".csv":
         return True
     first = text.lstrip()[:1]
-    return first not in ("{", "[") and "," in text.splitlines()[0] if text.strip() else False
+    return bool(first) and first not in ("{", "[") and "," in _first_line(text)
 
 
 def detect_format(path: Path, text: str) -> str:
     """Guess the input format from the file contents."""
     head = text[:20000]
     if _is_csv(path, text):
-        header = text.splitlines()[0].lower()
+        header = _first_line(text).lower()
         if "num_model_requests" in header:
             return "openai-usage"
         if "uncached_input_tokens" in header:
@@ -426,7 +451,7 @@ def _anthropic_usage_record(r: Mapping[str, Any], start: Any, end: Any, file: st
     write_5m = _int(creation.get("ephemeral_5m_input_tokens", r.get("ephemeral_5m_input_tokens"))) or 0
     write_1h = _int(creation.get("ephemeral_1h_input_tokens", r.get("ephemeral_1h_input_tokens"))) or 0
     if not creation and r.get("cache_creation_input_tokens") is not None:
-        write_5m = (_int(r.get("cache_creation_input_tokens")) or 0) - write_1h
+        write_5m = max((_int(r.get("cache_creation_input_tokens")) or 0) - write_1h, 0)
     reads = _int(r.get("cache_read_input_tokens")) or 0
     uncached = _int(r.get("uncached_input_tokens")) or 0
     tool = r.get("server_tool_use") if isinstance(r.get("server_tool_use"), Mapping) else {}
@@ -556,8 +581,10 @@ def _generic_usage(provider: str | None, usage: Any) -> dict[str, Any]:
     if "input_tokens" in usage or "output_tokens" in usage:
         if provider == "openai" or "input_tokens_details" in usage:
             # OpenAI Responses API usage: input_tokens includes cached ones.
-            details = usage.get("input_tokens_details") or {}
-            out_details = usage.get("output_tokens_details") or {}
+            details = usage.get("input_tokens_details")
+            details = details if isinstance(details, Mapping) else {}
+            out_details = usage.get("output_tokens_details")
+            out_details = out_details if isinstance(out_details, Mapping) else {}
             return {
                 "tokens_in": _int(usage.get("input_tokens")),
                 "tokens_out": _int(usage.get("output_tokens")),
@@ -677,11 +704,13 @@ def load_records(
     sources: list[SourceStats] = []
     for p in paths:
         path = Path(p)
-        text = path.read_text(encoding="utf-8-sig")
+        # Untrusted input: undecodable bytes become U+FFFD instead of
+        # aborting the run.
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
         kind = fmt or detect_format(path, text)
         stats = SourceStats(source=kind, file=path.name)
         rows: Iterable[Any] = (
-            _read_csv_rows(text) if _is_csv(path, text) else _read_json_rows(text, stats)
+            _read_csv_rows(text, stats) if _is_csv(path, text) else _read_json_rows(text, stats)
         )
         if kind in ("openai-usage", "anthropic-usage"):
             records.extend(_usage_rows(rows, stats, kind))

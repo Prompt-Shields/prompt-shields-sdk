@@ -33,10 +33,12 @@ policy replay or quality parity read *"Not measured in this teardown — pending
 |---|---|---|---|
 | `openai-usage` | OpenAI `GET /v1/organization/usage/completions` pages (JSON), or CSV with the result column names plus `start_time` / `end_time` | bucket × project × key × model | `calls` = `num_model_requests`; `batch: true` → batch tier |
 | `anthropic-usage` | Anthropic `GET /v1/organizations/usage_report/messages` pages (JSON), or CSV with the result fields flattened (`ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`, `web_search_requests`) plus `starting_at` / `ending_at` | bucket × workspace × key × model | No request count (`calls` unknown). `context_window` picks the long-context band. |
-| `ps-events` | Prompt Shields SDK events, gateway telemetry events, registry (`ai_usage_events`) rows: JSONL, JSON array or CSV | call | Re-priced from tokens at `served_model`; the event's own `cost` is not summed (M§4.2). `provider_reported` costs are kept. Gateway cache events are dropped. |
+| `ps-events` | Prompt Shields SDK events, gateway telemetry events, registry (`ai_usage_events`) rows: JSONL, JSON array or CSV | call | Re-priced from tokens at `served_model` (at `requested_model` when the served id has no price, as `pricing.resolve_pricing_model` does); the event's own `cost` is not summed (M§4.2). `provider_reported` costs are kept. Gateway cache events are dropped. |
 | `generic-jsonl` | `{"messages", "model", "usage", "metadata"}` per line | call | `usage` may be OpenAI, Anthropic or Gemini shaped. Messages are read only to compute the request hash and prompt features. |
 
-Every input row is either used or counted as dropped with a reason (report §2).
+Every input row is either used or counted as dropped with a reason (report §2). Input files
+are untrusted: a malformed row (invalid JSON or CSV, an out-of-range timestamp, a negative
+count or cost) is dropped or has that field treated as missing; it does not abort the run.
 
 ## Normalised record
 

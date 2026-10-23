@@ -86,6 +86,16 @@ def price_records(
         provider = rec.provider or infer_provider(name)
         at_requested = rec.served_model is None and rec.requested_model is not None
         priced = None if name == "auto" else source.resolve_model(provider, name)
+        if (
+            priced is None
+            and rec.served_model
+            and rec.requested_model not in (None, "auto", rec.served_model)
+        ):
+            # A served id with no price (an unlisted snapshot) is priced at
+            # the requested model, as the SDK does since #229
+            # (``pricing.resolve_pricing_model``: served first, requested last).
+            priced = source.resolve_model(provider, rec.requested_model)
+            at_requested = priced is not None
         if rec.provider_cost is not None:
             out.append(PricedRecord(rec, provider, priced or name, round(rec.provider_cost, 6),
                                     COST_PROVIDER_REPORTED, None, at_requested))
