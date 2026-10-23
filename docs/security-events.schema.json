@@ -942,9 +942,21 @@
           "enum": [
             "no_matching_group",
             "provider_not_allowed",
-            "model_not_allowed"
+            "model_not_allowed",
+            "mcp_server_not_allowed",
+            "mcp_tool_not_allowed"
           ],
           "description": "Why the OIDC group policy refused the caller."
+        },
+        "ps.mcp.server": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "MCP denials: the MCP server id from the request path, or other."
+        },
+        "ps.mcp.tool": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "mcp_tool_not_allowed: the tool name, or other when it is not a valid tool name."
         },
         "ps.policy.group": {
           "type": "string",
@@ -957,7 +969,8 @@
           "description": "ECS user.hash: pseudonymous OIDC subject (HMAC or SHA-256 of issuer and sub). Absent with PS_OIDC_TELEMETRY_SUBJECT=off."
         },
         "http.response.status_code": {
-          "const": 403
+          "enum": [403, 200],
+          "description": "403; 200 for an MCP tool refused by the group policy, which is answered with a JSON-RPC error like the server's own tool policy."
         }
       },
       "required": [

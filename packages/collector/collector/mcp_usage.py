@@ -12,7 +12,10 @@ and one reader, ``GET /api/v1/registry/mcp-tools`` (tenant ingest key).
 
 Names only. Arguments, results, tool descriptions, server URLs, commands
 and headers are never accepted or stored: an event has no field for them,
-and unknown fields are ignored. Every string comes from an MCP server or an
+and unknown fields are ignored. The caller is attributed by a pseudonym
+only: ``user_id`` must be a hex hash (the gateway's OIDC subject hash) and
+``user_group`` an operator-chosen policy group name, so a raw subject or an
+email address is never stored. Every string comes from an MCP server or an
 app, so it is treated as attacker-controlled data: control characters are
 removed, and a value that is too long is refused rather than cut (half a
 name is wrong data). A URL-shaped server identity is reduced to its host.
@@ -23,6 +26,7 @@ one bad event never costs the batch, and the SDK does not retry it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,7 +56,13 @@ MAX_LABEL_LENGTH = 64
 MAX_LATENCY_MS = 24 * 3600 * 1000  # a day; longer is not a latency
 
 UNKNOWN_SERVER = "unknown"
-OUTCOMES = frozenset({"ok", "error"})
+# blocked: refused by a guardrail (the gateway's MCP proxy). Stored apart
+# from errors: a blocked call is a policy outcome, not a failing tool.
+OUTCOMES = frozenset({"ok", "error", "blocked"})
+# A pseudonymous user id: a hex hash (the gateway sends 32 characters).
+USER_HASH_RE = re.compile(r"[0-9a-f]{16,64}")
+# The gateway's policy group names (PS_OIDC_POLICY groups[].name).
+USER_GROUP_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 # Sources a client may claim on /ingest/mcp. "otel" is set by the OTLP
 # receiver only.
 INGEST_SOURCES = frozenset({"sdk", "gateway", "scan"})
@@ -65,6 +75,8 @@ _KEY = (
     "tool_name",
     "calling_service",
     "environment",
+    "user_hash",
+    "user_group",
 )
 UPSERT_CHUNK = 500
 
@@ -121,6 +133,10 @@ class McpCall:
     calling_service: str = ""
     environment: str = ""
     transport: str | None = None
+    is_blocked: bool = False
+    # Pseudonymous caller (gateway with OIDC); "" when not reported.
+    user_hash: str = ""
+    user_group: str = ""
 
 
 def _latency(value: Any) -> int | None:
@@ -131,6 +147,10 @@ def _latency(value: Any) -> int | None:
     if isinstance(value, int) and 0 <= value <= MAX_LATENCY_MS:
         return value
     return None
+
+
+def _matching(value: Any, pattern: re.Pattern[str]) -> str:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else ""
 
 
 def parse_event(raw: Any) -> McpCall | None:
@@ -161,6 +181,10 @@ def parse_event(raw: Any) -> McpCall | None:
         calling_service=clean_name(raw.get("calling_service"), MAX_NAME_LENGTH) or "",
         environment=clean_name(raw.get("environment"), MAX_LABEL_LENGTH) or "",
         transport=clean_name(raw.get("transport"), MAX_LABEL_LENGTH),
+        is_blocked=outcome == "blocked",
+        # Anything but a hash (a raw subject, an email) is dropped.
+        user_hash=_matching(raw.get("user_id"), USER_HASH_RE),
+        user_group=_matching(raw.get("user_group"), USER_GROUP_RE),
     )
 
 
@@ -181,6 +205,8 @@ def aggregate(tenant_id: UUID, calls: Iterable[McpCall], now: datetime) -> list[
             c.tool_name,
             c.calling_service,
             c.environment,
+            c.user_hash,
+            c.user_group,
         )
         row = rows.get(key)
         if row is None:
@@ -189,6 +215,7 @@ def aggregate(tenant_id: UUID, calls: Iterable[McpCall], now: datetime) -> list[
                 "transport": None,
                 "call_count": 0,
                 "error_count": 0,
+                "blocked_count": 0,
                 "latency_ms_total": 0,
                 "latency_count": 0,
                 "first_seen": now,
@@ -196,6 +223,7 @@ def aggregate(tenant_id: UUID, calls: Iterable[McpCall], now: datetime) -> list[
             }
         row["call_count"] += 1
         row["error_count"] += int(c.is_error)
+        row["blocked_count"] += int(c.is_blocked)
         if c.latency_ms is not None:
             row["latency_ms_total"] += c.latency_ms
             row["latency_count"] += 1
@@ -225,6 +253,7 @@ async def record_calls(
             set_={
                 "call_count": table.c.call_count + ex.call_count,
                 "error_count": table.c.error_count + ex.error_count,
+                "blocked_count": table.c.blocked_count + ex.blocked_count,
                 "latency_ms_total": table.c.latency_ms_total + ex.latency_ms_total,
                 "latency_count": table.c.latency_count + ex.latency_count,
                 "transport": func.coalesce(ex.transport, table.c.transport),
@@ -274,7 +303,8 @@ async def ingest_mcp(
 ):
     """Ingest observed MCP tool calls: ``{"events": [{server_name,
     tool_name, outcome, latency_ms, calling_service, environment,
-    transport, source}]}``. Same ingest-key auth as ``/ingest/events``,
+    transport, source, user_id, user_group}]}``. ``outcome`` is ok, error
+    or blocked; ``user_id`` is kept only when it is a hex hash. Same ingest-key auth as ``/ingest/events``,
     with its own per-tenant rate limit (``PS_MCP_RATE_LIMIT_PER_MINUTE``);
     at most ``MAX_EVENTS`` events and ``MAX_BODY_BYTES`` bytes per request."""
     tenant_id = await resolve_tenant(request)
@@ -310,6 +340,9 @@ def _usage_dict(row: McpToolUsage) -> dict:
         "transport": row.transport,
         "call_count": row.call_count,
         "error_count": row.error_count,
+        "blocked_count": row.blocked_count,
+        "user_hash": row.user_hash or None,
+        "user_group": row.user_group or None,
         "avg_latency_ms": (
             round(row.latency_ms_total / row.latency_count)
             if row.latency_count

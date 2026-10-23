@@ -55,7 +55,7 @@ export const handler: PluginHandler = async (
   if (!parameters?.projectId || !credentials?.apiKey) {
     return {
       error: new Error(`Missing required credentials`),
-      verdict: true,
+      verdict: false,
       data,
       transformedData,
       transformed,
@@ -66,7 +66,7 @@ export const handler: PluginHandler = async (
   if (!content) {
     return {
       error: { message: 'request or response json is empty' },
-      verdict: true,
+      verdict: false,
       data: null,
       transformedData,
       transformed,
@@ -139,8 +139,8 @@ export const handler: PluginHandler = async (
       error = e instanceof Error ? e.message : String(e);
     }
 
-    // On error, default to allowing the request (fail open)
-    verdict = true;
+    // On error the verdict is false; failOnError decides the outcome.
+    verdict = false;
     data = null;
   }
 
