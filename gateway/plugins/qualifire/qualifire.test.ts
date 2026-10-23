@@ -604,7 +604,7 @@ describe('grounding handler', () => {
           message:
             'Qualifire Grounding guardrail only supports after_request_hooks.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -621,7 +621,7 @@ describe('grounding handler', () => {
           message:
             'Qualifire Grounding guardrail only supports after_request_hooks.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -779,7 +779,7 @@ describe('hallucinations handler', () => {
           message:
             'Qualifire Hallucinations guardrail only supports after_request_hooks.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -796,7 +796,7 @@ describe('hallucinations handler', () => {
           message:
             'Qualifire Hallucinations guardrail only supports after_request_hooks.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -1971,7 +1971,7 @@ describe('policy handler', () => {
           message:
             'Qualifire Policy guardrail requires policies to be provided.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -1988,7 +1988,7 @@ describe('policy handler', () => {
           message:
             'Qualifire Policy guardrail requires policies to be provided.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -2005,7 +2005,7 @@ describe('policy handler', () => {
           message:
             'Qualifire Policy guardrail requires policies to be provided.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -2358,7 +2358,7 @@ describe('toolUseQuality handler', () => {
           message:
             'Qualifire Tool Use Quality guardrail only supports after_request_hooks.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });
@@ -2375,7 +2375,7 @@ describe('toolUseQuality handler', () => {
           message:
             'Qualifire Tool Use Quality guardrail only supports after_request_hooks.',
         },
-        verdict: true,
+        verdict: false,
         data: null,
       });
     });

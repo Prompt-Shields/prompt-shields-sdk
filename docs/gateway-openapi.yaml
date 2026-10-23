@@ -1538,6 +1538,12 @@ paths:
         Callers that send `anthropic-version` get Anthropic's shape
         (`limit`, `after_id` and `before_id` applied locally when the
         provider does not paginate); everyone else gets OpenAI's shape.
+        Provider errors keep their status and body.
+
+        Claude Code discovers models this way: point `ANTHROPIC_BASE_URL`
+        at the gateway (without `/v1`) and pass the provider with
+        `ANTHROPIC_CUSTOM_HEADERS`, for example `x-portkey-provider: anthropic`
+        or `x-portkey-config: <config id or JSON>`.
       parameters:
         - $ref: '#/components/parameters/AnthropicVersion'
         - name: limit
