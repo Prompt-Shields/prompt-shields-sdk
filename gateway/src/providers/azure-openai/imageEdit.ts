@@ -2,9 +2,14 @@ import { POWERED_BY } from '../../globals';
 
 export const AzureImageEditRequestTransform = (
   body: FormData,
-  requestHeaders: Record<string, string>
+  requestHeaders: Record<string, string>,
+  providerOptions?: { apiVersion?: string }
 ) => {
-  const apiVersion = requestHeaders[`x-${POWERED_BY}-azure-api-version`];
+  // The target's resolved version (header or `api_version` in a config) is
+  // the one the URL is built from; the header alone misses config targets.
+  const apiVersion =
+    providerOptions?.apiVersion ??
+    requestHeaders[`x-${POWERED_BY}-azure-api-version`];
 
   const isAzureV1API = apiVersion?.trim() === 'v1';
 

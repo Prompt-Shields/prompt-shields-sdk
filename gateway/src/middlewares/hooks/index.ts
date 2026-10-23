@@ -345,6 +345,8 @@ export class HooksManager {
   ): Promise<GuardrailCheckResult> {
     const [source, fn] = check.id.split('.');
     const createdAt = new Date();
+    const failOnError =
+      (check.parameters as Record<string, any>)?.failOnError || false;
     try {
       const result = await this.plugins[source][fn](
         context,
@@ -355,7 +357,10 @@ export class HooksManager {
       return {
         transformedData: result.transformedData,
         data: result.data || null,
-        verdict: result.verdict,
+        // PS fork: an errored check never passes on its own verdict. Some
+        // upstream plugins returned `verdict: true` with an error, which
+        // made failOnError a no-op; `failOnError` alone decides an error.
+        verdict: result.error ? false : result.verdict,
         id: check.id,
         error: result.error
           ? { name: result.error.name, message: result.error.message }
@@ -364,8 +369,7 @@ export class HooksManager {
         transformed: result.transformed || false,
         created_at: createdAt,
         log: result.log || null,
-        fail_on_error:
-          (check.parameters as Record<string, any>)?.failOnError || false,
+        fail_on_error: failOnError,
       };
     } catch (err: any) {
       console.error(`Error executing check "${check.id}":`, err);
@@ -379,6 +383,8 @@ export class HooksManager {
         id: check.id,
         execution_time: new Date().getTime() - createdAt.getTime(),
         created_at: createdAt,
+        // PS fork: a check that throws honours failOnError too.
+        fail_on_error: failOnError,
       };
     }
   }

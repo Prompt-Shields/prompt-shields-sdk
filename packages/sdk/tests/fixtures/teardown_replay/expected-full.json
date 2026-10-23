@@ -1,0 +1,186 @@
+{
+  "schema": "teardown-replay.v1",
+  "mode": "full",
+  "policy": {
+    "policy_version": "nordic-sovereign-1",
+    "sha256": "82a2c33e46f258b8c38979f8928a6b4e7e83fb08d4d17a6bf6981d74e6b88c23",
+    "strategy": "heuristic"
+  },
+  "calls": 8,
+  "baseline": {
+    "spend": 0.059535,
+    "calls_priced": 7,
+    "calls_null_cost": 1,
+    "null_cost_by_reason": {
+      "unpriced": 1
+    },
+    "priced_at_requested": 1
+  },
+  "sensitivity_mix": {
+    "levels": [
+      {
+        "level": "public",
+        "calls": 0,
+        "share_calls": 0.0,
+        "spend": 0.0,
+        "share_spend": 0.0,
+        "by_source": {
+          "declared": 0,
+          "pii_escalated": 0,
+          "default": 0
+        },
+        "must_stay_sovereign": false,
+        "allowed_jurisdictions": [
+          "any"
+        ]
+      },
+      {
+        "level": "internal",
+        "calls": 3,
+        "share_calls": 0.375,
+        "spend": 0.0315,
+        "share_spend": 0.529101,
+        "by_source": {
+          "declared": 2,
+          "pii_escalated": 1,
+          "default": 0
+        },
+        "must_stay_sovereign": false,
+        "allowed_jurisdictions": [
+          "EEA",
+          "US"
+        ]
+      },
+      {
+        "level": "confidential",
+        "calls": 1,
+        "share_calls": 0.125,
+        "spend": 0.00021,
+        "share_spend": 0.003527,
+        "by_source": {
+          "declared": 1,
+          "pii_escalated": 0,
+          "default": 0
+        },
+        "must_stay_sovereign": true,
+        "allowed_jurisdictions": [
+          "EEA"
+        ]
+      },
+      {
+        "level": "restricted",
+        "calls": 4,
+        "share_calls": 0.5,
+        "spend": 0.027825,
+        "share_spend": 0.467372,
+        "by_source": {
+          "declared": 1,
+          "pii_escalated": 3,
+          "default": 0
+        },
+        "must_stay_sovereign": true,
+        "allowed_jurisdictions": [
+          "NO",
+          "EEA"
+        ]
+      }
+    ],
+    "sovereign": {
+      "calls": 5,
+      "share_calls": 0.625,
+      "spend": 0.028035,
+      "share_spend": 0.470899
+    },
+    "pii_escalated_share_calls": 0.5,
+    "pii_categories": {
+      "email": 2,
+      "health_data": 1,
+      "national_id": 3,
+      "phone": 3
+    }
+  },
+  "jurisdictions": {
+    "baseline": {
+      "US": {
+        "calls": 7,
+        "spend": 0.059535
+      },
+      "unknown": {
+        "calls": 1,
+        "spend": 0.0
+      }
+    },
+    "policy": {
+      "EEA": {
+        "calls": 5,
+        "spend": 0.0343
+      },
+      "US": {
+        "calls": 2,
+        "spend": 0.0315
+      },
+      "no_compliant_candidate": {
+        "calls": 1,
+        "spend": 0.00225
+      }
+    }
+  },
+  "baseline_noncompliant": {
+    "calls": 5,
+    "spend": 0.028035,
+    "calls_served_model_not_in_policy": 1
+  },
+  "strategies": {
+    "baseline": {
+      "spend": 0.059535
+    },
+    "policy_cheapest": {
+      "outcomes": {
+        "routed": 5,
+        "unchanged": 2,
+        "no_compliant_candidate": 1
+      },
+      "calls_compared": 7,
+      "calls_projected_null": 0,
+      "calls_priced_at_policy_rates": 5,
+      "baseline_spend_compared": 0.059535,
+      "projected_spend": 0.06735,
+      "savings": -0.007815,
+      "savings_pct": -0.131267,
+      "by_model": {
+        "berget-llama-70b": {
+          "calls": 1,
+          "spend": 0.009
+        },
+        "claude-sonnet-4-20250514": {
+          "calls": 1,
+          "spend": 0.024
+        },
+        "gpt-4o": {
+          "calls": 1,
+          "spend": 0.0075
+        },
+        "mistral-large-eu": {
+          "calls": 1,
+          "spend": 0.024
+        },
+        "mistral-small-eu": {
+          "calls": 2,
+          "spend": 0.0006
+        },
+        "no_compliant_candidate": {
+          "calls": 1,
+          "spend": 0.00225
+        },
+        "scaleway-small": {
+          "calls": 1,
+          "spend": 0.0007
+        }
+      }
+    },
+    "policy_at_parity": {
+      "status": "not_measured",
+      "pending": "#14 (eval harness)"
+    }
+  }
+}
