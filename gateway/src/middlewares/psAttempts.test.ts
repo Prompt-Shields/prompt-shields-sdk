@@ -272,6 +272,8 @@ describe('psTelemetry with attempts', () => {
       model: 'gpt-4o',
       error_class: 'server_error',
     });
+    // Error classes only, in order (PRD 0001 §7.12).
+    expect(ev.fallback_chain).toEqual(['server_error', 'rate_limited']);
     expect(JSON.stringify(sent)).not.toContain(SECRET);
   });
 
@@ -300,5 +302,6 @@ describe('psTelemetry with attempts', () => {
     expect(ev.attempts).toBeUndefined();
     expect(ev.retry_count).toBeUndefined();
     expect(ev.trace_id).toBeUndefined();
+    expect(ev.fallback_chain).toBeUndefined();
   });
 });

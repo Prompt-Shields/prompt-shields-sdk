@@ -139,13 +139,9 @@ async def test_gateway_event_round_trip(seeded_db):
     assert ev.tokens_in is None and ev.tokens_cached is None
     assert assets[ev.asset_id].modality == "audio"
 
+    # api_surface and route_* are stored since #25 (test_route_fields_db.py).
     (stats,) = loss["clients"]
-    assert set(stats["ignored_fields"]) == {
-        "api_surface",
-        "route_group",
-        "route_reason",
-        "route_est_cost",
-    }
+    assert not stats["ignored_fields"]
 
     async with _client() as c:
         body = (await c.get("/api/v1/registry/assets", headers=HEADERS)).json()

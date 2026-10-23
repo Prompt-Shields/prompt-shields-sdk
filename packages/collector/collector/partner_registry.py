@@ -31,7 +31,7 @@ from db.models import (
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, func, select
 
 from collector import aibom
 from collector.attestation import add_attestation_summaries, attestation_changes_since
@@ -427,6 +427,16 @@ async def get_usage_summary(
                         "unique_sessions"
                     ),
                     func.avg(AIUsageEvent.latency_ms).label("avg_latency_ms"),
+                    # NULL unless both costs were reported, so sum() skips it.
+                    func.sum(AIUsageEvent.counterfactual_cost - AIUsageEvent.cost).label(
+                        "savings_usd"
+                    ),
+                    func.count(AIUsageEvent.fallback_chain).label("fallback_reported"),
+                    func.count(
+                        case(
+                            (func.jsonb_array_length(AIUsageEvent.fallback_chain) > 0, 1)
+                        )
+                    ).label("fallback_requests"),
                 ).where(
                     AIUsageEvent.asset_id == asset_id,
                     AIUsageEvent.tenant_id == principal.tenant_id,
@@ -445,12 +455,17 @@ async def get_usage_summary(
 def _usage_summary_dict(row, period: str) -> dict:
     """Shape an aggregate row into the documented `UsageSummary` schema.
 
-    Counts and token totals are 0 when there were no events. Cost and
-    latency are null when no event in the window reported them, because
-    0 would claim a measurement that was never taken.
+    Counts and token totals are 0 when there were no events. Cost, latency,
+    savings and fallback rate are null when no event in the window reported
+    what they need, because 0 would claim a measurement never taken.
+    savings_usd sums counterfactual_cost - cost over events reporting both;
+    fallback_rate is the share of events reporting a fallback_chain whose
+    chain is not empty.
     """
     cost = row["estimated_cost_usd"]
     latency = row["avg_latency_ms"]
+    savings = row["savings_usd"]
+    fallback_reported = int(row["fallback_reported"] or 0)
     return {
         "total_requests": int(row["total_requests"] or 0),
         "total_tokens_in": int(row["total_tokens_in"] or 0),
@@ -461,6 +476,12 @@ def _usage_summary_dict(row, period: str) -> dict:
         "estimated_cost_usd": round(float(cost), 6) if cost is not None else None,
         "unique_sessions": int(row["unique_sessions"] or 0),
         "avg_latency_ms": round(float(latency)) if latency is not None else None,
+        "savings_usd": round(float(savings), 6) if savings is not None else None,
+        "fallback_rate": (
+            round(int(row["fallback_requests"] or 0) / fallback_reported, 4)
+            if fallback_reported
+            else None
+        ),
         "period": period,
     }
 
