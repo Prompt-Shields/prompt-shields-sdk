@@ -3,6 +3,7 @@ import { Options } from '../../types/requestBody';
 import BedrockAPIConfig from './api';
 import { BEDROCK } from '../../globals';
 import { externalServiceFetch } from '../../utils/fetch';
+import { GatewayError } from '../../errors/GatewayError';
 
 export const BedrockRetrieveFileRequestHandler = async ({
   c,
@@ -84,6 +85,8 @@ export const BedrockRetrieveFileRequestHandler = async ({
       },
     });
   } catch (error: any) {
+    // An invalid region or bucket (assertAwsUrl in getBaseURL) is a 400.
+    if (error instanceof GatewayError) throw error;
     let errorResponse;
 
     try {

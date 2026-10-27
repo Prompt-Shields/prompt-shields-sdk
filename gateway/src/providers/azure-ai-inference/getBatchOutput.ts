@@ -4,6 +4,8 @@ import { Options } from '../../types/requestBody';
 import { RetrieveBatchResponse } from '../types';
 import { AZURE_AI_INFERENCE, AZURE_OPEN_AI } from '../../globals';
 import { externalServiceFetch } from '../../utils/fetch';
+import { assertSafeUpstreamURL } from '../../middlewares/requestValidator';
+import { GatewayError } from '../../errors/GatewayError';
 
 // Return a ReadableStream containing batches output data
 export const AzureAIInferenceGetBatchOutputRequestHandler = async ({
@@ -35,6 +37,8 @@ export const AzureAIInferenceGetBatchOutputRequestHandler = async ({
       gatewayRequestBodyJSON: {},
       gatewayRequestBody: {},
     });
+  // The host is built from the request's Azure Foundry URL.
+  assertSafeUpstreamURL(retrieveBatchURL, c);
   const retrieveBatchesHeaders = await AzureAIInferenceAPI.headers({
     c,
     providerOptions,
@@ -101,6 +105,7 @@ export const AzureAIInferenceGetBatchOutputRequestHandler = async ({
         gatewayRequestBodyJSON: {},
         gatewayRequestBody: {},
       });
+    assertSafeUpstreamURL(retrieveFileContentURL, c);
     const retrieveFileContentHeaders = await AzureAIInferenceAPI.headers({
       c,
       providerOptions,
@@ -115,6 +120,7 @@ export const AzureAIInferenceGetBatchOutputRequestHandler = async ({
     });
     return response;
   } catch (error: any) {
+    if (error instanceof GatewayError) throw error;
     return new Response(
       JSON.stringify({
         error: 'error fetching batch output',

@@ -7,6 +7,7 @@ import {
 } from '../../globals';
 import { configSchema } from './schema/config';
 import { Environment } from '../../utils/env';
+import { GatewayError } from '../../errors/GatewayError';
 
 // Regex patterns for validation (defined once for reusability)
 const VALIDATION_PATTERNS = {
@@ -431,6 +432,19 @@ function isSafeURLForTrustedHosts(
   } catch {
     return false;
   }
+}
+
+/**
+ * PS fork: for provider request handlers (batch output, file upload, ...),
+ * which build and fetch their own URLs and so skip the isSafeUpstreamURL
+ * check in tryPostToProvider. Call it on every handler-built URL whose host
+ * comes from a request-controlled field before fetching it.
+ */
+export function assertSafeUpstreamURL(rawUrl: string, c?: Context): string {
+  if (!isSafeUpstreamURL(rawUrl, c)) {
+    throw new GatewayError('Invalid upstream URL', 400);
+  }
+  return rawUrl;
 }
 
 export function isValidCustomHost(customHost: string, c?: Context) {

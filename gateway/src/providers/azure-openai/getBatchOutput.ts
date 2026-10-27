@@ -6,7 +6,10 @@ import { AZURE_OPEN_AI } from '../../globals';
 import { generateErrorResponse } from '../utils';
 import { externalServiceFetch } from '../../utils/fetch';
 import { logger } from '../../apm';
-import { isSafeUpstreamURL } from '../../middlewares/requestValidator';
+import {
+  assertSafeUpstreamURL,
+  isSafeUpstreamURL,
+} from '../../middlewares/requestValidator';
 
 const AZURE_BLOB_HOST_SUFFIXES = [
   '.blob.core.windows.net',
@@ -58,6 +61,8 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
       gatewayRequestBodyJSON: {},
       gatewayRequestBody: {},
     });
+  // The host is built from the request's Azure resource name.
+  assertSafeUpstreamURL(retrieveBatchURL, c);
   const retrieveBatchesHeaders = await AzureOpenAIAPIConfig.headers({
     c,
     providerOptions,
@@ -108,6 +113,7 @@ export const AzureOpenAIGetBatchOutputRequestHandler = async ({
         gatewayRequestBodyJSON: {},
         gatewayRequestBody: {},
       });
+    assertSafeUpstreamURL(retrieveFileContentURL, c);
     const retrieveFileContentHeaders = await AzureOpenAIAPIConfig.headers({
       c,
       providerOptions,

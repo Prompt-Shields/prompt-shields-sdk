@@ -4,6 +4,7 @@ import BedrockAPIConfig from './api';
 import { getOctetStreamToOctetStreamTransformer } from '../../handlers/streamHandlerUtils';
 import { BEDROCK } from '../../globals';
 import { externalServiceFetch } from '../../utils/fetch';
+import { GatewayError } from '../../errors/GatewayError';
 
 const getRowTransform = () => {
   return (row: Record<string, any>) => row;
@@ -82,6 +83,8 @@ export const BedrockRetrieveFileContentRequestHandler = async ({
       },
     });
   } catch (error: any) {
+    // An invalid region or bucket (assertAwsUrl in getBaseURL) is a 400.
+    if (error instanceof GatewayError) throw error;
     let errorResponse;
 
     try {
