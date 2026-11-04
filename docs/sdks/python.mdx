@@ -129,8 +129,12 @@ self-learning router; an empty list means none fired.
 | `retry` | The same, after a call that raised |
 
 Prompt and answer text are only read in process, to parse JSON and to
-fingerprint requests (a bounded in-memory table of truncated SHA-256 digests);
-neither is sent. JSON and tool-call checks cover non-streamed calls.
+fingerprint requests (a bounded in-memory table of truncated SHA-256 digests,
+salted per process); neither is sent. Without a `session_id`, two identical
+requests from different end users within 120 s also count as a `regenerate`,
+so pass `session_id` when one process serves many users. Until the collector
+stores these fields it lists them under `ignored_fields` in `/telemetry/loss`;
+they do not count as lost events. JSON and tool-call checks cover non-streamed calls.
 
 ## Per-Request Metadata
 

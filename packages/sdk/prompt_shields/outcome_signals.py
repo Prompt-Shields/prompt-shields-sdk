@@ -28,8 +28,9 @@ Only these class names leave the process, in ``event["outcome_signals"]``
 (sorted, de-duplicated, at most ``MAX_SIGNALS``), with
 ``event["outcome_signals_version"]``. Prompt and answer text are read in
 process (to parse JSON and to fingerprint a prompt) and never sent or kept:
-the regenerate detector keeps only truncated SHA-256 digests, in a bounded
-in-memory table. ``PS_OUTCOME_SIGNALS=0`` turns the whole feature off.
+the regenerate detector keeps only truncated SHA-256 digests, salted with a
+random per-process value (so a memory dump cannot be matched against guessed
+short prompts), in a bounded in-memory table. ``PS_OUTCOME_SIGNALS=0`` turns the whole feature off.
 
 Without a ``session_id`` the detector only matches a byte-identical request
 (same model and message list); with one, the same last user message
@@ -261,8 +262,13 @@ def _text(content: Any) -> str:
     return "\n".join(parts)
 
 
+# Random per process: digests are never sent and only compared in process,
+# so a short prompt cannot be recovered from them by hashing guesses.
+_SALT = os.urandom(16)
+
+
 def _digest(*parts: str) -> str:
-    h = hashlib.sha256()
+    h = hashlib.sha256(_SALT)
     for part in parts:
         h.update(part.encode("utf-8", "replace"))
         h.update(b"\x00")

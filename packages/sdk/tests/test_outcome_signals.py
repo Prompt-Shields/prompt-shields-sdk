@@ -382,3 +382,15 @@ def test_instrumented_async_failure_is_a_retry(fakes):  # noqa: F811
     asyncio.run(run())
     assert _events()[0]["outcome_signals"] == ["retry"]
     assert _events()[0]["outcome_signals_version"] == OUTCOME_SIGNALS_VERSION
+
+
+def test_request_key_is_salted_per_process():
+    # A plain SHA-256 of a short prompt would be guessable from a memory dump.
+    import hashlib
+
+    from prompt_shields import outcome_signals
+
+    plain = hashlib.sha256(b"r\x00gpt-4o\x00user:hi\x00").hexdigest()[:32]
+    key = request_key("gpt-4o", [{"role": "user", "content": "hi"}])
+    assert key != plain
+    assert len(outcome_signals._SALT) == 16
