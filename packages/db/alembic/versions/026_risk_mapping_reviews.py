@@ -20,7 +20,7 @@ The table gets the tenant_isolation policy (same SQL as 015), enforced if
 RLS is already enforced on ai_assets (same as 020).
 
 Revision ID: 026
-Revises: 023 (set to 025 at merge once 024/025 land)
+Revises: 025
 Create Date: 2026-10-23
 """
 
@@ -31,7 +31,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "026"
-down_revision: str | None = "023"
+down_revision: str | None = "025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
