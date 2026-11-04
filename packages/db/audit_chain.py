@@ -16,6 +16,12 @@ A purge of old rows keeps the rest verifiable with a checkpoint row
 (action ``audit.purge``) that records the seq and row_hash of the last
 row it removed; the first remaining row's prev_hash must equal it.
 
+``details`` is canonicalised before it is hashed and stored
+(``sanitize_details``): plain JSON types only, floats as strings (a float
+does not survive a JSONB round trip byte for byte: ``1e16`` comes back as
+the integer ``10000000000000000``), strings truncated, secret-looking keys
+redacted.
+
 Plain Python with no collector imports, so the Alembic backfill (021),
 the collector and an external verifier share one definition.
 """
@@ -80,6 +86,53 @@ def _plain(value: Any) -> Any:
     if isinstance(value, datetime):
         return format_ts(value)
     return value
+
+
+_SECRET_MARKERS = ("secret", "password", "token", "authorization", "admin_key", "api_key")
+MAX_DETAIL_STRING = 256
+MAX_DETAIL_ITEMS = 50
+REDACTED = "[REDACTED]"
+
+
+def _clean(value: Any, depth: int = 0) -> Any:
+    if value is None or isinstance(value, bool | int):
+        return value
+    if isinstance(value, float):
+        return str(value)  # floats don't survive JSONB round trips byte for byte
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return format_ts(value)
+    if isinstance(value, str):
+        return value[:MAX_DETAIL_STRING]
+    if depth >= 2:
+        return None
+    if isinstance(value, dict):
+        return sanitize_details(value, depth + 1)
+    if isinstance(value, list | tuple | set | frozenset):
+        items = sorted(value, key=str) if isinstance(value, set | frozenset) else value
+        return [_clean(v, depth + 1) for v in list(items)[:MAX_DETAIL_ITEMS]]
+    return str(value)[:MAX_DETAIL_STRING]
+
+
+def sanitize_details(details: Mapping | None, depth: int = 0) -> dict:
+    """Details safe to store and hash: secret-looking keys redacted,
+    strings truncated, plain JSON types only (floats as strings)."""
+    out: dict = {}
+    for key, value in (details or {}).items():
+        name = str(key)[:64]
+        lowered = name.lower()
+        # "api_key_id" (a provider's key id) and "*_count" are not secrets,
+        # and neither is a number or a flag (an erasure's "admin_tokens": 2).
+        if (
+            any(m in lowered for m in _SECRET_MARKERS)
+            and not lowered.endswith(("_id", "_count", "_ids"))
+            and not (value is None or isinstance(value, bool | int))
+        ):
+            out[name] = REDACTED
+        else:
+            out[name] = _clean(value, depth)
+    return out
 
 
 def canonical_row(fields: Mapping[str, Any]) -> bytes:
