@@ -68,12 +68,13 @@ token or an API key. Scopes not granted are denied.
 |-------|-----------|
 | `assets:read` | `/assets`, `/assets/{id}`, `/vendors`, `/models`, `/business-units` |
 | `data-flows:read` | `/assets/{id}/data-flows` |
-| `risks:read` | `/assets/{id}/risks` |
+| `risks:read` | `/assets/{id}/risks`, `/assets/{id}/risks/{risk_id}/reviews` |
 | `usage:read` | `/assets/{id}/usage-summary`, `/telemetry/coverage` |
 | `changes:read` | `/changes` |
 | `export:read` | `/export` |
 | `webhooks:manage` | Webhook subscriptions. Never granted unless asked for |
 | `attestations:write` | `POST /assets/{id}/attestations`, including retiring an asset (`field: asset`, `state: retired`) and un-retiring it. Never granted unless asked for |
+| `risks:review` | `POST /assets/{id}/risks/{risk_id}/review`: confirm or reject a risk mapping, with the reviewer and an optional comment. Never granted unless asked for |
 | `provider-credentials:manage` | `/provider-credentials`, `/provider-key-fingerprints` (provider admin keys for the org usage pull, write-only). Never granted unless asked for |
 
 New credentials get the six read scopes unless the tenant admin picks fewer.

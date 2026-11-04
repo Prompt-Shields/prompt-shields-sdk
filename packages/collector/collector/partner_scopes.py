@@ -35,7 +35,7 @@ from collections.abc import Iterable
 SCOPES: dict[str, str] = {
     "assets:read": "List and get AI assets, vendors, models and business units",
     "data-flows:read": "Read an asset's data flows",
-    "risks:read": "Read an asset's risk mappings",
+    "risks:read": "Read an asset's risk mappings and their review history",
     "usage:read": "Read an asset's aggregated usage summary",
     "changes:read": "Read the /changes delta feed",
     "export:read": "Bulk export the registry (JSON or CycloneDX)",
@@ -43,6 +43,10 @@ SCOPES: dict[str, str] = {
     "attestations:write": (
         "Record human attestations of asset fields, including retiring an "
         "asset (an `asset` attestation with state `retired`) and un-retiring it"
+    ),
+    "risks:review": (
+        "Confirm or reject an asset's risk mappings (rule-based suggestions "
+        "included), with the reviewer's name and comment"
     ),
     "provider-credentials:manage": (
         "Store, rotate and delete provider admin keys (write-only) and "

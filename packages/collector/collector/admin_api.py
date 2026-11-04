@@ -5,7 +5,11 @@ ingest keys. Mounted at /api/v1/admin. Auth and scopes: collector/admin_auth.py.
   POST   /tokens                           issue (token returned once)   admin:tokens
   GET    /tokens                           list (metadata)               admin:tokens | admin:read
   GET    /tokens/{token_id}                read                          admin:tokens | admin:read
-  DELETE /tokens/{token_id}                revoke                        admin:tokens
+  DELETE /tokens/{token_id}                revoke, with every token it
+                                           created (cascade)             admin:tokens
+
+  A token issued by another token expires no later than that token (an
+  expiry past it, or none, is capped to it).
 
   POST   /api-keys                         issue (key returned once)     admin:keys *
   GET    /api-keys                         list (metadata)               admin:keys | admin:read
@@ -47,10 +51,12 @@ from collector.admin_auth import (
     TOKEN_WARNING,
     AdminPrincipal,
     add_audit,
+    cap_child_expiry,
     created_by,
     issue_token,
     require_admin,
     require_full_admin,
+    revoke_descendants,
     serialize_token,
     unknown_scopes,
 )
@@ -135,7 +141,7 @@ async def create_token(
             principal.tenant_id,
             name=body.name,
             scopes=body.scopes,
-            expires_at=_future(body.expires_at),
+            expires_at=await cap_child_expiry(db, principal, _future(body.expires_at)),
             created_by=created_by(request, principal),
         )
     except DuplicateName:
@@ -203,8 +209,10 @@ async def revoke_token(
 ) -> None:
     db = request.state.db
     row = await _get_token(request, principal.tenant_id, token_id)
+    now = datetime.now(UTC)
+    changed = False
     if row.revoked_at is None:
-        row.revoked_at = datetime.now(UTC)
+        row.revoked_at = now
         await add_audit(
             request,
             db,
@@ -216,6 +224,24 @@ async def revoke_token(
             target_id=str(row.id),
             name=row.name,
         )
+        changed = True
+    # The tokens it created go with it (also on a repeated DELETE, for
+    # children made before revocation cascaded).
+    for child in await revoke_descendants(db, row, now):
+        await add_audit(
+            request,
+            db,
+            tenant_id=principal.tenant_id,
+            status_code=204,
+            action="admin_token.revoke",
+            principal=principal,
+            target_type="admin_token",
+            target_id=str(child.id),
+            name=child.name,
+            cascade_from=str(row.id),
+        )
+        changed = True
+    if changed:
         await db.commit()
 
 
@@ -313,7 +339,8 @@ async def create_api_key(
 async def list_api_keys(
     request: Request, status: Status | None = None, principal: AdminPrincipal = _KEYS
 ) -> dict:
-    await _adopt(request, principal)
+    # Read only: a key still on the tenant row is moved by migration 022 or
+    # by the first key write (_adopt), never by a GET.
     rows = (
         (
             await request.state.db.execute(

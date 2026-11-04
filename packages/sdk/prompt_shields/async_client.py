@@ -14,6 +14,7 @@ from typing import Any
 
 from prompt_shields.client import _fingerprint, _openai_max_tokens
 from prompt_shields.instrumentation import suppress_instrumentation
+from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import (
     add_usage_detail_fields,
@@ -256,9 +257,13 @@ class _AsyncCompletionsNamespace:
         start = time.monotonic()
         # This client emits its own event; keep instrument() from adding one.
         with suppress_instrumentation():
-            response = await self._call_upstream(
-                model=model, messages=messages, max_tokens=max_tokens, **kwargs
-            )
+            try:
+                response = await self._call_upstream(
+                    model=model, messages=messages, max_tokens=max_tokens, **kwargs
+                )
+            except Exception:
+                record_failure(model, messages, (ps_metadata or {}).get("session_id"))
+                raise
 
         if streaming:
             return self._wrap_stream(
@@ -275,6 +280,8 @@ class _AsyncCompletionsNamespace:
         )
         if _event_hook is not None:
             _event_hook(event)
+        attach_outcome_signals(event, model=model, messages=messages,
+                               response=response, request=kwargs)
         await self._send(event, messages)
         return response
 
@@ -309,6 +316,9 @@ class _AsyncCompletionsNamespace:
                 event["tokens_estimated"] = True
             if event_hook is not None:
                 event_hook(event)
+            attach_outcome_signals(
+                event, model=model, messages=messages,
+                reasons=adapter_fields.get("finish_reasons") or [])
             return event
 
         async def on_finish(*args, flush: bool = True) -> None:

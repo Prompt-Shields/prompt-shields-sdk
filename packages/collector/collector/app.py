@@ -174,6 +174,13 @@ from collector.attestation_api import tenant_router as attestation_tenant_router
 app.include_router(attestation_tenant_router)
 app.include_router(attestation_partner_router)
 
+# Risk mapping reviews: comment, history, Partner API (#98)
+from collector.risk_reviews import admin_router as risk_reviews_admin_router
+from collector.risk_reviews import partner_router as risk_reviews_partner_router
+
+app.include_router(risk_reviews_admin_router)
+app.include_router(risk_reviews_partner_router)
+
 # Platform signal: provider org usage pull (admin trigger)
 from collector.provider_usage_admin import router as provider_usage_router
 
