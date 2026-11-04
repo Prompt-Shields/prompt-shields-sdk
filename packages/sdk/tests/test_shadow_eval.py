@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from prompt_shields.evals import (
     Candidate,
+    Completion,
     EvalPolicy,
     FakeExecutor,
     PromptReexecutionNotAllowed,
@@ -96,6 +97,23 @@ def test_defaults():
     assert cfg.sample_rate == 0.01
     assert cfg.max_spend_share == 0.02
     assert cfg.allow_prompt_reexecution is False
+
+
+@pytest.mark.parametrize("field", ["queue_size", "max_tokens"])
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), 2.5, True])
+def test_queue_size_and_max_tokens_validated(field, value):
+    # A NaN or infinite queue_size would make the queue unbounded.
+    with pytest.raises(ValueError, match=field):
+        _sampler(**{field: value})
+
+
+def test_config_changes_after_construction_do_not_apply():
+    sampler = _sampler()
+    sampler.config.policy = EvalPolicy.allow_all()
+    sampler.config.sample_rate = float("nan")
+    sampler.config.candidates = [PRIMARY]
+    assert _offer(sampler, level="restricted") is False
+    assert sampler.stats()["skipped_policy"] == 1
 
 
 # --- sampling ---------------------------------------------------------------
@@ -226,6 +244,25 @@ def test_absolute_cap():
     assert sampler.stats()["refused_spend_cap"] == 1
 
 
+@pytest.mark.parametrize("reported", [float("nan"), float("inf"), -1.0])
+def test_bad_reported_cost_books_worst_case(reported):
+    # A NaN reported cost used to make the cap allow every later call.
+    class BadCost(_Sends):
+        def complete(self, candidate, messages, **kw):
+            done = super().complete(candidate, messages, **kw)
+            return Completion(text=done.text, cost=reported)
+
+    executor = BadCost(_responder)
+    sampler = _sampler(executor, allow_prompt_reexecution=True,
+                       max_spend_usd=0.01, queue_size=100)
+    for _ in range(50):
+        _offer(sampler, cost=1e6)
+    sampler.drain()
+    stats = sampler.stats()
+    assert 0 < stats["shadow_spend_usd"] <= 0.01
+    assert stats["refused_spend_cap"] > 0
+
+
 def test_unbounded_prompt_not_sent():
     executor = _Sends(_responder)
     sampler = _sampler(executor, allow_prompt_reexecution=True, max_spend_usd=10.0)
@@ -313,6 +350,32 @@ def test_background_worker_and_close():
     sampler.close()
     assert sampler.stats()["completed"] == 1
     assert _offer(sampler) is False  # closed
+
+
+def test_close_drops_jobs_not_started_in_time():
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow(candidate, messages):
+        calls.append(candidate)
+        started.set()
+        release.wait(5)
+        return _responder(candidate, messages)
+
+    sampler = ShadowSampler(FakeExecutor(slow), _config(queue_size=4),
+                            sleep=lambda s: None)
+    for _ in range(5):
+        _offer(sampler)
+    assert started.wait(5)
+    sampler.close(timeout=0.05)
+    release.set()
+    sampler._thread.join(5)
+    assert not sampler._thread.is_alive()
+    # Only the job in flight ran (one alternative call and two judge calls).
+    assert len(calls) == 3
+    stats = sampler.stats()
+    assert stats["dropped_on_close"] == stats["enqueued"] - 1 >= 3
+    assert stats["completed"] == 1
 
 
 # --- no text out ------------------------------------------------------------

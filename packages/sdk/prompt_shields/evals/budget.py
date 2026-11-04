@@ -38,7 +38,13 @@ class SpendCap:
         return True
 
     def book(self, actual_usd: float | None, worst_case_usd: float) -> None:
-        self.spent += actual_usd if actual_usd is not None else worst_case_usd
+        # A NaN, infinite or negative reported cost would disable the cap
+        # (NaN) or give spend back; book the worst case instead.
+        valid = (
+            isinstance(actual_usd, (int, float)) and not isinstance(actual_usd, bool)
+            and math.isfinite(actual_usd) and actual_usd >= 0
+        )
+        self.spent += actual_usd if valid else worst_case_usd
 
     @property
     def remaining(self) -> float | None:

@@ -198,6 +198,7 @@ class _Counters:
     skipped_policy: int = 0
     offer_errors: int = 0
     worker_errors: int = 0
+    dropped_on_close: int = 0
     completed: int = 0
     cells: dict = field(default_factory=dict)
 
@@ -243,10 +244,25 @@ class ShadowSampler:
             and 0 <= config.max_spend_share <= MAX_SPEND_SHARE
         ):
             raise ValueError(f"max_spend_share must be in [0, {MAX_SPEND_SHARE}]")
-        if config.queue_size < 1:
-            raise ValueError("queue_size must be at least 1")
+        for name in ("queue_size", "max_tokens"):
+            value = getattr(config, name)
+            # A NaN or infinite queue_size would make queue.Queue unbounded.
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be an integer >= 1")
 
-        self.config = config
+        # Snapshot the validated config: the worker reads it for every job, so
+        # later changes (an allow-all policy, a NaN sample_rate) must not apply.
+        policy = config.policy
+        self._config = replace(
+            config,
+            candidates=tuple(config.candidates),
+            policy=EvalPolicy(
+                allowed={k: frozenset(v) for k, v in policy.allowed.items()},
+                unclassified_default=policy.unclassified_default,
+            ),
+            pricing_table=copy.deepcopy(config.pricing_table),
+        )
+        config = self._config
         self._executor = executor
         self._judge_executor = judge_executor
         self._on_result = on_result
@@ -264,8 +280,14 @@ class ShadowSampler:
         self._queue: queue.Queue[_Job | None] = queue.Queue(maxsize=config.queue_size)
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._abort = False
         if start:
             self.start()
+
+    @property
+    def config(self) -> ShadowConfig:
+        """A copy of the validated config; changing it has no effect."""
+        return copy.deepcopy(self._config)
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -277,14 +299,36 @@ class ShadowSampler:
             self._thread.start()
 
     def close(self, timeout: float | None = 5.0) -> None:
-        """Stop taking jobs; let the worker finish the queue, up to ``timeout``."""
+        """Stop taking jobs; let the worker finish the queue, up to ``timeout``.
+        Jobs not started by then are dropped (``dropped_on_close``), so no live
+        prompt is sent after ``close`` returns beyond the job in flight."""
         self._closed = True
-        if self._thread is not None:
+        if self._thread is None:
+            return
+        try:
+            self._queue.put(None, timeout=timeout)
+        except queue.Full:
+            pass
+        self._thread.join(timeout)
+        if not self._thread.is_alive():
+            return
+        self._abort = True
+        dropped = 0
+        while True:
             try:
-                self._queue.put(None, timeout=timeout)
-            except queue.Full:
-                pass
-            self._thread.join(timeout)
+                job = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            self._queue.task_done()
+            if job is not None:
+                dropped += 1
+            job = None
+        with self._lock:
+            self._counters.dropped_on_close += dropped
+        try:
+            self._queue.put_nowait(None)  # wake the worker so it exits
+        except queue.Full:  # pragma: no cover - offer() no longer puts
+            pass
 
     def drain(self) -> None:
         """Process every queued job on the calling thread. For a sampler built
@@ -297,6 +341,7 @@ class ShadowSampler:
             if job is not None:
                 self._process(job)
             self._queue.task_done()
+            job = None  # do not keep the last prompt alive
 
     # --- primary-path hooks -----------------------------------------------------
 
@@ -362,7 +407,7 @@ class ShadowSampler:
         with self._lock:
             c = self._counters
             c.offered += 1
-            if self._closed or self._rng.random() >= self.config.sample_rate:
+            if self._closed or self._rng.random() >= self._config.sample_rate:
                 return False
             c.sampled += 1
             if not response_text or not messages:
@@ -376,12 +421,12 @@ class ShadowSampler:
                 use_case=use_case or "(unattributed)",
                 data_classification=sensitivity_level,
             )
-            level = record.sensitivity(self.config.policy.unclassified_default)
+            level = record.sensitivity(self._config.policy.unclassified_default)
             primary = _primary_label(model, vendor)
             allowed = [
-                cand for cand in self.config.candidates
+                cand for cand in self._config.candidates
                 if cand.label != primary and cand.model != model
-                and self.config.policy.allows(cand, level)
+                and self._config.policy.allows(cand, level)
             ]
             if not allowed:
                 c.skipped_policy += 1
@@ -408,9 +453,15 @@ class ShadowSampler:
             try:
                 if job is None:
                     return
+                if self._abort:
+                    with self._lock:
+                        self._counters.dropped_on_close += 1
+                    continue
                 self._process(job)
             finally:
                 self._queue.task_done()
+                # Release the prompt now, not when the next job arrives.
+                job = None
 
     def _process(self, job: _Job) -> None:
         try:
@@ -435,7 +486,7 @@ class ShadowSampler:
         )
 
     def _evaluate(self, job: _Job) -> ShadowResult:
-        cfg = self.config
+        cfg = self._config
         # Check the judge first, so no shadow call is made that cannot be judged.
         if not cfg.policy.allows(cfg.judge, job.level):
             return self._result(job, SKIPPED_JUDGE_POLICY)
@@ -523,6 +574,7 @@ class ShadowSampler:
                 "skipped_no_answer": c.skipped_no_answer,
                 "skipped_policy": c.skipped_policy,
                 "offer_errors": c.offer_errors, "worker_errors": c.worker_errors,
+                "dropped_on_close": c.dropped_on_close,
                 "completed": c.completed,
             }
         primary = cap.primary_spent
@@ -534,7 +586,7 @@ class ShadowSampler:
             "primary_spend_usd": round(primary, 6),
             "shadow_spend_usd": round(cap.spent, 6),
             "shadow_spend_share": round(cap.spent / primary, 6) if primary else None,
-            "sample_rate": self.config.sample_rate,
-            "max_spend_share": self.config.max_spend_share,
+            "sample_rate": self._config.sample_rate,
+            "max_spend_share": self._config.max_spend_share,
             "cells": cells,
         }
