@@ -1099,7 +1099,10 @@ components:
         expires_at:
           type: [string, 'null']
           format: date-time
-          description: Must be in the future. Omit for a token that does not expire.
+          description: >-
+            Must be in the future. Omit for a token that does not expire.
+            With an admin token that expires, the new token expires no later
+            than the caller's (an omitted or later expiry is capped to it).
       required: [name, scopes]
 
     BootstrapAdminTokenRequest:
@@ -1139,7 +1142,8 @@ components:
           enum: [api, legacy]
           description: >-
             `legacy` for the key that lived on the tenant row before this API,
-            moved here by migration 022 or by the first key API call
+            moved here by migration 022 or by the tenant's first key write
+            (listing keys does not move it)
         status:
           $ref: '#/components/schemas/CredentialStatus'
         rotation_grace_ends_at:
@@ -3152,6 +3156,8 @@ paths:
       description: |
         Revokes at once. The row is kept (`status: revoked`, readable by
         id) and the name can be reused. Revoking a revoked token is 204.
+        Every token this token created, and the tokens those created, are
+        revoked with it.
       security:
         - TenantApiKey: []
         - AdminToken: []
