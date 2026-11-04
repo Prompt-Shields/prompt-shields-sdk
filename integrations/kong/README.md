@@ -8,6 +8,10 @@ For each request through `ai-proxy` (or another Kong AI plugin), it does three t
 1. **Access phase.** It reads the `X-PS-*` business headers into
    `kong.ctx.plugin`. Then it removes every `X-PS-*` header from the
    upstream request, so this business metadata never reaches the LLM provider.
+   The removal does not depend on the read: if reading or stashing the
+   headers fails, the headers are still removed. A request with more than
+   Kong's 1,000-header limit for `kong.request.get_headers()` is read again in
+   full, so an `X-PS-*` header cannot hide past it.
 2. **Log phase.** It builds a small event with only the metadata the collector
    maps:
    - Kong's AI analytics: provider, requested and served model, tokens, cost
@@ -108,7 +112,7 @@ collector reads.
 | `strip_ps_headers` | `true` | Remove every `X-PS-*` request header before proxying. The values are reported either way. |
 | `timeout` | `10000` | Timeout for each collector request, in ms. |
 | `keepalive` | `60000` | Idle keepalive for collector connections, in ms. |
-| `queue.*` | `max_batch_size: 200`, `max_coalescing_delay: 5` | Kong's standard queue settings (`max_entries`, `max_bytes`, `max_retry_time`, ...). `max_batch_size` is capped at 1000, the collector's limit per request. |
+| `queue.*` | `max_batch_size: 200`, `max_coalescing_delay: 5` | Kong's standard queue settings (`max_entries`, `max_bytes`, `max_retry_time`, ...). `max_batch_size` is capped at 1000, the collector's limit per request. A batch larger than the collector's 4 MiB body limit is sent as several requests. |
 
 **Delivery is fail-open.** The proxied request never waits on the collector,
 and an error in the plugin is logged, never returned to the client. If the
