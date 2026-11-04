@@ -144,6 +144,7 @@ client = ShieldsClient(vendor="openai", api_key=..., ps_api_key=...)
 | `scan_pii` | bool | no | Default `True`. Set `False` to disable local PII detection. |
 | `send_prompt_text` | bool | no | Default `False`. Set `True` to log full prompt content (requires explicit security review). |
 | `pricing_table` | dict | no | Override default token-to-USD pricing. See [Cost estimation](#10-cost-estimation). |
+| `on_prompt_features` | callable | no | Called once per call, before the provider call, with local `PromptFeatures` from `prompt_shields.prompt_features` (complexity features plus a local embedding). Nothing from it is sent; the telemetry event is unchanged. Errors in it are swallowed. |
 
 ### Why metadata at the client level?
 
@@ -539,6 +540,7 @@ Format: `{(vendor, model): (input_per_1k_tokens, output_per_1k_tokens)}`.
 | **Response content** | **No** | Never, regardless of settings |
 | **Raw API key** | **No** | Only the fingerprint |
 | **Tool call arguments** | **No** | Only the tool name |
+| **Prompt features / embedding** | **No** | Computed locally only for `on_prompt_features` |
 
 ### When to enable `send_prompt_text=True`
 
