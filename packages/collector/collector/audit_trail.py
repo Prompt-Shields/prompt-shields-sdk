@@ -12,6 +12,7 @@ module records *changes* and security events in ``audit_events``:
   retention.purge                               (usage-event retention runs)
   registry.attest|registry.retire|registry.unretire|registry.lifecycle_sweep
   registry.merge_assets                         (duplicate asset merge)
+  registry.risk_review                          (risk mapping confirmed/rejected)
   operator.access                               (operator-token routes)
   auth.failure                                  (admin routes, rate-limited)
   audit_log.purge                               (partner_audit_log purge)

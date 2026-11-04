@@ -142,6 +142,21 @@ confirmed or rejected row, never re-suggests a reviewed rule, and does not
 suggest a framework and category that already has a hand-entered mapping on
 the asset. Suggestions whose rule stops firing are withdrawn.
 
+An optional `comment` (up to 4,000 characters) records why; the mapping
+carries the latest one as `review_comment`. A mapping can be reviewed again,
+and every review is kept in an append-only history (database triggers
+reject edits and deletes outside tenant erasure): who, when, the new and
+previous status, the comment and the mapping as it was reviewed.
+`GET /api/v1/admin/risk-mappings/{risk_id}/reviews` returns it, newest
+first. A review never changes `confidence`, bumps the asset into the Partner
+API `/changes` feed and writes a `registry.risk_review` row to the
+[audit trail](/guides/audit-trail).
+
+Partners review through
+`POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review` (scope
+`risks:review`, never granted by default) and read the history at
+`GET /partner/v1/assets/{asset_id}/risks/{risk_id}/reviews` (`risks:read`).
+
 **Reading.** `GET /api/v1/registry/assets/{id}/risks` returns every mapping
 except rejected ones, each with `status` and `source`.
 `GET /partner/v1/assets/{id}/risks` returns only `confirmed` mappings by

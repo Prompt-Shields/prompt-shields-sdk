@@ -1,5 +1,6 @@
 import os
 
+import pytest
 import pytest_asyncio
 from db.api_keys import api_key_lookup_prefix, hash_api_key
 from db.models import Base, Tenant
@@ -11,6 +12,12 @@ TEST_DB_URL = os.environ.get(
     "PS_TEST_DATABASE_URL",
     "postgresql+asyncpg://ps_user:ps_local_dev@localhost:5432/prompt_shields_test",
 )
+
+
+@pytest.fixture
+def test_database_url() -> str:
+    """For tests that manage their own engine (e.g. a server on another loop)."""
+    return TEST_DB_URL
 
 
 @pytest_asyncio.fixture

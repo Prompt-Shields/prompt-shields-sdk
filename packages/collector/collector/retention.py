@@ -60,6 +60,7 @@ from db.models import (
     ProviderKeyFingerprint,
     RetentionAuditLog,
     RiskMapping,
+    RiskMappingReview,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
@@ -94,6 +95,7 @@ ERASE_ORDER: tuple[type, ...] = (
     DataFlow,
     RiskMapping,
     AssetAttestation,
+    RiskMappingReview,
     PartnerAuditLog,
     WebhookDelivery,
     WebhookSubscription,
@@ -236,8 +238,9 @@ async def _delete_in_batches(
     one statement.
 
     ``erasing_tenant`` marks each delete transaction as part of that
-    tenant's erasure, which the append-only trigger on
-    ``asset_attestations`` requires before it allows a DELETE.
+    tenant's erasure, which the append-only triggers on
+    ``asset_attestations`` and ``risk_mapping_reviews`` require before
+    they allow a DELETE.
     """
 
     async def _mark_erasure() -> None:
