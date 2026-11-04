@@ -20,7 +20,7 @@ All columns are nullable with no default, so existing rows and old events
 are unaffected.
 
 Revision ID: 025
-Revises: 023
+Revises: 024
 Create Date: 2026-10-23
 """
 
@@ -31,7 +31,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = "025"
-down_revision: str | None = "023"
+down_revision: str | None = "024"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -70,6 +70,10 @@ def test_details_never_keep_secrets_or_long_text():
             "ratio": 0.5,
             "scopes": {"b", "a"},
             "nested": {"password": "p", "count": 1},
+            # Counts under secret-looking names (an erasure's per-table rows).
+            "admin_tokens": 2,
+            "tenant_api_keys": 0,
+            "api_key": None,
         }
     )
     assert out["admin_key"] == out["client_secret"] == out["token"] == "[REDACTED]"
@@ -81,6 +85,7 @@ def test_details_never_keep_secrets_or_long_text():
     assert out["ratio"] == "0.5"
     assert out["scopes"] == ["a", "b"]
     assert out["nested"] == {"password": "[REDACTED]", "count": 1}
+    assert (out["admin_tokens"], out["tenant_api_keys"], out["api_key"]) == (2, 0, None)
 
 
 def test_auth_failure_limiter():
