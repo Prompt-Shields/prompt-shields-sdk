@@ -1,6 +1,6 @@
 {
   "$schema": "./cost-vectors.schema.json",
-  "description": "Hand-computed from vendor list prices (USD per 1M tokens) as of 2026-Q1; per-unit (seconds, characters, pages, search units, images) prices as of 2026-10-18. Shared by the SDK (packages/sdk/tests/test_cost_vectors.py) and, once it prices calls, the gateway.",
+  "description": "Hand-computed from vendor list prices (USD per 1M tokens) as of 2026-Q1; per-unit (seconds, characters, pages, search units, images) prices as of 2026-10-18. Shared by the SDK (packages/sdk/tests/test_cost_vectors.py) and the gateway (gateway/src/middlewares/psPricing.test.ts).",
   "vectors": [
     {
       "id": "openai-gpt-4o-base",
@@ -11,6 +11,15 @@
       "expected_cost": 0.0225,
       "expected_cost_source": "pricing_table",
       "derivation": "1000 x $2.50 + 2000 x $10.00 = $0.0025 + $0.0200"
+    },
+    {
+      "id": "azure-openai-gateway-slug-base",
+      "dimension": "base",
+      "vendor": "azure-openai",
+      "model": "gpt-4o",
+      "usage": { "tokens_in": 1000, "tokens_out": 2000 },
+      "expected_cost": 0.0225,
+      "derivation": "The gateway's azure-openai provider slug is priced at OpenAI list prices: 1000 x $2.50 + 2000 x $10.00"
     },
     {
       "id": "openai-gpt-4o-cache-read",

@@ -63,6 +63,21 @@ class IngestEvent(BaseModel):
     # SDK's sha256(api key)[:16] (#93). Anything else (a raw or redacted
     # key) is dropped, so a key can never be stored here.
     api_key_fingerprint: str | None = None
+    # Routing, sovereignty and savings metadata (PRD 0001 §7.12, #25).
+    # Lenient like the extended usage fields above.
+    api_surface: str | None = None
+    route_mode: str | None = None
+    route_group: str | None = None
+    route_reason: str | None = None
+    route_est_cost: float | None = None
+    sensitivity_level: str | None = None
+    sensitivity_source: str | None = None
+    served_provider: str | None = None
+    served_jurisdiction: str | None = None
+    policy_version: str | None = None
+    fallback_chain: list[str] | None = None
+    counterfactual_cost: float | None = None
+    baseline_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -92,11 +107,57 @@ class IngestEvent(BaseModel):
         return _lenient_str(value, MAX_MODEL_NAME_LENGTH)
 
     @field_validator(
-        "cost_source", "service_tier", "framework", "usage_unit_type", mode="before"
+        "cost_source",
+        "service_tier",
+        "framework",
+        "usage_unit_type",
+        "api_surface",
+        "route_group",
+        "sensitivity_level",
+        "served_provider",
+        "served_jurisdiction",
+        mode="before",
     )
     @classmethod
     def _label(cls, value: Any) -> str | None:
         return _lenient_str(value, MAX_LABEL_LENGTH)
+
+    @field_validator("route_reason", mode="before")
+    @classmethod
+    def _reason(cls, value: Any) -> str | None:
+        return _lenient_str(value, MAX_REASON_LENGTH)
+
+    @field_validator("policy_version", "baseline_id", mode="before")
+    @classmethod
+    def _identifier(cls, value: Any) -> str | None:
+        return _lenient_str(value, MAX_IDENTIFIER_LENGTH)
+
+    @field_validator("route_mode", mode="before")
+    @classmethod
+    def _route_mode(cls, value: Any) -> str | None:
+        return _lenient_choice(value, ROUTE_MODES)
+
+    @field_validator("sensitivity_source", mode="before")
+    @classmethod
+    def _sensitivity_source(cls, value: Any) -> str | None:
+        return _lenient_choice(value, SENSITIVITY_SOURCES)
+
+    @field_validator("fallback_chain", mode="before")
+    @classmethod
+    def _fallback_chain(cls, value: Any) -> list[str] | None:
+        # Error classes only (rate_limited, server_error, ...): anything
+        # that is not a short snake_case token, such as an error message,
+        # drops the whole field so content can never be stored here.
+        if not isinstance(value, list) or len(value) > MAX_FALLBACK_CHAIN:
+            return None
+        if not all(isinstance(v, str) and ERROR_CLASS_RE.fullmatch(v) for v in value):
+            return None
+        return value
+
+    @field_validator("route_est_cost", "counterfactual_cost", mode="before")
+    @classmethod
+    def _route_cost(cls, value: Any) -> float | None:
+        return _lenient_amount(value, MAX_COST)
 
     @field_validator("modality", mode="before")
     @classmethod
@@ -143,12 +204,37 @@ MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
 MAX_COST = 9999.999999  # largest Numeric(10, 6) value
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
+MAX_REASON_LENGTH = 256
+MAX_IDENTIFIER_LENGTH = 128
+# The gateway keeps at most MAX_ATTEMPT_RECORDS (32) attempts per request.
+MAX_FALLBACK_CHAIN = 32
+ERROR_CLASS_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# PRD 0001 §7.12. Matched case-insensitively, stored lower-case.
+ROUTE_MODES = frozenset({"gateway", "local", "none"})
+SENSITIVITY_SOURCES = frozenset({"declared", "pii_escalated", "default"})
 
 # The modalities telemetry reports, as the gateway's modalityOf() sets them
 # from the endpoint: chat, completions, messages, responses, embeddings and
 # rerank are text; /v1/images is image; /v1/audio is audio; /v1/ocr is
 # document. Matched case-insensitively, stored lower-case.
 MODALITIES = frozenset({"text", "image", "audio", "document"})
+
+# PRD 0001 §7.12 routing metadata (#25), stored as sent once validated.
+ROUTE_FIELDS = (
+    "api_surface",
+    "route_mode",
+    "route_group",
+    "route_reason",
+    "route_est_cost",
+    "sensitivity_level",
+    "sensitivity_source",
+    "served_provider",
+    "served_jurisdiction",
+    "policy_version",
+    "fallback_chain",
+    "counterfactual_cost",
+    "baseline_id",
+)
 
 # Lenient fields whose dropped values are reported in ignored_fields as
 # "<field>:invalid", so a client sending bad values shows up in
@@ -171,7 +257,7 @@ LENIENT_FIELDS = (
     "usage_units",
     "usage_unit_type",
     "api_key_fingerprint",
-)
+) + ROUTE_FIELDS
 
 
 def _lenient_str(value: Any, max_length: int) -> str | None:
@@ -181,6 +267,14 @@ def _lenient_str(value: Any, max_length: int) -> str | None:
     if not value or len(value) > max_length:
         return None
     return value
+
+
+def _lenient_choice(value: Any, choices: frozenset[str]) -> str | None:
+    value = _lenient_str(value, MAX_LABEL_LENGTH)
+    if value is None:
+        return None
+    value = value.lower()
+    return value if value in choices else None
 
 
 def _lenient_count(value: Any) -> int | None:
@@ -426,6 +520,7 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             usage_units=event.usage_units,
             usage_unit_type=event.usage_unit_type,
             api_key_fingerprint=event.api_key_fingerprint,
+            **{name: getattr(event, name) for name in ROUTE_FIELDS},
         )
         db.add(usage_event)
         await record_event_flows(
