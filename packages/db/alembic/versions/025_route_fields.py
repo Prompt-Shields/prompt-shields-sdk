@@ -19,8 +19,8 @@ already has its tenant_isolation policy (015) and is in the erasure order.
 All columns are nullable with no default, so existing rows and old events
 are unaffected.
 
-Revision ID: 023
-Revises: 022
+Revision ID: 025
+Revises: 023
 Create Date: 2026-10-23
 """
 
@@ -30,8 +30,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "023"
-down_revision: str | None = "022"
+revision: str = "025"
+down_revision: str | None = "023"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
