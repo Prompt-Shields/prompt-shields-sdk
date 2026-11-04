@@ -79,6 +79,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from prompt_shields import mcp_instrumentation
+from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.providers import (
     ADAPTERS,
     AzureOpenAIAdapter,
@@ -795,8 +796,8 @@ def _make_wrapper(original: Any, vendor: str, api: str) -> Any:
         start = time.monotonic()
         try:
             response = original(self, *args, **call["kwargs"])
-        except BaseException:
-            _release_framework_call(call)
+        except BaseException as e:
+            _call_failed(call, e)
             raise
         if inspect.isawaitable(response):
             return _await_and_finish(call, response, start)
@@ -809,10 +810,17 @@ def _make_wrapper(original: Any, vendor: str, api: str) -> Any:
 async def _await_and_finish(call: dict, awaitable: Any, start: float) -> Any:
     try:
         response = await awaitable
-    except BaseException:
-        _release_framework_call(call)
+    except BaseException as e:
+        _call_failed(call, e)
         raise
     return await _finish_async(call, response, start)
+
+
+def _call_failed(call: dict, error: BaseException | None = None) -> None:
+    """The upstream call raised: no event, but a re-send counts as a retry."""
+    _release_framework_call(call)
+    if error is None or isinstance(error, Exception):
+        record_failure(call.get("model"), call.get("messages"))
 
 
 def _prepare(resource: Any, vendor: str, api: str, args: tuple,
@@ -1163,7 +1171,7 @@ def _wrap_stream(call: dict, stream: Any, start: float,
     options = {"hide_usage_chunk": call["hide_usage_chunk"],
                "on_abandon": on_abandon, "close_flush": close_flush}
     if call["vendor"] in _LAZY_STREAM_VENDORS:
-        options["on_failed_start"] = lambda: _release_framework_call(call)
+        options["on_failed_start"] = lambda: _call_failed(call)
     if is_async or (hasattr(stream, "__aiter__") and not hasattr(stream, "__iter__")):
         async def on_finish_async(adapter_fields, stream_fields, latency_ms,
                                   flush=True):
@@ -1484,6 +1492,7 @@ def build_event(state: _State, *, vendor: str, model: Any, messages: list,
 def _event(call: dict, response: Any, latency_ms: int,
            adapter_fields: dict | None = None) -> dict:
     adapter = call.get("adapter") or get_adapter(call["vendor"])
+    streamed = adapter_fields is not None
     if adapter_fields is None:
         if call.get("http_response"):
             response = getattr(response, "data", None)
@@ -1503,6 +1512,10 @@ def _event(call: dict, response: Any, latency_ms: int,
     )
     if call.get("framework") is not None:
         apply_framework_fields(event, call["framework"])
+    if not streamed:
+        attach_outcome_signals(event, model=call["model"],
+                               messages=call["messages"], response=response,
+                               request=call.get("kwargs"))
     return event
 
 
@@ -1512,6 +1525,9 @@ def _stream_event(call: dict, adapter_fields: dict, stream_fields: dict,
     event.update(stream_fields)
     if adapter_fields.get("tokens_estimated"):
         event["tokens_estimated"] = True
+    attach_outcome_signals(event, model=call["model"], messages=call["messages"],
+                           request=call.get("kwargs"),
+                           reasons=adapter_fields.get("finish_reasons") or [])
     return event
 
 
@@ -1590,6 +1606,10 @@ class _ResponsesAccumulator(StreamAccumulator):
             if fields["tokens_reasoning"] is not None:
                 self.tokens_reasoning = fields["tokens_reasoning"]
             self._update_pricing(fields)
+            self._finish_reason(_field(_field(
+                getattr(event, "response", None), "incomplete_details"), "reason"))
+        elif etype == "response.refusal.done":
+            self._finish_reason("refusal")
         elif etype == "response.output_text.delta":
             delta = getattr(event, "delta", None)
             if isinstance(delta, str):
