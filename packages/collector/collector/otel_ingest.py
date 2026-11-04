@@ -12,6 +12,7 @@ The response uses the request's encoding. Compressed bodies
 from __future__ import annotations
 
 import contextlib
+from typing import NoReturn
 from uuid import UUID
 
 from db.models import AIUsageEvent
@@ -39,6 +40,7 @@ from collector.otel_mapping import (
 from collector.otlp_protobuf import (
     PROTOBUF_CONTENT_TYPES,
     PROTOBUF_MEDIA_TYPE,
+    TooManySpans,
     decode_traces,
     encode_response,
 )
@@ -155,6 +157,20 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
     return assets_created
 
 
+async def _reject_too_many_spans(
+    db: AsyncSession, tenant_id: UUID, genai_clients: list[str]
+) -> NoReturn:
+    """413 for a request over the span limit. Exporters do not retry a 413:
+    the GenAI spans in it (one client id each) are lost."""
+    counts: dict[str, OtelCounts] = {}
+    for client in genai_clients:
+        counts.setdefault(client, OtelCounts()).reject("too_large")
+    await record_otel(db, tenant_id, counts)
+    raise _problem(
+        413, "Payload Too Large", f"More than {MAX_SPANS} spans in one request"
+    )
+
+
 @router.post("/ingest/otel/v1/traces")
 async def ingest_otel_traces(request: Request):
     tenant_id = await resolve_tenant(request)
@@ -170,8 +186,11 @@ async def ingest_otel_traces(request: Request):
         )
 
     raw = await _read_bounded_body(request)
+    db = request.state.db
     try:
-        payload = decode_traces(raw) if is_protobuf else loads_bounded(raw)
+        payload = decode_traces(raw, MAX_SPANS) if is_protobuf else loads_bounded(raw)
+    except TooManySpans as exc:
+        await _reject_too_many_spans(db, tenant_id, exc.genai_clients)
     except BodyTooDeep:
         raise too_deep_problem() from None
     except ValueError:  # UnicodeDecodeError included
@@ -182,18 +201,15 @@ async def ingest_otel_traces(request: Request):
             400, "Bad Request", "Expected an ExportTraceServiceRequest object"
         )
 
-    db = request.state.db
     if count_spans(payload) > MAX_SPANS:
-        # Exporters do not retry a 413: the GenAI spans in it are lost.
-        counts: dict[str, OtelCounts] = {}
-        for span, resource_attrs in iter_spans(payload):
-            if is_genai_span(safe_attributes(span.get("attributes"))):
-                counts.setdefault(otel_client_id(resource_attrs), OtelCounts()).reject(
-                    "too_large"
-                )
-        await record_otel(db, tenant_id, counts)
-        raise _problem(
-            413, "Payload Too Large", f"More than {MAX_SPANS} spans in one request"
+        await _reject_too_many_spans(
+            db,
+            tenant_id,
+            [
+                otel_client_id(resource_attrs)
+                for span, resource_attrs in iter_spans(payload)
+                if is_genai_span(safe_attributes(span.get("attributes")))
+            ],
         )
 
     mcp_calls: list[McpCall] = []

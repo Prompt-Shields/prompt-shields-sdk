@@ -111,6 +111,18 @@ GENAI = {
 }
 
 
+def _len_field(number: int, payload: bytes) -> bytes:
+    """A length-delimited protobuf field (field numbers below 16)."""
+    tag = bytes([(number << 3) | 2])
+    n, length = len(payload), b""
+    while True:
+        byte = n & 0x7F
+        n >>= 7
+        length += bytes([byte | (0x80 if n else 0)])
+        if not n:
+            return tag + length + payload
+
+
 def _fixture_json() -> dict:
     return json.loads(OPENLLMETRY_JSON.read_text())
 
@@ -352,9 +364,38 @@ async def test_protobuf_body_size_bounded(mocked, monkeypatch):
     mocked.assert_not_awaited()
 
 
-async def test_protobuf_span_count_bounded(mocked, monkeypatch):
+@pytest.mark.parametrize(
+    ("fixture", "content_type"),
+    [(OPENLLMETRY_PB, "application/x-protobuf"), (OPENLLMETRY_JSON, "application/json")],
+)
+async def test_span_count_bounded(mocked, monkeypatch, fixture, content_type):
+    """Over the span limit, both encodings give a 413 and count the same
+    GenAI spans as lost. Protobuf checks the limit before converting the
+    message to a dict (a 4 MiB body can hold ~2M empty spans)."""
     monkeypatch.setattr(otel_ingest, "MAX_SPANS", 5)
-    resp = await _post(OPENLLMETRY_PB.read_bytes(), PROTOBUF)
+    recorder = AsyncMock()
+    monkeypatch.setattr(otel_ingest, "record_otel", recorder)
+    with patch(
+        "collector.otlp_protobuf.MessageToDict",
+        side_effect=AssertionError("converted"),
+    ):
+        resp = await _post(fixture.read_bytes(), {**AUTH, "Content-Type": content_type})
+    assert resp.status_code == 413
+    mocked.assert_not_awaited()
+    counts = recorder.await_args.args[2]
+    assert list(counts) == ["otel:joke_generation_service"]
+    assert counts["otel:joke_generation_service"].rejected == {"too_large": 3}
+
+
+async def test_protobuf_span_limit_checked_before_conversion(mocked):
+    """~2M empty spans in a 4 MiB body: refused without building the dict."""
+    body = _len_field(1, _len_field(2, b"\x12\x00" * 2_000_000))  # ScopeSpans.spans
+    assert len(body) <= otel_ingest.MAX_BODY_BYTES
+    with patch(
+        "collector.otlp_protobuf.MessageToDict",
+        side_effect=AssertionError("converted"),
+    ):
+        resp = await _post(body, PROTOBUF)
     assert resp.status_code == 413
     mocked.assert_not_awaited()
 

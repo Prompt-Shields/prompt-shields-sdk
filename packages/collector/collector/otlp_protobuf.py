@@ -8,7 +8,10 @@ name), so both encodings go through one mapping path (otel_mapping.py) and
 get the same treatment:
 
 * Size: the same body limit (otel_ingest.MAX_BODY_BYTES) applies before
-  decoding, and the same span limit after.
+  decoding, and the same span limit after parsing but before the message is
+  converted to a dict (``TooManySpans``): a 4 MiB body of empty spans is ~2M
+  messages, and converting them all would cost seconds and several hundred
+  MB for a request that is refused anyway.
 * Depth: the decoded value must nest no deeper than ``MAX_JSON_DEPTH``, the
   limit for a JSON body. A message nested deeper than the protobuf parser's
   own recursion limit is a decode error. Both are a 400.
@@ -30,6 +33,8 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceResponse,
 )
 
+from collector.loss_accounting import otel_client_id
+from collector.otel_mapping import GENAI_MARKER_KEYS
 from collector.sanitize import (
     MAX_JSON_DEPTH,
     TOO_DEEP_DETAIL,
@@ -41,10 +46,46 @@ PROTOBUF_CONTENT_TYPES = frozenset({"application/x-protobuf", "application/proto
 PROTOBUF_MEDIA_TYPE = "application/x-protobuf"
 
 
-def decode_traces(raw: bytes) -> dict[str, Any]:
+class TooManySpans(Exception):
+    """The request has more spans than the limit. ``genai_clients`` holds the
+    loss-accounting client of each GenAI span in it, for the 413 path."""
+
+    def __init__(self, genai_clients: list[str]):
+        super().__init__(f"{len(genai_clients)} GenAI spans")
+        self.genai_clients = genai_clients
+
+
+def _service_attrs(resource: Any) -> dict[str, Any]:
+    """``service.name`` of a Resource, as ``safe_attributes`` reads it."""
+    attrs: dict[str, Any] = {}
+    for kv in resource.attributes:
+        if kv.key == "service.name":
+            attrs["service.name"] = (
+                kv.value.string_value
+                if kv.value.WhichOneof("value") == "string_value"
+                else None
+            )
+    return attrs
+
+
+def _genai_clients(message: ExportTraceServiceRequest) -> list[str]:
+    clients: list[str] = []
+    for rs in message.resource_spans:
+        client = None
+        for ss in rs.scope_spans:
+            for span in ss.spans:
+                if any(kv.key in GENAI_MARKER_KEYS for kv in span.attributes):
+                    if client is None:
+                        client = otel_client_id(_service_attrs(rs.resource))
+                    clients.append(client)
+    return clients
+
+
+def decode_traces(raw: bytes, max_spans: int | None = None) -> dict[str, Any]:
     """An ExportTraceServiceRequest as its OTLP/JSON dict. Raises
-    ``BodyTooDeep`` past the JSON depth limit and ``ValueError`` for a body
-    that is not a valid message."""
+    ``BodyTooDeep`` past the JSON depth limit, ``TooManySpans`` past
+    ``max_spans`` and ``ValueError`` for a body that is not a valid
+    message."""
     message = ExportTraceServiceRequest()
     try:
         message.ParseFromString(raw)
@@ -54,6 +95,10 @@ def decode_traces(raw: bytes) -> dict[str, Any]:
         # Includes invalid UTF-8 in a string field and nesting past the
         # parser's recursion limit.
         raise ValueError(str(exc)) from None
+    if max_spans is not None:
+        spans = sum(len(ss.spans) for rs in message.resource_spans for ss in rs.scope_spans)
+        if spans > max_spans:
+            raise TooManySpans(_genai_clients(message))
     try:
         payload = MessageToDict(message)
     except RecursionError:
