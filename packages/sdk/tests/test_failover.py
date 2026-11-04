@@ -387,3 +387,32 @@ def test_async_empty_stream() -> None:
         return [c async for c in stream]
 
     assert asyncio.run(main()) == []
+
+
+def test_cancelled_half_open_probe_frees_the_slot():
+    t = [0.0]
+    reg = BreakerRegistry(
+        BreakerConfig(failure_threshold=1, open_seconds=10), clock=lambda: t[0]
+    )
+    engine = FailoverEngine(breakers=reg)
+    reg.record_failure("p")
+    t[0] = 11
+
+    async def hang(c):
+        await asyncio.sleep(10)
+
+    async def main():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(engine.arun([Candidate("p", "m")], hang), 0.01)
+
+    asyncio.run(main())
+    assert reg.state("p") == "half_open"
+    assert reg.allow("p")  # the cancelled probe gave its slot back
+
+    def interrupted(c):
+        raise KeyboardInterrupt
+
+    reg.release("p")
+    with pytest.raises(KeyboardInterrupt):
+        engine.run([Candidate("p", "m")], interrupted)
+    assert reg.allow("p")

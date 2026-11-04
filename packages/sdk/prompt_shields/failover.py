@@ -591,6 +591,10 @@ class _Run:
             self.min_window = max(self.min_window or 0, window)
         return NEXT, 0.0
 
+    def cancelled(self) -> None:
+        if self.current is not None:
+            self.engine.breakers.release(self.current.provider)
+
     def annotate(self, exc: BaseException) -> None:
         with contextlib.suppress(AttributeError, TypeError):
             exc.ps_attempts = tuple(self.attempts)  # type: ignore[attr-defined]
@@ -709,14 +713,24 @@ class FailoverEngine:
             start = time.monotonic()
             try:
                 response = call(c)
-            except Exception as exc:
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    # Cancelled or interrupted: says nothing about the
+                    # provider, but frees a half-open probe slot so the
+                    # breaker cannot wedge.
+                    run.cancelled()
+                    raise
                 last = exc
                 action, wait = run.failed(exc, start)
                 if action == RAISE:
                     run.annotate(exc)
                     raise
                 if action == "retry":
-                    self._sleep(wait)
+                    try:
+                        self._sleep(wait)
+                    except BaseException:
+                        run.cancelled()
+                        raise
                     continue
                 c = run.next_candidate()
                 continue
@@ -738,14 +752,24 @@ class FailoverEngine:
             start = time.monotonic()
             try:
                 response = await call(c)
-            except Exception as exc:
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    # Cancelled or interrupted: says nothing about the
+                    # provider, but frees a half-open probe slot so the
+                    # breaker cannot wedge.
+                    run.cancelled()
+                    raise
                 last = exc
                 action, wait = run.failed(exc, start)
                 if action == RAISE:
                     run.annotate(exc)
                     raise
                 if action == "retry":
-                    await self._async_sleep(wait)
+                    try:
+                        await self._async_sleep(wait)
+                    except BaseException:
+                        run.cancelled()
+                        raise
                     continue
                 c = run.next_candidate()
                 continue
