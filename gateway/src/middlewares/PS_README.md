@@ -247,3 +247,10 @@ When the router made a decision, the telemetry event carries:
   effective sensitivity level and `declared` / `default` / `pii_escalated`
   (only under a policy with the policy stages; OTel: `ps.route.sensitivity_level`,
   `ps.route.sensitivity_source`)
+- `route_mode` — `gateway` (the PRD 0001 §7.12 value for a gateway decision)
+
+When the gateway recorded upstream attempts (retries, fallback targets), the
+event also carries `fallback_chain`: the error class of each failed attempt,
+in order (`["server_error", "rate_limited"]`), or `[]` when the first attempt
+succeeded. Classes only, never error messages. The collector stores all of
+these on `ai_usage_events` (#25).
