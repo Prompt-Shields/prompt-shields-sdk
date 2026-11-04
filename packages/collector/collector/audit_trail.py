@@ -446,7 +446,7 @@ async def verify_chain(
     """Walk one tenant's chain in seq order and report the first break."""
     result = VerifyResult(tenant_id=str(tenant_id), ok=True)
     # seq counts from 1 and the walk starts there, so a row below 1 would
-    # never be looked at. The CHECK constraint (migration 023) refuses new
+    # never be looked at. The CHECK constraint (migration 024) refuses new
     # ones; a row from before it, or with the constraint dropped, is a break.
     below = (
         await db.execute(

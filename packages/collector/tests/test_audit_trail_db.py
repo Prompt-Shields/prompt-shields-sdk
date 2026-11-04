@@ -252,7 +252,7 @@ async def test_row_below_seq_1_is_refused_and_reported(env):
         async with env["engine"].begin() as conn:
             await _insert_raw(conn, t, 0)
     # ...and verify reports one that got in anyway (constraint dropped, or
-    # a row from before migration 023), though the walk starts at seq 1.
+    # a row from before migration 024), though the walk starts at seq 1.
     async with env["engine"].begin() as conn:
         await conn.execute(
             text("ALTER TABLE audit_events DROP CONSTRAINT ck_audit_events_seq_positive")

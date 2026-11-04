@@ -11,8 +11,8 @@ The collector never writes seq < 1. If a database already holds such rows
 ``python -m collector.audit_trail verify`` to report (rows are append-only,
 so the migration does not delete them).
 
-Revision ID: 023
-Revises: 022
+Revision ID: 024
+Revises: 023
 Create Date: 2026-10-23
 """
 
@@ -21,8 +21,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "023"
-down_revision: str | None = "022"
+revision: str = "024"
+down_revision: str | None = "023"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -33,7 +33,7 @@ CONSTRAINT = "ck_audit_events_seq_positive"
 def upgrade() -> None:
     conn = op.get_bind()
     # audit_events may be under FORCE ROW LEVEL SECURITY (transaction-local).
-    conn.execute(sa.text("SELECT set_config('app.rls_bypass', 'migration-023', true)"))
+    conn.execute(sa.text("SELECT set_config('app.rls_bypass', 'migration-024', true)"))
     bad = conn.execute(sa.text(f"SELECT count(*) FROM {TABLE} WHERE seq < 1")).scalar()
     not_valid = " NOT VALID" if bad else ""
     op.execute(
