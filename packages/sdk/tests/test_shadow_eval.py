@@ -362,6 +362,38 @@ def test_offer_routed_without_text_is_skipped():
     assert sampler.stats()["skipped_no_answer"] == 1
 
 
+def test_offer_routed_with_real_router_types():
+    from prompt_shields.router import (
+        ChatMessage,
+        Choice,
+        CostInfo,
+        PSResult,
+        RoutedChatCompletion,
+        RouteInfo,
+    )
+
+    completion = RoutedChatCompletion(
+        id="x", model="gpt-4o", created=0,
+        choices=[Choice(0, ChatMessage("assistant", SECRET_ANSWER), "stop")],
+        usage=None,
+        ps=PSResult(
+            route=RouteInfo(mode="local", requested_model="auto", model="gpt-4o",
+                            provider="openai", sensitivity_level="internal"),
+            cost=CostInfo(usd=20.0, source="provider"),
+            attempts=(),
+        ),
+    )
+    results = []
+    sampler = ShadowSampler(FakeExecutor(_responder), _config(), start=False,
+                            on_result=results.append, sleep=lambda s: None)
+    assert sampler.offer_routed([{"role": "user", "content": "hi"}], completion) is True
+    sampler.drain()
+    assert results[0].primary == "openai:gpt-4o"
+    assert results[0].sensitivity == "internal"
+    assert results[0].status == "judged"
+    assert sampler.stats()["primary_spend_usd"] == 20.0
+
+
 # --- route-policy.v1 allowlist ----------------------------------------------
 
 
