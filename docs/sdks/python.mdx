@@ -268,6 +268,87 @@ Precedence: `model_group` > `quality`/`max_cost` > gateway default. An empty
 records `requested_model` (e.g. `"auto"`) vs `served_model` (what actually
 ran) so savings are provable. Works on the async clients too.
 
+## Local Routing: `ShieldsRouter`
+
+The clients above never pick a model. `ShieldsRouter` (and `AsyncShieldsRouter`)
+is the opt-in exception, for teams that do not run the gateway: it picks the
+model for each call in your process, under a
+[`route-policy.v1`](https://github.com/Prompt-Shields/prompt-shields-sdk/tree/main/schemas/route-policy)
+policy, and sends the call with your own provider keys.
+
+```python
+from prompt_shields import PolicyViolation, RouteHint, ShieldsRouter
+
+client = ShieldsRouter(
+    providers={                       # BYOK: keys never leave the process
+        "openai":     {"api_key": "sk-..."},
+        "anthropic":  {"api_key": "sk-ant-..."},
+        "berget":     {"api_key": "...", "base_url": "https://api.berget.ai/v1"},
+        "mistral-eu": {"api_key": "...", "base_url": "https://..."},
+    },
+    policy="ps-route.json",           # or .yaml (needs PyYAML), or a dict
+    ps_api_key="ps-...",
+    business_unit="Claims", use_case="claim-summary",
+    data_classification="confidential",
+)
+
+resp = client.chat.completions.create(
+    model="auto", messages=[...], route=RouteHint(quality="balanced"),
+)
+resp.choices[0].message.content   # OpenAI shape, whichever provider served it
+resp.raw                          # the provider's own response object
+resp.ps.route    # model, provider, group, reason, jurisdiction, policy_version,
+                 # sensitivity_level, sensitivity_source, est_cost
+resp.ps.cost     # usd, source, estimated_usd
+resp.ps.attempts # one Attempt per upstream call
+```
+
+How a call is routed (`resolve_policy_route`, the same router policy replay uses):
+
+1. **Sensitivity**: the call's `data_classification` (per call, else the
+   client's), or the policy's `unclassified_default` when there is none. PII
+   found in the prompt can raise it, never lower it (`pii_escalation`). The
+   prompt is always scanned for this, also with `scan_pii=False`; nothing
+   leaves the process.
+2. **Constraint**: only models the level's `data_policy` rule allows
+   (jurisdiction, providers, ZDR, US CLOUD Act exposure), and only models whose
+   `provider` is configured in `providers`.
+3. **Route**: `RouteHint.model_group` > `quality` > the policy's strategy, then
+   the use case's quality bar and the `max_cost` clamp, all within the allowed
+   models.
+
+If no allowed model is left, `create` raises `PolicyViolation` and nothing is
+sent. A call is never served by a model the policy does not allow.
+
+- `model="auto"`, or any hint, routes. A concrete model with no hint is
+  *pinned*: it is used as is, but it must be in the policy and allowed at the
+  call's sensitivity (`PolicyViolation` otherwise; `RouterError` when it is not
+  in the policy).
+- Provider entries take `api_key`, an optional `vendor` (`"anthropic"` for
+  the `anthropic` provider, `"openai"` for every other one: an
+  OpenAI-compatible API reached at its `base_url`) and any other option of
+  that SDK's client. Policy tiers without a `provider` go to
+  `default_provider` (the only provider, when there is one).
+- Requests are written in the OpenAI shape. For Anthropic, `system`
+  messages, `stop` and `max_completion_tokens` are translated; tool messages
+  and OpenAI-only parameters (`tools`, `response_format`, `n`, ...) raise
+  `RouterError` instead of being dropped.
+- `stream=True` is not supported in local mode yet. There is no failover
+  yet: each call makes one attempt.
+- `client.route(messages, ...)` returns the decision without sending the call.
+
+Each call emits the usual telemetry event through the chosen provider's
+instrumented client, plus the route: `requested_model` (`auto`) and
+`served_model`, `route_mode`, `route_group`, `route_reason`, `route_est_cost`,
+`served_provider`, `served_jurisdiction`, `policy_version`,
+`sensitivity_level` and `sensitivity_source`. A model the pricing table does
+not know is priced at the policy tier's rates (`cost_source: "route_policy"`).
+
+`ShieldsRouter(mode="gateway", gateway_url=..., gateway_api_key=...)` leaves the
+decision to the gateway instead: calls go to the gateway with the hints and the
+business context as `X-PS-*` headers, and responses come back in the same
+`RoutedChatCompletion` shape with `resp.ps.route.mode == "gateway"`.
+
 ## Configuration Reference
 
 | Argument | Type | Default | Notes |
@@ -285,6 +366,7 @@ ran) so savings are provable. Works on the async clients too.
 | `scan_pii` | bool | `True` | Disable to skip local PII detection. |
 | `send_prompt_text` | bool | `False` | Opt-in to log full prompt content. |
 | `pricing_table` | dict | built-in | Override token-to-USD pricing. |
+| `on_prompt_features` | callable | — | Called per call with local `PromptFeatures` (see below). Nothing is sent. |
 
 ## Privacy Model
 
@@ -300,6 +382,28 @@ ran) so savings are provable. Works on the async clients too.
 | **Response content** | **Never** |
 | **Raw API key** | **Never** |
 | **Tool call arguments** | **Never** |
+| **Prompt features / embedding** | **Never** (local only) |
+
+## Local Prompt Features
+
+`prompt_shields.prompt_features` turns a `messages` list into routing context in your process:
+approximate input tokens, message count, code fences, JSON-schema wording, a coarse language
+label, your `use_case`, the router's `simple`/`complex` label and, with `embed=True`, a
+64-dimension hashed-word embedding. `to_dict()` holds no prompt text and no hash of it; the
+embedding is left out of `to_dict()` and is never sent anywhere. Output is deterministic and
+carries `feature_schema` (`ps-prompt-features.v1`), which is bumped whenever a field's meaning
+changes. Extraction takes about 2 ms on a 4k-token prompt with the embedding (the PRD target is under 10 ms p50).
+
+```python
+from prompt_shields.prompt_features import extract_prompt_features
+
+features = extract_prompt_features(messages, use_case="contract-review", embed=True)
+features.to_dict()   # {"feature_schema": ..., "approx_input_tokens": 812, "language": "en", ...}
+features.embedding   # tuple of 64 floats, local only
+
+# Or per call, from the client (e.g. to feed a local learner). The telemetry event is unchanged.
+client = ShieldsOpenAI(api_key=..., ps_api_key=..., on_prompt_features=my_learner.observe)
+```
 
 ## PII Detection
 
