@@ -75,12 +75,42 @@ async def test_ingest_aggregates_names_only(client, seeded_db):
     assert by_tool["search_issues"]["avg_latency_ms"] is None
     assert set(by_tool["create_issue"]) == {
         "server_name", "tool_name", "source", "calling_service", "environment",
-        "transport", "call_count", "error_count", "avg_latency_ms", "first_seen",
-        "last_seen",
+        "transport", "call_count", "error_count", "blocked_count", "user_hash",
+        "user_group", "avg_latency_ms", "first_seen", "last_seen",
     }
     resp = await client.get("/api/v1/registry/mcp-tools", headers=HEADERS,
                             params={"server_name": "nope"})
     assert resp.json()["data"] == []
+
+
+async def test_gateway_blocked_calls_and_user_attribution(client, seeded_db):
+    """The gateway's MCP proxy reports blocked calls apart from errors, and
+    the caller as a subject hash and policy group; anything but a hex hash
+    in user_id is dropped, so a raw subject or email is never stored."""
+    user = "0123456789abcdef0123456789abcdef"
+    gw = {"source": "gateway", "tool_name": "search", "server_name": "docs"}
+    resp = await client.post("/ingest/mcp", headers=HEADERS, json={"events": [
+        {**gw, "outcome": "blocked", "user_id": user, "user_group": "analysts"},
+        {**gw, "outcome": "ok", "user_id": user, "user_group": "analysts"},
+        {**gw, "outcome": "error", "user_id": user, "user_group": "analysts"},
+        {**gw, "outcome": "ok", "user_id": "jane.doe@bank.example",
+         "user_group": "bad group!"},
+    ]})
+    assert resp.json() == {"ingested": 4, "skipped": 0}
+    rows = await _rows(seeded_db)
+    assert sorted(
+        (r["user_hash"], r["user_group"], r["call_count"], r["error_count"],
+         r["blocked_count"])
+        for r in rows
+    ) == [("", "", 1, 0, 0), (user, "analysts", 3, 1, 1)]
+    assert "jane.doe" not in json.dumps(rows, default=str)
+
+    data = (await client.get("/api/v1/registry/mcp-tools", headers=HEADERS)).json()["data"]
+    attributed = next(d for d in data if d["user_hash"])
+    assert attributed["user_group"] == "analysts"
+    assert attributed["blocked_count"] == 1
+    anonymous = next(d for d in data if not d["user_hash"])
+    assert (anonymous["user_hash"], anonymous["user_group"]) == (None, None)
 
 
 async def test_ingest_requires_an_ingest_key(client):
