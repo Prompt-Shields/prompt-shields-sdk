@@ -2,18 +2,22 @@
 """Build the model catalog and the gateway's default route policy.
 
 Reads the hand-maintained source, ``schemas/catalog/source.v1.json``, and
-writes two generated files:
+writes three generated files:
 
 - ``packages/sdk/prompt_shields/catalog.json``: the SDK catalog (catalog v1).
   Model entries use LiteLLM ``model_prices_and_context_window.json`` field
   names, plus the provider's sovereignty fields copied onto every model.
 - ``gateway/src/middlewares/router/defaultPolicy.json``: the gateway router's
   default ``RoutePolicy``, with per-1k prices taken from the catalog.
+- ``gateway/src/middlewares/psPricingTables.json``: the token rate tables
+  the gateway prices telemetry events with (psPricing.ts), built exactly as
+  the SDK's ``catalog.py`` builds ``pricing.DEFAULT_PRICING``,
+  ``LONG_CONTEXT_PRICING`` and ``AUDIO_PRICING``.
 
 Usage::
 
-    python scripts/build_catalog.py            # regenerate both files
-    python scripts/build_catalog.py --check    # exit 1 if either file drifted
+    python scripts/build_catalog.py            # regenerate the files
+    python scripts/build_catalog.py --check    # exit 1 if any file drifted
     python scripts/build_catalog.py --litellm PATH/model_prices_and_context_window.json
         # also report entries whose prices differ from LiteLLM (informational)
 
@@ -33,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "schemas" / "catalog" / "source.v1.json"
 SDK_CATALOG = ROOT / "packages" / "sdk" / "prompt_shields" / "catalog.json"
 GATEWAY_POLICY = ROOT / "gateway" / "src" / "middlewares" / "router" / "defaultPolicy.json"
+GATEWAY_PRICING = ROOT / "gateway" / "src" / "middlewares" / "psPricingTables.json"
 
 SCHEMA_VERSION = 1
 CURRENCIES = ("USD", "EUR")
@@ -292,6 +297,47 @@ def build_gateway_policy(source: dict) -> dict:
     }
 
 
+LONG_CONTEXT_THRESHOLD = 200_000
+
+
+def _rate_list(entry: dict, fields: tuple[str, ...]) -> list[float] | None:
+    # As catalog._rate_tuple: the leading run of present fields, at least 2.
+    rates = []
+    for field in fields:
+        if field not in entry:
+            break
+        rates.append(per_1k(entry[field]))
+    return rates if len(rates) >= 2 else None
+
+
+def build_gateway_pricing(source: dict) -> dict:
+    """USD token rates per 1k tokens, keyed "<provider>/<model id>", as the
+    SDK's catalog.py builds them (pricing_table, long_context_pricing,
+    audio_pricing). Non-USD and unpriced entries are left out."""
+    tokens, long_context, audio = {}, {}, {}
+    for key, entry in source["models"].items():
+        if entry.get("currency", "USD") != "USD" or "input_cost_per_token" not in entry:
+            continue
+        rates = _rate_list(entry, PRICE_CHAINS[0])
+        if rates is not None:
+            tokens[key] = rates
+        band = _rate_list(entry, PRICE_CHAINS[1])
+        if band is not None:
+            long_context[key] = {"threshold": LONG_CONTEXT_THRESHOLD, "rates": band}
+        if "input_cost_per_audio_token" in entry and "output_cost_per_audio_token" in entry:
+            audio[key] = [
+                per_1k(entry["input_cost_per_audio_token"]),
+                per_1k(entry["output_cost_per_audio_token"]),
+            ]
+    return {
+        "_generated": SDK_HEADER,
+        "catalogVersion": source["catalog_version"],
+        "tokenPricing": tokens,
+        "longContextPricing": long_context,
+        "audioPricing": audio,
+    }
+
+
 def render(data: dict) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
@@ -301,6 +347,7 @@ def outputs(source: dict) -> dict[Path, str]:
     return {
         SDK_CATALOG: render(build_sdk_catalog(source)),
         GATEWAY_POLICY: render(build_gateway_policy(source)),
+        GATEWAY_PRICING: render(build_gateway_pricing(source)),
     }
 
 

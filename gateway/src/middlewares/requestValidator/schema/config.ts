@@ -126,6 +126,11 @@ export const configSchema: any = z
     strict_open_ai_compliance: z.boolean().optional(),
     // PS fork (#73): force or disable Messages → Responses routing
     messages_via_responses: z.boolean().optional(),
+    // PS fork (#76): OAuth client credentials instead of a static key
+    // (`openai`, and AWS providers with aws_auth_type oauth)
+    oauth_token_url: z.string().optional(),
+    oauth_client_id: z.string().optional(),
+    oauth_client_secret: z.string().optional(),
   })
   .refine(
     (value) => {
@@ -143,6 +148,11 @@ export const configSchema: any = z
         value.aws_access_key_id && value.aws_secret_access_key;
       const hasAzureAuth =
         value.provider == AZURE_OPEN_AI && value.azure_auth_mode;
+      const hasOAuthClientCredentials =
+        value.provider !== undefined &&
+        value.oauth_token_url &&
+        value.oauth_client_id &&
+        value.oauth_client_secret;
 
       return (
         hasProviderApiKey ||
@@ -158,7 +168,8 @@ export const configSchema: any = z
         value.before_request_hooks ||
         value.input_guardrails ||
         value.output_guardrails ||
-        hasAzureAuth
+        hasAzureAuth ||
+        hasOAuthClientCredentials
       );
     },
     {
