@@ -10,8 +10,9 @@ Quality = Literal["draft", "balanced", "critical"]
 class RouteHint:
     """Explicit cost/quality hints for a single LLM call.
 
-    The SDK never routes — it only emits these as ``X-PS-*`` headers that the
-    gateway acts on. All fields are optional; an empty hint yields no headers
+    The SDK clients never route — they only emit these as ``X-PS-*`` headers
+    that the gateway acts on. ``ShieldsRouter`` (opt-in) applies the same
+    hints locally instead. All fields are optional; an empty hint yields no headers
     and preserves today's transparent, gateway-default behavior.
 
     Precedence at the gateway:

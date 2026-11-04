@@ -5,7 +5,8 @@
  * the request's HooksManager, so every installed check runs on them and the
  * security events and metrics of #211 are recorded as for model calls. The
  * content is shown to the checks in the Completions shape every text check
- * supports: arguments as `request.json.prompt`, the result as
+ * supports: arguments (and MRTR `inputResponses`) as `request.json.prompt`,
+ * the result as
  * `response.json.choices[0].text`. Checks only read it; transformations
  * (mutators, regexReplace) are not applied to MCP traffic.
  *
@@ -38,6 +39,20 @@ function decodeBase64Text(blob: string): string {
     // Not base64: checked as it is.
     return blob;
   }
+}
+
+/**
+ * Text of a tools/call request for the input checks: the arguments and, on
+ * a 2026-07-28 multi round-trip retry, the client's `inputResponses`
+ * (elicited user input, sampled model output, roots), which the server
+ * reads like arguments.
+ */
+export function toolCallInputText(params: any): string {
+  const args = params?.arguments;
+  const parts = [JSON.stringify(args === undefined ? {} : args)];
+  if (params?.inputResponses !== undefined)
+    parts.push(JSON.stringify(params.inputResponses));
+  return parts.join('\n');
 }
 
 /** Text of a tools/call response for the output checks. */

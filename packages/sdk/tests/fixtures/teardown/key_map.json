@@ -1,0 +1,6 @@
+{
+  "proj_support": {"business_unit": "Customer Care", "use_case": "support-bot", "data_classification": "internal"},
+  "proj_search": {"business_unit": "Product", "use_case": "search-rerank"},
+  "wrkspc_legal": {"business_unit": "Legal", "use_case": "contract-review", "data_classification": "confidential"},
+  "apikey_ops": {"business_unit": "Operations", "use_case": "ticket-triage"}
+}
