@@ -131,6 +131,12 @@ class StreamAccumulator:
         self.output_chars = 0
         self._tool_calls: dict[Any, str | None] = {}
         self._mcp_calls: list[dict] = []
+        # Raw stop/finish reasons seen, for the outcome signals (#44).
+        self.finish_reasons: list[Any] = []
+
+    def _finish_reason(self, value: Any) -> None:
+        if value is not None and len(self.finish_reasons) < 16:
+            self.finish_reasons.append(value)
 
     def observe(self, chunk: Any) -> None:
         if self._vendor in ("openai", "azure_openai"):
@@ -165,6 +171,7 @@ class StreamAccumulator:
         for call in fields["tool_calls_used"] or ():
             self._tool_calls[len(self._tool_calls)] = call["name"]
         for candidate in _items(_field(chunk, "candidates")):
+            self._finish_reason(_field(candidate, "finish_reason"))
             for part in _items(_field(_field(candidate, "content"), "parts")):
                 text = _field(part, "text")
                 if isinstance(text, str):
@@ -183,6 +190,7 @@ class StreamAccumulator:
             self._tool_calls[len(self._tool_calls)] = _field(
                 _field(call, "function"), "name")
         elif etype == "message-end":
+            self._finish_reason(_field(delta, "finish_reason"))
             self._set_counts(CohereAdapter().extract({"usage": _field(delta, "usage")}))
             return
         etype = _field(event, "event_type")  # v1
@@ -192,6 +200,7 @@ class StreamAccumulator:
                 self.output_chars += len(text)
         elif etype == "stream-end":
             # The final event carries the whole response, tool calls included.
+            self._finish_reason(_field(event, "finish_reason"))
             fields = CohereAdapter().extract(_field(event, "response"))
             self._set_counts(fields)
             if fields["tool_calls_used"]:
@@ -213,6 +222,7 @@ class StreamAccumulator:
         tool_use = _field(_field(event.get("contentBlockStart"), "start"), "toolUse")
         if tool_use is not None:
             self._tool_calls[len(self._tool_calls)] = _field(tool_use, "name")
+        self._finish_reason(_field(event.get("messageStop"), "stopReason"))
         usage = _field(event.get("metadata"), "usage")
         if usage is not None:
             self._set_counts(BedrockAdapter().extract({"usage": usage}))
@@ -245,6 +255,8 @@ class StreamAccumulator:
                 block = body.get("content_block")
                 if _field(block, "type") == "tool_use":
                     self._tool_calls[len(self._tool_calls)] = _field(block, "name")
+            elif etype == "message_delta":
+                self._finish_reason(_field(body.get("delta"), "stop_reason"))
             elif etype == "content_block_delta":
                 text = _field(body.get("delta"), "text")
                 if isinstance(text, str):
@@ -273,6 +285,7 @@ class StreamAccumulator:
             self.tokens_reasoning = fields["tokens_reasoning"]
             self._update_pricing(fields)
         for choice in getattr(chunk, "choices", None) or []:
+            self._finish_reason(getattr(choice, "finish_reason", None))
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
@@ -297,6 +310,8 @@ class StreamAccumulator:
                 self.served_model = model
             self._observe_anthropic_usage(getattr(message, "usage", None))
         elif etype == "message_delta":
+            self._finish_reason(
+                getattr(getattr(event, "delta", None), "stop_reason", None))
             # Counts on message_delta are cumulative, not deltas.
             self._observe_anthropic_usage(getattr(event, "usage", None))
         elif etype == "content_block_start":
@@ -360,6 +375,8 @@ class StreamAccumulator:
             "tool_calls_used": tool_calls or None,
             "served_model": self.served_model,
         }
+        if self.finish_reasons:
+            fields["finish_reasons"] = list(self.finish_reasons)
         if fields["tokens_in"] is None:
             fields["tokens_in"] = _estimate_tokens(_message_chars(self._messages))
             fields["tokens_estimated"] = True
