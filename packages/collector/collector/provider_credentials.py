@@ -29,8 +29,11 @@ platform_signal asset for key K and model M, and SDK usage events carrying
 K's fingerprint for vendor = provider and model M (asset model, requested
 or served model). Each asset gets the other's source, so both become
 ``verified`` (two independent sources). It runs after every usage pull and
-after a link is registered. Gateway events carry no fingerprint, so
-gateway sightings are not matched by key.
+after a link is registered. Gateway events carry a fingerprint only when
+the operator sets PS_TELEMETRY_CREDENTIAL_FINGERPRINT=true (#76); for a
+static key it is the same sha256(api_key)[:16], so those sightings match
+too. Keyless (OAuth / workload identity) gateway traffic carries a hash of
+the client identity instead, which never matches a key link.
 """
 
 from __future__ import annotations

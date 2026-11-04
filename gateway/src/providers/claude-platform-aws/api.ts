@@ -31,7 +31,11 @@ export const claudePlatformAwsHost = (region: string) =>
 export function usesSigV4(providerOptions: Options): boolean {
   const { awsAuthType } = providerOptions;
   if (awsAuthType === 'apiKey') return false;
-  if (awsAuthType === 'assumedRole' || awsAuthType === 'serviceRole')
+  if (
+    awsAuthType === 'assumedRole' ||
+    awsAuthType === 'serviceRole' ||
+    awsAuthType === 'oauth'
+  )
     return true;
   return !!providerOptions.awsAccessKeyId || !providerOptions.apiKey;
 }
