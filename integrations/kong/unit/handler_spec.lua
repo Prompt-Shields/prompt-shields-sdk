@@ -20,6 +20,22 @@ local function conf(overrides)
 end
 
 
+-- Sorted, de-duplicated copy of a list of names.
+local function set_of(list)
+  local seen, out = {}, {}
+  for _, v in ipairs(list) do
+    if not seen[v] then seen[v] = true; out[#out + 1] = v end
+  end
+  table.sort(out)
+  return out
+end
+
+local PS_FIVE = {
+  "x-ps-business-unit", "x-ps-data-classification", "x-ps-environment",
+  "x-ps-owner", "x-ps-use-case",
+}
+
+
 describe("prompt-shields handler", function()
   local state, handler, kong_state, req
 
@@ -27,14 +43,16 @@ describe("prompt-shields handler", function()
   local function load(request)
     req = request
     state = mock.install()
-    local k
-    k, kong_state = mock.new_kong(req)
+    local k, n
+    k, kong_state, n = mock.new_kong(req)
     _G.kong = k
+    _G.ngx = n
     handler = require "kong.plugins.prompt-shields.handler"
   end
 
   after_each(function()
     _G.kong = nil
+    _G.ngx = nil
   end)
 
   describe("access phase", function()
@@ -50,8 +68,9 @@ describe("prompt-shields handler", function()
 
       assert.same({ ["x-ps-business-unit"] = "Payments", ["x-ps-use-case"] = "fraud-explainer" },
                   kong.ctx.plugin.ps_headers)
-      table.sort(kong_state.cleared)
-      assert.same({ "x-ps-business-unit", "x-ps-max-cost", "x-ps-use-case" }, kong_state.cleared)
+      -- The five mapped names are cleared by name, then every other X-PS-*.
+      local expected = set_of({ "x-ps-max-cost", unpack(PS_FIVE) })
+      assert.same(expected, set_of(kong_state.cleared))
       assert.same({ authorization = "Bearer sk-provider", ["content-type"] = "application/json" },
                   req.headers)
     end)
@@ -66,7 +85,62 @@ describe("prompt-shields handler", function()
     it("fails open: an error is logged and the request continues", function()
       load({ get_headers_error = "boom" })
       assert.has_no.errors(function() handler:access(conf()) end)
-      assert.matches("access phase failed", kong_state.logs.err[1])
+      assert.matches("could not read the request headers: .*boom", kong_state.logs.err[1])
+    end)
+
+    it("still strips every X-PS-* header when reading the headers fails", function()
+      load({ get_headers_error = "boom", headers = {
+        ["x-ps-owner"] = "a@example.com",
+        ["x-ps-max-cost"] = "5",
+        accept = "*/*",
+      } })
+      handler:access(conf())
+      assert.is_nil(kong.ctx.plugin.ps_headers)
+      assert.same({ accept = "*/*" }, req.headers)
+      assert.same(set_of({ "x-ps-max-cost", unpack(PS_FIVE) }), set_of(kong_state.cleared))
+    end)
+
+    it("still strips when stashing the values fails", function()
+      load({ headers = { ["x-ps-owner"] = "a@example.com", ["x-ps-extra"] = "1" } })
+      kong.ctx = nil -- makes the stash throw
+      assert.has_no.errors(function() handler:access(conf()) end)
+      assert.matches("could not stash", kong_state.logs.err[1])
+      assert.same({}, req.headers)
+    end)
+
+    it("falls back to clearing the five mapped names when the strip fails", function()
+      load({ clear_header_error = "nope", headers = {
+        ["x-ps-owner"] = "a@example.com",
+        ["x-ps-use-case"] = "chat",
+        accept = "*/*",
+      } })
+      assert.has_no.errors(function() handler:access(conf()) end)
+      assert.matches("could not strip every X%-PS%-%* header", kong_state.logs.err[1])
+      assert.same(PS_FIVE, set_of(kong_state.ngx_cleared))
+      assert.same({ accept = "*/*" }, req.headers)
+      -- The values were stashed before the strip.
+      assert.same({ ["x-ps-owner"] = "a@example.com", ["x-ps-use-case"] = "chat" },
+                  kong.ctx.plugin.ps_headers)
+    end)
+
+    it("finds X-PS-* headers past Kong's 1,000-header cap", function()
+      local headers, order = {}, {}
+      for i = 1, 1000 do
+        local name = string.format("x-filler-%04d", i)
+        headers[name] = "x"
+        order[#order + 1] = name
+      end
+      headers["x-ps-owner"] = "a@example.com"
+      headers["x-ps-hidden"] = "1"
+      order[#order + 1] = "x-ps-owner"
+      order[#order + 1] = "x-ps-hidden"
+      load({ headers = headers, order = order, truncated = 1000 })
+      handler:access(conf())
+
+      assert.same({ ["x-ps-owner"] = "a@example.com" }, kong.ctx.plugin.ps_headers)
+      assert.is_nil(req.headers["x-ps-hidden"])
+      assert.is_nil(req.headers["x-ps-owner"])
+      assert.equal("x", req.headers["x-filler-0001"])
     end)
   end)
 
@@ -151,6 +225,62 @@ describe("prompt-shields handler", function()
       load({})
       handler._send_batch(conf({ ssl_verify = false }), entries)
       assert.is_false(state.http_calls[1].params.ssl_verify)
+    end)
+
+    it("splits a batch into POSTs under the collector's body limit", function()
+      load({})
+      local max = handler._MAX_BATCH_BYTES
+      assert.is_true(max <= 4 * 1024 * 1024)
+      -- 1,000 events of ~10 KB: one POST would be ~10 MB.
+      local big = {}
+      for i = 1, 1000 do
+        big[i] = cjson.encode({ i = i, pad = string.rep("x", 10000) })
+      end
+      assert.is_true(handler._send_batch(conf(), big))
+
+      assert.is_true(#state.http_calls > 1)
+      local seen = 0
+      for _, call in ipairs(state.http_calls) do
+        assert.is_true(#call.params.body <= max, tostring(#call.params.body))
+        for _, e in ipairs(cjson.decode(call.params.body)) do
+          seen = seen + 1
+          assert.equal(seen, e.i)
+        end
+      end
+      assert.equal(1000, seen)
+    end)
+
+    it("does not post the delivered part of a split batch again on retry", function()
+      load({})
+      local big = {}
+      for i = 1, 3 do
+        big[i] = cjson.encode({ i = i, pad = string.rep("x", 1500000) })
+      end
+      -- The first POST (events 1 and 2) succeeds, the second fails.
+      local calls = 0
+      package.loaded["resty.http"].new = function()
+        return {
+          set_timeout = function() end,
+          request_uri = function(_, _, params)
+            calls = calls + 1
+            state.http_calls[#state.http_calls + 1] = { params = params }
+            if calls == 2 then return { status = 503 } end
+            return { status = 200 }
+          end,
+        }
+      end
+      local ok, err = handler._send_batch(conf(), big)
+      assert.is_nil(ok)
+      assert.equal("collector returned 503", err)
+      assert.is_true(handler._send_batch(conf(), big))
+
+      local posted = {}
+      for _, call in ipairs(state.http_calls) do
+        local ids = {}
+        for _, e in ipairs(cjson.decode(call.params.body)) do ids[#ids + 1] = e.i end
+        posted[#posted + 1] = ids
+      end
+      assert.same({ { 1, 2 }, { 3 }, { 3 } }, posted)
     end)
 
     for _, status in ipairs({ 408, 429, 500, 502, 503 }) do
