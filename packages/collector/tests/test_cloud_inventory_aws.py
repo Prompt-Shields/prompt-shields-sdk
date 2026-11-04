@@ -94,7 +94,8 @@ def _check_signature(request: httpx.Request, keys: ci.AwsKeys) -> None:
     expected = ci.sigv4_headers(
         request.method,
         host,
-        request.url.path,
+        # As sent (still percent-encoded), not url.path, which is decoded.
+        request.url.raw_path.decode().split("?", 1)[0],
         query,
         request.content,
         region=region,
@@ -719,3 +720,214 @@ def test_request_body_cannot_carry_aws_credentials():
         {"tenant_id": str(TENANT), "aws": {"secret_access_key": "x"}}
     )
     assert not hasattr(body, "aws")
+
+
+# --- Bedrock model access (check_model_access) ------------------------------
+
+HAIKU = "anthropic.claude-3-haiku-20240307-v1:0"
+SONNET = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+TITAN = "amazon.titan-text-express-v1"
+LLAMA = "meta.llama3-8b-instruct-v1:0"
+OLD = "anthropic.claude-v2:1"
+
+
+def _fm(model_id: str, types=("ON_DEMAND",), status="ACTIVE"):
+    return {
+        "modelArn": f"arn:aws:bedrock:eu-central-1::foundation-model/{model_id}",
+        "modelId": model_id,
+        "inferenceTypesSupported": list(types),
+        "modelLifecycle": {"status": status},
+    }
+
+
+def _availability(authorized=True, agreement="AVAILABLE"):
+    return {
+        "agreementAvailability": {"status": agreement},
+        "authorizationStatus": "AUTHORIZED" if authorized else "NOT_AUTHORIZED",
+        "entitlementAvailability": "AVAILABLE",
+        "regionAvailability": "AVAILABLE",
+    }
+
+
+def _system_profile(profile_id: str, model_id: str, regions, status="ACTIVE"):
+    return {
+        "inferenceProfileArn": (
+            f"arn:aws:bedrock:eu-central-1:{ACCT}:inference-profile/{profile_id}"
+        ),
+        "inferenceProfileId": profile_id,
+        "type": "SYSTEM_DEFINED",
+        "status": status,
+        "models": [
+            {"modelArn": f"arn:aws:bedrock:{r}::foundation-model/{model_id}"}
+            for r in regions
+        ],
+    }
+
+
+def _model_access_handler(calls: list[httpx.Request], *, availability_status=200):
+    resources = _aws_handler(calls)
+    availability = {
+        HAIKU: _availability(),
+        SONNET: _availability(agreement="PENDING"),
+        TITAN: _availability(authorized=False),
+        OLD: _availability(),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/foundation-models":
+            calls.append(request)
+            _check_signature(request, ci.AwsKeys(KEY_ID, SECRET))
+            return httpx.Response(
+                200,
+                json={
+                    "modelSummaries": [
+                        _fm(HAIKU, ("ON_DEMAND", "PROVISIONED")),
+                        _fm(SONNET, ("INFERENCE_PROFILE",)),
+                        _fm(TITAN),
+                        _fm(OLD, status="LEGACY"),
+                        # Unknown to the availability API: skipped.
+                        _fm(LLAMA),
+                        # Provisioned-only: inventoried as throughput instead.
+                        _fm("amazon.titan-text-express-v1:0:8k", ("PROVISIONED",)),
+                        # Malformed ids are never put in a URL.
+                        _fm("../../evil"),
+                        {"modelId": 7},
+                        "junk",
+                    ]
+                },
+            )
+        if path.startswith("/foundation-model-availability/"):
+            calls.append(request)
+            _check_signature(request, ci.AwsKeys(KEY_ID, SECRET))
+            # The id's ":" is sent percent-encoded, as the AWS SDKs do.
+            assert ":" not in request.url.raw_path.decode()
+            model_id = path.rsplit("/", 1)[1]
+            if availability_status != 200:
+                return httpx.Response(availability_status)
+            if model_id not in availability:
+                return httpx.Response(404)
+            return httpx.Response(200, json=availability[model_id])
+        if (
+            path == "/inference-profiles"
+            and request.url.params.get("type") == "SYSTEM_DEFINED"
+        ):
+            calls.append(request)
+            _check_signature(request, ci.AwsKeys(KEY_ID, SECRET))
+            return httpx.Response(
+                200,
+                json={
+                    "inferenceProfileSummaries": [
+                        _system_profile(
+                            f"eu.{HAIKU}",
+                            HAIKU,
+                            ["eu-central-1", "eu-west-1", "eu-west-3"],
+                        ),
+                        # Routes to a model the account cannot use.
+                        _system_profile(f"eu.{TITAN}", TITAN, ["eu-central-1"]),
+                        _system_profile(
+                            f"global.{OLD}", OLD, ["eu-central-1"], status="DISABLED"
+                        ),
+                        {"inferenceProfileArn": "not-an-arn", "status": "ACTIVE"},
+                    ]
+                },
+            )
+        return resources(request)
+
+    return handler
+
+
+async def test_model_access_is_reported_per_region():
+    calls: list[httpx.Request] = []
+    summary, deps = await _fetch(
+        _creds(check_model_access=True), _model_access_handler(calls)
+    )
+    assert summary == {
+        "regions": 1,
+        "model_access": {
+            "eu-central-1": {
+                "foundation_models": [SONNET, HAIKU, OLD],
+                "inference_profiles": {
+                    f"eu.{HAIKU}": ["eu-central-1", "eu-west-1", "eu-west-3"]
+                },
+                "agreement_not_accepted": [SONNET],
+            }
+        },
+    }
+    # Model access is reported, not stored: the assets are unchanged.
+    assert len(deps) == 5
+    checked = sorted(
+        c.url.path.rsplit("/", 1)[1]
+        for c in calls
+        if c.url.path.startswith("/foundation-model-availability/")
+    )
+    assert checked == sorted([HAIKU, SONNET, TITAN, OLD, LLAMA])
+    # Still read-only: the one POST is ListTagsForResource.
+    assert {c.url.path for c in calls if c.method == "POST"} == {"/listTagsForResource"}
+
+
+async def test_model_access_is_off_by_default():
+    calls: list[httpx.Request] = []
+    summary, _ = await _fetch(_creds(), _model_access_handler(calls))
+    assert "model_access" not in summary
+    assert not any(c.url.path.startswith("/foundation-model") for c in calls)
+
+
+async def test_model_access_denied_is_reported_apart_from_the_region():
+    calls: list[httpx.Request] = []
+    summary, deps = await _fetch(
+        _creds(check_model_access=True),
+        _model_access_handler(calls, availability_status=403),
+    )
+    assert summary == {
+        "regions": 1,
+        "model_access": {},
+        "model_access_errors": {
+            "eu-central-1": "aws: model availability (eu-central-1) returned HTTP 403"
+        },
+    }
+    # The region's resources are still inventoried.
+    assert len(deps) == 5
+    # Stopped at the first refusal instead of trying every model.
+    availability_calls = [
+        c for c in calls if c.url.path.startswith("/foundation-model-availability/")
+    ]
+    assert len(availability_calls) == 1
+
+
+async def test_model_access_flows_into_the_pull_result():
+    result = await ci.pull_cloud_inventory(
+        FakeSession(),
+        TENANT,
+        clouds=["aws"],
+        settings=_settings(check_model_access=True),
+        transport=httpx.MockTransport(_model_access_handler([])),
+        sleep=_no_sleep,
+        now=NOW,
+    )
+    aws = result["clouds"]["aws"]
+    assert aws["status"] == "ok"
+    assert aws["model_access"]["eu-central-1"]["foundation_models"] == [
+        SONNET,
+        HAIKU,
+        OLD,
+    ]
+
+
+def test_sigv4_encodes_the_path_again_like_botocore():
+    # Expected value from botocore 1.43 (SigV4Auth) signing
+    # GetFoundationModelAvailability for this model id, keys and time.
+    headers = ci.sigv4_headers(
+        "GET",
+        "bedrock.eu-central-1.amazonaws.com",
+        "/foundation-model-availability/anthropic.claude-3-haiku-20240307-v1%3A0",
+        "",
+        b"",
+        region="eu-central-1",
+        service="bedrock",
+        keys=ci.AwsKeys("AKIDEXAMPLE", "secretkey"),
+        now=datetime(2026, 10, 23, 19, 28, 20, tzinfo=UTC),
+    )
+    assert headers["authorization"].endswith(
+        "Signature=e4dda77579fc0fbae3270c514d126a523f453220f929e6ebceda74937fb25538"
+    )
