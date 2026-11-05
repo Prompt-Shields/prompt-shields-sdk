@@ -243,6 +243,13 @@ When the router made a decision, the telemetry event carries:
 - `route_group` — the resolved group (`cheap` / `frontier` / ...)
 - `route_reason` — why (`heuristic:simple`, `quality:critical`, `override`, `...+budget-clamp`)
 - `route_est_cost` — the router's pre-flight USD estimate
+- `baseline_id` / `counterfactual_cost` — with `PS_BASELINE_FILE` set to a
+  frozen `baseline.v1` document (`schemas/baseline/`, written by the SDK's
+  `freeze_baseline`), the baseline's id and what the call's tokens would have
+  cost on the use case's baseline model at the baseline's frozen prices
+  (`router/baseline.ts`, same rules and shared vectors as the SDK). Added at
+  send time, so streamed calls are priced on their final usage. An invalid
+  file stops the gateway at startup.
 - `route_sensitivity_level` / `route_sensitivity_source` — the call's
   effective sensitivity level and `declared` / `default` / `pii_escalated`
   (only under a policy with the policy stages; OTel: `ps.route.sensitivity_level`,

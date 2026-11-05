@@ -1,0 +1,152 @@
+{
+  "$schema": "../vectors.schema.json",
+  "description": "Counterfactual cost of routed events under examples/onboarding.json. Its rates are older than the current catalog (gpt-4o input at $5/M, not $2.50/M), so these vectors also check that the frozen rates are used, not the catalog's. Events use the telemetry field names. expected.counterfactual_cost null means the event carries baseline_id but no counterfactual_cost.",
+  "baseline": "../examples/onboarding.json",
+  "vectors": [
+    {
+      "id": "default-model",
+      "event": { "tokens_in": 1000, "tokens_out": 500 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": 0.0125 }
+    },
+    {
+      "id": "use-case-model",
+      "event": { "use_case_name": "contract-review", "tokens_in": 2000, "tokens_out": 1000 },
+      "expected": {
+        "baseline_model": "anthropic/claude-sonnet-4-20250514",
+        "counterfactual_cost": 0.021
+      }
+    },
+    {
+      "id": "unknown-use-case-uses-default",
+      "event": { "use_case_name": "chat", "tokens_in": 100, "tokens_out": 10 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": 0.00065 }
+    },
+    {
+      "id": "cache-read",
+      "event": { "tokens_in": 1000, "tokens_cached": 400, "tokens_out": 100 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": 0.0055 }
+    },
+    {
+      "id": "cache-read-and-write",
+      "event": {
+        "use_case_name": "contract-review",
+        "tokens_in": 1000,
+        "tokens_cached": 200,
+        "tokens_cache_write": 300,
+        "tokens_out": 0
+      },
+      "expected": {
+        "baseline_model": "anthropic/claude-sonnet-4-20250514",
+        "counterfactual_cost": 0.002685
+      }
+    },
+    {
+      "id": "cache-counts-above-prompt",
+      "event": { "tokens_in": 100, "tokens_cached": 80, "tokens_cache_write": 50, "tokens_out": 10 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": 0.0006 }
+    },
+    {
+      "id": "standard-service-tier",
+      "event": { "tokens_in": 1000, "tokens_out": 0, "service_tier": "default" },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": 0.005 }
+    },
+    {
+      "id": "zero-tokens",
+      "event": { "tokens_in": 0, "tokens_out": 0 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": 0 }
+    },
+    {
+      "id": "batch-tier-unpriced",
+      "event": { "tokens_in": 1000, "tokens_out": 500, "service_tier": "batch" },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": null }
+    },
+    {
+      "id": "missing-output-unpriced",
+      "event": { "tokens_in": 1000 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": null }
+    },
+    {
+      "id": "missing-input-unpriced",
+      "event": { "tokens_out": 10 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": null }
+    },
+    {
+      "id": "negative-count-unpriced",
+      "event": { "tokens_in": -5, "tokens_out": 10 },
+      "expected": { "baseline_model": "openai/gpt-4o", "counterfactual_cost": null }
+    }
+  ],
+  "invalid_baselines": [
+    {
+      "id": "wrong-schema-version",
+      "patch": { "schema_version": "baseline.v2" }
+    },
+    {
+      "id": "empty-baseline-id",
+      "patch": { "baseline_id": "" }
+    },
+    {
+      "id": "baseline-id-too-long",
+      "patch": {
+        "baseline_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "id": "missing-catalog-version",
+      "patch": { "catalog_version": null }
+    },
+    {
+      "id": "non-usd-currency",
+      "patch": { "currency": "EUR" }
+    },
+    {
+      "id": "default-model-not-in-models",
+      "patch": { "default_model": "openai/gpt-4o-mini" }
+    },
+    {
+      "id": "use-case-model-not-in-models",
+      "patch": { "use_cases": { "chat": "mistral/mistral-large-latest" } }
+    },
+    {
+      "id": "negative-rate",
+      "patch": {
+        "use_cases": {},
+        "models": {
+          "openai/gpt-4o": {
+            "input_cost_per_token": -1e-6,
+            "output_cost_per_token": 1.5e-5,
+            "cache_read_input_token_cost": 2.5e-6,
+            "cache_creation_input_token_cost": 5e-6
+          }
+        }
+      }
+    },
+    {
+      "id": "missing-rate",
+      "patch": {
+        "use_cases": {},
+        "models": {
+          "openai/gpt-4o": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 1.5e-5,
+            "cache_read_input_token_cost": 2.5e-6
+          }
+        }
+      }
+    },
+    {
+      "id": "string-rate",
+      "patch": {
+        "use_cases": {},
+        "models": {
+          "openai/gpt-4o": {
+            "input_cost_per_token": "5e-6",
+            "output_cost_per_token": 1.5e-5,
+            "cache_read_input_token_cost": 2.5e-6,
+            "cache_creation_input_token_cost": 5e-6
+          }
+        }
+      }
+    }
+  ]
+}
