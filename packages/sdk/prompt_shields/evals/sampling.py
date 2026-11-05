@@ -9,7 +9,7 @@ for, so a report can say what each sampled call represents.
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from prompt_shields.evals.records import EvalRecord, complexity_band
@@ -17,10 +17,19 @@ from prompt_shields.evals.records import EvalRecord, complexity_band
 StratumKey = tuple[str, str, str]  # (use_case, sensitivity, complexity)
 
 
-def stratum_of(record: EvalRecord, unclassified_default: str = "confidential") -> StratumKey:
+#: Effective sensitivity of a record (``EvalPolicy.level``); by default the
+#: declared level or ``unclassified_default``.
+LevelOf = Callable[[EvalRecord], str]
+
+
+def stratum_of(
+    record: EvalRecord,
+    unclassified_default: str = "confidential",
+    level_of: LevelOf | None = None,
+) -> StratumKey:
     return (
         record.use_case,
-        record.sensitivity(unclassified_default),
+        level_of(record) if level_of else record.sensitivity(unclassified_default),
         complexity_band(record.input_tokens()),
     )
 
@@ -39,9 +48,10 @@ class Sample:
     seed: int
     per_stratum: int
     unclassified_default: str
+    level_of: LevelOf | None = None
 
     def stratum(self, record: EvalRecord) -> StratumKey:
-        return stratum_of(record, self.unclassified_default)
+        return stratum_of(record, self.unclassified_default, self.level_of)
 
 
 def stratified_sample(
@@ -51,19 +61,24 @@ def stratified_sample(
     seed: int,
     unclassified_default: str = "confidential",
     use_cases: Sequence[str] | None = None,
+    level_of: LevelOf | None = None,
 ) -> Sample:
     """Draw up to ``per_stratum`` records with prompt text from each stratum.
 
     The draw is deterministic for a given ``seed`` and set of records: strata
     and records are ordered by key and ``record_id`` before sampling, so the
     input order does not matter. ``use_cases`` limits sampling to those use
-    cases (the population counts still cover every record).
+    cases (the population counts still cover every record). ``level_of``
+    gives the sensitivity stratum (``EvalPolicy.level``: with a route policy,
+    PII escalation included); by default the declared level.
     """
     if per_stratum < 1:
         raise ValueError("per_stratum must be at least 1")
     groups: dict[StratumKey, list[EvalRecord]] = {}
     for record in records:
-        groups.setdefault(stratum_of(record, unclassified_default), []).append(record)
+        groups.setdefault(
+            stratum_of(record, unclassified_default, level_of), []
+        ).append(record)
 
     rng = random.Random(seed)
     chosen: list[EvalRecord] = []
@@ -91,4 +106,5 @@ def stratified_sample(
         seed=seed,
         per_stratum=per_stratum,
         unclassified_default=unclassified_default,
+        level_of=level_of,
     )
