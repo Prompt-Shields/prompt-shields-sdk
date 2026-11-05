@@ -334,6 +334,33 @@ def test_cli_full_pipeline(tmp_path, no_network, capsys):
     assert "## 10. Savings at parity" in md and SECRET_TEXT not in md
 
 
+def test_cli_eval_results_text_is_never_echoed(tmp_path, no_network, capsys):
+    # The eval file is untrusted: free text in a numeric field must not reach
+    # the report, and a bad parameter must fail without quoting the file.
+    doc = json.loads(json.dumps(EVAL_RESULTS))
+    meth = doc["methodology"]
+    for key in ("per_stratum", "spend_usd", "calls", "sample_seed"):
+        meth[key] = SECRET_TEXT
+    meth["strata"][0]["population"] = SECRET_TEXT
+    meth["scoring"] = [SECRET_TEXT]
+    doc["cells"][0]["parity"] = SECRET_TEXT
+    doc["saving_pct"] = SECRET_TEXT
+    doc["notes"] = SECRET_TEXT
+    eval_path = tmp_path / "eval.json"
+    eval_path.write_text(json.dumps(doc))
+    args = ["run", str(FIXTURES / "ps_events.jsonl"), "--policy", str(POLICY_PATH),
+            "--eval-results", str(eval_path), "--out-dir", str(tmp_path / "out")]
+    assert teardown_main(args) == 0
+    for out in (tmp_path / "out").iterdir():
+        assert SECRET_TEXT not in out.read_text()
+    doc["params"]["min_parity"] = SECRET_TEXT
+    eval_path.write_text(json.dumps(doc))
+    with pytest.raises(SystemExit):
+        teardown_main(args)
+    err = capsys.readouterr().err
+    assert "params.min_parity" in err and SECRET_TEXT not in err
+
+
 @pytest.mark.parametrize("extra,message", [
     (["--eval-results", "x.json"], "need --policy"),
     (["--scan-prompts"], "need --policy"),

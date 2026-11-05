@@ -190,42 +190,118 @@ class _Cell:
     conservative: bool
 
 
+#: Upper bound on ``bootstrap_resamples`` read from an eval results file.
+MAX_BOOTSTRAP_RESAMPLES = 100_000
+
+
+def _num(value: Any) -> float | None:
+    """A finite number from an input file, else None (never a string)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _int(value: Any) -> int | None:
+    """A whole number from an input file, else None (never a string)."""
+    x = _num(value)
+    return int(x) if x is not None and x == int(x) else None
+
+
+def _unit(value: Any) -> float | None:
+    """A 0–1 share from an input file, else None."""
+    x = _num(value)
+    return x if x is not None and 0.0 <= x <= 1.0 else None
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _methodology(meth: Mapping[str, Any]) -> dict:
+    """The methodology record of an eval report, reduced to typed values.
+
+    The file is untrusted input: every value is either a number, a bool, a
+    control-character-free label, or dropped, so no free text reaches the
+    teardown report beyond short labels (use cases, model ids, scorers).
+    """
+    rp = _mapping(_mapping(meth.get("policy")).get("route_policy"))
+    sha = rp.get("sha256")
+    strata = meth.get("strata") if isinstance(meth.get("strata"), list) else []
+    scoring = _mapping(meth.get("scoring"))
+    judges = meth.get("judges") if isinstance(meth.get("judges"), list) else []
+    return {
+        "sample_seed": _int(meth.get("sample_seed")),
+        "per_stratum": _int(meth.get("per_stratum")),
+        "strata": [
+            {"use_case": _label(st.get("use_case")), "sensitivity": _label(st.get("sensitivity")),
+             "complexity": _label(st.get("complexity")),
+             "population": _int(st.get("population")), "sampled": _int(st.get("sampled"))}
+            for st in strata if isinstance(st, Mapping)
+        ],
+        "scoring": {(_label(k) or "?"): _label(v) for k, v in scoring.items()},
+        "judges": [_label(j) for j in judges if _label(j)],
+        "policy": ({"route_policy": {"sha256": sha}}
+                   if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha) else {}),
+        "temperature_default": _num(meth.get("temperature_default")),
+        "spend_usd": _num(meth.get("spend_usd")),
+        "max_spend_usd": _num(meth.get("max_spend_usd")),
+        "calls": _int(meth.get("calls")),
+        "judge_calls": _int(meth.get("judge_calls")),
+        "prompts_sent_to_providers": meth.get("prompts_sent_to_providers") is True,
+    }
+
+
 def read_eval_results(doc: Any) -> dict:
-    """Validate and normalise a ``ps-eval`` JSON report (``EvalReport.to_dict``)."""
+    """Validate and normalise a ``ps-eval`` JSON report (``EvalReport.to_dict``).
+
+    The file is untrusted: malformed values raise :class:`EvalResultsError`
+    (whose message never quotes the file) or are dropped, and only numbers
+    and short labels are kept.
+    """
     if not isinstance(doc, Mapping) or not isinstance(doc.get("cells"), list):
         raise EvalResultsError("expected a ps-eval JSON report with a 'cells' list")
-    params = doc.get("params") if isinstance(doc.get("params"), Mapping) else {}
-    meth = doc.get("methodology") if isinstance(doc.get("methodology"), Mapping) else {}
+    params = _mapping(doc.get("params"))
     cells = []
     for c in doc["cells"]:
         if not isinstance(c, Mapping):
             raise EvalResultsError("a cell is not an object")
-        try:
-            n, passed = int(c["n"]), int(c["passed"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise EvalResultsError(f"cell without n/passed: {exc}") from None
-        if n < 0 or not 0 <= passed <= n:
-            raise EvalResultsError("cell with an invalid n/passed")
+        n, passed = _int(c.get("n")), _int(c.get("passed"))
+        if n is None or passed is None or n < 0 or not 0 <= passed <= n:
+            raise EvalResultsError("a cell has a missing or invalid n/passed")
         cells.append(_Cell(
             use_case=_label(c.get("use_case")) or "(unattributed)",
             candidate=_label(c.get("candidate")) or "?",
             n=n, passed=passed,
-            parity=c.get("parity"), ci_low=c.get("ci_low"), ci_high=c.get("ci_high"),
+            parity=_unit(c.get("parity")), ci_low=_unit(c.get("ci_low")),
+            ci_high=_unit(c.get("ci_high")),
             status=c.get("status") if c.get("status") in (
                 "at_parity", "below_parity", "insufficient_sample") else "insufficient_sample",
             conservative=c.get("conservative_at_parity") is True,
         ))
+
+    def param(key: str, default: Any, conv: Callable[[Any], Any], ok: Callable[[Any], bool]):
+        if params.get(key) is None:
+            return default
+        value = conv(params[key])
+        if value is None or not ok(value):
+            raise EvalResultsError(f"params.{key} is not valid")
+        return value
+
+    ci = doc.get("saving_ci")
+    ci = [_num(x) for x in ci] if isinstance(ci, list) and len(ci) == 2 else None
     return {
         "cells": cells,
-        "min_parity": float(params.get("min_parity", GATE1_PARITY)),
-        "min_cell_samples": int(params.get("min_cell_samples", 30)),
-        "bootstrap_resamples": int(params.get("bootstrap_resamples", 1000)),
-        "bootstrap_seed": int(params.get("bootstrap_seed", 0)),
-        "methodology": meth,
-        "notes": [_label(x) for x in doc.get("notes") or [] if _label(x)],
-        "eval_saving_pct": doc.get("saving_pct"),
-        "eval_saving_ci": doc.get("saving_ci"),
-        "eval_population_calls": doc.get("population_calls"),
+        "min_parity": param("min_parity", GATE1_PARITY, _num, lambda x: 0 < x <= 1),
+        "min_cell_samples": param("min_cell_samples", 30, _int, lambda x: x >= 0),
+        "bootstrap_resamples": param("bootstrap_resamples", 1000, _int,
+                                     lambda x: 0 <= x <= MAX_BOOTSTRAP_RESAMPLES),
+        "bootstrap_seed": param("bootstrap_seed", 0, _int, lambda x: True),
+        "methodology": _methodology(_mapping(doc.get("methodology"))),
+        "notes": [_label(x) for x in (doc.get("notes") if isinstance(doc.get("notes"), list)
+                                      else []) if _label(x)],
+        "eval_saving_pct": _num(doc.get("saving_pct")),
+        "eval_saving_ci": ci if ci and None not in ci else None,
+        "eval_population_calls": _int(doc.get("population_calls")),
     }
 
 
