@@ -2710,7 +2710,12 @@ components:
           type: string
           minLength: 1
           maxLength: 128
-          description: Opaque user id (ignored with OIDC, which uses the subject pseudonym)
+          description: >-
+            Your id for the user. Forwarded only as a hex hash: kept when it
+            already is 16-64 lowercase hex characters, else replaced by the
+            first 32 hex characters of its SHA-256. Ignored with OIDC, which
+            forwards the subject hash (nothing with
+            PS_OIDC_TELEMETRY_SUBJECT=off).
       additionalProperties: true
     CallFeedbackResponse:
       type: object

@@ -428,7 +428,7 @@ resp.ps_call_id   # also on a stream object; last_call_id() for this thread/task
 
 # Later, when the user rates the answer: a score from 0 (bad) to 1 (good),
 # or True/False, and optionally one reason label. Never free text.
-client.feedback(resp.ps_call_id, 0.2, reason="incomplete", user_id=hashed_user)
+client.feedback(resp.ps_call_id, 0.2, reason="incomplete", user_id=user.id)
 ```
 
 `ps_call_id` is a plain attribute: it is not one of the response's fields
@@ -442,6 +442,9 @@ Reasons: `correct`, `helpful`, `incorrect`, `incomplete`, `hallucination`,
 `other` (`prompt_shields.FEEDBACK_REASONS`). Feedback goes to the
 collector's `POST /ingest/feedback`, which keeps one feedback per call (a
 later one replaces it) and rate-limits it per tenant and per `user_id`.
+`user_id` is sent only as a hash: a value that already is 16-64 lowercase hex
+characters is kept, anything else is replaced by the first 32 hex characters
+of its SHA-256, so a raw identifier never leaves the host.
 Without a client, use `send_feedback(call_id, score, reason, ps_api_key=...,
 ps_collector_url=...)` (or `send_feedback_async`). Unlike telemetry,
 feedback is not fail-open: invalid arguments raise `ValueError` (or

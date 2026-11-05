@@ -50,8 +50,12 @@ of a fixed set of labels and there is no field for free text. The gateway
 forwards it to the collector with `PS_API_KEY` (503 without it). It is
 rate-limited per user and per replica (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`,
 default 60, `0` turns it off): the OIDC subject with `PS_OIDC_ENABLED` (whose
-pseudonym is also the `user_id` forwarded), else the caller's credential
-header, else one shared anonymous bucket.
+hash is also the `user_id` forwarded), else the caller's credential
+header, else one shared anonymous bucket. Without OIDC the credential header
+is not verified, so a caller can change it to get a new bucket; the
+collector's per-tenant limit still applies. The body's `user_id` is
+forwarded only as a hash (the first 32 hex characters of its SHA-256,
+unless it already is a 16-64 character lowercase hex hash).
 
 ## Errors
 

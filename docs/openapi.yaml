@@ -871,9 +871,12 @@ components:
           enum: [correct, helpful, incorrect, incomplete, hallucination, off_topic, refusal, format_error, unsafe, too_slow, too_long, other, null]
         user_id:
           type: [string, 'null']
-          minLength: 1
-          maxLength: 128
-          description: Opaque user id (printable); rate-limited separately when sent
+          pattern: '^[0-9a-f]{16,64}$'
+          description: >-
+            Hex hash of the user id (16-64 lowercase hex characters; the SDK
+            and gateway hash it before sending). Anything else is refused
+            with a 422, so a raw identifier is never stored. Rate-limited
+            separately when sent
         source:
           type: string
           enum: [sdk, gateway]

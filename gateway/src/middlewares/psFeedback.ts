@@ -12,19 +12,22 @@
  *
  * POST /v1/feedback. `{"call_id", "score", "reason", "user_id"}`: a score
  * from 0 (bad) to 1 (good) (or true/false), optionally a reason label from
- * FEEDBACK_REASONS and an opaque user id. Metadata only; there is no field
- * for free text and other fields are dropped. The gateway checks it,
+ * FEEDBACK_REASONS and a user id. Metadata only; there is no field for
+ * free text and other fields are dropped. The gateway checks it,
  * rate-limits it per user (PS_FEEDBACK_RATE_LIMIT_PER_MINUTE, default 60,
  * per replica; 0 turns it off) and forwards it to the collector's
  * `/ingest/feedback` with PS_API_KEY, which stores one feedback per call.
  * "Per user" is the OIDC subject when PS_OIDC_ENABLED, else a fingerprint
  * of the caller's credential header, else one shared anonymous bucket.
- * With OIDC the user_id sent is the subject pseudonym (as on telemetry),
- * never the body's.
+ * The user id is only ever forwarded as a hex hash (the collector refuses
+ * anything else): with OIDC it is the subject hash (none with
+ * PS_OIDC_TELEMETRY_SUBJECT=off), never the raw subject or the body's;
+ * without OIDC the body's user_id, kept when it already is 16-64 lowercase
+ * hex characters, else replaced by the first 32 hex characters of its
+ * SHA-256 (as the Python SDK does).
  */
 import type { Context } from 'hono';
 import { oidcIdentityOf } from './psOidc/identity';
-import { oidcTelemetryFields } from './psOidc/telemetry';
 
 export const CALL_ID_HEADER = 'x-ps-call-id';
 export const CALL_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -205,6 +208,18 @@ const hex = (buf: ArrayBuffer) =>
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 
+const USER_HASH_RE = /^[0-9a-f]{16,64}$/;
+
+/** A user id as forwarded: kept when already a hex hash, else hashed. */
+export async function hashUserId(userId: string): Promise<string> {
+  if (USER_HASH_RE.test(userId)) return userId;
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(userId)
+  );
+  return hex(digest).slice(0, 32);
+}
+
 /** The rate-limit bucket of the caller: OIDC subject, credential fingerprint or anonymous. */
 export async function feedbackUserKey(c: Context): Promise<string> {
   const identity = oidcIdentityOf(c);
@@ -309,16 +324,19 @@ export async function psFeedbackHandler(c: Context): Promise<Response> {
     );
   }
 
-  // With OIDC the user is the authenticated subject, as on telemetry.
+  // With OIDC the user is the authenticated subject, by its hash only.
   const identity = oidcIdentityOf(c);
-  const oidcUser = oidcTelemetryFields(identity).user_id;
   const forward: Record<string, unknown> = {
     call_id: parsed.call_id,
     score: parsed.score,
     source: 'gateway',
   };
   if (parsed.reason) forward.reason = parsed.reason;
-  const userId = identity ? oidcUser : parsed.user_id;
+  const userId = identity
+    ? identity.config.telemetrySubject === 'off'
+      ? undefined
+      : identity.subjectHash
+    : parsed.user_id && (await hashUserId(parsed.user_id));
   if (userId) forward.user_id = userId;
 
   const base = (env.PS_COLLECTOR_URL || 'http://localhost:8000').replace(

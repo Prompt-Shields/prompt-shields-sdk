@@ -7,6 +7,9 @@
  */
 jest.mock('jose', () => ({}));
 
+import { createHash } from 'crypto';
+import { Hono } from 'hono';
+
 import {
   events,
   feedbackCollector,
@@ -20,9 +23,12 @@ import {
   upstreamCalls,
 } from './harness';
 import app from '../../index';
+import { OIDC_IDENTITY_KEY } from '../../middlewares/psOidc/identity';
 import {
   _resetFeedbackRateLimitsForTests,
   FEEDBACK_REASONS,
+  hashUserId,
+  psFeedbackHandler,
   MAX_FEEDBACK_BYTES,
   parseFeedback,
 } from '../../middlewares/psFeedback';
@@ -132,11 +138,12 @@ describe('POST /v1/feedback', () => {
     expect(feedbackRequests).toHaveLength(1);
     const [sent] = feedbackRequests;
     expect(sent.headers.authorization).toBe('Bearer ps-regression-key');
+    // The raw user id never leaves the gateway: it is forwarded as a hash.
     expect(sent.body).toEqual({
       call_id: 'call-1',
       score: 0.25,
       reason: 'incomplete',
-      user_id: 'u-1',
+      user_id: createHash('sha256').update('u-1').digest('hex').slice(0, 32),
       source: 'gateway',
     });
     // Not an LLM call: no telemetry event, no upstream call.
@@ -144,6 +151,53 @@ describe('POST /v1/feedback', () => {
     expect(events).toHaveLength(0);
     expect(upstreamCalls).toHaveLength(0);
   });
+
+  test('a user id is only forwarded as a hex hash', async () => {
+    const hashed = '0123456789abcdef'.repeat(2);
+    expect(await hashUserId(hashed)).toBe(hashed);
+    expect(await hashUserId('alice@example.com')).toBe(
+      createHash('sha256')
+        .update('alice@example.com')
+        .digest('hex')
+        .slice(0, 32)
+    );
+    await feedback({ call_id: 'c1', score: 1, user_id: hashed });
+    await feedback({ call_id: 'c2', score: 1, user_id: 'alice@example.com' });
+    expect(feedbackRequests.map((r) => r.body.user_id)).toEqual([
+      hashed,
+      await hashUserId('alice@example.com'),
+    ]);
+    expect(JSON.stringify(feedbackRequests)).not.toContain('alice');
+  });
+
+  test.each([
+    ['hash', 'f'.repeat(32)],
+    ['raw', 'f'.repeat(32)],
+    ['off', undefined],
+  ])(
+    'with OIDC (subject %s) forwards the subject hash, never the body or raw subject',
+    async (mode, expected) => {
+      const oidcApp = new Hono();
+      oidcApp.use('*', async (c, next) => {
+        c.set(OIDC_IDENTITY_KEY as any, {
+          subjectHash: 'f'.repeat(32),
+          subject: 'alice@example.com',
+          config: { telemetrySubject: mode },
+        });
+        await next();
+      });
+      oidcApp.post('/v1/feedback', psFeedbackHandler);
+      const res = await oidcApp.request('/v1/feedback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ call_id: 'c', score: 1, user_id: 'mallory' }),
+      });
+      expect(res.status).toBe(200);
+      expect(feedbackRequests[0].body.user_id).toBe(expected);
+      expect(JSON.stringify(feedbackRequests)).not.toContain('alice');
+      expect(JSON.stringify(feedbackRequests)).not.toContain('mallory');
+    }
+  );
 
   test('a boolean score is 1 or 0', async () => {
     await feedback({ call_id: 'c', score: true });

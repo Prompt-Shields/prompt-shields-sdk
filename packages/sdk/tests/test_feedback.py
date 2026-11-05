@@ -1,6 +1,7 @@
 """Per-call ids and the feedback helper (#43)."""
 
 import asyncio
+import hashlib
 import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
@@ -177,10 +178,22 @@ def test_client_feedback_sends_metadata_only(collector):
     req = collector["seen"][0]
     assert str(req.url) == "http://collector:8000/ingest/feedback"
     assert req.headers["Authorization"] == "Bearer ps-test"
+    # The raw user id never leaves the host: it is sent as a hash.
     assert json.loads(req.content) == {
         "call_id": resp.ps_call_id, "score": 0.5, "reason": "incomplete",
-        "user_id": "u-1", "source": "sdk",
+        "user_id": hashlib.sha256(b"u-1").hexdigest()[:32], "source": "sdk",
     }
+
+
+def test_user_id_already_hashed_is_kept(collector):
+    hashed = "0123456789abcdef" * 2
+    send_feedback("c-1", 1, user_id=hashed, ps_api_key="k", ps_collector_url="http://c")
+    send_feedback("c-2", 1, user_id="alice@example.com", ps_api_key="k",
+                  ps_collector_url="http://c")
+    sent = [json.loads(r.content)["user_id"] for r in collector["seen"]]
+    assert sent[0] == hashed
+    assert sent[1] == hashlib.sha256(b"alice@example.com").hexdigest()[:32]
+    assert "alice" not in collector["seen"][1].content.decode()
 
 
 def test_bool_score_and_module_helper(collector):

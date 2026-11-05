@@ -17,8 +17,8 @@ generated before the call (or the caller's own, from
 ``client.feedback(call_id, score, reason=None)`` (or ``send_feedback``)
 then records how good the answer was, for the routing learner. Metadata
 only: a score from 0 (bad) to 1 (good), and optionally one reason label from
-``FEEDBACK_REASONS`` and the caller's opaque user id. There is no field for
-free text. The collector keeps one feedback per call (a later one replaces
+``FEEDBACK_REASONS`` and the caller's user id, sent only as a hash (see
+``hash_user_id``). There is no field for free text. The collector keeps one feedback per call (a later one replaces
 it) and rate-limits it per tenant and per user.
 
 Unlike telemetry, feedback is not fail-open: it is an explicit request, so
@@ -30,6 +30,7 @@ refused or failed request raises ``FeedbackError``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import math
 import re
 import uuid
@@ -59,6 +60,10 @@ FEEDBACK_REASONS = (
 )
 
 _CALL_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+# A user id is only ever sent as a hex hash (the collector refuses anything
+# else), as for MCP telemetry: 16-64 lowercase hex characters are kept,
+# anything else is replaced by the first 32 hex characters of its SHA-256.
+_USER_HASH_RE = re.compile(r"[0-9a-f]{16,64}")
 _LAST_CALL_ID: ContextVar[str | None] = ContextVar("ps_last_call_id", default=None)
 
 
@@ -116,6 +121,15 @@ def call_id_headers(kwargs: dict, call_id: str) -> None:
         kwargs["extra_headers"] = {**headers, CALL_ID_HEADER: call_id}
 
 
+def hash_user_id(user_id: str) -> str:
+    """The user id as sent: unchanged when it already is a hex hash (16-64
+    lowercase hex characters), else the first 32 hex characters of its
+    SHA-256. A raw user id never leaves the host."""
+    if _USER_HASH_RE.fullmatch(user_id):
+        return user_id
+    return hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
+
+
 def build_feedback(call_id: str, score: float | bool, reason: str | None = None,
                    user_id: str | None = None) -> dict:
     """The request body for one feedback; ValueError (TypeError for a
@@ -145,7 +159,7 @@ def build_feedback(call_id: str, score: float | bool, reason: str | None = None,
             or not user_id.isprintable()
         ):
             raise ValueError(f"user_id must be 1-{MAX_USER_ID_LENGTH} printable characters")
-        body["user_id"] = user_id
+        body["user_id"] = hash_user_id(user_id)
     return body
 
 

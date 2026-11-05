@@ -398,8 +398,9 @@ class CallFeedback(Base):
     One row per (tenant, call_id): a later submission for the same call
     replaces the earlier one. Metadata only: a score in [0, 1], an optional
     reason from a fixed set of labels (collector/feedback.py), the caller's
-    opaque user id and the source. Never free text. ``call_id`` is the id
-    the SDK or gateway put on the call's usage event; the feedback is kept
+    user id as a hex hash (never a raw identifier) and the source. Never
+    free text. ``call_id`` is the id the SDK or gateway put on the call's
+    usage event; the feedback is kept
     even when that event has not arrived (it may follow). Rows not updated
     within the tenant's retention period are purged with the events.
     """

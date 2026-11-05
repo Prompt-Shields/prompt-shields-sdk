@@ -6,8 +6,8 @@ gateway (``POST /v1/feedback``) send it here, naming the call by the
 ``call_id`` they put on its usage event.
 
 Metadata only. A feedback is a score in [0, 1], an optional reason from a
-fixed set of labels (``REASONS``), the caller's opaque user id and the
-source; there is no field for free text, and unknown fields are ignored.
+fixed set of labels (``REASONS``), the caller's user id as a hex hash
+(never a raw identifier) and the source; there is no field for free text, and unknown fields are ignored.
 
 * Tenant-scoped: the same ingest-key auth as ``/ingest/events``; one row per
   (tenant, call_id).
@@ -27,6 +27,7 @@ source; there is no field for free text, and unknown fields are ignored.
 from __future__ import annotations
 
 import math
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -49,7 +50,10 @@ from collector.sanitize import BodyTooDeep, is_storable, loads_bounded, too_deep
 router = APIRouter()
 
 MAX_BODY_BYTES = 4096
-MAX_USER_ID_LENGTH = 128
+# A user id is kept only as a hex hash, as on /ingest/mcp (the gateway's
+# OIDC subject hash; the SDK hashes the caller's user id before sending), so
+# a raw identifier (an e-mail, a username) is never stored.
+USER_HASH_RE = re.compile(r"[0-9a-f]{16,64}")
 SOURCES = frozenset({"sdk", "gateway"})
 # Why a call was rated as it was: labels, never text. Kept in step with
 # prompt_shields.feedback.FEEDBACK_REASONS and the gateway's FEEDBACK_REASONS.
@@ -108,12 +112,9 @@ def parse_feedback(body: Any) -> dict:
 
     user_id = body.get("user_id")
     if user_id is not None and (
-        not isinstance(user_id, str)
-        or not user_id
-        or len(user_id) > MAX_USER_ID_LENGTH
-        or not user_id.isprintable()
+        not isinstance(user_id, str) or not USER_HASH_RE.fullmatch(user_id)
     ):
-        raise _invalid(f"user_id must be 1-{MAX_USER_ID_LENGTH} printable characters")
+        raise _invalid("user_id must be a hex hash (16-64 lowercase hex characters)")
 
     source = body.get("source", "sdk")
     if source not in SOURCES:

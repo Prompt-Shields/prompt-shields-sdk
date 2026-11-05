@@ -62,7 +62,7 @@ async def test_feedback_is_stored_as_metadata_and_matched(client, seeded_db):
 
     resp = await client.post("/ingest/feedback", headers=HEADERS, json={
         "call_id": CALL, "score": 0.25, "reason": "incomplete",
-        "user_id": "u-hash-1", "comment": "the answer missed the second half",
+        "user_id": "a1b2c3d4e5f60718", "comment": "the answer missed the second half",
     })
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"call_id": CALL, "created": True, "matched": True}
@@ -78,7 +78,7 @@ async def test_feedback_is_stored_as_metadata_and_matched(client, seeded_db):
     rows = await _rows(seeded_db, "SELECT * FROM call_feedback ORDER BY call_id")
     assert [(r["call_id"], r["score"], r["reason"], r["user_id"], r["source"])
             for r in rows] == [
-        (CALL, 0.25, "incomplete", "u-hash-1", "sdk"),
+        (CALL, 0.25, "incomplete", "a1b2c3d4e5f60718", "sdk"),
         ("not-seen-yet", 1.0, None, None, "sdk"),
     ]
     # No free text is kept anywhere.
@@ -123,8 +123,13 @@ async def test_feedback_is_idempotent_per_call(client, seeded_db):
         {"call_id": CALL, "score": 1, "reason": "the model was rude to me"},
         {"call_id": CALL, "score": 1, "reason": 3},
         {"call_id": CALL, "score": 1, "user_id": ""},
-        {"call_id": CALL, "score": 1, "user_id": "u" * 129},
+        {"call_id": CALL, "score": 1, "user_id": "a" * 65},
         {"call_id": CALL, "score": 1, "user_id": "line\nbreak"},
+        # Raw identifiers are never stored: hex hashes only.
+        {"call_id": CALL, "score": 1, "user_id": "alice@example.com"},
+        {"call_id": CALL, "score": 1, "user_id": "A1B2C3D4E5F60718"},
+        {"call_id": CALL, "score": 1, "user_id": "abc123"},
+        {"call_id": CALL, "score": 1, "user_id": 12345678901234567},
         {"call_id": CALL, "score": 1, "source": "browser"},
         [{"call_id": CALL, "score": 1}],
     ],
@@ -198,13 +203,14 @@ async def test_rate_limited_per_user_and_per_tenant(client, seeded_db, monkeypat
             body["user_id"] = user
         return client.post("/ingest/feedback", headers=HEADERS, json=body)
 
-    assert (await fb(1, "alice")).status_code == 200
-    assert (await fb(2, "alice")).status_code == 200
-    limited = await fb(3, "alice")
+    alice, bob = "a" * 32, "b" * 32
+    assert (await fb(1, alice)).status_code == 200
+    assert (await fb(2, alice)).status_code == 200
+    limited = await fb(3, alice)
     assert limited.status_code == 429
     assert int(limited.headers["Retry-After"]) >= 1
     # Another user has their own budget, until the tenant's is used up.
-    assert (await fb(4, "bob")).status_code == 200
+    assert (await fb(4, bob)).status_code == 200
     assert (await fb(5, None)).status_code == 200
     assert (await fb(6, None)).status_code == 429  # tenant limit (5)
 
