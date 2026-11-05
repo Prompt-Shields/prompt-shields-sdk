@@ -46,6 +46,13 @@ from collector.partner_rate_limit import get_rate_limiter
 from collector.partner_scopes import DEFAULT_RATE_LIMIT
 from collector.retention import get_retention_cutoff
 from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
+from collector.usage_reports import (
+    SavingsGroupBy,
+    savings_report,
+    sovereign_share,
+    sovereign_share_columns,
+    sovereign_share_report,
+)
 
 router = APIRouter(prefix="/partner/v1", tags=["Partner API"])
 
@@ -359,6 +366,20 @@ async def get_risks(
 USAGE_PERIODS: dict[str, int] = {"7d": 7, "30d": 30, "90d": 90}
 
 
+async def _usage_since(db, tenant_id: UUID, period: str) -> datetime:
+    """Start of the trailing `period` window, clamped to retention.
+
+    Never report events past the tenant's retention period, even if the
+    purge has not run yet (#85).
+    """
+    now = datetime.now(UTC)
+    since = now - timedelta(days=USAGE_PERIODS[period])
+    cutoff = await get_retention_cutoff(db, tenant_id, now)
+    if cutoff is not None and cutoff > since:
+        since = cutoff
+    return since
+
+
 @router.get(
     "/assets/{asset_id}/usage-summary", summary="Get usage summary for an asset"
 )
@@ -401,13 +422,7 @@ async def get_usage_summary(
             },
         )
 
-    now = datetime.now(UTC)
-    since = now - timedelta(days=USAGE_PERIODS[period])
-    # Never report events past the tenant's retention period, even if the
-    # purge has not run yet (#85).
-    cutoff = await get_retention_cutoff(db, principal.tenant_id, now)
-    if cutoff is not None and cutoff > since:
-        since = cutoff
+    since = await _usage_since(db, principal.tenant_id, period)
     row = (
         (
             await db.execute(
@@ -437,6 +452,7 @@ async def get_usage_summary(
                             (func.jsonb_array_length(AIUsageEvent.fallback_chain) > 0, 1)
                         )
                     ).label("fallback_requests"),
+                    *sovereign_share_columns(),
                 ).where(
                     AIUsageEvent.asset_id == asset_id,
                     AIUsageEvent.tenant_id == principal.tenant_id,
@@ -456,11 +472,12 @@ def _usage_summary_dict(row, period: str) -> dict:
     """Shape an aggregate row into the documented `UsageSummary` schema.
 
     Counts and token totals are 0 when there were no events. Cost, latency,
-    savings and fallback rate are null when no event in the window reported
-    what they need, because 0 would claim a measurement never taken.
-    savings_usd sums counterfactual_cost - cost over events reporting both;
-    fallback_rate is the share of events reporting a fallback_chain whose
-    chain is not empty.
+    savings, fallback rate and sovereign share are null when no event in the
+    window reported what they need, because 0 would claim a measurement
+    never taken. savings_usd sums counterfactual_cost - cost over events
+    reporting both; fallback_rate is the share of events reporting a
+    fallback_chain whose chain is not empty; sovereign_share is the share of
+    events reporting a served_jurisdiction that was in the EEA.
     """
     cost = row["estimated_cost_usd"]
     latency = row["avg_latency_ms"]
@@ -482,8 +499,67 @@ def _usage_summary_dict(row, period: str) -> dict:
             if fallback_reported
             else None
         ),
+        "sovereign_share": sovereign_share(row),
         "period": period,
     }
+
+
+@router.get("/usage/savings", summary="Realised routing savings vs. counterfactual")
+async def get_usage_savings(
+    request: Request,
+    response: Response,
+    period: Literal["7d", "30d", "90d"] = Query(
+        default="30d", description="Time period for aggregation"
+    ),
+    group_by: SavingsGroupBy = Query(
+        default="none",
+        description="Bucket by time (UTC day/week/month), asset, use case or business unit",
+    ),
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),  # noqa: B008 - FastAPI dependency marker, by design
+):
+    """Tenant-wide savings: what routed calls cost against what they would
+    have cost on their baseline model, over the trailing `period`.
+
+    Only events reporting both `cost` and `counterfactual_cost` count
+    towards savings; see `collector.usage_reports`. Aggregates only.
+    """
+    await _enforce_rate_limit(request, response, principal)
+    db = request.state.db
+    since = await _usage_since(db, principal.tenant_id, period)
+    body = await savings_report(db, principal.tenant_id, since, period, group_by)
+    await _audit(request, principal, "/partner/v1/usage/savings", "GET", 200, len(body["data"]))
+    return body
+
+
+@router.get(
+    "/usage/sovereign-share",
+    summary="Share of calls and spend served in the EEA, by sensitivity level",
+)
+async def get_usage_sovereign_share(
+    request: Request,
+    response: Response,
+    period: Literal["7d", "30d", "90d"] = Query(
+        default="30d", description="Time period for aggregation"
+    ),
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),  # noqa: B008 - FastAPI dependency marker, by design
+):
+    """Tenant-wide sovereign share over the trailing `period`: calls and
+    spend served in an EEA jurisdiction, overall and per sensitivity level.
+    Events without a `served_jurisdiction` are left out of both sides of
+    each share. Aggregates only."""
+    await _enforce_rate_limit(request, response, principal)
+    db = request.state.db
+    since = await _usage_since(db, principal.tenant_id, period)
+    body = await sovereign_share_report(db, principal.tenant_id, since, period)
+    await _audit(
+        request,
+        principal,
+        "/partner/v1/usage/sovereign-share",
+        "GET",
+        200,
+        len(body["by_sensitivity_level"]),
+    )
+    return body
 
 
 @router.get("/telemetry/coverage", summary="Telemetry coverage per source")
