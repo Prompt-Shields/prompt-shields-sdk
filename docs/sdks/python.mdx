@@ -362,6 +362,9 @@ sent. A call is never served by a model the policy does not allow.
   yet: each call makes one attempt.
 - `client.route(messages, ...)` returns the decision without sending the call.
 
+The [routing guide](/guides/routing) walks through a full policy, with
+results you can reproduce offline, and lists what is not enforced yet.
+
 Each call emits the usual telemetry event through the chosen provider's
 instrumented client, plus the route: `requested_model` (`auto`) and
 `served_model`, `route_mode`, `route_group`, `route_reason`, `route_est_cost`,

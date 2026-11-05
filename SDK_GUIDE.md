@@ -14,7 +14,7 @@ A walkthrough for engineers integrating the Prompt Shields Python SDK into a rea
 3. [How the SDK works](#3-how-the-sdk-works)
 4. [Client configuration](#4-client-configuration)
 5. [Per-request metadata](#5-per-request-metadata)
-6. [Cost-aware routing (route hints)](#6-cost-aware-routing)
+6. [Routing (route hints, `ShieldsRouter`)](#6-routing)
 7. [Provider switching (OpenAI, Anthropic)](#7-provider-switching)
 8. [Sync vs. async](#8-sync-vs-async)
 9. [PII detection](#9-pii-detection)
@@ -200,11 +200,16 @@ All five are optional. Omit what you don't have.
 
 ---
 
-## 6. Cost-aware routing
+## 6. Routing
 
-Most requests are *over-served* — a trivial "classify this sentiment" prompt sent to a frontier model wastes 10–50× the tokens it needs. The SDK lets you attach an **intent hint** to a call. It does **not** pick a model itself; it emits the hint as `X-PS-*` headers, and the **gateway** decides which concrete model runs. This keeps the decision (and the model catalog, pricing, and policy) in one place instead of scattered across every service.
+Most requests are *over-served* — a trivial "classify this sentiment" prompt sent to a frontier model wastes 10–50× the tokens it needs. Routing picks a cheaper model when that is good enough, and keeps sensitive data on the models a policy allows. There are two ways to use it:
 
-> Routing only takes effect when your `api_key`/`base_url` points at the Prompt Shields gateway. Calling a provider directly still sends the headers, but there's nothing there to act on them — the hint is simply ignored, so it's always safe to add.
+- **Route hints** on the ordinary clients (`ShieldsOpenAI`, `ShieldsAnthropic`, ...). These clients do **not** pick a model; they send the hint as `X-PS-*` headers and the **gateway** decides which model runs. This section covers them first.
+- **`ShieldsRouter`**, which picks the model in your process under a `route-policy.v1` document and sends the call with your own keys. It is for teams that do not run the gateway; see [Local routing with `ShieldsRouter`](#local-routing-with-shieldsrouter) below.
+
+The full guide, with sensitivity levels, data rules and a worked policy, is [docs/guides/routing.mdx](docs/guides/routing.mdx). `python demo/demo_route.py` runs it end to end offline.
+
+> Route hints only take effect when your `api_key`/`base_url` points at the Prompt Shields gateway. Calling a provider directly still sends the headers, but there's nothing there to act on them — the hint is simply ignored, so it's always safe to add.
 
 ### The `RouteHint` object
 
@@ -273,6 +278,45 @@ Every event now records both **`requested_model`** (what you asked for — possi
 ```
 
 Route hints work identically on the async clients (`AsyncShieldsOpenAI`, etc.).
+
+### Local routing with `ShieldsRouter`
+
+`ShieldsRouter` (and `AsyncShieldsRouter`) decides in your process. Each call gets a sensitivity level (the declared `data_classification`, else the policy's `unclassified_default`, raised by any PII found in the prompt), then only the models the level's data rule allows are considered, then the hints, the use case's quality bar and the `max_cost` clamp pick among them.
+
+```python
+from prompt_shields import PolicyViolation, RouteHint, ShieldsRouter
+
+client = ShieldsRouter(
+    providers={
+        "openai":     {"api_key": os.environ["OPENAI_API_KEY"]},
+        "mistral-eu": {"api_key": os.environ["MISTRAL_API_KEY"],
+                       "base_url": "https://..."},   # any OpenAI-compatible API
+    },
+    policy="ps-route.json",          # route-policy.v1; .yaml needs PyYAML
+    ps_api_key=os.environ["PS_API_KEY"],
+    data_classification="confidential",
+)
+
+client.route(messages)               # the decision only; nothing is sent
+
+try:
+    resp = client.chat.completions.create(
+        model="auto", messages=messages, route=RouteHint(quality="draft"),
+    )
+    resp.ps.route.model, resp.ps.route.sensitivity_level, resp.ps.cost.usd
+except PolicyViolation:
+    ...                              # no allowed model: nothing was sent
+```
+
+The response is in the OpenAI chat-completions shape whichever provider served it, with the provider's own object as `resp.raw`. `mode="gateway"` sends the call to the gateway with the hints as headers instead.
+
+### What routing does not do yet
+
+- **No failover (#21).** `prompt_shields.failover` has the engine and circuit breaker, but `ShieldsRouter` does not use it: each call makes one attempt, and a provider error is raised even when another allowed model exists.
+- **No streaming in local mode.** `stream=True` raises `RouterError`. Gateway mode streams.
+- **No tool translation for Anthropic.** Tool messages and OpenAI-only parameters raise `RouterError` when the call is routed to Anthropic.
+- **The policy's facts are trusted.** Nothing verifies a tier's `jurisdiction`, `zdr` or `us_cloud_act_exposure`. A missing fact fails closed, so leave out any fact the model catalog has as `null` (unverified).
+- **PII escalation is only as good as the detector** ([§9](#9-pii-detection)). Declare `data_classification` rather than relying on it.
 
 ---
 
