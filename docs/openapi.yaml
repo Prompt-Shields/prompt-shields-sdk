@@ -109,6 +109,12 @@ components:
         The tenant's own API key (the one the SDK ingests with), for the
         tenant admin routes under `/api/v1/admin`. Partners never hold it.
 
+        After `PS_AUTH_FAILURE_LIMIT_PER_MINUTE` failed tenant key or admin
+        token checks from one client address in a minute, a request with an
+        unknown, revoked or expired key or token gets `429` with
+        `Retry-After` instead of `401` until the minute ends. A valid key or
+        token is never held back.
+
     AdminToken:
       type: http
       scheme: bearer

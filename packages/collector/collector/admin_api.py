@@ -45,7 +45,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from collector import tenant_keys
+from collector import auth_cache, tenant_keys
 from collector.admin_auth import (
     ADMIN_SCOPES,
     TOKEN_WARNING,
@@ -382,6 +382,9 @@ async def rotate_api_key(
         key = tenant_keys.rotate_key(row, timedelta(seconds=grace))
     except NotRotatable as exc:
         raise _problem(409, "Conflict", f"Cannot rotate a {exc} key") from None
+    # The hash changed, so cached verifications no longer match; drop them
+    # now rather than at their TTL.
+    auth_cache.get_key_cache().invalidate_key(row.id)
     await add_audit(
         request,
         db,
@@ -408,6 +411,7 @@ async def revoke_api_key(
     db = request.state.db
     row = await _get_key(request, principal.tenant_id, key_id)
     if tenant_keys.revoke_key(row):
+        auth_cache.get_key_cache().invalidate_key(row.id)
         await add_audit(
             request,
             db,

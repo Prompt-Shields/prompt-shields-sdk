@@ -31,9 +31,10 @@ pointed at a shared database by accident:
 prints the report as JSON. The exit status is 1 when a check fails.
 tests/test_ingest_load_smoke_db.py runs a small version of this in CI.
 
-Every ingest request authenticates with bcrypt (collector/auth.py), so a
-run's throughput is mostly bounded by the collector's CPU, and the load
-driver shares that CPU here. Treat the numbers as a regression baseline on
+Ingest keys are checked with bcrypt (collector/auth.py), once per key per
+PS_INGEST_KEY_CACHE_TTL_SECONDS (collector/auth_cache.py); set it to 0 to
+measure bcrypt on every request. The load driver shares the collector's CPU
+here. Treat the numbers as a regression baseline on
 one machine, not as a production capacity figure.
 """
 
