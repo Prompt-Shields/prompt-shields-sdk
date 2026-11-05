@@ -102,7 +102,8 @@ async def resolve_tenant(request: Request) -> UUID:
 
     A key that passed recently skips bcrypt while its stored hash is
     unchanged, and a client with too many failed checks gets 429 instead of
-    another bcrypt check (collector/auth_cache.py).
+    another bcrypt check for a key that is unknown or not live
+    (collector/auth_cache.py).
 
     On success the request's session is scoped to the tenant for Postgres
     row-level security (collector/rls.py).
@@ -126,7 +127,14 @@ async def resolve_tenant(request: Request) -> UUID:
         # (collector/auth_cache.py); the row read above is current.
         valid, client = True, None
     else:
-        client = check_failed_auth_limit(request)
+        if candidate is None or not candidate.live:
+            # Only a key that cannot get in is held back. The lookup prefix
+            # is 64 bits of SHA-256 over the whole key, so a live candidate
+            # means the caller holds the real key: a client sharing its
+            # address (a proxy, NAT) cannot lock valid keys out.
+            client = check_failed_auth_limit(request)
+        else:
+            client = failed_auth_client(request)
         stored_hash = candidate.stored_hash if candidate is not None else _DUMMY_HASH
         # bcrypt takes tens of ms; keep it off the event loop.
         valid = await asyncio.to_thread(verify_api_key, api_key, stored_hash)

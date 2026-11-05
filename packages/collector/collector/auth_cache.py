@@ -24,12 +24,16 @@ Unknown and wrong keys still pay a full bcrypt check (so they look the same
 as each other), which let an unauthenticated caller spend CPU at will. The
 limiter counts failed authentications per client address (an IPv6 address
 by its /64) per minute. Past ``PS_AUTH_FAILURE_LIMIT_PER_MINUTE`` (default
-60; 0 turns it off), requests from that address that would need bcrypt get
-429 with Retry-After instead, without the check. A key found in the cache
-is not affected. The client address is ``request.client.host``, which
+60; 0 turns it off), requests from that address whose key is unknown or
+not live (revoked, expired, rotated out) get 429 with Retry-After instead,
+without the check. A key whose row is found and live is never held back:
+the lookup prefix is 64 bits of SHA-256 over the whole key, so only its
+holder can present it, and a bad client sharing the address cannot lock
+valid keys out. The client address is ``request.client.host``, which
 uvicorn takes from X-Forwarded-For only for proxies listed in
 ``FORWARDED_ALLOW_IPS`` (default 127.0.0.1): behind a load balancer not in
-that list, every client shares the balancer's address. At most
+that list, every client shares the balancer's address (and its failure
+count). At most
 ``PS_AUTH_FAILURE_TRACKED_CLIENTS`` addresses are tracked.
 
 Both are per process, like the rate limiters in partner_rate_limit.py.

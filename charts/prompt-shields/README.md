@@ -241,12 +241,13 @@ hash is unchanged; the key row is still read on every request, so revoking,
 rotating or expiring a key, or disabling its tenant, applies at once on every
 replica. A client address with more than `PS_AUTH_FAILURE_LIMIT_PER_MINUTE`
 failed authentications in a minute gets `429` (with `Retry-After`) instead of
-further bcrypt checks; keys already cached keep working. The address is the
-one uvicorn reports, which follows `X-Forwarded-For` only from proxies listed
-in uvicorn's `FORWARDED_ALLOW_IPS` (default `127.0.0.1`). Behind an ingress
-or load balancer, set `FORWARDED_ALLOW_IPS` in `collector.config` to its
-addresses, or every client shares one address and one bad client can make
-uncached valid keys wait out the minute.
+further bcrypt checks for unknown, revoked or expired keys; a valid, live key
+is never held back. The address is the one uvicorn reports, which follows
+`X-Forwarded-For` only from proxies listed in uvicorn's `FORWARDED_ALLOW_IPS`
+(default `127.0.0.1`). Behind an ingress or load balancer, set
+`FORWARDED_ALLOW_IPS` in `collector.config` to its addresses, or every client
+shares one failure count and one bad client can make other clients' wrong
+keys get `429` instead of `401`.
 
 ## Security defaults
 

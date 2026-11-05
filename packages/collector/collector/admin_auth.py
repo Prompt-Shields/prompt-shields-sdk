@@ -54,6 +54,7 @@ from collector.auth import (
     _DUMMY_HASH,
     bearer_token,
     check_failed_auth_limit,
+    failed_auth_client,
     record_failed_auth,
     resolve_tenant,
     tenant_disabled,
@@ -139,8 +140,13 @@ async def _resolve_admin_token(request: Request, token: str) -> AdminPrincipal:
                 .where(AdminToken.token_prefix == api_key_lookup_prefix(token))
             )
         ).one_or_none()
-    # Too many failed checks from this client: 429 without bcrypt.
-    client = check_failed_auth_limit(request)
+    # Too many failed checks from this client: 429 without bcrypt, unless
+    # the token is found and active (only its holder can present it; see
+    # collector/auth.py::resolve_tenant).
+    if row is None or key_status(row) != "active":
+        client = check_failed_auth_limit(request)
+    else:
+        client = failed_auth_client(request)
     stored = row.token_hash if row is not None else _DUMMY_HASH
     valid = await asyncio.to_thread(verify_api_key, token, stored)
     if row is None or not valid:

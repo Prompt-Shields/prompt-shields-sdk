@@ -354,3 +354,49 @@ async def test_failed_admin_tokens_limited(client, monkeypatch):
     resp = await client.get("/api/v1/admin/tokens", headers=H("ps-at-bad"))
     assert resp.status_code == 429
     assert "Retry-After" in resp.headers
+
+
+async def test_limited_address_still_admits_uncached_valid_key(
+    client, bcrypt_calls, monkeypatch
+):
+    """Behind a shared address (proxy, NAT) one bad client must not lock
+    out valid keys that are not cached (new pod, expired entry)."""
+    monkeypatch.setattr(settings, "auth_failure_limit_per_minute", 2)
+    monkeypatch.setattr(settings, "ingest_key_cache_ttl_seconds", 0)
+    for i in range(2):
+        assert await _status(client, f"ps-bad-{i}") == 401
+    assert await _status(client, "ps-bad-x") == 429
+    before = bcrypt_calls.count(TENANT_KEY)
+    assert await _status(client, TENANT_KEY) == 200
+    assert bcrypt_calls.count(TENANT_KEY) == before + 1
+    assert await _status(client, "ps-bad-y") == 429
+
+
+async def test_limited_address_holds_back_revoked_key(client, monkeypatch):
+    created = await _issue(client)
+    resp = await client.delete(
+        f"/api/v1/admin/api-keys/{created['id']}", headers=H(TENANT_KEY)
+    )
+    assert resp.status_code == 204
+    monkeypatch.setattr(settings, "auth_failure_limit_per_minute", 1)
+    assert await _status(client, created["key"]) == 401
+    assert await _status(client, created["key"]) == 429
+
+
+async def test_limited_address_still_admits_valid_admin_token(client, monkeypatch):
+    resp = await client.post(
+        "/api/v1/admin/tokens",
+        headers=H(TENANT_KEY),
+        json={"name": "ci", "scopes": ["admin:read"]},
+    )
+    assert resp.status_code == 201, resp.text
+    token = resp.json()["token"]
+    monkeypatch.setattr(settings, "auth_failure_limit_per_minute", 1)
+    assert (
+        await client.get("/api/v1/admin/tokens", headers=H("ps-at-bad"))
+    ).status_code == 401
+    assert (
+        await client.get("/api/v1/admin/tokens", headers=H("ps-at-bad2"))
+    ).status_code == 429
+    resp = await client.get("/api/v1/admin/tokens", headers=H(token))
+    assert resp.status_code == 200, resp.text
