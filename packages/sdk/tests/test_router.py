@@ -515,7 +515,9 @@ def test_existing_clients_are_unchanged_by_the_router():
     )
     assert isinstance(resp, ChatCompletion)
     assert fake.calls[0]["model"] == "auto"
-    assert fake.calls[0]["extra_headers"] == {"X-PS-Quality": "draft"}
+    assert fake.calls[0]["extra_headers"] == {
+        "X-PS-Quality": "draft", "X-PS-Call-Id": resp.ps_call_id,
+    }
 
 
 # --- gateway mode -------------------------------------------------------------------
@@ -540,6 +542,8 @@ def test_gateway_mode_delegates_with_headers():
         "X-PS-Quality": "draft",
         "X-PS-Max-Cost": "0.01",
         "X-PS-Data-Classification": "confidential",
+        # The gateway reports the call under the SDK's call_id (#43).
+        "X-PS-Call-Id": events[0]["call_id"],
     }
     assert resp.ps.route.mode == "gateway"
     assert events[0]["route_mode"] == "gateway"

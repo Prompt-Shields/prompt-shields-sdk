@@ -44,6 +44,7 @@ TENANT_TABLES: dict[str, str] = {
     "retention_audit_log": "tenant_id",
     "telemetry_client_stats": "tenant_id",
     "asset_attestations": "tenant_id",
+    "risk_mapping_reviews": "tenant_id",
     "webhook_subscriptions": "tenant_id",
     "webhook_deliveries": "tenant_id",
     "provider_credentials": "tenant_id",

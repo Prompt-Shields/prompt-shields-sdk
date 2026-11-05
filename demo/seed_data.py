@@ -3,7 +3,7 @@ import asyncio
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from db.api_keys import api_key_lookup_prefix, hash_api_key
-from db.models import Base, Tenant, AIAsset, DataFlow, RiskMapping
+from db.models import Base, Tenant, TenantApiKey, AIAsset, DataFlow, RiskMapping
 from datetime import datetime, timezone
 
 # Same environment variable and default the collector uses, so a host that has
@@ -22,10 +22,15 @@ async def seed():
     session_factory = async_sessionmaker(engine, class_=AsyncSession)
 
     async with session_factory() as db:
-        tenant = Tenant(name="Acme Insurance", domain="acme.com", settings={},
-                        api_key_prefix=api_key_lookup_prefix(DEMO_API_KEY),
-                        api_key_hash=hash_api_key(DEMO_API_KEY))
+        tenant = Tenant(name="Acme Insurance", domain="acme.com", settings={})
         db.add(tenant)
+        await db.flush()
+        # In tenant_api_keys (not on the tenant row), so the key API lists it
+        # without moving it first.
+        db.add(TenantApiKey(tenant_id=tenant.id, name="demo-ingest-key",
+                            key_prefix=api_key_lookup_prefix(DEMO_API_KEY),
+                            key_hash=hash_api_key(DEMO_API_KEY),
+                            key_hint=DEMO_API_KEY[-4:]))
         await db.flush()
 
         now = datetime.now(timezone.utc)

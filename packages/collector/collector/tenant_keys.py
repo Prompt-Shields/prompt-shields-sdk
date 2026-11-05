@@ -10,9 +10,10 @@ Before this table a tenant had one key, on ``tenants.api_key_prefix`` /
 ``api_key_hash`` (still written by the demo seed and older fixtures). They
 keep working: auth checks this table first and then the tenant row. A
 legacy key is moved into this table, under the name ``legacy-ingest-key``
-and ``origin = 'legacy'``, by migration 022 and again by the first key API
-call for a tenant (``adopt_legacy_key``), so it can be listed, rotated and
-revoked like any other. Moving clears the tenant-row columns, so a revoked
+and ``origin = 'legacy'``, by migration 022, or for a key written to the
+tenant row later by the first key *write* for that tenant (issuing a key,
+``adopt_legacy_key``), so it can be listed, rotated and revoked like any
+other. Listing keys never writes: until then the list does not show it. Moving clears the tenant-row columns, so a revoked
 key cannot come back through the fallback. The key itself does not change.
 
 Validity

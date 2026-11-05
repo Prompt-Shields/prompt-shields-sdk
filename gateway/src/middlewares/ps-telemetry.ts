@@ -23,9 +23,17 @@ import { isMcpProxyPath } from '../mcp/paths';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 import { oidcTelemetryFields } from './psOidc/telemetry';
 import { callIdOf, FEEDBACK_PATH, setCallIdHeader } from './psFeedback';
+import { RESPONSE_HEADER_KEYS } from '../globals';
+import {
+  COST_SOURCE_PROVIDER_REPORTED,
+  costFields,
+  PricingUsage,
+} from './psPricing';
 
 // Set by psOidc (./psOidc/index.ts OIDC_IDENTITY_KEY).
 const OIDC_IDENTITY_KEY = 'psOidcIdentity';
+// Set by recordCredentialFingerprint (../utils/credentialFingerprint.ts).
+const CREDENTIAL_FINGERPRINT_KEY = 'psCredentialFingerprint';
 
 interface PSConfig {
   collectorUrl: string;
@@ -40,7 +48,8 @@ interface TelemetryEvent {
   tokens_out?: number;
   // Usage detail (#9), as the SDK reports it: cached, cache-write (and its
   // 1-hour subset) and reasoning counts, the provider's service tier, and a
-  // cost only when the provider reported one (cost_source says so).
+  // cost: the provider-reported one, else the SDK's table price (withCost);
+  // cost_source says which.
   tokens_cached?: number;
   tokens_cache_write?: number;
   tokens_cache_write_1h?: number;
@@ -57,9 +66,15 @@ interface TelemetryEvent {
   // Cost-aware routing (populated when ps-router made a decision)
   requested_model?: string;
   served_model?: string;
+  // gateway when ps-router made the decision (PRD 0001 §7.12).
+  route_mode?: string;
   route_group?: string;
   route_reason?: string;
   route_est_cost?: number;
+  // Sensitivity-aware routing (#18): the call's effective level and whether
+  // it was declared, the policy default, or raised by detected PII.
+  route_sensitivity_level?: string;
+  route_sensitivity_source?: string;
   // Exact-match cache (populated by emitCacheTelemetry)
   cache_status?: string;
   est_tokens_saved?: number;
@@ -79,6 +94,10 @@ interface TelemetryEvent {
   stream?: boolean;
   stream_truncated?: boolean;
   stream_cancelled?: boolean;
+  // Stable fingerprint of the upstream credential's identity (#76), only
+  // with PS_TELEMETRY_CREDENTIAL_FINGERPRINT=true; see
+  // utils/credentialFingerprint.ts. Never a key or token.
+  api_key_fingerprint?: string;
   // OIDC (PS_OIDC_ENABLED): the caller's pseudonymous subject and the name
   // of the gateway policy group that applied. See psOidc/telemetry.ts.
   user_id?: string;
@@ -93,6 +112,16 @@ interface TelemetryEvent {
   // returned as the X-PS-Call-Id response header. POST /v1/feedback names
   // the call by it.
   call_id?: string;
+  // The error class of each failed attempt, in order (PRD 0001 §7.12):
+  // empty when the first attempt succeeded. Classes only, never messages.
+  fallback_chain?: string[];
+}
+
+/** The error classes of the failed attempts, in order. */
+export function fallbackChainOf(attempts: AttemptRecord[]): string[] {
+  return attempts
+    .map((a) => a.error_class)
+    .filter((c): c is string => typeof c === 'string');
 }
 
 /** The API surface of a gateway request, from its path. */
@@ -199,8 +228,7 @@ export function usageTokens(body: any): {
   };
 }
 
-/** The SDK's `cost_source` for a cost the provider billed (pricing.py). */
-export const COST_SOURCE_PROVIDER_REPORTED = 'provider_reported';
+export { COST_SOURCE_PROVIDER_REPORTED };
 
 /**
  * Usage details of a non-streamed response body. The tier is top level on
@@ -244,9 +272,9 @@ export function withoutFilledZeros(details: UsageDetails): UsageDetails {
 
 /**
  * Event fields for usage details. Like the SDK's `add_usage_detail_fields`,
- * `cost_source` accompanies a cost only: the gateway prices nothing itself,
- * so a cost (and `cost_source: provider_reported`) is sent only when the
- * provider reported what it billed.
+ * `cost_source` accompanies a cost only. A cost the provider reported is
+ * sent here (`cost_source: provider_reported`); otherwise `withCost` prices
+ * the event from its usage once the served model is known.
  */
 export function usageDetailFields(
   details: UsageDetails | undefined
@@ -255,10 +283,38 @@ export function usageDetailFields(
   const { provider_cost, ...rest } = details;
   const out: Partial<TelemetryEvent> = { ...rest };
   if (provider_cost !== undefined) {
-    out.cost = provider_cost;
-    out.cost_source = COST_SOURCE_PROVIDER_REPORTED;
+    Object.assign(out, costFields('', undefined, undefined, { provider_cost }));
   }
   return out;
+}
+
+/**
+ * `event` with its `cost` and `cost_source: pricing_table` (#71), priced as
+ * the SDK prices the same usage (psPricing.ts, checked against the shared
+ * cost vectors): at the served model, then the served id without its
+ * version date, then the requested model. A provider-reported cost is kept;
+ * a call with no price stays without a cost (unmetered, not zero).
+ */
+export function withCost(
+  event: TelemetryEvent,
+  servedModel?: string
+): TelemetryEvent {
+  if (event.cost !== undefined) return event;
+  const usage: PricingUsage = {
+    tokens_in: event.tokens_in,
+    tokens_out: event.tokens_out,
+    tokens_cached: event.tokens_cached,
+    tokens_cache_write: event.tokens_cache_write,
+    tokens_cache_write_1h: event.tokens_cache_write_1h,
+    service_tier: event.service_tier,
+    usage_units: event.usage_units,
+    usage_unit_type: event.usage_unit_type,
+  };
+  const model = event.model === 'unknown' ? undefined : event.model;
+  return {
+    ...event,
+    ...costFields(event.vendor, model, servedModel, usage),
+  };
 }
 
 /**
@@ -408,12 +464,19 @@ export function psTelemetryMiddleware() {
         // The provider echoes the concrete model it ran; prefer that as served.
         event.served_model = response.body?.model || route.servedModel;
         event.route_group = route.group;
+        event.route_mode = 'gateway';
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
+        if (route.sensitivityLevel)
+          event.route_sensitivity_level = route.sensitivityLevel;
+        if (route.sensitivitySource)
+          event.route_sensitivity_source = route.sensitivitySource;
       }
 
       // Fire-and-forget
-      sendTelemetry(event).catch(() => {});
+      sendTelemetry(
+        withCost(event, response.body?.model || route?.servedModel)
+      ).catch(() => {});
 
       return response;
     },
@@ -524,12 +587,22 @@ export function psTelemetry() {
         call_id: callId,
       };
 
+      const fingerprint = c.get(CREDENTIAL_FINGERPRINT_KEY);
+      if (typeof fingerprint === 'string' && fingerprint) {
+        event.api_key_fingerprint = fingerprint;
+      }
+
       if (route) {
         event.requested_model = route.requestedModel;
         event.served_model = responseBody?.model || route.servedModel;
         event.route_group = route.group;
+        event.route_mode = 'gateway';
         event.route_reason = route.reason;
         event.route_est_cost = route.estCost;
+        if (route.sensitivityLevel)
+          event.route_sensitivity_level = route.sensitivityLevel;
+        if (route.sensitivitySource)
+          event.route_sensitivity_source = route.sensitivitySource;
       }
 
       const attempts = attemptsOf(c);
@@ -538,6 +611,7 @@ export function psTelemetry() {
         event.trace_id = traceIdOf(headers['x-portkey-trace-id']);
         event.retry_count = Math.max(attemptCountOf(c), attempts.length) - 1;
         event.attempts = attempts.map((a) => ({ ...a }));
+        event.fallback_chain = fallbackChainOf(attempts);
       }
 
       // A streamed response carries its usage at the end of the stream, so
@@ -551,16 +625,32 @@ export function psTelemetry() {
       } catch {
         /* no execution context */
       }
+      // The model that ran prices the call (SDK: served, then requested).
+      // A response served from the gateway cache cost nothing upstream.
+      const served = responseBody?.model || route?.servedModel;
+      const cacheStatus =
+        c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
+      const priced = (e: TelemetryEvent, m?: string) =>
+        cacheStatus.endsWith('HIT') ? e : withCost(e, m);
       const stream = observeStream(c);
       if (!stream) {
-        waitUntil(sendTelemetry(event).catch(() => {}));
+        waitUntil(sendTelemetry(priced(event, served)).catch(() => {}));
         return;
       }
       waitUntil(
         stream
           .then((summary) =>
             sendTelemetry(
-              withStreamSummary(event, summary, !!route, !adapted, zeroFilled)
+              priced(
+                withStreamSummary(
+                  event,
+                  summary,
+                  !!route,
+                  !adapted,
+                  zeroFilled
+                ),
+                summary.model || served
+              )
             )
           )
           .catch(() => {})

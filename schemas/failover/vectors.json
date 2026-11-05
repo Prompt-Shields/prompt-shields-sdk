@@ -1,0 +1,311 @@
+{
+  "description": "Golden vectors for the failover engine and the per-provider circuit breaker (PRD 0001 §7.5, #21). Shared data only: the Python SDK (packages/sdk/prompt_shields/failover.py, tests/test_failover_vectors.py) and the gateway (gateway/src/middlewares/psFailover, vectors.test.ts) each run every vector with their own code. Times are in seconds.",
+  "classify": [
+    {
+      "id": "rate-limited",
+      "input": { "status": 429 },
+      "expected": { "error_class": "rate_limited", "action": "retry_after", "trips_breaker": true }
+    },
+    {
+      "id": "server-error",
+      "input": { "status": 503 },
+      "expected": { "error_class": "server_error", "action": "next", "trips_breaker": true }
+    },
+    {
+      "id": "overloaded-529",
+      "input": { "status": 529 },
+      "expected": { "error_class": "server_error", "action": "next", "trips_breaker": true }
+    },
+    {
+      "id": "gateway-timeout",
+      "input": { "status": 504 },
+      "expected": { "error_class": "timeout", "action": "next", "trips_breaker": true }
+    },
+    {
+      "id": "request-timeout-408",
+      "input": { "status": 408 },
+      "expected": { "error_class": "timeout", "action": "next", "trips_breaker": true }
+    },
+    {
+      "id": "client-timeout",
+      "input": { "kind": "timeout" },
+      "expected": { "error_class": "timeout", "action": "next", "trips_breaker": true }
+    },
+    {
+      "id": "connection-error",
+      "input": { "kind": "network" },
+      "expected": { "error_class": "network_error", "action": "next", "trips_breaker": true }
+    },
+    {
+      "id": "context-length-code",
+      "input": { "status": 400, "code": "context_length_exceeded" },
+      "expected": { "error_class": "context_length_exceeded", "action": "next_larger_context", "trips_breaker": false }
+    },
+    {
+      "id": "context-length-message",
+      "input": { "status": 400, "message": "prompt is too long: 210000 tokens > 200000 maximum" },
+      "expected": { "error_class": "context_length_exceeded", "action": "next_larger_context", "trips_breaker": false }
+    },
+    {
+      "id": "payload-too-large-413",
+      "input": { "status": 413 },
+      "expected": { "error_class": "context_length_exceeded", "action": "next_larger_context", "trips_breaker": false }
+    },
+    {
+      "id": "bad-request",
+      "input": { "status": 400 },
+      "expected": { "error_class": "client_error", "action": "raise", "trips_breaker": false }
+    },
+    {
+      "id": "unauthorized",
+      "input": { "status": 401 },
+      "expected": { "error_class": "client_error", "action": "raise", "trips_breaker": false }
+    },
+    {
+      "id": "forbidden",
+      "input": { "status": 403 },
+      "expected": { "error_class": "client_error", "action": "raise", "trips_breaker": false }
+    },
+    {
+      "id": "content-filter-code",
+      "description": "Azure OpenAI answers a filtered prompt with 400 and code content_filter. Falling back to a laxer model would evade the policy (P7).",
+      "input": { "status": 400, "code": "content_filter" },
+      "expected": { "error_class": "content_filter", "action": "raise", "trips_breaker": false }
+    },
+    {
+      "id": "content-policy-violation-code",
+      "input": { "status": 400, "code": "content_policy_violation" },
+      "expected": { "error_class": "content_filter", "action": "raise", "trips_breaker": false }
+    },
+    {
+      "id": "content-filter-message",
+      "input": { "status": 400, "message": "The response was filtered due to the prompt triggering content management policy." },
+      "expected": { "error_class": "content_filter", "action": "raise", "trips_breaker": false }
+    },
+    {
+      "id": "content-filter-wins-over-context",
+      "input": { "status": 400, "code": "content_filter", "message": "maximum context length" },
+      "expected": { "error_class": "content_filter", "action": "raise", "trips_breaker": false }
+    },
+    {
+      "id": "stream-interrupted",
+      "description": "The stream had already emitted tokens: never retried, but it counts against the provider.",
+      "input": { "kind": "stream_interrupted" },
+      "expected": { "error_class": "stream_interrupted", "action": "raise", "trips_breaker": true }
+    },
+    {
+      "id": "unknown-error",
+      "description": "An error with no status and no known kind is a bug or a caller error, not an outage: raise.",
+      "input": {},
+      "expected": { "error_class": "unknown_error", "action": "raise", "trips_breaker": false }
+    }
+  ],
+  "breaker": [
+    {
+      "id": "opens-after-threshold",
+      "config": { "failure_threshold": 3, "open_seconds": 30 },
+      "steps": [
+        { "t": 0, "op": "failure", "state": "closed" },
+        { "t": 1, "op": "failure", "state": "closed" },
+        { "t": 2, "op": "failure", "state": "open" },
+        { "t": 3, "op": "allow", "allowed": false, "state": "open" }
+      ]
+    },
+    {
+      "id": "success-resets-count",
+      "config": { "failure_threshold": 2, "open_seconds": 30 },
+      "steps": [
+        { "t": 0, "op": "failure", "state": "closed" },
+        { "t": 1, "op": "success", "state": "closed" },
+        { "t": 2, "op": "failure", "state": "closed" },
+        { "t": 3, "op": "failure", "state": "open" }
+      ]
+    },
+    {
+      "id": "half-open-probe-closes",
+      "config": { "failure_threshold": 1, "open_seconds": 10 },
+      "steps": [
+        { "t": 0, "op": "failure", "state": "open" },
+        { "t": 9, "op": "allow", "allowed": false, "state": "open" },
+        { "t": 10, "op": "allow", "allowed": true, "state": "half_open" },
+        { "t": 10, "op": "allow", "allowed": false, "state": "half_open" },
+        { "t": 11, "op": "success", "state": "closed" },
+        { "t": 11, "op": "allow", "allowed": true, "state": "closed" }
+      ],
+      "transitions": ["open", "half_open", "closed"]
+    },
+    {
+      "id": "half-open-probe-reopens",
+      "config": { "failure_threshold": 1, "open_seconds": 10 },
+      "steps": [
+        { "t": 0, "op": "failure", "state": "open" },
+        { "t": 10, "op": "allow", "allowed": true, "state": "half_open" },
+        { "t": 11, "op": "failure", "state": "open" },
+        { "t": 20, "op": "allow", "allowed": false, "state": "open" },
+        { "t": 21, "op": "allow", "allowed": true, "state": "half_open" }
+      ],
+      "transitions": ["open", "half_open", "open", "half_open"]
+    },
+    {
+      "id": "half-open-release-frees-probe",
+      "description": "A probe that ends without a verdict (a 400, a content filter) frees its slot without closing or reopening.",
+      "config": { "failure_threshold": 1, "open_seconds": 10 },
+      "steps": [
+        { "t": 0, "op": "failure", "state": "open" },
+        { "t": 10, "op": "allow", "allowed": true, "state": "half_open" },
+        { "t": 10, "op": "release", "state": "half_open" },
+        { "t": 10, "op": "allow", "allowed": true, "state": "half_open" }
+      ]
+    },
+    {
+      "id": "two-probes",
+      "config": { "failure_threshold": 1, "open_seconds": 5, "half_open_max_probes": 2 },
+      "steps": [
+        { "t": 0, "op": "failure", "state": "open" },
+        { "t": 5, "op": "allow", "allowed": true, "state": "half_open" },
+        { "t": 5, "op": "allow", "allowed": true, "state": "half_open" },
+        { "t": 5, "op": "allow", "allowed": false, "state": "half_open" }
+      ]
+    }
+  ],
+  "failover": [
+    {
+      "id": "first-candidate-serves",
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": ["ok"] },
+      "expected": { "served": "berget", "fallback_chain": [], "attempts": ["berget"] }
+    },
+    {
+      "id": "5xx-moves-to-next",
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 503 }], "mistral-eu": ["ok"] },
+      "expected": { "served": "mistral-eu", "fallback_chain": ["server_error"], "attempts": ["berget", "mistral-eu"] }
+    },
+    {
+      "id": "timeout-moves-to-next",
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "kind": "timeout" }], "mistral-eu": ["ok"] },
+      "expected": { "served": "mistral-eu", "fallback_chain": ["timeout"], "attempts": ["berget", "mistral-eu"] }
+    },
+    {
+      "id": "429-waits-then-retries-same",
+      "config": { "max_wait": 5 },
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 429, "retry_after": 2 }, "ok"] },
+      "expected": { "served": "berget", "fallback_chain": ["rate_limited"], "attempts": ["berget", "berget"], "waits": [2] }
+    },
+    {
+      "id": "429-retry-after-over-max-wait-moves-on",
+      "config": { "max_wait": 5 },
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 429, "retry_after": 60 }], "mistral-eu": ["ok"] },
+      "expected": { "served": "mistral-eu", "fallback_chain": ["rate_limited"], "attempts": ["berget", "mistral-eu"], "waits": [] }
+    },
+    {
+      "id": "429-without-retry-after-moves-on",
+      "config": { "max_wait": 5 },
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 429 }], "mistral-eu": ["ok"] },
+      "expected": { "served": "mistral-eu", "fallback_chain": ["rate_limited"], "attempts": ["berget", "mistral-eu"], "waits": [] }
+    },
+    {
+      "id": "429-retried-once-then-next",
+      "config": { "max_wait": 5 },
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 429, "retry_after": 1 }, { "status": 429, "retry_after": 1 }], "mistral-eu": ["ok"] },
+      "expected": { "served": "mistral-eu", "fallback_chain": ["rate_limited", "rate_limited"], "attempts": ["berget", "berget", "mistral-eu"], "waits": [1] }
+    },
+    {
+      "id": "context-length-skips-smaller-windows",
+      "candidates": [
+        { "provider": "berget", "model": "small", "context_window": 32000 },
+        { "provider": "regolo", "model": "also-small", "context_window": 32000 },
+        { "provider": "unknown-window", "model": "x" },
+        { "provider": "mistral-eu", "model": "large", "context_window": 128000 }
+      ],
+      "outcomes": { "berget": [{ "status": 400, "code": "context_length_exceeded" }], "mistral-eu": ["ok"] },
+      "expected": {
+        "served": "mistral-eu",
+        "fallback_chain": ["context_length_exceeded"],
+        "attempts": ["berget", "mistral-eu"],
+        "skipped": [["regolo", "context_window"], ["unknown-window", "context_window"]]
+      }
+    },
+    {
+      "id": "context-length-no-larger-window-fails-closed",
+      "candidates": [
+        { "provider": "berget", "model": "small", "context_window": 32000 },
+        { "provider": "regolo", "model": "also-small", "context_window": 16000 }
+      ],
+      "outcomes": { "berget": [{ "status": 400, "code": "context_length_exceeded" }] },
+      "expected": {
+        "error": "no_compliant_candidate",
+        "fallback_chain": ["context_length_exceeded"],
+        "attempts": ["berget"],
+        "skipped": [["regolo", "context_window"]]
+      }
+    },
+    {
+      "id": "400-raises-without-fallback",
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 400 }] },
+      "expected": { "error": "raise", "error_class": "client_error", "fallback_chain": ["client_error"], "attempts": ["berget"] }
+    },
+    {
+      "id": "401-raises-without-fallback",
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 401 }] },
+      "expected": { "error": "raise", "error_class": "client_error", "fallback_chain": ["client_error"], "attempts": ["berget"] }
+    },
+    {
+      "id": "content-filter-raises-without-fallback",
+      "candidates": [{ "provider": "azure-eu", "model": "gpt-4o" }, { "provider": "berget", "model": "llama-70b" }],
+      "outcomes": { "azure-eu": [{ "status": 400, "code": "content_filter" }] },
+      "expected": { "error": "raise", "error_class": "content_filter", "fallback_chain": ["content_filter"], "attempts": ["azure-eu"] }
+    },
+    {
+      "id": "all-candidates-down-fails-closed",
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "berget": [{ "status": 502 }], "mistral-eu": [{ "kind": "network" }] },
+      "expected": { "error": "no_compliant_candidate", "fallback_chain": ["server_error", "network_error"], "attempts": ["berget", "mistral-eu"] }
+    },
+    {
+      "id": "no-candidates-fails-closed",
+      "candidates": [],
+      "outcomes": {},
+      "expected": { "error": "no_compliant_candidate", "fallback_chain": [], "attempts": [] }
+    },
+    {
+      "id": "open-breaker-is-skipped",
+      "open": ["berget"],
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": { "mistral-eu": ["ok"] },
+      "expected": { "served": "mistral-eu", "fallback_chain": [], "attempts": ["mistral-eu"], "skipped": [["berget", "circuit_open"]] }
+    },
+    {
+      "id": "every-breaker-open-fails-closed",
+      "open": ["berget", "mistral-eu"],
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "mistral-eu", "model": "mistral-large" }],
+      "outcomes": {},
+      "expected": {
+        "error": "no_compliant_candidate",
+        "fallback_chain": [],
+        "attempts": [],
+        "skipped": [["berget", "circuit_open"], ["mistral-eu", "circuit_open"]]
+      }
+    },
+    {
+      "id": "allow-guard-skips-non-compliant",
+      "description": "Defence in depth: a candidate the caller's compliance re-check rejects is never called, even as a fallback.",
+      "deny": ["us-provider"],
+      "candidates": [{ "provider": "berget", "model": "llama-70b" }, { "provider": "us-provider", "model": "gpt-4o" }],
+      "outcomes": { "berget": [{ "status": 503 }] },
+      "expected": {
+        "error": "no_compliant_candidate",
+        "fallback_chain": ["server_error"],
+        "attempts": ["berget"],
+        "skipped": [["us-provider", "non_compliant"]]
+      }
+    }
+  ]
+}

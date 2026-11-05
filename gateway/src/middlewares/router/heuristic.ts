@@ -23,6 +23,15 @@ function demandsJsonSchema(messages: any[]): boolean {
   );
 }
 
+/** The heuristic's difficulty call: long, code or schema-shaped prompts. */
+export function isComplex(req: RouteRequest): boolean {
+  return (
+    req.approxInputTokens > COMPLEX_TOKEN_THRESHOLD ||
+    hasCodeFence(req.messages) ||
+    demandsJsonSchema(req.messages)
+  );
+}
+
 /**
  * Cheap, explainable, <1ms difficulty router. Simple prompts go to the cheap
  * group; long / code / schema-shaped prompts go to frontier. A max_cost ceiling
@@ -34,10 +43,7 @@ function demandsJsonSchema(messages: any[]): boolean {
  */
 export class HeuristicStrategy implements RouterStrategy {
   async route(req: RouteRequest, policy: RoutePolicy): Promise<RouteDecision> {
-    const complex =
-      req.approxInputTokens > COMPLEX_TOKEN_THRESHOLD ||
-      hasCodeFence(req.messages) ||
-      demandsJsonSchema(req.messages);
+    const complex = isComplex(req);
 
     const group = complex ? 'frontier' : 'cheap';
     const picked = pickCheapestIn(groupTiers(policy, group) || [], req);
