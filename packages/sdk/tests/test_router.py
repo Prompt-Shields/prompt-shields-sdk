@@ -22,6 +22,7 @@ from prompt_shields import (
     RouterError,
     ShieldsClient,
     ShieldsRouter,
+    last_call_id,
 )
 from prompt_shields.route_policy import resolve_policy_route
 
@@ -122,6 +123,11 @@ def _wire(router, is_async=False):
     return events, upstreams
 
 
+def event_call_id(events):
+    (event,) = events
+    return event["call_id"]
+
+
 def _router(**kwargs) -> ShieldsRouter:
     kwargs.setdefault("ps_api_key", "ps-test")
     kwargs.setdefault("providers", NORDIC_PROVIDERS)
@@ -211,6 +217,8 @@ def test_routes_and_dispatches_to_chosen_provider():
     assert all(not u.calls for n, u in upstreams.items() if n != "scaleway")
     # No X-PS-* headers go to a provider directly.
     assert "extra_headers" not in upstreams["scaleway"].calls[0]
+    # The routed call has a call_id (#43), on its event and the raw response.
+    assert event_call_id(events) == resp.raw.ps_call_id == last_call_id()
 
     (event,) = events
     assert event["requested_model"] == "auto"

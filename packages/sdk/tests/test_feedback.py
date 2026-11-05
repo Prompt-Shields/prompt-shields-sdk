@@ -11,6 +11,7 @@ from prompt_shields import (
     FEEDBACK_REASONS,
     AsyncShieldsClient,
     FeedbackError,
+    RouteHint,
     ShieldsClient,
     last_call_id,
     send_feedback,
@@ -51,13 +52,23 @@ def test_every_call_gets_a_call_id_on_event_header_and_response():
 
     assert uuid.UUID(first.ps_call_id)
     assert event["call_id"] == first.ps_call_id
-    assert kwargs["extra_headers"]["X-PS-Call-Id"] == first.ps_call_id
+    # Straight to the provider: no X-PS-* header at all.
+    assert "extra_headers" not in kwargs
     assert last_call_id() == first.ps_call_id
 
     second = client.chat.completions.create(
         model="gpt-4o", messages=[{"role": "user", "content": "again"}])
     assert second.ps_call_id != first.ps_call_id
     assert _sent_event(client)["call_id"] == second.ps_call_id
+
+
+def test_call_id_header_goes_with_route_hints():
+    client = _client()
+    resp = client.chat.completions.create(
+        model="auto", messages=[], route=RouteHint(quality="draft"))
+    _, kwargs = client._upstream.chat.completions.create.call_args
+    assert kwargs["extra_headers"]["X-PS-Call-Id"] == resp.ps_call_id
+    assert kwargs["extra_headers"]["X-PS-Quality"] == "draft"
 
 
 def test_caller_can_supply_the_call_id():
@@ -111,9 +122,7 @@ async def test_async_client_call_id():
     client.chat.completions._send = AsyncMock()
     resp = await client.chat.completions.create(model="gpt-4o", messages=[])
     event = client.chat.completions._send.call_args[0][0]
-    _, kwargs = client._upstream.chat.completions.create.call_args
     assert event["call_id"] == resp.ps_call_id
-    assert kwargs["extra_headers"]["X-PS-Call-Id"] == resp.ps_call_id
     assert last_call_id() == resp.ps_call_id
 
 

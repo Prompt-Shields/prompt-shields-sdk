@@ -5,8 +5,10 @@ generated before the call (or the caller's own, from
 ``ps_metadata={"call_id": ...}``). It is
 
   - on the call's telemetry event (``call_id``),
-  - sent upstream as the ``X-PS-Call-Id`` header, so a Prompt Shields
-    gateway in front of the provider reports the call under the same id,
+  - sent as the ``X-PS-Call-Id`` header on calls that already carry
+    ``X-PS-*`` headers (route hints: the call goes to a Prompt Shields
+    gateway), so the gateway reports the call under the same id; a call
+    straight to a provider gets no ``X-PS-*`` header,
   - returned to the caller: ``response.ps_call_id`` (a plain attribute, not
     part of the response's fields or its ``model_dump()``), the same
     attribute on a wrapped stream, and ``last_call_id()`` for the current
@@ -105,9 +107,13 @@ def attach_call_id(obj: Any, call_id: str) -> Any:
 
 
 def call_id_headers(kwargs: dict, call_id: str) -> None:
-    """Add ``X-PS-Call-Id`` to a provider call's ``extra_headers``."""
-    kwargs["extra_headers"] = {**kwargs.get("extra_headers", {}),
-                               CALL_ID_HEADER: call_id}
+    """Add ``X-PS-Call-Id`` to a call's ``extra_headers`` when it already
+    carries ``X-PS-*`` headers (route hints or gateway context: the call goes
+    to a Prompt Shields gateway). A call straight to a provider gets no
+    ``X-PS-*`` header."""
+    headers = kwargs.get("extra_headers") or {}
+    if any(str(k).lower().startswith("x-ps-") for k in headers):
+        kwargs["extra_headers"] = {**headers, CALL_ID_HEADER: call_id}
 
 
 def build_feedback(call_id: str, score: float | bool, reason: str | None = None,
