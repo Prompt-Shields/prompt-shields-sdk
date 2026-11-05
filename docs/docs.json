@@ -96,6 +96,8 @@
         "api-reference/assets/get-data-flows",
         "api-reference/assets/get-risks",
         "api-reference/assets/get-usage-summary",
+        "api-reference/assets/get-usage-savings",
+        "api-reference/assets/get-usage-sovereign-share",
         "api-reference/assets/get-telemetry-coverage"
       ]
     },

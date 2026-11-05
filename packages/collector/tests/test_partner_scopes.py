@@ -38,6 +38,8 @@ ROUTES = [
     (f"/partner/v1/assets/{ASSET}/risks", "risks:read"),
     (f"/partner/v1/assets/{ASSET}/usage-summary", "usage:read"),
     ("/partner/v1/telemetry/coverage", "usage:read"),
+    ("/partner/v1/usage/savings", "usage:read"),
+    ("/partner/v1/usage/sovereign-share", "usage:read"),
     ("/partner/v1/changes?since=2026-01-01T00:00:00", "changes:read"),
     ("/partner/v1/export", "export:read"),
 ]

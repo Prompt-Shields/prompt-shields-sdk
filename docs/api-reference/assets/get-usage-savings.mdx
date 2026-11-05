@@ -1,0 +1,15 @@
+---
+title: Get Routing Savings
+openapi: get /partner/v1/usage/savings
+---
+
+Realised savings compare what each call cost with what it would have cost on
+its baseline model (`counterfactual_cost`, reported with `baseline_id` by the
+SDK router or the gateway).
+
+<Note>
+Only calls that reported **both** `cost` and `counterfactual_cost` count towards
+`savings_usd`. A call without a counterfactual is not measured: it is counted in
+`total_requests` and `estimated_cost_usd`, never as zero savings. Read
+`counterfactual_coverage` to see what share of requests the savings figure covers.
+</Note>
