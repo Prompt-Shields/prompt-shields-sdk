@@ -105,6 +105,7 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "avg_latency_ms": 200,
         "savings_usd": 0.02,
         "fallback_rate": 0.5,
+        "sovereign_share": None,
         "period": "7d",
     }
     assert r30.json() == {
@@ -120,6 +121,7 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         # 0.02 saved inside 7d, then a routed call that cost 0.5 more.
         "savings_usd": -0.48,
         "fallback_rate": 0.5,
+        "sovereign_share": None,
         "period": "30d",
     }
     b90 = r90.json()

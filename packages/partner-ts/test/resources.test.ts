@@ -294,6 +294,57 @@ describe('sync', () => {
   });
 });
 
+describe('usage', () => {
+  it('reads savings with group_by, camelCased', async () => {
+    const totals = {
+      total_requests: 3,
+      estimated_cost_usd: 0.112,
+      requests_with_counterfactual: 2,
+      counterfactual_coverage: 0.6667,
+      compared_cost_usd: 0.012,
+      counterfactual_cost_usd: 0.04,
+      savings_usd: 0.028,
+      savings_rate: 0.7,
+    };
+    const m = mockFetch(
+      json({ period: '7d', group_by: 'use_case', total: totals, data: [{ key: 'support', ...totals }] }),
+    );
+    const res = await client(m.fetch).usage.savings({ period: '7d', groupBy: 'use_case' });
+    const url = new URL(m.calls[0].url);
+    expect(url.pathname).toBe('/partner/v1/usage/savings');
+    expect(url.searchParams.get('group_by')).toBe('use_case');
+    expect(url.searchParams.get('period')).toBe('7d');
+    expect(res.groupBy).toBe('use_case');
+    expect(res.total.requestsWithCounterfactual).toBe(2);
+    expect(res.data[0]).toMatchObject({ key: 'support', savingsUsd: 0.028, counterfactualCoverage: 0.6667 });
+  });
+
+  it('reads the sovereign share per sensitivity level', async () => {
+    const bucket = {
+      total_requests: 2,
+      requests_with_jurisdiction: 2,
+      sovereign_requests: 1,
+      request_share: 0.5,
+      cost_with_jurisdiction_usd: 0.012,
+      sovereign_cost_usd: 0.01,
+      spend_share: 0.8333,
+    };
+    const m = mockFetch(
+      json({
+        period: '30d',
+        sovereign_jurisdictions: ['EEA', 'SE'],
+        total: bucket,
+        by_sensitivity_level: [{ sensitivity_level: 'confidential', ...bucket }],
+      }),
+    );
+    const res = await client(m.fetch).usage.sovereignShare();
+    expect(new URL(m.calls[0].url).pathname).toBe('/partner/v1/usage/sovereign-share');
+    expect(res.sovereignJurisdictions).toEqual(['EEA', 'SE']);
+    expect(res.bySensitivityLevel[0]).toMatchObject({ sensitivityLevel: 'confidential', spendShare: 0.8333 });
+    expect(res.total.requestShare).toBe(0.5);
+  });
+});
+
 describe('telemetry', () => {
   it('reads coverage per source, camelCased', async () => {
     const m = mockFetch(

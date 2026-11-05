@@ -225,6 +225,8 @@ class KeyCandidate:
     stored_hash: str
     live: bool
     tenant_disabled: bool
+    # tenant_api_keys.id; None for a legacy key on the tenant row.
+    key_id: UUID | None = None
 
 
 async def find_candidate(db: AsyncSession, plaintext: str) -> KeyCandidate | None:
@@ -250,7 +252,7 @@ async def find_candidate(db: AsyncSession, plaintext: str) -> KeyCandidate | Non
         active = key_status(key, now) == "active"
         if key.key_prefix == prefix:
             return KeyCandidate(
-                key.tenant_id, key.key_hash, active, disabled_at is not None
+                key.tenant_id, key.key_hash, active, disabled_at is not None, key.id
             )
         in_grace = bool(key.previous_expires_at and key.previous_expires_at > now)
         return KeyCandidate(
@@ -258,6 +260,7 @@ async def find_candidate(db: AsyncSession, plaintext: str) -> KeyCandidate | Non
             key.previous_key_hash or "",
             active and in_grace,
             disabled_at is not None,
+            key.id,
         )
 
     legacy = (

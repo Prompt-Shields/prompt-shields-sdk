@@ -52,6 +52,15 @@ flood the routing learner. `0` turns either off. The gateway's
 `POST /v1/feedback` adds a per-user limit before forwarding
 (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE` on the gateway, default 60).
 
+## Failed authentication limit
+
+Each failed tenant key or admin token check from one client address (an IPv6
+address counts by its /64) is counted per minute. Past
+`PS_AUTH_FAILURE_LIMIT_PER_MINUTE` (default 60, `0` turns it off), further
+requests from that address with an unknown, revoked or expired key or token
+get `429` with `Retry-After` until the minute ends, instead of `401`. A valid
+key or token is never affected.
+
 <Info>
   The limiter is in-process, so each collector worker counts separately.
   Running N workers allows up to N times the configured limit.

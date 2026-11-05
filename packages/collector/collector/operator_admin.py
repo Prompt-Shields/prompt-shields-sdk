@@ -40,7 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 
-from collector import audit_trail, retention, rls, tenant_keys
+from collector import audit_trail, auth_cache, retention, rls, tenant_keys
 from collector.admin_auth import (
     ADMIN_SCOPES,
     TOKEN_WARNING,
@@ -181,6 +181,7 @@ async def erase(
     if confirm.strip().lower() != str(tenant_id):
         raise _problem(400, "Bad Request", "confirm must equal the tenant id")
     result = await retention.erase_tenant(request.state.db, tenant_id, actor=actor)
+    auth_cache.get_key_cache().invalidate_tenant(tenant_id)
     return asdict(result)
 
 
@@ -395,6 +396,8 @@ async def update_tenant(
     if body.disabled is not None and body.disabled != (tenant.disabled_at is not None):
         tenant.disabled_at = datetime.now(UTC) if body.disabled else None
         changed.append("disabled")
+        if body.disabled:
+            auth_cache.get_key_cache().invalidate_tenant(tenant.id)
     if changed:
         await add_audit(
             request,

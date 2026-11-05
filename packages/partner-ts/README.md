@@ -24,6 +24,8 @@ for await (const asset of client.assets.list({ limit: 200 })) {
 | `client.assets.attestations(id, { field, limit })` | `GET /partner/v1/assets/{id}/attestations` |
 | `client.assets.attest(id, { field, state, attestedBy, comment })` | `POST /partner/v1/assets/{id}/attestations` (`attestations:write`) |
 | `client.assets.usageSummary(id, { period })` | `GET /partner/v1/assets/{id}/usage-summary` |
+| `client.usage.savings({ period, groupBy })` | `GET /partner/v1/usage/savings` (realised savings vs. counterfactual, by day/week/month, asset, use case or business unit) |
+| `client.usage.sovereignShare({ period })` | `GET /partner/v1/usage/sovereign-share` (share of calls and spend served in the EEA, per sensitivity level) |
 | `client.telemetry.coverage()` | `GET /partner/v1/telemetry/coverage` (coverage per source: sdk, gateway, otel, kong) |
 | `client.vendors.list()` / `models.list()` / `businessUnits.list()` | `GET /partner/v1/vendors`, `/models`, `/business-units` |
 | `client.changes.list({ since })` / `listPage(...)` | `GET /partner/v1/changes` |
