@@ -74,7 +74,8 @@
         "guides/observability",
         "guides/gateway-oidc",
         "guides/audit-trail",
-        "guides/model-catalog"
+        "guides/model-catalog",
+        "guides/routing"
       ]
     },
     {

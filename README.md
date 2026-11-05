@@ -235,7 +235,15 @@ Most READMEs stop at the feature list. This one is for people who have to sign o
 
 This is a discovery and inventory tool. It is not a control, and the statements below are the boundary of what it can be relied upon for.
 
-**It does not block anything.** No prompt, response or tool call is ever filtered, redacted, rewritten, or refused. Every call proceeds exactly as it would without Prompt Shields; the only change is that a record is written. The one exception is the model name, and only if you opt in: with `PS_ROUTER_ENABLED=true` the gateway may swap the requested model for a cheaper one. Despite the product name, there is no prompt-injection, jailbreak, or unsafe-output defence anywhere in this repository.
+**It does not block anything unless you opt in.** By default no prompt, response or tool call is filtered, redacted, rewritten, or refused. Every call proceeds exactly as it would without Prompt Shields; the only change is that a record is written. The opt-in exceptions are routing and the gateway's access policies. With routing (`ShieldsRouter` in the SDK, or `PS_ROUTER_ENABLED=true` on the gateway), the model name may be swapped, and a call that no model allowed by the route policy can serve is refused before anything is sent. The gateway's OIDC and MCP policies refuse what they do not allow. Despite the product name, there is no prompt-injection, jailbreak, or unsafe-output defence anywhere in this repository.
+
+**Routing enforces only what its policy says, and only where it runs.** See the [routing guide](docs/guides/routing.mdx) for details.
+- The sensitivity level of an undeclared call comes from the policy's `unclassified_default` and the PII detector below, which misses names, addresses and most free-text identifiers.
+- Sovereignty facts (`jurisdiction`, `zdr`, `us_cloud_act_exposure`) are claims made by the policy author. Nothing verifies them. A missing fact fails closed, and in the model catalog `null` means unverified, so leave it out of a policy tier rather than guessing.
+- There is no failover yet (#21). The failover engine and circuit breaker exist but are not wired in, so a `ShieldsRouter` call makes one attempt, and a provider outage surfaces as the provider's error even when another allowed model exists.
+- In local mode, `ShieldsRouter` refuses `stream=True`, and tool calls cannot be routed to Anthropic. Both raise `RouterError` rather than degrading silently.
+- The gateway runs its built-in default policy, which has no sensitivity or data rules. Its data-policy stages only run when a route policy is passed to `psRouter()` in code; there is no setting for a policy file yet.
+- Calls that do not go through the router are neither routed nor checked.
 
 **PII detection is a signal, not a data loss prevention control.** It is regular-expression and keyword matching over prompt text, run locally, and it is wrong in both directions. `10.2.14.3` in a release note is reported as `ip_address`; a sixteen-digit order number is reported as both `credit_card` and `phone`; `Jane Doe, 14 Rue Lafayette, Paris` is reported as nothing at all. Names, postal addresses, free-text identifiers, and anything in a language or format not covered by the patterns are missed. Treat the output as a hint about where to look, never as evidence that a payload was clean.
 
