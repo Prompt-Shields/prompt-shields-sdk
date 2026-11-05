@@ -1,14 +1,26 @@
 # AI bill teardown — customer report template
 
-Copy this file for each teardown and replace every `{{placeholder}}`. Methodology:
+`ps-teardown run` writes this report (Markdown, HTML and JSON) with every computed field
+filled in ([cli.md](cli.md)):
+
+```
+ps-eval --records calls.jsonl --route-policy policy.json --candidate … --mode live \
+  --allow-prompt-reexecution --max-spend-usd 50 --out-json eval.json     # optional, #14
+ps-teardown run usage.json events.jsonl --key-map key-map.json \
+  --policy policy.json --eval-results eval.json --out-dir report/
+```
+
+Fields only a person can fill (customer name, consent, invoice reconciliation, the
+short readings, recommendations, run-specific limits) keep their `{{placeholder}}`. For a
+by-hand teardown, copy this file and replace every placeholder. Methodology:
 [methodology.md](methodology.md). Section numbers like "M§4" point to it.
 
 Rules for filling it in:
 
-- A section that depends on a step that is not built yet stays in the report, with the
-  line *"Not measured in this teardown — pending #N."* It is never filled in with an
-  estimate. Today that means #12 (cost-only CLI), #13 (policy replay and sensitivity
-  mix) and #14 (quality parity); see M§1.
+- A section whose input the run did not have stays in the report, with the line
+  *"Not measured in this teardown — pending #N."* It is never filled in with an
+  estimate. §7–8 need a route policy (`--policy`, #13); §9–10 need `ps-eval` results
+  (`--eval-results`, #14); see M§1.
 - Every amount gives its currency. Every percentage says what it is a percentage of.
 - Rows that cover fewer than `{{min_cell_calls}}` calls are merged into "Other" (M§2.3).
 - No prompt text, response text, `prompt_hash` values or user identifiers appear anywhere.
@@ -55,7 +67,7 @@ Based on: {{point estimate and conservative (Wilson lower bound) figures, M§7.2
 |---|---|---|---|
 | {{source}} | {{n}} | {{n}} | {{n (reason)}} |
 
-- Prompt text: {{not used / used for a sample of N calls in use cases …}}
+- Prompt text: {{not used / scanned locally for PII (category names only) / a sample of N calls re-run by ps-eval in use cases …}}
 - Sensitivity input: {{declared / detected_pii_types / prompt text / per-key mapping}} (M§5.3)
 - Was the window typical? {{customer answer}}
 
@@ -78,8 +90,6 @@ Calls where requested model ≠ served model: {{n}} ({{pct}}%). {{Re-priced from
 
 ## 4. Where the money goes
 
-*Not measured in this teardown — pending #12.* (Remove this line once filled in by hand or by the CLI.)
-
 ### 4.1 By business unit and use case
 
 | Business unit | Use case | Calls | Spend | Share | Main model |
@@ -95,19 +105,16 @@ Calls where requested model ≠ served model: {{n}} ({{pct}}%). {{Re-priced from
 
 ## 5. Same-model price arbitrage
 
-*Not measured in this teardown — pending #12.*
-
 | Model | Current provider | Cheaper compliant provider | Spend now | Spend after | Saving |
 |---|---|---|---|---|---|
 | {{model}} | {{provider}} | {{provider}} | {{amount}} | {{amount}} | {{amount}} ({{pct}}) |
 
 ## 6. Cache-hit potential
 
-*Not measured in this teardown — pending #12.*
-
 TTL {{ttl}}. Exact repeats of the message text: {{n}} calls ({{pct}}% of calls), {{amount}}
 ({{pct}}% of baseline). This is an upper bound (M§6.4). Calls whose sensitivity turns the
-cache off under the policy are excluded: {{n}}.
+cache off under the policy are excluded: {{n}}. With a route policy, a call's level is
+its effective level (PII escalation included).
 
 ## 7. Sensitivity mix
 
@@ -122,11 +129,18 @@ Policy: `{{policy_file}}`, `policy_version` {{policy_version}}. `unclassified_de
 | confidential | | | | | | |
 | restricted | | | | | | |
 
+Must stay sovereign: {{amount}} ({{pct}} of spend), {{n}} calls ({{pct}}). Today's traffic
+outside the policy: {{n}} calls ({{amount}}) on a model the data policy does not allow at
+their level.
+
 {{Short reading, e.g. "62% of spend must stay in the EEA; 18 points of that come from the confidential default for calls with no declared classification."}}
 
 ## 8. Policy replay — projected spend by strategy
 
 *Not measured in this teardown — pending #13.*
+
+Outcomes: {{n}} calls routed, {{n}} unchanged, {{n}} with no compliant candidate (kept at
+baseline cost); {{n}} priced at the policy's per-1k rates (M§4.6).
 
 | Strategy (M§6.2) | Projected spend | vs. baseline | Calls with no compliant candidate |
 |---|---|---|---|
@@ -137,6 +151,8 @@ Policy: `{{policy_file}}`, `policy_version` {{policy_version}}. `unclassified_de
 | Cache (separate, not additive) | {{amount}} | {{pct}} | — |
 
 "Policy, cheapest" is not a savings claim. It shows the ceiling before quality is checked.
+"Policy, at parity" allows, per use case, only the models that reached parity in §9 plus
+the model in use today (M§6.2).
 
 ## 9. Quality parity
 
@@ -156,11 +172,12 @@ Every tested cell is listed, including the ones that failed (M§7.4).
 
 | Use case | Baseline spend | At-parity spend | Saving | Model change |
 |---|---|---|---|---|
-| {{use_case}} | {{amount}} | {{amount}} | {{pct}} | {{from → to}} |
+| {{use_case}} | {{amount}} | {{amount}} | {{pct}} | {{from → to / no change / none at parity / no eval set}} |
 | **Total (spend-weighted)** | **{{amount}}** | **{{amount}}** | **{{pct}} (95% CI {{ci}})** | |
 | Conservative (Wilson lower bound) | | {{amount}} | {{pct}} | |
 
-Use cases with no eval set count as zero savings here (M§7.4).
+Use cases with no eval set count as zero savings here (M§7.4). The 95% CI is a bootstrap
+over the parity sample (M§6.2).
 
 ## 11. Recommendations and next steps
 
@@ -184,7 +201,7 @@ Specific to this teardown:
 
 ## Appendix A — Methodology record
 
-Fill in every field from M§9. "n/a" needs a reason. Unbuilt steps read "pending #N".
+Fill in every field from M§9. "n/a" needs a reason. A step whose input the run did not have reads "pending #N".
 
 | Field | Value |
 |---|---|
@@ -204,7 +221,7 @@ Fill in every field from M§9. "n/a" needs a reason. Unbuilt steps read "pending
 | Calls by cost source | {{counts}} |
 | Null-cost calls by reason | {{counts}} |
 | `requested_model ≠ served_model` calls | {{n}} |
-| Route policy file, `policy_version`, SHA-256 | {{policy}} |
+| Route policy file, `policy_version`, SHA-256 | {{policy}} or pending #13 |
 | Sensitivity input | {{input}} |
 | Cache TTL | {{ttl}} |
 | Sample size per stratum, seed | {{sample}} or pending #14 |
@@ -212,8 +229,8 @@ Fill in every field from M§9. "n/a" needs a reason. Unbuilt steps read "pending
 | Judge model, provider, jurisdiction, prompt version | {{judge}} or pending #14 |
 | Re-execution temperature, spend | {{reexec}} or pending #14 |
 | `min_parity`, `min_cell_samples`, `min_cell_calls` | {{0.95}}, {{30}}, {{10}} |
-| CI methods | Wilson 95% two-sided per cell; bootstrap {{n_resamples}} resamples, seed {{seed}} |
-| Known limits specific to this run | {{limits}} |
+| CI methods | Wilson 95% two-sided per cell; bootstrap over the parity sample, {{n_resamples}} resamples, seed {{seed}} |
+| Known limits specific to this run | {{limits, e.g. "window was a launch week", "eval ran without --route-policy"}} |
 | Intermediate data deleted on | {{date}} |
 
 ## Appendix B — Data handling statement

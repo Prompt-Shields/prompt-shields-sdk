@@ -164,7 +164,7 @@ def _population_calls(
         if base is None:
             unpriced += 1
             continue
-        level = record.sensitivity(policy.unclassified_default)
+        level = policy.level(record)
         saving = {}
         for candidate in candidates:
             projected = None
@@ -174,7 +174,9 @@ def _population_calls(
                     record.tokens_out, pricing_table,
                 )
             saving[candidate.label] = base - projected if projected is not None else 0.0
-        calls.append(_Call(stratum_of(record, policy.unclassified_default), base, saving))
+        calls.append(_Call(
+            stratum_of(record, policy.unclassified_default, policy.level), base, saving
+        ))
     return calls, unpriced
 
 

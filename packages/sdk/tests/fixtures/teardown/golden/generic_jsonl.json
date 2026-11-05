@@ -9,7 +9,11 @@
     "catalog_version": "test-catalog",
     "currency": "USD",
     "min_cell_calls": 1,
-    "sensitivity_input": "declared data_classification only; PII escalation pending #13"
+    "sensitivity_input": "declared data_classification only; PII escalation needs a route policy (#13)",
+    "prompt_text": {
+      "scanned_locally": false,
+      "reexecuted_by_ps_eval": false
+    }
   },
   "window": {
     "start": "2026-10-20T08:00:00Z",
@@ -207,12 +211,14 @@
     "saving_pct": 0.0,
     "rows": [],
     "allowed_providers": null,
-    "compliance_checked": false
+    "compliance_checked": false,
+    "calls_blocked_by_data_policy": null
   },
   "cache": {
     "ttl_seconds": 3600,
     "cache_off_at": "confidential",
     "unclassified_default": "confidential",
+    "levels_from": "declared",
     "calls_with_hash": 6,
     "calls_with_hash_pct": 85.71,
     "hit_calls": 1,
