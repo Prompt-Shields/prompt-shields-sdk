@@ -135,6 +135,7 @@ async def readyz():
 
 
 # Internal collector + registry surface
+from collector.feedback import router as feedback_router
 from collector.ingest import router as ingest_router
 from collector.kong_ingest import router as kong_ingest_router
 from collector.lifecycle import router as lifecycle_router
@@ -152,6 +153,7 @@ app.include_router(kong_ingest_router)
 app.include_router(loss_accounting_router)
 app.include_router(risk_suggestions_router)
 app.include_router(mcp_usage_router)
+app.include_router(feedback_router)
 
 # Partner API surface (read-only, OAuth + API key)
 from collector.oauth import router as oauth_router

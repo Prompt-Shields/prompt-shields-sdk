@@ -45,6 +45,7 @@ class PSMetadata(TypedDict, total=False):
     risk_tags: list[str]
     session_id: str
     user_id: str  # opaque identifier (hashed by client before send)
+    call_id: str  # optional own per-call id (#43); generated when absent
 
 
 # Client-level config (set once on construction)

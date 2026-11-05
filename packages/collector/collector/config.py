@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # /ingest/events so MCP telemetry cannot use up the LLM telemetry
     # budget (the SDK batches MCP events); 0 or less disables it.
     mcp_rate_limit_per_minute: int = 600
+    # /ingest/feedback (#43): requests per minute per tenant, and per
+    # user_id within the tenant (poisoning resistance: one user cannot
+    # flood the routing learner). 0 or less disables either.
+    feedback_rate_limit_per_minute: int = 600
+    feedback_user_rate_limit_per_minute: int = 30
     # Tenant key auth (collector/auth_cache.py). Seconds a key that passed
     # bcrypt is remembered (by an HMAC of the key, never the key), so its
     # next requests skip bcrypt while the stored hash is unchanged; the key

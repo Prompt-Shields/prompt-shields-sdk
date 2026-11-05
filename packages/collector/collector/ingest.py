@@ -78,6 +78,9 @@ class IngestEvent(BaseModel):
     fallback_chain: list[str] | None = None
     counterfactual_cost: float | None = None
     baseline_id: str | None = None
+    # Per-call id (#43) that /ingest/feedback names. Anything that is not a
+    # short token is dropped (counted as call_id:invalid).
+    call_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -100,6 +103,11 @@ class IngestEvent(BaseModel):
             return None
         value = value.strip().lower()
         return value if FINGERPRINT_RE.fullmatch(value) else None
+
+    @field_validator("call_id", mode="before")
+    @classmethod
+    def _call_id(cls, value: Any) -> str | None:
+        return value if isinstance(value, str) and CALL_ID_RE.fullmatch(value) else None
 
     @field_validator("requested_model", "served_model", mode="before")
     @classmethod
@@ -204,6 +212,9 @@ MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
 MAX_COST = 9999.999999  # largest Numeric(10, 6) value
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
+# The SDK and gateway send a UUID; any short token is accepted (the gateway
+# takes a caller's X-PS-Call-Id of this shape).
+CALL_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 MAX_REASON_LENGTH = 256
 MAX_IDENTIFIER_LENGTH = 128
 # The gateway keeps at most MAX_ATTEMPT_RECORDS (32) attempts per request.
@@ -257,6 +268,7 @@ LENIENT_FIELDS = (
     "usage_units",
     "usage_unit_type",
     "api_key_fingerprint",
+    "call_id",
 ) + ROUTE_FIELDS
 
 
@@ -520,6 +532,7 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             usage_units=event.usage_units,
             usage_unit_type=event.usage_unit_type,
             api_key_fingerprint=event.api_key_fingerprint,
+            call_id=event.call_id,
             **{name: getattr(event, name) for name in ROUTE_FIELDS},
         )
         db.add(usage_event)

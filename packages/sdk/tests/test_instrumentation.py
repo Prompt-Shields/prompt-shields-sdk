@@ -267,6 +267,16 @@ def test_openai_chat_sync_event(fakes):
     assert RecordingSender.instances[0].flushes == 1
 
 
+def test_instrumented_calls_get_a_call_id(fakes):
+    prompt_shields.instrument(ps_api_key="ps_key")
+    first = fakes.chat.Completions().create(model="gpt-4o", messages=MESSAGES)
+    second = fakes.chat.Completions().create(model="gpt-4o", messages=MESSAGES)
+    ids = [e["call_id"] for e in _events()]
+    assert ids == [first.ps_call_id, second.ps_call_id]
+    assert ids[0] != ids[1]
+    assert prompt_shields.last_call_id() == ids[1]
+
+
 def test_anthropic_async_event(fakes):
     prompt_shields.instrument(ps_api_key="ps_key")
     resp = asyncio.run(fakes.messages.AsyncMessages().create(

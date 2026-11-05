@@ -162,9 +162,10 @@ def _sync_client(**kwargs):
 
 
 def _strip_latency(event: dict) -> dict:
-    # The second identical call is also flagged as a regenerate (#44).
+    # The second identical call is also flagged as a regenerate (#44), and
+    # every call has its own call_id (#43).
     return {k: v for k, v in event.items()
-            if k not in ("latency_ms", "outcome_signals")}
+            if k not in ("latency_ms", "outcome_signals", "call_id")}
 
 
 def test_collector_event_is_unchanged_by_feature_extraction():

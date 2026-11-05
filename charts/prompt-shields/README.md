@@ -471,6 +471,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_SECURITY_EVENTS_OTLP`, `PS_SECURITY_EVENTS_OTLP_ENDPOINT`, `PS_SECURITY_EVENTS_OTLP_HEADERS` | Security events as OTLP log records |
 | `PS_ROUTER_ENABLED`, `PS_CACHE_DEFAULT`, `PS_CACHE_MAX_ENTRIES` | Router and response cache |
 | `PS_BASELINE_FILE` | Frozen savings baseline (`baseline.v1` JSON, mount it from a ConfigMap with `gateway.extraVolumes` / `extraVolumeMounts`): routed events carry `baseline_id` and `counterfactual_cost`. An invalid file stops the gateway |
+| `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE` | `POST /v1/feedback` limit per user and replica (default 60, `0` off) |
 | `PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`, `TRUSTED_CUSTOM_HOSTS`, `OAUTH_TOKEN_URL_ALLOWED_HOSTS` | Custom upstream hosts |
 | `MAX_JSON_PAYLOAD_SIZE_IN_MB`, `MAX_FILE_PAYLOAD_SIZE_IN_MB` | Request size limits |
 | `REDIS_CONNECTION_STRING` (secret) | Shared cache and rate limits across replicas |
@@ -497,6 +498,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_COLLECTOR_API_DOCS_ENABLED` (*chart*) | `false` | `/docs`, `/redoc`, `/openapi.json` |
 | `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process) |
 | `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart (per process) |
+| `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE` | `600`, `30` | `/ingest/feedback` limits per tenant and per `user_id` (per process) |
 | `PS_INGEST_KEY_CACHE_TTL_SECONDS`, `PS_INGEST_KEY_CACHE_MAX_ENTRIES` | `30`, `10000` | Verified tenant key cache (skips bcrypt; `0` TTL turns it off; per process) |
 | `PS_AUTH_FAILURE_LIMIT_PER_MINUTE`, `PS_AUTH_FAILURE_TRACKED_CLIENTS` | `60`, `10000` | Failed tenant key / admin token checks per client address per minute before `429` (`0` turns it off; per process) |
 | `FORWARDED_ALLOW_IPS` (uvicorn) | `127.0.0.1` | Proxies whose `X-Forwarded-For` sets the client address (failed-auth limiter, audit) |

@@ -22,6 +22,7 @@ import { PSTelemetrySender } from './psTelemetrySender';
 import { isMcpProxyPath } from '../mcp/paths';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 import { oidcTelemetryFields } from './psOidc/telemetry';
+import { callIdOf, FEEDBACK_PATH, setCallIdHeader } from './psFeedback';
 import { applyBaseline, getBaseline } from './router/baseline';
 import { RESPONSE_HEADER_KEYS } from '../globals';
 import {
@@ -112,6 +113,10 @@ interface TelemetryEvent {
   trace_id?: string;
   retry_count?: number;
   attempts?: AttemptRecord[];
+  // Per-call id (#43): the caller's X-PS-Call-Id or a new UUID, also
+  // returned as the X-PS-Call-Id response header. POST /v1/feedback names
+  // the call by it.
+  call_id?: string;
   // The error class of each failed attempt, in order (PRD 0001 §7.12):
   // empty when the first attempt succeeded. Classes only, never messages.
   fallback_chain?: string[];
@@ -541,8 +546,13 @@ export function psTelemetry() {
     if (c.req.method !== 'POST') return;
     // MCP proxy calls are reported to /ingest/mcp by the MCP handler.
     if (isMcpProxyPath(c.req.path)) return;
+    // Feedback is not an LLM call (psFeedback.ts forwards it).
+    if (c.req.path === FEEDBACK_PATH) return;
 
     try {
+      const callId = callIdOf(c);
+      setCallIdHeader(c, callId);
+
       const url = c.req.url as string;
       const headers = Object.fromEntries(c.req.raw.headers) as Record<
         string,
@@ -596,6 +606,7 @@ export function psTelemetry() {
         latency_ms: Date.now() - startTime,
         ...psHeaders,
         ...oidcTelemetryFields(c.get(OIDC_IDENTITY_KEY)),
+        call_id: callId,
       };
 
       const fingerprint = c.get(CREDENTIAL_FINGERPRINT_KEY);

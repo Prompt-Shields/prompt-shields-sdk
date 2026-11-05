@@ -29,6 +29,11 @@ Public surface:
         prompt_shields.integrations.litellm    — LiteLLM custom logger
         prompt_shields.integrations.llamaindex — LlamaIndex instrumentation handlers
 
+    Feedback (#43):
+        send_feedback / send_feedback_async — feedback on one call by its call_id
+        last_call_id         — call_id of the latest call in this thread or task
+        FEEDBACK_REASONS, FeedbackError
+
     Utilities:
         detect_pii_categories — pattern-based PII detection
         estimate_cost         — token-to-USD cost estimator
@@ -50,6 +55,13 @@ from prompt_shields.client import (
     ShieldsAnthropic,
     ShieldsClient,
     ShieldsOpenAI,
+)
+from prompt_shields.feedback import (
+    FEEDBACK_REASONS,
+    FeedbackError,
+    last_call_id,
+    send_feedback,
+    send_feedback_async,
 )
 from prompt_shields.instrumentation import (
     instrument,
@@ -78,6 +90,7 @@ from prompt_shields.types import (
 __version__ = "0.3.0"
 
 __all__ = [
+    "FEEDBACK_REASONS",
     "AsyncShieldsAnthropic",
     "AsyncShieldsClient",
     "AsyncShieldsOpenAI",
@@ -86,6 +99,7 @@ __all__ = [
     "BaselineError",
     "DataClassification",
     "DiscoverySource",
+    "FeedbackError",
     "PSConfig",
     "PSMetadata",
     "PolicyViolation",
@@ -103,8 +117,11 @@ __all__ = [
     "estimate_unit_cost",
     "freeze_baseline",
     "instrument",
+    "last_call_id",
     "load_baseline",
     "scan_messages",
+    "send_feedback",
+    "send_feedback_async",
     "suppress_instrumentation",
     "uninstrument",
 ]

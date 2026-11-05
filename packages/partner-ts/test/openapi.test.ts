@@ -169,6 +169,9 @@ const SCHEMAS: Record<string, string> = {
 const UNMAPPED_SCHEMAS = new Set([
   'Error', // parsed into APIError (src/errors.ts)
   'WebhookEventType', // a string enum; checked through the properties that use it
+  // Call feedback (#43): ingest-key route, not wrapped by the partner SDK.
+  'CallFeedbackRequest',
+  'CallFeedbackResult',
   // Provider credentials (#93) are not wrapped by the SDK: a tenant stores
   // its own provider admin keys. Call them with client.send() if needed.
   'ProviderCredential',
@@ -320,6 +323,9 @@ const OPERATIONS: Record<string, Operation> = {
   'PUT /api/v1/operator/tenants/{tenant_id}/retention': NOT_WRAPPED,
   'POST /api/v1/operator/retention/purge': NOT_WRAPPED,
   'GET /api/v1/operator/audit/verify': NOT_WRAPPED,
+  // Call feedback (#43) is sent by the Python SDK and the gateway with the
+  // tenant ingest key, never by a partner.
+  'POST /ingest/feedback': NOT_WRAPPED,
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

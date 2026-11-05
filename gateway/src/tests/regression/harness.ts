@@ -41,6 +41,21 @@ export const otelPayloads: any[] = [];
 export const collectorMetadata: any[] = [];
 /** Collector response override; a 200 `{}` (event stored) when unset. */
 let collectorResponder: (() => Response | Promise<Response>) | undefined;
+/** Requests to the collector's /ingest/feedback (#43): headers and body. */
+export const feedbackRequests: {
+  headers: Record<string, string>;
+  body: any;
+}[] = [];
+let feedbackResponder:
+  | ((body: any) => Response | Promise<Response>)
+  | undefined;
+
+/** Answer /ingest/feedback with `respond` until the next resetHarness(). */
+export function feedbackCollector(
+  respond: (body: any) => Response | Promise<Response>
+) {
+  feedbackResponder = respond;
+}
 
 /** Answer collector requests with `respond` until the next resetHarness(). */
 export function collector(respond: () => Response | Promise<Response>) {
@@ -103,6 +118,15 @@ global.fetch = jest.fn(async (input: any, init: any = {}) => {
 }) as any;
 
 async function fakeFetchOnce(url: string, init: any): Promise<Response> {
+  if (url === `${COLLECTOR}/ingest/feedback`) {
+    const body = JSON.parse(init.body);
+    feedbackRequests.push({ headers: headersOf(init), body });
+    if (feedbackResponder) return feedbackResponder(body);
+    return new Response(
+      JSON.stringify({ call_id: body.call_id, created: true, matched: true }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
+  }
   if (url.startsWith(COLLECTOR)) {
     const sent = JSON.parse(init.body);
     collectorMetadata.push(sent.metadata);
@@ -144,6 +168,8 @@ export function resetHarness() {
   otelPayloads.length = 0;
   collectorMetadata.length = 0;
   collectorResponder = undefined;
+  feedbackRequests.length = 0;
+  feedbackResponder = undefined;
 }
 
 export const json = (body: unknown, status = 200) =>

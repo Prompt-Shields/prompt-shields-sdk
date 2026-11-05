@@ -19,6 +19,12 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from prompt_shields.feedback import (
+    attach_call_id,
+    call_id_headers,
+    new_call_id,
+    send_feedback,
+)
 from prompt_shields.instrumentation import suppress_instrumentation
 from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.pii import scan_messages
@@ -107,6 +113,7 @@ class ShieldsClient:
         self._vendor = vendor
         self._adapter = get_adapter(vendor)
         self._ps_api_key = ps_api_key
+        self._ps_collector_url = ps_collector_url
         self._telemetry = TelemetrySender(ps_collector_url, ps_api_key)
         atlas_url = atlas_url if atlas_url is not None else os.environ.get("PS_ATLAS_URL")
         atlas_api_key = (
@@ -164,6 +171,7 @@ class ShieldsClient:
         latency_ms: int,
         ps_metadata: PSMetadata | None = None,
         adapter_fields: dict | None = None,
+        call_id: str | None = None,
     ) -> dict:
         # Streams pass fields accumulated from their chunks instead.
         if adapter_fields is None:
@@ -200,6 +208,8 @@ class ShieldsClient:
             ),
             "api_key_fingerprint": self._api_key_fingerprint,
         }
+        if call_id is not None:
+            event["call_id"] = call_id
         add_usage_detail_fields(event, adapter_fields)
 
         # Map SDK field names to collector field names
@@ -232,6 +242,20 @@ class ShieldsClient:
                 event["detected_pii_types"] = categories
 
         return event
+
+    # --- feedback -------------------------------------------------------------
+
+    def feedback(self, call_id: str, score: float | bool, reason: str | None = None,
+                 *, user_id: str | None = None) -> dict:
+        """Record how good a call's answer was (#43): ``score`` from 0 (bad)
+        to 1 (good) or a bool, and optionally a ``reason`` label from
+        ``FEEDBACK_REASONS``; never free text. ``call_id`` is the call's
+        ``response.ps_call_id`` (or ``last_call_id()``). Returns the
+        collector's answer; raises ValueError or FeedbackError
+        (see prompt_shields.feedback)."""
+        return send_feedback(call_id, score, reason, user_id=user_id,
+                             ps_api_key=self._ps_api_key,
+                             ps_collector_url=self._ps_collector_url)
 
     # --- telemetry delivery --------------------------------------------------
 
@@ -320,6 +344,10 @@ class _CompletionsNamespace:
                 **kwargs.get("extra_headers", {}),
                 **route.to_headers(),
             }
+        # One id per call (#43): on the event, sent upstream so a gateway
+        # reports the call under it, and returned on the response.
+        call_id = new_call_id(ps_metadata)
+        call_id_headers(kwargs, call_id)
 
         streaming = kwargs.get("stream") is True
         hide_usage_chunk = False
@@ -347,11 +375,12 @@ class _CompletionsNamespace:
                 raise
 
         if streaming:
-            return self._wrap_stream(
+            return attach_call_id(self._wrap_stream(
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
                 hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
-            )
+                call_id=call_id,
+            ), call_id)
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -361,13 +390,14 @@ class _CompletionsNamespace:
             response=response,
             latency_ms=latency_ms,
             ps_metadata=ps_metadata,
+            call_id=call_id,
         )
         if _event_hook is not None:
             _event_hook(event)
         attach_outcome_signals(event, model=model, messages=messages,
                                response=response, request=kwargs)
         self._send(event, messages)
-        return response
+        return attach_call_id(response, call_id)
 
     def _send(self, event: dict, messages: list, flush: bool = True) -> None:
         self._parent._telemetry.enqueue(event)
@@ -382,7 +412,8 @@ class _CompletionsNamespace:
     def _wrap_stream(self, response: Any, *, model: str, messages: list,
                      ps_metadata: PSMetadata | None, start: float,
                      hide_usage_chunk: bool,
-                     event_hook: Callable[[dict], None] | None = None) -> Any:
+                     event_hook: Callable[[dict], None] | None = None,
+                     call_id: str | None = None) -> Any:
         """Wrap a stream so one event is emitted when it ends. Fail-open."""
 
         def on_finish(adapter_fields: dict, stream_fields: dict,
@@ -390,7 +421,7 @@ class _CompletionsNamespace:
             event = self._parent._build_event(
                 model=model, messages=messages, response=None,
                 latency_ms=latency_ms, ps_metadata=ps_metadata,
-                adapter_fields=adapter_fields,
+                adapter_fields=adapter_fields, call_id=call_id,
             )
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):

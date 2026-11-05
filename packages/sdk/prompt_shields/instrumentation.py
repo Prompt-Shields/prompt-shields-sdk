@@ -79,6 +79,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from prompt_shields import mcp_instrumentation
+from prompt_shields.feedback import attach_call_id, new_call_id
 from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.providers import (
     ADAPTERS,
@@ -910,6 +911,9 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             "hide_usage_chunk": hide_usage_chunk,
             "api_key": api_key if isinstance(api_key, str) and api_key else None,
             "framework": framework,
+            # Per-call id (#43): on the event, last_call_id(), and
+            # response.ps_call_id where the response takes an attribute.
+            "call_id": new_call_id(),
         }
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"Instrumentation prepare error: {e}")
@@ -1142,6 +1146,7 @@ def _finish_sync(call: dict, response: Any, start: float) -> Any:
             return _wrap_stream(call, response, start)
         latency_ms = int((time.monotonic() - start) * 1000)
         _send_sync(call, _event(call, response, latency_ms))
+        attach_call_id(response, call["call_id"])
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"Instrumentation telemetry error: {e}")
     return response
@@ -1153,6 +1158,7 @@ async def _finish_async(call: dict, response: Any, start: float) -> Any:
             return _wrap_stream(call, response, start, is_async=True)
         latency_ms = int((time.monotonic() - start) * 1000)
         await _send_async(call, _event(call, response, latency_ms))
+        attach_call_id(response, call["call_id"])
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.debug(f"Instrumentation telemetry error: {e}")
     return response
@@ -1462,7 +1468,8 @@ class _StreamContext:
 def build_event(state: _State, *, vendor: str, model: Any, messages: list,
                 latency_ms: int, adapter_fields: dict,
                 api_key: str | None = None,
-                adapter: ProviderAdapter | None = None) -> dict:
+                adapter: ProviderAdapter | None = None,
+                call_id: str | None = None) -> dict:
     """A `ShieldsClient`-shaped event from already extracted usage fields."""
     # Imported here: client.py imports this module for suppress_instrumentation.
     from prompt_shields.client import ShieldsClient, _fingerprint
@@ -1486,6 +1493,7 @@ def build_event(state: _State, *, vendor: str, model: Any, messages: list,
         response=None,
         latency_ms=latency_ms,
         adapter_fields=adapter_fields,
+        call_id=call_id,
     )
 
 
@@ -1509,6 +1517,7 @@ def _event(call: dict, response: Any, latency_ms: int,
         latency_ms=latency_ms,
         adapter_fields=adapter_fields,
         api_key=call["api_key"],
+        call_id=call.get("call_id"),
     )
     if call.get("framework") is not None:
         apply_framework_fields(event, call["framework"])

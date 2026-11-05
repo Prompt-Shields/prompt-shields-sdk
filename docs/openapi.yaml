@@ -61,6 +61,10 @@ tags:
       stable UUID ids, secrets returned once, POST with a name an unrevoked
       row already has is 409, and DELETE revokes (204, the row stays
       readable by id with `status: revoked`, a repeated DELETE is 204).
+  - name: Ingest
+    description: |
+      Telemetry ingest routes the SDK and the gateway call with the tenant's
+      own API key. Only call feedback is documented here.
   - name: Operator
     description: |
       Cross-tenant operator routes (`PS_ADMIN_TOKEN`): tenants, retention,
@@ -1072,6 +1076,51 @@ components:
         detail:
           type: string
           example: "Invalid or expired access token"
+
+    CallFeedbackRequest:
+      type: object
+      description: |
+        Explicit feedback on one LLM call (#43). Metadata only: there is no
+        field for free text, and other fields are ignored.
+      required: [call_id, score]
+      properties:
+        call_id:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,128}$'
+          description: The call's id, as on its usage event (`call_id`), the SDK's `response.ps_call_id` or the gateway's `x-ps-call-id` header
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 0 (bad) to 1 (good)
+        reason:
+          type: [string, 'null']
+          enum: [correct, helpful, incorrect, incomplete, hallucination, off_topic, refusal, format_error, unsafe, too_slow, too_long, other, null]
+        user_id:
+          type: [string, 'null']
+          pattern: '^[0-9a-f]{16,64}$'
+          description: >-
+            Hex hash of the user id (16-64 lowercase hex characters; the SDK
+            and gateway hash it before sending). Anything else is refused
+            with a 422, so a raw identifier is never stored. Rate-limited
+            separately when sent
+        source:
+          type: string
+          enum: [sdk, gateway]
+          default: sdk
+
+    CallFeedbackResult:
+      type: object
+      required: [call_id, created, matched]
+      properties:
+        call_id:
+          type: string
+        created:
+          type: boolean
+          description: False when it replaced an earlier feedback for the same call (the request is idempotent)
+        matched:
+          type: boolean
+          description: Whether a usage event with this call_id has arrived for the tenant
 
     TokenResponse:
       type: object
@@ -2110,6 +2159,66 @@ components:
       description: Filter by data classification
 
 paths:
+  /ingest/feedback:
+    post:
+      operationId: ingestCallFeedback
+      tags: [Ingest]
+      summary: Record feedback on one call
+      description: |
+        Stores one feedback per (tenant, call_id); a later one for the same
+        call replaces it. Kept even when the call's usage event has not
+        arrived yet (`matched` says whether it has). Rate-limited per tenant
+        (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, default 600) and, when
+        `user_id` is sent, per user (`PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE`,
+        default 30). Rows are purged with the tenant's usage events
+        (retention) and on erasure.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CallFeedbackRequest'
+      responses:
+        '200':
+          description: Stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallFeedbackResult'
+        '400':
+          description: The body is not JSON, or nests too deep
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: The body exceeds 4096 bytes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid field, or a string with a NUL character or an unpaired surrogate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: The tenant's or the user's feedback rate limit is exhausted
+          headers:
+            Retry-After:
+              description: Seconds until the limit resets
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /oauth/token:
     post:
       operationId: createToken

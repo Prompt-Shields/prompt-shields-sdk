@@ -53,6 +53,7 @@ TENANT_TABLES: dict[str, str] = {
     "tenant_api_keys": "tenant_id",
     "admin_tokens": "tenant_id",
     "audit_events": "tenant_id",
+    "call_feedback": "tenant_id",
 }
 
 
