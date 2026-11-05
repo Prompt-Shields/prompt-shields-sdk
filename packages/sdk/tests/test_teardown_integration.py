@@ -231,6 +231,35 @@ def test_cache_uses_effective_levels_under_a_policy():
             >= plain["cache"]["excluded_cache_off_calls"])
 
 
+def test_arbitrage_checks_the_cheaper_host_against_the_data_policy():
+    table = {
+        ("anthropic", "claude-3-5-haiku-20241022"): (0.0008, 0.004),
+        ("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0"): (0.0004, 0.002),
+        ("openai", "gpt-4o"): (0.0025, 0.010),
+    }
+    source = SdkPriceSource(pricing_table=table, version="t")
+    loaded = load_records([FIXTURES / "ps_events.jsonl"], key_map=KEY_MAP)
+    priced = price_records(loaded.records, source)
+    plain = build_report(priced, loaded.sources, ReportOptions(), source)["arbitrage"]
+    checked = build_report(priced, loaded.sources, ReportOptions(policy=POLICY), source)
+    arb = checked["arbitrage"]
+    assert plain["compliance_checked"] is False and plain["rows"][0]["calls"] == 2
+    # Bedrock (US, CLOUD Act) is fine for the internal call, not the confidential one.
+    assert arb["compliance_checked"] is True
+    assert arb["rows"][0]["calls"] == 1 and arb["calls_blocked_by_data_policy"] == 1
+    assert arb["saving"] < plain["saving"]
+    md = render_report(checked, "markdown")
+    assert "does not check the cheaper host" not in md
+
+
+def test_arbitrage_host_with_unverified_facts_fails_closed():
+    from prompt_shields.teardown.policy import arbitrage_check, host_facts
+
+    assert host_facts(POLICY, "nohost", "m") == {"provider": "nohost", "model": "m"}
+    for level, ok in (("public", True), ("internal", False), ("confidential", False)):
+        assert arbitrage_check(POLICY, lambda _p, lv=level: lv)(None, "nohost", "m") is ok
+
+
 def test_policy_at_parity_only_routes_to_models_at_parity():
     report = _report(eval_results=EVAL_RESULTS)
     sap = report["savings_at_parity"]

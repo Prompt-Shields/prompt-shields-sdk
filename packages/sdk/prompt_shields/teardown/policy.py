@@ -27,6 +27,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import prompt_shields.teardown_replay as tr  # attributes used lazily: no import cycle
+from prompt_shields import catalog as model_catalog
+from prompt_shields.route_policy import data_policy_rule, tier_complies
 from prompt_shields.teardown.catalog import PriceSource
 
 if TYPE_CHECKING:  # engine imports this module
@@ -108,6 +110,36 @@ def replay_priced(
         )
         for p in priced
     ]
+
+
+def host_facts(policy: Mapping[str, Any], provider: str, model: str) -> Mapping[str, Any]:
+    """Sovereignty facts of one host of a model, for the data-policy check.
+
+    The route policy's own tier for that provider and model first (what
+    replay uses), else the SDK catalog's sovereignty fields (``None`` means
+    unverified), else nothing. ``tier_complies`` fails closed on a missing
+    or ``None`` fact, so an unverified host never passes a restrictive rule.
+    """
+    for tier in tr._policy_tiers(policy):
+        if tier.get("provider") == provider and tr._same_model(tier.get("model"), model):
+            return tier
+    entry = model_catalog.get_model(provider, model)
+    facts = model_catalog.sovereignty(entry) if entry is not None else {}
+    return {**facts, "provider": provider, "model": model}
+
+
+def arbitrage_check(
+    policy: Mapping[str, Any], level_of: Callable[[Any], str]
+) -> Callable[[Any, str, str], bool]:
+    """``complies(priced_record, provider, model)`` for same-model arbitrage:
+    the cheaper host must meet the data policy at the call's effective level."""
+
+    def complies(p, provider: str, model: str) -> bool:
+        level = level_of(p)
+        rule = data_policy_rule(policy, level if level != tr.UNCLASSIFIED else None)
+        return tier_complies(host_facts(policy, provider, model), rule)
+
+    return complies
 
 
 def replay_sections(calls: list, policy: Mapping[str, Any], *, policy_name: str,

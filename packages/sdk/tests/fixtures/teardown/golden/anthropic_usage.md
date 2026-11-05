@@ -29,7 +29,7 @@
 - Priced calls: — of calls, 68.4% of tokens. Null-cost calls are left out (M§4.5).
 - Estimated token counts: 0.0% of baseline spend (M§4.3).
 - 31.6% of tokens could not be priced; savings figures cover only the priced part of the traffic (M§4.5).
-- Same-model arbitrage does not check the cheaper host against a data policy (the price catalog has no jurisdiction data yet, #7 / #8).
+- Same-model arbitrage does not check the cheaper host against a data policy (no route policy given).
 
 ## 2. Scope and data
 

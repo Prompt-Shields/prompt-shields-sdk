@@ -153,7 +153,8 @@
     "saving_pct": 0.0,
     "rows": [],
     "allowed_providers": null,
-    "compliance_checked": false
+    "compliance_checked": false,
+    "calls_blocked_by_data_policy": null
   },
   "cache": {
     "ttl_seconds": 3600,

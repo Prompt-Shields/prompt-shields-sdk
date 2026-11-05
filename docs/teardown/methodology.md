@@ -329,6 +329,10 @@ Each report shows projected spend for:
 - **Same-model arbitrage:** the same model from the cheapest provider that serves it
   and is allowed by the call's data policy (e.g. an open-weight model offered by
   several hosts, or a regional endpoint). Cost-only mode computes this (`ps-teardown`, #12).
+  The data-policy check needs a route policy (`--policy`): the host is judged on the
+  policy's tier for it, else on the catalog's sovereignty fields, and an unverified
+  (`null`) fact fails the check. Without a route policy the report says the host was not
+  checked.
 - **Policy, cheapest:** the cheapest compliant candidate in the group the policy picks.
 - **Policy, at parity:** like *Policy, cheapest*, but only models that passed the
   parity bar for that use case ([§7.2](#72-quality-parity)) are allowed, plus the model

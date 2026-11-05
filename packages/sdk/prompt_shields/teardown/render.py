@@ -180,7 +180,7 @@ def render_markdown(r: dict) -> str:
         add(f"- {c}")
     if not arb["compliance_checked"]:
         add("- Same-model arbitrage does not check the cheaper host against a data policy "
-            "(the price catalog has no jurisdiction data yet, #7 / #8)"
+            "(no route policy given)"
             + (f"; it is limited to: {', '.join(arb['allowed_providers'])}."
                if arb["allowed_providers"] else "."))
 
@@ -275,11 +275,21 @@ def render_markdown(r: dict) -> str:
              m(a["spend_after"]), f"{m(a['saving'])} ({pct(a['saving_pct'])})"]
             for a in arb["rows"]
         ]))
-        add("\n\"Compliant\" here means allowed by `--allow-provider`, not checked against a "
-            "data policy: the price catalog has no jurisdiction data yet (#7 / #8).")
+        if arb["compliance_checked"]:
+            add("\n\"Compliant\" here means allowed by `--allow-provider` and by the route "
+                "policy's data policy at each call's effective level, on the host's "
+                "sovereignty facts (route policy tier, else catalog; unverified counts as "
+                "non-compliant).")
+        else:
+            add("\n\"Compliant\" here means allowed by `--allow-provider`, not checked against a "
+                "data policy: no route policy given (`--policy`).")
     else:
-        add("No model in the window is sold cheaper by another host in catalog "
-            f"`{meta['catalog_version']}`. Saving: {m(0.0)}.")
+        add("No model in the window is sold cheaper by another "
+            + ("compliant " if arb["compliance_checked"] else "")
+            + f"host in catalog `{meta['catalog_version']}`. Saving: {m(0.0)}.")
+    if arb.get("calls_blocked_by_data_policy"):
+        add(f"\nCalls whose cheaper host the data policy does not allow at their level: "
+            f"{num(arb['calls_blocked_by_data_policy'])}.")
 
     # 6. Cache
     add("\n## 6. Cache-hit potential\n")

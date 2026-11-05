@@ -30,7 +30,6 @@ Based on: point estimate 11.2% (95% CI 0.0% – 11.2%), conservative (Wilson low
 - Priced calls: 79.2% of calls, 97.0% of tokens. Null-cost calls are left out (M§4.5).
 - Estimated token counts: 4.2% of baseline spend (M§4.3).
 - judge mistral-eu:mistral-large-eu is from the same family as candidate mistral-eu:mistral-small-eu (M§7.3)
-- Same-model arbitrage does not check the cheaper host against a data policy (the price catalog has no jurisdiction data yet, #7 / #8).
 
 ## 2. Scope and data
 
@@ -105,7 +104,7 @@ Calls where requested model ≠ served model: 4 (16.7%). Re-priced from tokens a
 
 ## 5. Same-model price arbitrage
 
-No model in the window is sold cheaper by another host in catalog `test-catalog`. Saving: USD 0.00.
+No model in the window is sold cheaper by another compliant host in catalog `test-catalog`. Saving: USD 0.00.
 
 ## 6. Cache-hit potential
 

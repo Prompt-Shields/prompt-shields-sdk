@@ -28,7 +28,7 @@
 - Baseline reconciliation with the invoice: {{gap_pct}}% → {{reconciled / unreconciled / no invoice}} (M§3.1).
 - Priced calls: 76.5% of calls, 96.6% of tokens. Null-cost calls are left out (M§4.5).
 - Estimated token counts: 4.6% of baseline spend (M§4.3).
-- Same-model arbitrage does not check the cheaper host against a data policy (the price catalog has no jurisdiction data yet, #7 / #8).
+- Same-model arbitrage does not check the cheaper host against a data policy (no route policy given).
 
 ## 2. Scope and data
 

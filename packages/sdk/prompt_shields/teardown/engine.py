@@ -369,25 +369,39 @@ def _attribution(priced: Sequence[PricedRecord], baseline: float, opts: ReportOp
 
 
 def _arbitrage(priced: Sequence[PricedRecord], source: PriceSource, baseline: float,
-               opts: ReportOptions) -> dict:
+               opts: ReportOptions,
+               complies: Callable[[PricedRecord, str, str], bool] | None = None) -> dict:
+    """Same-model arbitrage (M§6.1).
+
+    ``complies(record, provider, model)`` checks the cheaper host against the
+    route policy's data policy at the call's effective level (with a route
+    policy); a host whose sovereignty facts are unknown does not comply.
+    """
     allowed = set(opts.allowed_providers) if opts.allowed_providers else None
     cells: dict[tuple[str, str], dict] = {}
     total_saving = 0.0
+    blocked_calls = 0
     for p in priced:
         # Only token-priced calls can be re-priced at another host on the
         # same basis; provider-billed amounts are left as they are.
         if p.cost is None or p.cost_source not in (COST_PRICING_TABLE, COST_ESTIMATED_TOKENS):
             continue
         best = None
+        blocked = False
         for alt_provider, alt_model in source.equivalents(p.provider, p.model):
             if allowed is not None and alt_provider not in allowed:
                 continue
             if not source.covers(p.record, alt_provider, alt_model):
                 continue
             alt = source.cost(p.record, alt_provider, alt_model)
-            if alt is not None and alt < p.cost and (best is None or alt < best[0]):
-                best = (alt, alt_provider)
+            if alt is None or alt >= p.cost or (best is not None and alt >= best[0]):
+                continue
+            if complies is not None and not complies(p, alt_provider, alt_model):
+                blocked = True
+                continue
+            best = (alt, alt_provider)
         if best is None:
+            blocked_calls += (p.calls or 0) if blocked else 0
             continue
         cell = cells.setdefault((p.model, p.provider), {
             "spend_now": 0.0, "spend_after": 0.0, "to": Counter(), "calls": 0,
@@ -416,9 +430,10 @@ def _arbitrage(priced: Sequence[PricedRecord], source: PriceSource, baseline: fl
         "saving_pct": _pct(total_saving, baseline) if baseline else None,
         "rows": rows,
         "allowed_providers": sorted(allowed) if allowed is not None else None,
-        # The price catalog has no jurisdiction data yet (#7 / #8), so the
-        # cheaper host is not checked against a data policy.
-        "compliance_checked": False,
+        # Without a route policy there is no data policy to check the
+        # cheaper host against.
+        "compliance_checked": complies is not None,
+        "calls_blocked_by_data_policy": blocked_calls if complies is not None else None,
     }
 
 
@@ -513,7 +528,6 @@ def build_report(
     base = _baseline(priced, opts)
     spend = base["spend"] or 0.0
     trust = _trust(priced, spend)
-    arb = _arbitrage(priced, source, spend, opts)
     pending = dict(PENDING)
     caveats = list(trust["caveats"])
     sections: dict[str, Any] = {}
@@ -539,6 +553,9 @@ def build_report(
                 scan_prompts=opts.scan_prompts))
             del pending["quality_parity"], pending["savings_at_parity"]
             caveats += sections["quality_parity"]["caveats"]
+    complies = (policy_mode.arbitrage_check(opts.policy, level_of)
+                if level_of is not None else None)
+    arb = _arbitrage(priced, source, spend, opts, complies)
     cache = _cache(priced, spend, opts, level_of, unclassified_default)
     days = window["days"]
 

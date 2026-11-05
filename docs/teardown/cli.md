@@ -139,9 +139,12 @@ and will be replaced by the versioned catalog (#7 / #8).
 - **Same-model arbitrage** (M§6.2): the same model from a cheaper host in the catalog's
   equivalence groups, limited by `--allow-provider`. A host is only a candidate if its
   price list covers every dimension the call uses (web-search fees, 1-hour cache writes,
-  long-context bands, audio, batch). Provider-billed amounts are not re-priced. The cheaper
-  host is not checked against a data policy: the catalog has no jurisdiction data yet
-  (#7 / #8). With the 2026-Q1 price table,
+  long-context bands, audio, batch). Provider-billed amounts are not re-priced. With
+  `--policy`, the cheaper host must also meet the data policy at the call's effective level,
+  judged on the policy's own tier for that host, else the catalog's sovereignty fields
+  (`jurisdiction`, `us_cloud_act_exposure`, `zdr`); an unverified (`null`) fact counts as
+  non-compliant. Without `--policy` the host is not checked against a data policy. With
+  the 2026-Q1 price table,
   hosts in a group charge the same, so this is usually zero until the catalog adds hosts.
 - **Cache-hit potential** (M§6.4): calls whose `prompt_hash` repeats within the TTL of the
   entry's write. Usage exports and gateway events carry no hash, so they are not covered;
