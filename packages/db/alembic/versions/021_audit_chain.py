@@ -15,8 +15,11 @@ the tenant id). No foreign key to ``tenants``, like
   - Backfill: each tenant's existing ``retention_audit_log`` rows (purges,
     erasures, retention changes) become the first rows of its chain, in
     (created_at, id) order, with ``details.backfilled_from`` naming the
-    source row. Nothing else existed to backfill: registry reads stay in
-    ``partner_audit_log``, which is a separate, unchained read log.
+    source row. Details are canonicalised like the collector's
+    (``audit_chain.sanitize_details``: floats as strings, ...), so they
+    hash the same after the JSONB round trip. Nothing else existed to
+    backfill: registry reads stay in ``partner_audit_log``, which is a
+    separate, unchained read log.
     Tenants with no such rows start their chain at genesis with their next
     audited action.
 
@@ -81,6 +84,9 @@ def _backfill(conn) -> None:
         if r["cutoff"] is not None:
             details["cutoff"] = audit_chain.format_ts(r["cutoff"])
         details["backfilled_from"] = f"retention_audit_log:{r['id']}"
+        # The collector's canonicalisation (floats as strings, ...): hashed
+        # as stored, so the row verifies after the JSONB round trip.
+        details = audit_chain.sanitize_details(details)
         fields = {
             "id": uuid.uuid4(),
             "tenant_id": r["tenant_id"],

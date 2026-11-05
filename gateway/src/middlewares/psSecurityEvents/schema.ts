@@ -133,21 +133,37 @@ export interface AuthFailureEvent extends SecurityEventBase {
   'http.response.status_code': number;
 }
 
-/** An authenticated (OIDC) caller was refused by the group policy (403). */
+/**
+ * A policy refused the call: the OIDC group policy refused an authenticated
+ * caller (a 403, or for an MCP tool the group may not call, the MCP proxy's
+ * JSON-RPC error, HTTP 200, like the server's own tool policy), or
+ * (`no_compliant_candidate`, 403) the routing data policy allowed no model
+ * at the call's sensitivity level.
+ */
 export interface PolicyDeniedEvent extends SecurityEventBase {
   'event.name': 'policy.denied';
   'ps.policy.reason':
     | 'no_matching_group'
     | 'provider_not_allowed'
-    | 'model_not_allowed';
-  /** The policy entry that applied (its configured `name`), if any. */
+    | 'model_not_allowed'
+    | 'mcp_server_not_allowed'
+    | 'mcp_tool_not_allowed'
+    | 'no_compliant_candidate';
+  /** MCP denials: the server id from the path (`other` when not an id). */
+  'ps.mcp.server'?: string;
+  /** `mcp_tool_not_allowed`: the tool name (`other` when not a valid name). */
+  'ps.mcp.tool'?: string;
+  /**
+   * The policy entry that applied (its configured `name`), if any; for
+   * `no_compliant_candidate`, the route group that had no allowed model.
+   */
   'ps.policy.group'?: string;
   /**
    * ECS user.hash: the pseudonymous subject (32 hex characters, see
    * PS_OIDC_SUBJECT_SALT). Absent with PS_OIDC_TELEMETRY_SUBJECT=off.
    */
   'user.hash'?: string;
-  'http.response.status_code': 403;
+  'http.response.status_code': 403 | 200;
 }
 
 export interface RateLimitHitEvent extends SecurityEventBase {

@@ -1,3 +1,4 @@
+import generatedPolicy from './defaultPolicy.json';
 import { ModelTier, RoutePolicy, RouteRequest } from './types';
 
 /** Assumed completion length when the caller gives no bound. */
@@ -69,12 +70,14 @@ export function pickCheapestIn(tiers: ModelTier[], req: RouteRequest) {
 /**
  * Cheapest tier across ALL groups whose estimated cost fits `maxCost`. When
  * nothing fits, returns the globally cheapest tier and flags `underBudget:false`
- * so the caller can record that the ceiling could not be honored.
+ * so the caller can record that the ceiling could not be honored. `allow`
+ * limits the tiers considered (the data policy and use-case bar).
  */
 export function cheapestUnderBudget(
   policy: RoutePolicy,
   maxCost: number,
-  req: RouteRequest
+  req: RouteRequest,
+  allow?: (tier: ModelTier) => boolean
 ) {
   const out = outTokens(req);
   let underBudget: { tier: ModelTier; estCost: number } | null = null;
@@ -82,6 +85,7 @@ export function cheapestUnderBudget(
 
   for (const group of Object.keys(policy.groups)) {
     for (const tier of policy.groups[group]) {
+      if (allow && !allow(tier)) continue;
       const estCost = estimateTierCost(tier, req.approxInputTokens, out);
       if (!cheapest || estCost < cheapest.estCost) cheapest = { tier, estCost };
       if (
@@ -99,52 +103,18 @@ export function cheapestUnderBudget(
 }
 
 /**
- * Default policy. Groups and pricing mirror the SDK's built-in pricing table
- * (packages/sdk/prompt_shields/pricing.py). Override per deployment / virtual-key.
+ * Default policy. Generated from the model catalog
+ * (schemas/catalog/source.v1.json) by scripts/build_catalog.py into
+ * ./defaultPolicy.json, so its prices match the SDK's
+ * (packages/sdk/prompt_shields/catalog.json). CI fails when the two drift.
+ * Override per deployment / virtual-key.
  */
 export const defaultPolicy: RoutePolicy = {
-  defaultGroup: 'balanced',
-  qualityToGroup: {
-    draft: 'cheap',
-    balanced: 'balanced',
-    critical: 'frontier',
-  },
-  groups: {
-    cheap: [
-      {
-        model: 'gpt-4o-mini',
-        group: 'cheap',
-        inputCostPer1k: 0.00015,
-        outputCostPer1k: 0.0006,
-      },
-      {
-        model: 'claude-3-5-haiku-20241022',
-        group: 'cheap',
-        inputCostPer1k: 0.0008,
-        outputCostPer1k: 0.004,
-      },
-    ],
-    balanced: [
-      {
-        model: 'gpt-4o',
-        group: 'balanced',
-        inputCostPer1k: 0.0025,
-        outputCostPer1k: 0.01,
-      },
-    ],
-    frontier: [
-      {
-        model: 'claude-sonnet-4-20250514',
-        group: 'frontier',
-        inputCostPer1k: 0.003,
-        outputCostPer1k: 0.015,
-      },
-      {
-        model: 'gpt-4o',
-        group: 'frontier',
-        inputCostPer1k: 0.0025,
-        outputCostPer1k: 0.01,
-      },
-    ],
-  },
+  defaultGroup: generatedPolicy.defaultGroup,
+  qualityToGroup: generatedPolicy.qualityToGroup,
+  groups: generatedPolicy.groups,
 };
+
+/** Catalog version the default policy's prices come from. */
+export const DEFAULT_POLICY_CATALOG_VERSION: string =
+  generatedPolicy.catalogVersion;

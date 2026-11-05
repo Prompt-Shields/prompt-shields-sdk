@@ -60,6 +60,7 @@ from db.models import (
     ProviderKeyFingerprint,
     RetentionAuditLog,
     RiskMapping,
+    RiskMappingReview,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
@@ -94,6 +95,7 @@ ERASE_ORDER: tuple[type, ...] = (
     DataFlow,
     RiskMapping,
     AssetAttestation,
+    RiskMappingReview,
     PartnerAuditLog,
     WebhookDelivery,
     WebhookSubscription,
@@ -236,8 +238,9 @@ async def _delete_in_batches(
     one statement.
 
     ``erasing_tenant`` marks each delete transaction as part of that
-    tenant's erasure, which the append-only trigger on
-    ``asset_attestations`` requires before it allows a DELETE.
+    tenant's erasure, which the append-only triggers on
+    ``asset_attestations`` and ``risk_mapping_reviews`` require before
+    they allow a DELETE.
     """
 
     async def _mark_erasure() -> None:
@@ -441,9 +444,25 @@ async def erase_tenant(
     await db.commit()
     rows_deleted[Tenant.__tablename__] = result.rowcount or 0
 
-    await _audit(
-        db, tenant_id=tenant_id, action="erase", actor=actor, details=rows_deleted
-    )
+    # The erasure is committed (in batches; it cannot share one transaction
+    # with the audit rows). If the audit write fails now, the data is still
+    # gone: report the erasure as done and log the missing audit loudly,
+    # rather than answer 500 for an erasure that succeeded.
+    try:
+        await _audit(
+            db, tenant_id=tenant_id, action="erase", actor=actor, details=rows_deleted
+        )
+    except Exception:
+        logger.exception(
+            "tenant erased but its audit record could not be written tenant=%s "
+            "rows_deleted=%s; record it by hand",
+            tenant_id,
+            rows_deleted,
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            logger.debug("rollback after the erase audit failure also failed", exc_info=True)
     logger.warning("tenant erased tenant=%s rows_deleted=%s", tenant_id, rows_deleted)
     return EraseResult(
         tenant_id=str(tenant_id), tenant_existed=existed, rows_deleted=rows_deleted

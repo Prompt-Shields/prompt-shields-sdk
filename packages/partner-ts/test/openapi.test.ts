@@ -191,6 +191,11 @@ const UNMAPPED_SCHEMAS = new Set([
   'CreateTenantRequest',
   'UpdateTenantRequest',
   'ConnectorSyncRequest',
+  // Risk mapping review history and review (#98): not wrapped yet; call
+  // them with client.send().
+  'RiskMappingReview',
+  'RiskReviewRequest',
+  'RiskReviewHistory',
 ]);
 
 interface Operation {
@@ -288,6 +293,9 @@ const OPERATIONS: Record<string, Operation> = {
   'POST /api/v1/admin/asset-lifecycle/sweep': NOT_WRAPPED,
   'POST /api/v1/admin/risk-suggestions/run': NOT_WRAPPED,
   'POST /api/v1/admin/risk-mappings/{risk_id}/review': NOT_WRAPPED,
+  'GET /api/v1/admin/risk-mappings/{risk_id}/reviews': NOT_WRAPPED,
+  'GET /partner/v1/assets/{asset_id}/risks/{risk_id}/reviews': NOT_WRAPPED,
+  'POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review': NOT_WRAPPED,
   'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,
   'POST /api/v1/admin/cloud-inventory/pull': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/leanix/sync': NOT_WRAPPED,

@@ -4,13 +4,18 @@
  * - One `mcp_tool_call` event per `tools/call` that passed the tool policy,
  *   posted to the collector's `POST /ingest/mcp` (#214) with `source:
  *   "gateway"`. Names, outcome and latency only: never arguments, results,
- *   descriptions, URLs or headers. Same opt-in, delivery and loss accounting
- *   as the LLM telemetry (`PS_API_KEY`, `PS_COLLECTOR_URL`).
+ *   descriptions, URLs or headers. With OIDC on, the caller is attributed by
+ *   the pseudonymous subject hash (`user_id`, the hash the LLM telemetry
+ *   sends; never the raw `sub` or email, whatever PS_OIDC_TELEMETRY_SUBJECT
+ *   says, and nothing when it is `off`) and the policy group name
+ *   (`user_group`). Same opt-in, delivery and loss accounting as the LLM
+ *   telemetry (`PS_API_KEY`, `PS_COLLECTOR_URL`).
  * - Prometheus metrics (`PS_METRICS_ENABLED`). Labels are bounded: `server`
  *   is a configured server id, `method` one of a fixed list, `tool` a tool
  *   name the policy allowed (capped per process), the rest fixed sets.
  */
 import { Context } from 'hono';
+import { oidcIdentityOf } from '../middlewares/psOidc/identity';
 import { isMetricsEnabled, labelValue } from '../middlewares/psMetrics/labels';
 import {
   Counter,
@@ -89,7 +94,7 @@ export const mcpToolCallDuration = defaultRegistry.register(
 export const mcpToolsRemovedTotal = defaultRegistry.register(
   new Counter(
     'ps_gateway_mcp_tools_removed_total',
-    'Tools removed from tools/list results, by server and reason (policy, invalid_name, duplicate, pin).',
+    'Tools removed from tools/list results, by server and reason (policy, invalid_name, duplicate, pin, invalid_header, group).',
     ['server', 'reason']
   )
 );
@@ -142,14 +147,18 @@ export function recordToolCall(
       source: 'gateway',
       server_name: record.server,
       tool_name: record.tool,
-      // The collector stores ok/error; a blocked call is an error there.
-      outcome: record.outcome === 'ok' ? 'ok' : 'error',
+      // The collector stores ok, error and blocked.
+      outcome:
+        record.outcome === 'ok' || record.outcome === 'blocked'
+          ? record.outcome
+          : 'error',
       latency_ms: Math.max(0, Math.round(record.latencyMs)),
       transport: 'streamable-http',
       ...(environment && environment !== 'other' ? { environment } : {}),
       ...(callingService
         ? { calling_service: callingService.slice(0, 200) }
         : {}),
+      ...mcpUserFields(c),
     };
     const sent = sender.send(event).catch(() => {});
     try {
@@ -160,6 +169,24 @@ export function recordToolCall(
   } catch {
     /* telemetry must never affect the call */
   }
+}
+
+/**
+ * The caller on an MCP telemetry event: the OIDC subject hash and policy
+ * group name. Unlike the LLM telemetry, `PS_OIDC_TELEMETRY_SUBJECT=raw`
+ * still sends the hash: the MCP registry stores pseudonyms only.
+ */
+export function mcpUserFields(c: Context): {
+  user_id?: string;
+  user_group?: string;
+} {
+  const identity = oidcIdentityOf(c);
+  if (!identity) return {};
+  const out: { user_id?: string; user_group?: string } = {};
+  if (identity.config.telemetrySubject !== 'off')
+    out.user_id = identity.subjectHash;
+  if (identity.group) out.user_group = identity.group.name;
+  return out;
 }
 
 export function recordRequest(

@@ -21,13 +21,13 @@ such a step by hand and say so in the methodology record.
 
 | Step | Issue | State on `main` |
 |---|---|---|
-| Per-call cost: cache read/write (5m and 1h), reasoning, service tier (batch/flex), long-context bands, audio, web-search fees, provider-reported cost, non-token units (seconds, characters, pages, search units, images) | #9, #71 (PRs #138, #157) | Built, in `packages/sdk/prompt_shields/pricing.py`. Checked by `schemas/pricing/cost-vectors.v1.json`. |
+| Per-call cost: cache read/write (5m and 1h), reasoning, service tier (batch/flex), long-context bands, audio, web-search fees, provider-reported cost, non-token units (seconds, characters, pages, search units, images) | #9, #71 (PRs #138, #157) | Built, in `packages/sdk/prompt_shields/pricing.py` and, for gateway events, its port `gateway/src/middlewares/psPricing.ts`. Both run `schemas/pricing/cost-vectors.v1.json`. |
 | Price at `served_model`, not `requested_model` | #6 (PR #229) | Built. The SDK and its integrations price at the served model, falling back to the requested one when the served id has no price (`pricing.resolve_pricing_model`). See [§4.2](#42-served-model-vs-requested-model). |
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
-| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
+| `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. The sensitivity, data-policy and quality-bar vectors are active: both implementations pass them (gateway stages #18, #19). |
 | `ps-teardown` CLI (ingest, baseline, attribution, arbitrage, cache-hit potential, Markdown + HTML + JSON) | #12 | Built: `prompt_shields/teardown/`, see [cli.md](cli.md). Re-prices at `served_model` from token counts. |
-| Policy replay and sensitivity mix | #13 | Built and in the CLI: `ps-teardown run --policy policy.json` (add `--scan-prompts` for full mode). `teardown_replay.py` replays every record through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) on the report's own baseline, and the report gets the sensitivity mix (§7) and projected spend per strategy (§8). Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway does not apply sensitivity, data policy or the quality bar yet. |
+| Policy replay and sensitivity mix | #13 | Built and in the CLI: `ps-teardown run --policy policy.json` (add `--scan-prompts` for full mode). `teardown_replay.py` replays every record through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) on the report's own baseline, and the report gets the sensitivity mix (§7) and projected spend per strategy (§8). Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway applies the same stages (`resolvePolicyRoute`) when its route policy has them. |
 | Eval harness and sample re-execution (quality parity) | #14 | Built: `prompt_shields.evals` and `ps-eval`. Stratified sample, re-execution (opt-in, spend cap, rate limit), exact match / schema validity / similarity / pairwise judge, Wilson parity per (use case, model). With `ps-eval --route-policy`, the sampled level includes PII escalation and candidates **and the judge** must meet the policy's data policy at that level. `ps-teardown run --policy … --eval-results eval.json` reads a prior `ps-eval --out-json` and fills quality parity (§9) and savings at parity (§10) through policy replay ([§6.2](#62-strategies-reported)); the teardown run executes no prompt. |
 | Learning-tuple export | #42 | **Partly built.** `ps-teardown run --learning-tuples` exports (features, model, cost) per call with no prompt text ([cli.md](cli.md#learning-tuples-42)); quality score and replayed decision per tuple are not exported yet. Out of scope for this appendix. |
 
@@ -133,7 +133,8 @@ must then be given as a percentage of the baseline, not as an absolute amount.
 ### 4.1 Per-call cost
 
 Cost is in USD and comes from `prompt_shields.pricing.usage_cost` /
-`estimate_cost`. Every case below has a worked example in
+`estimate_cost` (SDK events) or its port `psPricing.usageCost` (gateway events,
+priced at the served model like the SDK). Every case below has a worked example in
 `schemas/pricing/cost-vectors.v1.json`.
 
 | Dimension | Treatment |
@@ -299,8 +300,9 @@ Python reference router that implements `route-policy.v1`, then prices the route
 decision. The router must pass the golden vectors in `schemas/route-policy/vectors/`
 before a report can use it. `route_policy.resolve_policy_route` applies the whole policy
 (sensitivity, data policy, use-case quality bar, then hints and strategy) and passes every
-vector, including the sensitivity, data-policy and quality-bar vectors that stay
-`pending` for the gateway (`packages/sdk/tests/test_route_policy_vectors.py`). The
+vector, including the sensitivity, data-policy and quality-bar vectors, which the
+gateway's `resolvePolicyRoute` also passes (`packages/sdk/tests/test_route_policy_vectors.py`,
+`gateway/src/middlewares/router/vectors.test.ts`). The
 strategy must be `heuristic`; replay refuses the others.
 
 Calls with an unpriced baseline, or an unpriced projection, are left out of the savings
