@@ -3,8 +3,9 @@
 The Markdown follows ``docs/teardown/teardown-report-template.md`` section by
 section. Computed fields are filled in; fields only a person can fill (the
 customer's name, consent, invoice reconciliation, recommendations) keep their
-``{{placeholder}}``; sections that depend on unbuilt steps keep the
-template's "Not measured in this teardown — pending #N." line. HTML is the
+``{{placeholder}}``; sections whose input the run did not have (a route
+policy for §7–8, ``ps-eval`` results for §9–10) keep the template's "Not
+measured in this teardown — pending #N." line. HTML is the
 same document, self-contained (no external assets), so it can be opened
 offline on the machine that produced it.
 """
@@ -79,6 +80,26 @@ def _pending(report: dict, key: str) -> str:
     return PENDING_LINE.format(issue=report["pending"][key])
 
 
+def share(x: float | None) -> str:
+    """A 0–1 share (policy replay, ps-eval) as a percentage."""
+    return "—" if x is None else f"{100 * x:.1f}%"
+
+
+def _vs(x: float | None) -> str:
+    """A 0–1 saving as "N% lower" or, when negative, "N% higher"."""
+    if x is None:
+        return "—"
+    return f"{share(x)} lower" if x >= 0 else f"{share(-x)} higher"
+
+
+def _ci(ci: list | tuple | None, fmt=pct) -> str:
+    return "—" if not ci else f"{fmt(ci[0])} – {fmt(ci[1])}"
+
+
+_PARITY_STATUS = {"at_parity": "yes", "below_parity": "no",
+                  "insufficient_sample": "insufficient sample"}
+
+
 # --- markdown ---------------------------------------------------------------------
 
 
@@ -104,30 +125,51 @@ def render_markdown(r: dict) -> str:
     ]))
 
     # 1. Summary
-    parity_pending = f"*pending {s['parity']['pending']}*"
+    parity, sov = s["parity"], s["sovereign"]
+    if "pending" in parity:
+        parity_row = [f"*pending {parity['pending']}*", ""]
+    else:
+        parity_row = [
+            (f"{m(parity['window'])} ({pct(parity['saving_pct'])} lower, 95% CI "
+             f"{_ci(parity['ci_pct'])})"), m(parity["month"]),
+        ]
+    if "pending" in sov:
+        sov_row = [f"*pending {sov['pending']}*", ""]
+    else:
+        sov_row = [f"{pct(sov['spend_pct'])} of spend, {pct(sov['calls_pct'])} of calls", ""]
     add("\n## 1. Summary\n")
     add(_table(["", "Window", "Per month (extrapolated, M§3)"], [
         ["Baseline spend", m(s["baseline_window"]), m(s["baseline_month"])],
         ["Projected spend, same-model arbitrage",
          f"{m(s['arbitrage_window'])} ({pct(s['arbitrage_saving_pct'])} lower)",
          m(s["arbitrage_month"])],
-        ["Projected spend, policy at parity", parity_pending, ""],
+        ["Projected spend, policy at parity", *parity_row],
         ["Cache-hit potential (upper bound)",
          f"{m(s['cache_window'])} ({pct(s['cache_pct'])} of baseline)", m(s["cache_month"])],
-        ["Spend that must stay sovereign", f"*pending {s['sovereign']['pending']}*", ""],
+        ["Spend that must stay sovereign", *sov_row],
     ]))
     add(
         f"\n**In one sentence:** Over {days if days is not None else 'an unknown number of'} "
         f"days the logged AI traffic cost {m(s['baseline_window'])}"
         + (f" (about {m(s['baseline_month'])} a month)" if s["baseline_month"] is not None else "")
         + f"; same-model price arbitrage would save {pct(s['arbitrage_saving_pct'])} of it and "
-        f"exact-match caching up to {pct(s['cache_pct'])}. Savings from routing at quality "
-        f"parity are not measured yet (pending {s['parity']['pending']})."
+        f"exact-match caching up to {pct(s['cache_pct'])}. "
+        + (f"Routing at quality parity under the policy would save {pct(parity['saving_pct'])} "
+           f"of the compared spend (conservative: {pct(parity['conservative_saving_pct'])})."
+           if "pending" not in parity else
+           f"Savings from routing at quality parity are not measured (pending "
+           f"{parity['pending']}).")
+        + (f" {pct(sov['spend_pct'])} of spend must stay sovereign under the policy."
+           if "pending" not in sov else "")
     )
-    add(
-        "\n**Gate 1 reading** (≥ 30% savings at ≥ 95% parity): "
-        f"not measured — pending {s['gate1']['pending']}."
-    )
+    if "pending" in s["gate1"]:
+        add("\n**Gate 1 reading** (≥ 30% savings at ≥ 95% parity): "
+            f"not measured — pending {s['gate1']['pending']}.")
+    else:
+        add(f"\n**Gate 1 reading** (≥ 30% savings at ≥ 95% parity): {s['gate1']['reading']}.\n"
+            f"Based on: point estimate {pct(parity['saving_pct'])} (95% CI "
+            f"{_ci(parity['ci_pct'])}), conservative (Wilson lower bound) "
+            f"{pct(parity['conservative_saving_pct'])} (M§7.2).")
     add("\n**How much to trust these numbers:**\n")
     add("- Baseline reconciliation with the invoice: {{gap_pct}}% → "
         "{{reconciled / unreconciled / no invoice}} (M§3.1).")
@@ -137,8 +179,8 @@ def render_markdown(r: dict) -> str:
     for c in trust["caveats"]:
         add(f"- {c}")
     if not arb["compliance_checked"]:
-        add("- Same-model arbitrage does not check the cheaper host against a route policy "
-            f"(pending {r['pending']['policy_replay']})"
+        add("- Same-model arbitrage does not check the cheaper host against a data policy "
+            "(the price catalog has no jurisdiction data yet, #7 / #8)"
             + (f"; it is limited to: {', '.join(arb['allowed_providers'])}."
                if arb["allowed_providers"] else "."))
 
@@ -149,8 +191,18 @@ def render_markdown(r: dict) -> str:
          ", ".join(f"{n} ({k})" for k, n in src["dropped"].items()) or "0"]
         for src in r["sources"]
     ]))
-    add("\n- Prompt text: not used. Where an input carried messages, they were read on this "
-        "machine only to compute a request hash and prompt features; no text was kept.")
+    prompt = meta.get("prompt_text") or {}
+    if prompt.get("scanned_locally"):
+        add("\n- Prompt text: read on this machine only, to compute a request hash and prompt "
+            "features, to scan for PII (only category names were kept) and to run the policy "
+            "heuristic. No text is in this report.")
+    else:
+        add("\n- Prompt text: not used by `ps-teardown`. Where an input carried messages, they "
+            "were read on this machine only to compute a request hash and prompt features; no "
+            "text was kept.")
+    if prompt.get("reexecuted_by_ps_eval"):
+        add("- Quality parity: a stratified sample was re-run by a separate `ps-eval` run "
+            "(Appendix A); this report reads its results file and executed no prompt.")
     add(f"- Sensitivity input: {meta['sensitivity_input']}; see M§5.3.")
     add("- Was the window typical? {{customer answer}}")
     if win["records_without_timestamp"]:
@@ -224,7 +276,7 @@ def render_markdown(r: dict) -> str:
             for a in arb["rows"]
         ]))
         add("\n\"Compliant\" here means allowed by `--allow-provider`, not checked against a "
-            f"route policy (pending {r['pending']['policy_replay']}).")
+            "data policy: the price catalog has no jurisdiction data yet (#7 / #8).")
     else:
         add("No model in the window is sold cheaper by another host in catalog "
             f"`{meta['catalog_version']}`. Saving: {m(0.0)}.")
@@ -239,22 +291,20 @@ def render_markdown(r: dict) -> str:
         f"({pct(cache['saving_pct'])} of baseline). This is an upper bound (M§6.4). Calls whose "
         f"sensitivity turns the cache off under the policy are excluded: "
         f"{num(cache['excluded_cache_off_calls'])} ({m(cache['excluded_cache_off_spend'])}); the "
-        f"cache is off at `{cache['cache_off_at']}` and above, and a call with no declared "
-        f"classification counts as `{cache['unclassified_default']}` (M§5.1)."
+        f"cache is off at `{cache['cache_off_at']}` and above, and "
+        + ("a call's level is its effective level under the route policy, PII escalation "
+           f"included; with no declared classification it starts at "
+           f"`{cache['unclassified_default']}` (M§5.1)."
+           if cache.get("levels_from") == "route_policy" else
+           f"a call with no declared classification counts as "
+           f"`{cache['unclassified_default']}` (M§5.1).")
     )
     if cache["excluded_no_timestamp_calls"]:
         add(f"\nHashed calls without a timestamp, not analysed: "
             f"{num(cache['excluded_no_timestamp_calls'])}.")
 
-    # 7–10. Pending
-    add("\n## 7. Sensitivity mix\n")
-    add(_pending(r, "sensitivity_mix"))
-    add("\n## 8. Policy replay — projected spend by strategy\n")
-    add(_pending(r, "policy_replay"))
-    add("\n## 9. Quality parity\n")
-    add(_pending(r, "quality_parity"))
-    add("\n## 10. Savings at parity\n")
-    add(_pending(r, "savings_at_parity"))
+    # 7–10. Policy replay (#13) and quality parity (#14), or pending
+    _policy_sections(r, add, m)
 
     # 11–12
     add("\n## 11. Recommendations and next steps\n")
@@ -269,12 +319,28 @@ def render_markdown(r: dict) -> str:
         "compliance, prove general model quality, or measure latency or reliability. Migration "
         "cost is not included. Full list: M§8.\n")
     add("Specific to this teardown:\n")
-    add("- Cost-only mode: no prompt text, no policy replay, no quality parity.")
+    missing = [name for key, name in (
+        ("policy_replay", "no policy replay or sensitivity mix (no route policy given)"),
+        ("quality_parity", "no quality parity (no `ps-eval` results given)"),
+    ) if key in r["pending"]]
+    if meta["mode"] == "cost-only":
+        missing.insert(0, "no prompt text")
+    if missing:
+        add(f"- {meta['mode'].capitalize()} mode: " + ", ".join(missing) + ".")
+    if "policy_replay" in r:
+        add("- Policy replay assumes the same tokens on every model, no failures or capacity "
+            "limits, and no change in what users send (M§6.3).")
+    if "quality_parity" in r:
+        add("- Parity holds only for the sampled prompts, the scoring method and the judge "
+            "recorded below (M§8).")
     add("- Costs are list prices at the catalog version below, in USD.")
     add("- {{run-specific limit}}")
 
     # Appendix A
-    pending_14 = f"pending {r['pending']['quality_parity']}"
+    qp = r.get("quality_parity")
+    sap = r.get("savings_at_parity")
+    pending_14 = f"pending {r['pending'].get('quality_parity', '#14')}"
+    pol = (r.get("policy_replay") or {}).get("policy")
     by_src_counts = ", ".join(
         f"{k} {calls(v)}" for k, v in base["by_cost_source"].items()
     ) or "none"
@@ -303,25 +369,210 @@ def render_markdown(r: dict) -> str:
         ["Null-cost calls by reason", null_counts],
         ["`requested_model ≠ served_model` calls", num(base["requested_ne_served_calls"])],
         ["Route policy file, `policy_version`, SHA-256",
-         f"n/a: cost-only mode (pending {r['pending']['policy_replay']})"],
+         (f"`{pol['file']}`, {pol['policy_version']}, {pol['sha256']}" if pol else
+          f"n/a: no route policy given (pending {r['pending']['policy_replay']})")],
         ["Sensitivity input", meta["sensitivity_input"]],
         ["Cache TTL", f"{cache['ttl_seconds']} seconds"],
-        ["Sample size per stratum, seed", pending_14],
-        ["Scoring method per use case", pending_14],
-        ["Judge model, provider, jurisdiction, prompt version", pending_14],
-        ["Re-execution temperature, spend", pending_14],
+        ["Sample size per stratum, seed", _sample_text(qp) if qp else pending_14],
+        ["Scoring method per use case", _scoring_text(qp) if qp else pending_14],
+        ["Judge model, provider, jurisdiction, prompt version",
+         ("; ".join(qp["judges"]) or "none (no judge scorer)") if qp else pending_14],
+        ["Re-execution temperature, spend", _reexec_text(qp) if qp else pending_14],
         ["`min_parity`, `min_cell_samples`, `min_cell_calls`",
-         f"{pending_14}, {pending_14}, {meta['min_cell_calls']}"],
-        ["CI methods", pending_14],
+         (f"{qp['min_parity']}, {qp['min_cell_samples']}, {meta['min_cell_calls']}" if qp
+          else f"{pending_14}, {pending_14}, {meta['min_cell_calls']}")],
+        ["CI methods",
+         (f"Wilson 95% two-sided per cell (ps-eval); bootstrap over the parity sample, "
+          f"{sap['bootstrap_resamples']} resamples, seed {sap['bootstrap_seed']}" if sap
+          else pending_14)],
         ["Known limits specific to this run", "{{limits}}"],
         ["Intermediate data deleted on", "{{date}}"],
     ]))
     add("\n## Appendix B — Data handling statement\n")
     add("The analysis ran on {{where}}, under {{customer}}'s control, with `ps-teardown` reading "
-        "local files only and making no network calls. Logs did not leave that environment. This "
-        "report contains aggregates only: no prompt text, response text, request hashes or user "
-        "identifiers. Intermediate files were deleted on {{date}}.")
+        "local files only and making no network calls. Logs did not leave that environment. "
+        + ("Sampled prompts were re-run by `ps-eval` only on models, and judged only by models, "
+           "that the route policy allows for their sensitivity level, using the customer's own "
+           "provider keys. " if qp and qp["eval_policy_is_route_policy"] else
+           "Sampled prompts were re-run by `ps-eval` with the customer's own provider keys, "
+           "under {{eval policy}}. " if qp else "")
+        + "This report contains aggregates only: no prompt text, response text, request hashes "
+        "or user identifiers. Intermediate files were deleted on {{date}}.")
     return "\n".join(out) + "\n"
+
+
+def _sample_text(qp: dict) -> str:
+    sample = qp["sample"]
+    strata = "; ".join(
+        f"{st['use_case']}/{st['sensitivity']}/{st['complexity']}: {st['sampled']} of "
+        f"{st['population']}" for st in sample["strata"]
+    ) or "no strata"
+    return f"up to {sample['per_stratum']} per stratum, seed {sample['seed']} ({strata})"
+
+
+def _scoring_text(qp: dict) -> str:
+    return ", ".join(f"{uc}: {method}" for uc, method in qp["scoring"].items()) or "none"
+
+
+def _reexec_text(qp: dict) -> str:
+    x = qp["reexecution"]
+    spend = x.get("spend_usd")
+    cap = x.get("max_spend_usd")
+    money_text = "unknown" if spend is None else f"USD {spend:.4f}"
+    if cap is not None:
+        money_text += f" of a USD {cap:.2f} cap"
+    sent = "prompts sent to providers" if x.get("prompts_sent_to_providers") else (
+        "no prompt sent to a provider (mock or recorded answers)")
+    return (f"{x.get('temperature_default')} unless the logged call's is known; {money_text}; "
+            f"{x.get('calls')} calls, {x.get('judge_calls')} judge calls; {sent}")
+
+
+def _policy_sections(r: dict, add, m) -> None:
+    """Template §7–§10: filled from policy replay and eval results, or pending."""
+    pr = r.get("policy_replay")
+    add("\n## 7. Sensitivity mix\n")
+    if pr is None:
+        add(_pending(r, "sensitivity_mix"))
+    else:
+        pol, mix = pr["policy"], pr["sensitivity_mix"]
+        add(f"Policy: `{pol['file']}`, `policy_version` {pol['policy_version']}. "
+            f"`unclassified_default` = {pol['unclassified_default']}.\n")
+        add(_table(["Level", "Calls", "Share of calls", "Spend", "Share of spend",
+                    "declared / pii_escalated / default", "Must stay sovereign?"], [
+            [lv["level"], num(lv["calls"]), share(lv["share_calls"]), m(lv["spend"]),
+             share(lv["share_spend"]),
+             (f"{lv['by_source']['declared']} / {lv['by_source']['pii_escalated']} / "
+              f"{lv['by_source']['default']}"),
+             "yes" if lv["must_stay_sovereign"] else "no"]
+            for lv in mix["levels"]
+        ]))
+        sov = mix["sovereign"]
+        cats = ", ".join(f"{k} {num(v)}" for k, v in mix["pii_categories"].items()) or "none"
+        add(f"\nMust stay sovereign: {m(sov['spend'])} ({share(sov['share_spend'])} of spend), "
+            f"{num(sov['calls'])} calls ({share(sov['share_calls'])}). PII escalation raised "
+            f"{share(mix['pii_escalated_share_calls'])} of calls; categories seen: {cats}.")
+        nc = pr["baseline_noncompliant"]
+        add(f"\nToday's traffic outside the policy: {num(nc['calls'])} calls "
+            f"({m(nc['spend'])}) ran on a model the data policy does not allow at their level; "
+            f"{num(nc['calls_served_model_not_in_policy'])} calls ran on a model the policy does "
+            "not list.")
+        if pr["calls_unknown_rows"]:
+            add(f"\nUsage-export rows with no request count: {num(pr['calls_unknown_rows'])} "
+                "(their spend is included; their calls are not counted).")
+        add("\n{{Short reading, e.g. \"62% of spend must stay in the EEA; 18 points of that "
+            "come from the confidential default for calls with no declared classification.\"}}")
+
+    add("\n## 8. Policy replay — projected spend by strategy\n")
+    if pr is None:
+        add(_pending(r, "policy_replay"))
+    else:
+        base = r["baseline"]["spend"]
+        arb, cache = r["arbitrage"], r["cache"]
+        pc = pr["policy_cheapest"]
+        sap = r.get("savings_at_parity")
+        nocomp = num(pc["outcomes"]["no_compliant_candidate"])
+        rows = [
+            ["Baseline (observed)", m(base), "—", "—"],
+            ["Same-model arbitrage", m(arb["projected_spend"]),
+             f"{pct(arb['saving_pct'])} lower", "—"],
+            ["Policy, cheapest (not quality-checked)",
+             f"{m(pc['projected_spend'])} (vs. {m(pc['baseline_spend_compared'])} compared)",
+             _vs(pc["savings_pct"]), nocomp],
+        ]
+        if sap:
+            pp = sap["policy_at_parity"]
+            rows.append(["Policy, at parity",
+                         (f"{m(pp['projected_spend'])} (vs. "
+                          f"{m(pp['baseline_spend_compared'])} compared)"),
+                         _vs(pp["savings_pct"]),
+                         num(pp["calls_by_status"].get("no_compliant_candidate", 0))])
+        else:
+            rows.append(["Policy, at parity", f"*pending {r['pending']['savings_at_parity']}*",
+                         "—", "—"])
+        rows.append(["Cache (separate, not additive)", m(cache["saving"]),
+                     f"{pct(cache['saving_pct'])} of baseline", "—"])
+        add(_table(["Strategy (M§6.2)", "Projected spend", "vs. baseline",
+                    "Calls with no compliant candidate"], rows))
+        add("\n\"Policy, cheapest\" is not a savings claim. It shows the ceiling before quality "
+            "is checked. A negative saving means the policy moves traffic to more expensive, "
+            "compliant models.")
+        oc = pc["outcomes"]
+        add(f"\nOutcomes: {num(oc['routed'])} calls routed to another model, "
+            f"{num(oc['unchanged'])} unchanged, {nocomp} with no compliant candidate (kept at "
+            f"baseline cost). Calls with a null baseline or projected cost are left out of the "
+            f"comparison: {num(pc['calls_projected_null'])} projected null; "
+            f"{num(pc['calls_priced_at_policy_rates'])} priced at the policy's per-1k rates "
+            "because the catalog has no price for the model (M§4.6).")
+        add("\n" + _table(["Routed model", "Calls", "Projected spend"], [
+            [model, num(b["calls"]), m(b["spend"])] for model, b in pc["by_model"].items()
+        ]))
+
+    qp = r.get("quality_parity")
+    add("\n## 9. Quality parity\n")
+    if qp is None:
+        add(_pending(r, "quality_parity"))
+    else:
+        scoring = _scoring_text(qp)
+        judges = "; ".join(qp["judges"]) or "none"
+        add(f"Scoring: {scoring}. Judge: {judges}.\n")
+        add(_table(["Use case", "Candidate model", "Sample n", "Parity", "95% Wilson CI",
+                    "At parity?"], [
+            [c["use_case"], c["candidate"], num(c["n"]), share(c["parity"]),
+             _ci((c["ci_low"], c["ci_high"]) if c["ci_low"] is not None else None, share),
+             _PARITY_STATUS[c["status"]]]
+            for c in qp["cells"]
+        ]))
+        add(f"\nEvery tested cell is listed, including the ones that failed (M§7.4). At parity: "
+            f"point estimate ≥ {share(qp['min_parity'])} and n ≥ {qp['min_cell_samples']}.")
+        if not qp["eval_policy_is_route_policy"]:
+            add("\nThe eval was not run under this route policy (`ps-eval --route-policy`); "
+                "see the caveats in §1.")
+
+    sap = r.get("savings_at_parity")
+    add("\n## 10. Savings at parity\n")
+    if sap is None:
+        add(_pending(r, "savings_at_parity"))
+    else:
+        pp, cons = sap["policy_at_parity"], sap["conservative"]
+        rows, other = [], None
+        for u in sap["use_cases"]:
+            if not u["calls_unknown_rows"] and u["calls"] < r["report"]["min_cell_calls"]:
+                other = other or {"base": 0.0, "parity": 0.0}
+                other["base"] += u["baseline"]
+                other["parity"] += u["at_parity"]
+                continue
+            if u["eval"] == "no_eval":
+                change = "no eval set"
+            elif u["eval"] == "none_at_parity":
+                change = "none at parity"
+            elif u["to_model"] and u["to_model"] != u["from_model"]:
+                change = f"{u['from_model']} → {u['to_model']}"
+            else:
+                change = "no change"
+            rows.append([u["use_case"], m(u["baseline"]), m(u["at_parity"]),
+                         share(u["saving_pct"]), change])
+        if other:
+            saved = ((other["base"] - other["parity"]) / other["base"]
+                     if other["base"] else None)
+            rows.append([f"Other (use cases under {r['report']['min_cell_calls']} calls)",
+                         m(other["base"]), m(other["parity"]), share(saved), "various"])
+        rows.append(["**Total (spend-weighted)**", f"**{m(pp['baseline_spend_compared'])}**",
+                     f"**{m(pp['projected_spend'])}**",
+                     f"**{share(pp['savings_pct'])} (95% CI {_ci(sap['saving_ci'], share)})**",
+                     ""])
+        rows.append(["Conservative (Wilson lower bound)", "", m(cons["projected_spend"]),
+                     share(cons["savings_pct"]), ""])
+        add(_table(["Use case", "Baseline spend", "At-parity spend", "Saving",
+                    "Model change"], rows))
+        add("\nUse cases with no eval set count as zero savings here (M§7.4). The at-parity "
+            "strategy replays the route policy with each use case limited to the models that "
+            "reached parity for it, plus the model it runs on today (M§6.2). The interval "
+            "resamples the parity sample; the logged traffic is the whole population.")
+        x = sap["ps_eval_cross_check"]
+        if x.get("saving_pct") is not None:
+            add(f"\nCross-check: `ps-eval`'s own estimate (per-use-case model swap over its "
+                f"{num(x.get('population_calls'))} records) is {share(x['saving_pct'])} "
+                f"(95% CI {_ci(x.get('saving_ci'), share)}).")
 
 
 # --- minimal markdown -> HTML (only what render_markdown emits) --------------------

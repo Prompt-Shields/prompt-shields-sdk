@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | v0.1 draft. Parts of the pipeline are not built yet; see [§1](#1-what-is-built-and-what-is-pending). |
-| **Applies to** | Concierge teardowns (Gate 1) and the `ps-teardown` CLI once it ships |
+| **Status** | v0.2. The teardown pipeline is built end to end in the SDK; the versioned catalog is still pending. See [§1](#1-what-is-built-and-what-is-pending). |
+| **Applies to** | Concierge teardowns (Gate 1) and the `ps-teardown` / `ps-eval` CLIs |
 | **Spec** | PRD 0001 §7.6 (teardown), §7.10 (baseline), §7.4 (eval harness) |
 | **Report template** | [teardown-report-template.md](teardown-report-template.md) |
 | **Issue** | #15 |
@@ -13,28 +13,28 @@ report claims and what it does not. Every teardown report links to it and fills 
 [methodology record](#9-methodology-record) for its own run. If a report and this
 document disagree, the report's methodology record says what was actually done.
 
-Some sections describe tooling that does not exist on `main` yet. They are marked
-**Pending #N**. Those sections give the method the tool must follow. They do not
-describe tool behaviour, because there is none yet. A concierge teardown done before
-the tool lands must do these steps by hand and say so in the methodology record.
+Where a step depends on tooling that does not exist on `main` yet, it is marked
+**Pending #N** and gives the method the tool must follow. A concierge teardown must do
+such a step by hand and say so in the methodology record.
 
 ## 1. What is built and what is pending
 
 | Step | Issue | State on `main` |
 |---|---|---|
 | Per-call cost: cache read/write (5m and 1h), reasoning, service tier (batch/flex), long-context bands, audio, web-search fees, provider-reported cost, non-token units (seconds, characters, pages, search units, images) | #9, #71 (PRs #138, #157) | Built, in `packages/sdk/prompt_shields/pricing.py`. Checked by `schemas/pricing/cost-vectors.v1.json`. |
-| Price at `served_model`, not `requested_model` | #6 | **Pending.** See [§4.2](#42-served-model-vs-requested-model). |
+| Price at `served_model`, not `requested_model` | #6 (PR #229) | Built. The SDK and its integrations price at the served model, falling back to the requested one when the served id has no price (`pricing.resolve_pricing_model`). See [§4.2](#42-served-model-vs-requested-model). |
 | Versioned model catalog with sovereignty fields | #7, #8 | **Pending.** Prices today are the 2026-Q1 snapshot in `pricing.py`, with no catalog version id. |
 | Nordic national-ID detectors | #10 | Built (`national_ids.py`, `national_id` PII category). |
 | `route-policy.v1` schema and golden vectors | #11 (PR #124) | Built (`schemas/route-policy/`). The gateway and the Python reference router run the routing vectors. Sensitivity, data-policy and quality-bar vectors are `pending`. |
-| `ps-teardown` CLI, cost-only mode (ingest, baseline, attribution, arbitrage, cache-hit potential, HTML + JSON) | #12 | Built: `prompt_shields/teardown/`, see [cli.md](cli.md). Re-prices at `served_model` from token counts. |
-| Policy replay and sensitivity mix | #13 | **Built (Python), not yet in the CLI.** `packages/sdk/prompt_shields/teardown_replay.py` replays normalised records through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) and reports the sensitivity mix and projected spend per strategy. Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway does not apply sensitivity, data policy or the quality bar yet. |
-| Eval harness and sample re-execution (quality parity) | #14 | **Partly built.** `prompt_shields.evals` and the `ps-eval` CLI: stratified sample, re-execution (opt-in, spend cap, rate limit, per-level model allowlist), exact match / schema validity / similarity / pairwise judge, Wilson parity per (use case, model), savings at parity with a bootstrap interval, sections 9–10 of the report. Pending: PII escalation of the sampled level (#13), a judge constrained by `route-policy.v1` data policy (#13), savings through policy replay rather than a per-use-case model swap (#13). |
-| Learning-tuple export | #42 | **Partly built.** `ps-teardown run --learning-tuples` exports (features, model, cost) per call with no prompt text ([cli.md](cli.md#learning-tuples-42)); quality score pending #14, replayed decision pending #13. Out of scope for this appendix. |
+| `ps-teardown` CLI (ingest, baseline, attribution, arbitrage, cache-hit potential, Markdown + HTML + JSON) | #12 | Built: `prompt_shields/teardown/`, see [cli.md](cli.md). Re-prices at `served_model` from token counts. |
+| Policy replay and sensitivity mix | #13 | Built and in the CLI: `ps-teardown run --policy policy.json` (add `--scan-prompts` for full mode). `teardown_replay.py` replays every record through `route_policy.resolve_policy_route` (sensitivity, PII escalation, data policy, quality bar, precedence, heuristic strategy, budget clamp) on the report's own baseline, and the report gets the sensitivity mix (§7) and projected spend per strategy (§8). Standalone entry point: `python -m prompt_shields.teardown_replay`. The gateway does not apply sensitivity, data policy or the quality bar yet. |
+| Eval harness and sample re-execution (quality parity) | #14 | Built: `prompt_shields.evals` and `ps-eval`. Stratified sample, re-execution (opt-in, spend cap, rate limit), exact match / schema validity / similarity / pairwise judge, Wilson parity per (use case, model). With `ps-eval --route-policy`, the sampled level includes PII escalation and candidates **and the judge** must meet the policy's data policy at that level. `ps-teardown run --policy … --eval-results eval.json` reads a prior `ps-eval --out-json` and fills quality parity (§9) and savings at parity (§10) through policy replay ([§6.2](#62-strategies-reported)); the teardown run executes no prompt. |
+| Learning-tuple export | #42 | **Partly built.** `ps-teardown run --learning-tuples` exports (features, model, cost) per call with no prompt text ([cli.md](cli.md#learning-tuples-42)); quality score and replayed decision per tuple are not exported yet. Out of scope for this appendix. |
 
-Until #13 and #14 are wired into the CLI, a report contains what `ps-teardown` computes in cost-only mode
-(or what can be computed by hand from the customer's data with `pricing.py`). Every section that depends on a pending
-item must say so in the report. It must not be filled in with estimates.
+A report fills a section only when the run had its input: a route policy for the
+sensitivity mix and policy replay, `ps-eval` results for quality parity and savings at
+parity. Otherwise the section says *"Not measured in this teardown — pending #N"*. It is
+never filled in with estimates.
 
 ## 2. Data collected and consent
 
@@ -58,9 +58,9 @@ defined in [cli.md](cli.md#input-formats) (#12).
   the SDK already recorded ([§5.3](#53-without-prompt-text)). Quality parity cannot be
   measured.
 - **Full.** Prompt text is available for a sample. This adds PII-based sensitivity
-  escalation (replay with `--scan-prompts`; detection runs locally and only category
-  names reach the report), re-execution on candidate models and quality scoring
-  (**pending #14**).
+  escalation (`ps-teardown run --scan-prompts`; detection runs locally and only category
+  names reach the report), and re-execution on candidate models with quality scoring
+  (`ps-eval`, whose results the teardown reads with `--eval-results`).
 
 ### 2.3 Where the data goes
 
@@ -158,13 +158,15 @@ at the model that **served** it (`served_model`), because that is what the provi
 - Re-pricing in the teardown: use `served_model`. If it is missing, use
   `requested_model` and count the call as `priced_at_requested`. If neither names a
   priced model (e.g. `auto` with no served model), the cost is null.
-- **Known gap on `main` (#6, pending).** SDK events carry both fields, but
-  the SDK prices at the requested model. Only the Azure adapter falls back to the
-  served model, for unmapped deployments. The Gemini and Bedrock adapters only normalise
-  the requested name. So an event's `cost` can be wrong when the two differ, and
-  `model="auto"` events have a null cost. Until #6 lands, a teardown
-  that reads SDK events must **re-price** from token counts and `served_model`. It must
-  not sum the `cost` field. Record "re-priced from tokens" in the methodology record.
+- **SDK events (#6, fixed by PR #229).** SDK releases since #229 price an event at
+  the served model, and at the requested model only when the served id has no price
+  (`pricing.resolve_pricing_model`); `model="auto"` calls routed by the gateway get a
+  cost. Events written by earlier SDK versions priced at the requested model, so their
+  `cost` can be wrong when the two differ, and their `auto` events have a null cost.
+  A log rarely says which SDK version wrote each event, so `ps-teardown` always
+  **re-prices** from token counts at `served_model` (the same fallback as #229) and
+  never sums the event's `cost` field; record "re-priced from tokens" in the methodology
+  record. A by-hand teardown must do the same.
 - The report gives the number and share of calls where `requested_model ≠ served_model`.
 
 ### 4.3 Provider-reported, estimated and null
@@ -211,14 +213,15 @@ figure covers only the priced part of the traffic.
 
 ### 4.6 Projected cost on another model
 
-Built in `teardown_replay.py` (#13). Projected spend prices each call's token usage at
+Built in `teardown_replay.py` (#13); in `ps-teardown` the candidate is priced through
+the same price source as the baseline. Projected spend prices each call's token usage at
 the candidate model's rates, with these rules:
 
 - **Same tokens.** The call keeps its observed input and output counts. Tokenizers
   differ between model families, and output length depends on the model. This is a
-  known bias ([§6.3](#63-limits)). Once re-execution exists (#14), the sampled calls'
-  observed token ratio per (baseline, candidate) pair can correct it. If a correction
-  is applied, the report must say so.
+  known bias ([§6.3](#63-limits)). `ps-eval` reports the sampled calls' observed output
+  token ratio per (use case, candidate); the teardown does not apply it as a correction
+  yet. If a correction is applied by hand, the report must say so.
 - **Same dimensions on both sides.** A cached-read token on the baseline is priced at
   the candidate's cache-read rate only if the candidate offers prompt caching. If it
   does not, it is priced at the full input rate. A batch call keeps the batch discount
@@ -234,7 +237,8 @@ the candidate model's rates, with these rules:
 
 ## 5. Sensitivity mix
 
-Built in `teardown_replay.py` (#13). The method follows the shared contract in
+Built in `teardown_replay.py` (#13), in the report with `ps-teardown run --policy`.
+The method follows the shared contract in
 `schemas/route-policy/` (`route-policy.v1`, `vectors/sensitivity.json`,
 `vectors/data-policy.json`).
 
@@ -325,9 +329,16 @@ Each report shows projected spend for:
   several hosts, or a regional endpoint). Cost-only mode computes this (`ps-teardown`, #12).
 - **Policy, cheapest:** the cheapest compliant candidate in the group the policy picks.
 - **Policy, at parity:** like *Policy, cheapest*, but only models that passed the
-  parity bar for that use case ([§7.2](#72-quality-parity)) are allowed. **Pending #14.**
-  Without eval results this row reads "not measured". It is never filled in with the
-  *Policy, cheapest* number.
+  parity bar for that use case ([§7.2](#72-quality-parity)) are allowed, plus the model
+  the call runs on today. `ps-teardown --eval-results` replays the policy with each
+  evaluated use case's `eligible_models` set to its at-parity models. A use case with
+  no eval, or no model at parity, keeps its baseline cost; so does a call the router
+  would send outside the allowed set (an explicit route group bypasses the use-case
+  bar). The conservative variant uses only cells whose Wilson lower bound reaches
+  `min_parity`. Its interval is a bootstrap over the parity sample (each cell's trial
+  outcomes resampled, the at-parity set chosen again); the logged traffic is the whole
+  population and is not resampled. Without eval results this row reads "not measured".
+  It is never filled in with the *Policy, cheapest* number.
 - **Cache:** extra savings from exact-match caching ([§6.4](#64-cache-hit-potential)),
   shown separately and not added to routing savings.
 
@@ -376,8 +387,9 @@ earlier one exactly within a chosen TTL (record it; default 1 hour). Computed by
 
 ### 7.2 Quality parity
 
-**Partly built (#14):** `ps-eval` implements this section. Parity is measured on a
-stratified sample, re-run on candidate models.
+Built (#14): `ps-eval` implements this section. Parity is measured on a stratified
+sample, re-run on candidate models. With `--route-policy` the sensitivity stratum is the
+effective level (PII escalation included, [§5.1](#51-effective-level-per-call)).
 
 - **Sampling.** Stratify by use case × sensitivity level × complexity band. Sample at
   random within each stratum, with a recorded seed. Record the sample size per stratum,
@@ -404,9 +416,12 @@ stratified sample, re-run on candidate models.
 
 ### 7.3 Judge
 
-**Partly built (#14):** `ps-eval` judges both orders, counts disagreement as a tie
-and applies the eval policy's per-level allowlist to the judge. It notes a same-family
-judge; it does not pick another one.
+Built (#14): `ps-eval` judges both orders, counts disagreement as a tie and applies
+the eval policy to the judge exactly as to candidates. With `--route-policy`, that is
+the route policy's data policy at the call's effective level, and the report records
+the judge's jurisdiction from the policy. It notes a same-family judge; it does not
+pick another one. If the eval ran without `--route-policy`, the teardown report says
+so.
 
 - The judge model is subject to the same data policy as the candidates. A prompt at
   `restricted` is never sent to a judge that the policy would not allow to serve it.
@@ -455,7 +470,8 @@ A teardown report is a projection from a sample of past traffic. It does **not**
 ## 9. Methodology record
 
 Every report fills in this table. A field that does not apply reads "n/a" with a reason.
-A field for a step that has not been built reads "pending #N".
+A field for a step whose input the run did not have reads "pending #N" (#13: a route
+policy; #14: `ps-eval` results). `ps-teardown` fills every computed field.
 
 | Field | Value |
 |---|---|
@@ -478,10 +494,10 @@ A field for a step that has not been built reads "pending #N".
 | Route policy file, `policy_version`, SHA-256 | |
 | Sensitivity input ([§5.3](#53-without-prompt-text)) | declared / detected_pii_types / prompt text / per-key mapping |
 | Cache TTL used ([§6.4](#64-cache-hit-potential)) | |
-| Sample size per stratum and seed ([§7.2](#72-quality-parity)) | pending #14 |
-| Scoring method per use case | pending #14 |
-| Judge model, provider, jurisdiction, prompt version ([§7.3](#73-judge)) | pending #14 |
-| Re-execution temperature, spend | pending #14 |
+| Sample size per stratum and seed ([§7.2](#72-quality-parity)) | from `ps-eval`, or pending #14 |
+| Scoring method per use case | from `ps-eval`, or pending #14 |
+| Judge model, provider, jurisdiction, prompt version ([§7.3](#73-judge)) | from `ps-eval` and the route policy, or pending #14 |
+| Re-execution temperature, spend | from `ps-eval`, or pending #14 |
 | `min_parity`, `min_cell_samples`, `min_cell_calls` | |
 | CI methods (Wilson; bootstrap resamples and seed) | |
 | Known limits specific to this run | |

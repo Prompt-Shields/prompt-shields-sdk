@@ -1,4 +1,4 @@
-# `ps-teardown` CLI — cost-only mode
+# `ps-teardown` CLI
 
 `ps-teardown` builds the AI bill teardown report ([template](teardown-report-template.md),
 [methodology](methodology.md), "M§" below) from a customer's usage logs. It ships with the
@@ -12,8 +12,21 @@ ps-teardown run usage-openai.json usage-anthropic.json events.jsonl \
 
 This writes `report/teardown-report.md`, `.html` and `.json`. The Markdown and HTML follow
 the template section by section. Fields only a person can fill (customer name, consent,
-invoice reconciliation, recommendations) keep their `{{placeholder}}`. Sections that need
-policy replay or quality parity read *"Not measured in this teardown — pending #13 / #14."*
+invoice reconciliation, recommendations) keep their `{{placeholder}}`.
+
+Two optional inputs fill the rest of the template:
+
+```
+ps-teardown run events.jsonl --policy policy.json                 # + §7 sensitivity mix, §8 policy replay
+ps-teardown run calls.jsonl --policy policy.json --scan-prompts   # full mode: local PII scan
+ps-teardown run events.jsonl --policy policy.json --eval-results eval.json   # + §9–10 quality parity
+```
+
+`eval.json` is the `--out-json` of an earlier `ps-eval` run (#14), ideally with
+`ps-eval --route-policy policy.json` so its candidates and judge meet the same data policy
+and its sample levels include PII escalation. `ps-teardown` reads that file; it never
+executes a prompt and opens no socket. A section whose input is missing reads *"Not measured
+in this teardown — pending #13 / #14."*; it is never estimated.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -26,6 +39,9 @@ policy replay or quality parity read *"Not measured in this teardown — pending
 | `--allow-provider P` | any | Limit same-model arbitrage to these providers (repeatable) |
 | `--format F` / `--stdout F` | all three | Which report formats to write, or print one to stdout |
 | `--learning-tuples PATH` | off | Also write the learning-tuple export (#42) |
+| `--policy FILE` | none | `route-policy.v1` file (strategy `heuristic`): replay every call, add the sensitivity mix and projected spend per strategy (#13). The cache analysis then uses each call's effective level. |
+| `--scan-prompts` | off | Full mode (needs `--policy`): keep `generic-jsonl` message text in memory to scan it locally for PII and run the policy heuristic on it. Only category names reach the report. |
+| `--eval-results FILE` | none | `ps-eval --out-json` results (needs `--policy`): add quality parity and savings at parity (#14) |
 
 ## Input formats
 
@@ -42,8 +58,11 @@ count or cost) is dropped or has that field treated as missing; it does not abor
 
 ## Normalised record
 
-Each row becomes a `prompt_shields.teardown.TeardownRecord`. Other modes (policy replay
-and sensitivity mix, #13) work on these records, never on the raw input.
+Each row becomes a `prompt_shields.teardown.TeardownRecord`. It is the one normalised record
+type: policy replay (`prompt_shields.teardown_replay`, #13) takes it too, and the replay's
+old `UsageRecord` is a compatible subclass (its constructor also accepts `vendor=`).
+`TeardownRecord.from_mapping(dict)` builds one from these field names (`vendor` and `model`
+are accepted as aliases of `provider` and `requested_model`).
 
 | Field | Meaning |
 |---|---|
@@ -63,8 +82,11 @@ and sensitivity mix, #13) work on these records, never on the raw input.
 | `route_group` | Gateway route group |
 | `prompt_hash` | SHA-256 of the message text (the SDK's algorithm). Used for cache-hit analysis only; never in a report or export. |
 | `features` | Local prompt features (see below), when the input had message text |
+| `baseline_cost`, `quality`, `max_cost`, `max_output_tokens` | Replay inputs: a cost already computed per M§4, and the route hints and output bound as logged |
+| `messages` | Full mode only (`--scan-prompts`): the message list, for the local PII scan and the policy heuristic. Never in `repr`, a report or an export. |
 
-The record never holds prompt text, response text, user ids, session ids or owner emails.
+The record never holds response text, user ids, session ids or owner emails, and holds
+prompt text only in `messages` in full mode.
 
 Python API, in pipeline order:
 
@@ -79,10 +101,32 @@ report = build_report(priced, loaded.sources, ReportOptions(customer_label="Acme
 markdown = render_report(report, "markdown")    # or "html", "json"
 ```
 
-A new mode adds its sections to the `report` dict and removes its entry from
+`ReportOptions(policy=..., scan_prompts=..., eval_results=...)` adds the replay and parity
+sections (`prompt_shields/teardown/policy.py`) and removes their entries from
 `report["pending"]`. Prices come through the `PriceSource` protocol
 (`prompt_shields/teardown/catalog.py`); `SdkPriceSource` wraps `prompt_shields.pricing`
 and will be replaced by the versioned catalog (#7 / #8).
+
+## With a route policy and eval results
+
+- **Sensitivity mix** (M§5): every call's effective level from its declared
+  classification, recorded `detected_pii_types` and, in full mode, a local scan of its
+  messages, escalated per the policy; calls and spend per level split by declared /
+  PII-escalated / default; the share that must stay sovereign; today's calls on a model the
+  data policy does not allow at their level.
+- **Policy replay** (M§6): each record goes through `route_policy.resolve_policy_route` and
+  the chosen tier is priced through the same price source as the baseline (policy per-1k
+  rates when the catalog has no price). Usage-export rows count as their request count; the
+  router sees the per-request average prompt, and a row with no request count is treated
+  as complex, which understates savings. Strategies: baseline, same-model arbitrage,
+  policy cheapest, policy at parity, cache.
+- **Quality parity and savings at parity** (M§6.2, M§7): every `ps-eval` cell with its
+  Wilson interval; *policy at parity* replays the policy with each evaluated use case
+  limited to its at-parity models plus the model in use today; use cases with no eval keep
+  their baseline cost. The 95% interval is a bootstrap over the parity sample; the
+  conservative figure uses Wilson lower bounds. The methodology record gets the sample,
+  scoring, judge (with its jurisdiction from the policy), re-execution spend and CI
+  methods. If the eval did not run under the same route policy, the report says so.
 
 ## What the cost-only report computes
 
@@ -96,12 +140,14 @@ and will be replaced by the versioned catalog (#7 / #8).
   equivalence groups, limited by `--allow-provider`. A host is only a candidate if its
   price list covers every dimension the call uses (web-search fees, 1-hour cache writes,
   long-context bands, audio, batch). Provider-billed amounts are not re-priced. The cheaper
-  host is not checked against a route policy (pending #13). With the 2026-Q1 price table,
+  host is not checked against a data policy: the catalog has no jurisdiction data yet
+  (#7 / #8). With the 2026-Q1 price table,
   hosts in a group charge the same, so this is usually zero until the catalog adds hosts.
 - **Cache-hit potential** (M§6.4): calls whose `prompt_hash` repeats within the TTL of the
   entry's write. Usage exports and gateway events carry no hash, so they are not covered;
-  the report gives the hashed share. Calls at or above `--cache-off-at` are excluded, and in
-  cost-only mode a call's level is its declared classification or `--unclassified-default`.
+  the report gives the hashed share. Calls at or above `--cache-off-at` are excluded. A call's
+  level is its effective level under `--policy` (PII escalation included), else its
+  declared classification or `--unclassified-default`.
 - **Window and monthly figures**: first to last timestamp (bucket end for exports);
   monthly = window × 30 / days.
 

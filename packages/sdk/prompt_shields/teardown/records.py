@@ -75,14 +75,24 @@ class TeardownRecord:
     ``tokens_cache_write``; ``tokens_reasoning`` and ``tokens_audio_out`` are
     subsets of ``tokens_out``. None means "not reported", never zero.
 
-    The record never holds prompt text, response text, user ids or session
-    ids. ``prompt_hash`` is kept for cache-hit analysis only and never
-    appears in a report or an export.
+    The record never holds response text, user ids or session ids, and
+    holds prompt text only in ``messages``, which is set only when full mode
+    asks for it (``load_records(keep_messages=True)``, ``ps-teardown run
+    --scan-prompts``) and is read only by the local PII scan and the policy
+    heuristic. ``prompt_hash`` is kept for cache-hit analysis only. Neither
+    ever appears in a report or an export.
+
+    This is the one normalised record type: policy replay
+    (``prompt_shields.teardown_replay``, #13) takes it too, and its old
+    ``UsageRecord`` name is a compatible subclass. :meth:`from_mapping`
+    builds one from a dict with these field names (``vendor`` and ``model``
+    are accepted as aliases of ``provider`` and ``requested_model``).
     """
 
-    #: Input format id (one of ``FORMATS``) and the file it came from.
-    source: str
-    source_file: str
+    #: Input format id (one of ``FORMATS``, or ``records`` for a record built
+    #: in code) and the file it came from.
+    source: str = "records"
+    source_file: str = ""
     #: Call time (UTC), or the bucket start for an aggregated row.
     timestamp: datetime | None = None
     #: Bucket end for an aggregated row; equals ``timestamp`` for a call.
@@ -144,10 +154,111 @@ class TeardownRecord:
     #: None when the input has no message text.
     features: dict[str, Any] | None = None
 
+    # --- policy replay inputs (#13) ---------------------------------------
+    #: A USD cost an ingest step already computed per M§4; replay uses it
+    #: as the baseline instead of re-pricing. An event's ``cost`` is never
+    #: read into it (M§4.2).
+    baseline_cost: float | None = None
+    #: Route hints as logged (``X-PS-Quality``, ``X-PS-Max-Cost``) and the
+    #: request's output bound, for the router's own cost estimate.
+    quality: str | None = None
+    max_cost: float | None = None
+    max_output_tokens: int | None = None
+    #: Prompt messages, full mode only (see the class docstring). Never in
+    #: ``repr``, never compared, never written anywhere.
+    messages: list[Any] | None = field(default=None, repr=False, compare=False)
+
     @property
     def pricing_model(self) -> str | None:
         """``served_model`` when known, else ``requested_model`` (M§4.2)."""
         return self.served_model or self.requested_model
+
+    @property
+    def vendor(self) -> str | None:
+        """Alias of ``provider`` (the name policy replay used)."""
+        return self.provider
+
+    def baseline_model(self) -> str | None:
+        """The model the baseline is priced at: served, else requested, never
+        ``auto`` (M§4.2)."""
+        if self.served_model:
+            return self.served_model
+        if self.requested_model and self.requested_model != "auto":
+            return self.requested_model
+        return None
+
+    def usage_fields(self) -> dict[str, Any]:
+        """The ``pricing.usage_cost`` fields of this record."""
+        return {name: getattr(self, name) for name in _USAGE_FIELDS}
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> TeardownRecord:
+        """Build from a dict with the field names above; extra keys are ignored.
+
+        ``vendor`` is read as ``provider`` and ``model`` as
+        ``requested_model``. ``detected_pii_types`` may be a list or a
+        comma-separated string; categories are lower-cased. A ``cost`` key is
+        ignored (M§4.2).
+        """
+        names = set(cls.__dataclass_fields__)
+        kwargs = {k: v for k, v in data.items() if k in names}
+        if kwargs.get("provider") is None and data.get("vendor") is not None:
+            kwargs["provider"] = data["vendor"]
+        if kwargs.get("requested_model") is None and data.get("model") is not None:
+            kwargs["requested_model"] = data["model"]
+        kwargs["detected_pii_types"] = pii_categories(kwargs.get("detected_pii_types"))
+        return cls(**kwargs)
+
+
+#: ``pricing.usage_cost`` fields: tokens, ``pricing.PRICING_DIMENSIONS`` and
+#: the provider-reported / unit fields (a test keeps the two in sync).
+_USAGE_FIELDS = (
+    "tokens_in",
+    "tokens_out",
+    "tokens_cached",
+    "tokens_cache_write",
+    "tokens_cache_write_1h",
+    "tokens_audio_in",
+    "tokens_audio_out",
+    "web_search_requests",
+    "service_tier",
+    "provider_cost",
+    "usage_units",
+    "usage_unit_type",
+)
+
+
+def text_messages(messages: Any) -> list[dict[str, str]]:
+    """Messages reduced to their text, for the local PII scan.
+
+    Multi-part content (a list of parts) keeps its ``text`` parts; anything
+    else (images, audio, malformed rows) is dropped. Untrusted input never
+    makes the scan fail.
+    """
+    out = []
+    for m in messages if isinstance(messages, list) else []:
+        content = m.get("content") if isinstance(m, Mapping) else None
+        if isinstance(content, list):
+            content = " ".join(
+                p["text"] for p in content
+                if isinstance(p, Mapping) and isinstance(p.get("text"), str)
+            )
+        if isinstance(content, str) and content:
+            out.append({"role": str(m.get("role", "")), "content": content})
+    return out
+
+
+def pii_categories(value: Any) -> tuple[str, ...]:
+    """PII categories as a tuple of lower-case names.
+
+    A bare string (``"iban"`` or ``"iban,email"``) is split on commas, never
+    iterated per character, so a recorded category always escalates.
+    """
+    if not value:
+        return ()
+    if isinstance(value, str):
+        value = value.split(",")
+    return tuple(str(v).strip().lower() for v in value if str(v).strip())
 
 
 @dataclass
@@ -648,7 +759,9 @@ def _generic_record(obj: Mapping[str, Any], file: str) -> TeardownRecord:
     )
 
 
-def _generic(rows: Iterable[Any], stats: SourceStats) -> Iterator[TeardownRecord]:
+def _generic(
+    rows: Iterable[Any], stats: SourceStats, keep_messages: bool = False
+) -> Iterator[TeardownRecord]:
     for obj in rows:
         stats.rows_read += 1
         if not isinstance(obj, Mapping):
@@ -658,6 +771,8 @@ def _generic(rows: Iterable[Any], stats: SourceStats) -> Iterator[TeardownRecord
         if not rec.requested_model and not rec.served_model:
             stats.drop("no_model")
             continue
+        if keep_messages and isinstance(obj.get("messages"), list):
+            rec.messages = obj["messages"]
         stats.rows_used += 1
         yield rec
 
@@ -692,11 +807,15 @@ def load_records(
     *,
     fmt: str | None = None,
     key_map: Mapping[str, Any] | None = None,
+    keep_messages: bool = False,
 ) -> LoadResult:
     """Read and normalise input files into :class:`TeardownRecord` objects.
 
     ``fmt`` forces one of ``FORMATS`` for every file; by default each file's
     format is detected from its contents. Files are read in full, locally.
+    ``keep_messages`` (full mode) keeps ``generic-jsonl`` message lists on
+    ``TeardownRecord.messages`` for the local PII scan and the policy
+    heuristic; otherwise no message text outlives the row it came from.
     """
     if fmt is not None and fmt not in FORMATS:
         raise ValueError(f"unknown format {fmt!r}; expected one of {', '.join(FORMATS)}")
@@ -715,7 +834,7 @@ def load_records(
         if kind in ("openai-usage", "anthropic-usage"):
             records.extend(_usage_rows(rows, stats, kind))
         elif kind == "generic-jsonl":
-            records.extend(_generic(rows, stats))
+            records.extend(_generic(rows, stats, keep_messages))
         else:
             records.extend(_ps_events(rows, stats))
         sources.append(stats)
