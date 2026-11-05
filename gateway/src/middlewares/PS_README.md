@@ -249,7 +249,7 @@ When the router made a decision, the telemetry event carries:
   cost on the use case's baseline model at the baseline's frozen prices
   (`router/baseline.ts`, same rules and shared vectors as the SDK). Added at
   send time, so streamed calls are priced on their final usage. An invalid
-  file stops the gateway at startup.
+  file (or one over 1 MiB) stops the gateway at startup.
 - `route_sensitivity_level` / `route_sensitivity_source` — the call's
   effective sensitivity level and `declared` / `default` / `pii_escalated`
   (only under a policy with the policy stages; OTel: `ps.route.sensitivity_level`,

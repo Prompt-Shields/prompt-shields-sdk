@@ -96,6 +96,22 @@
       "patch": { "catalog_version": null }
     },
     {
+      "id": "null-currency",
+      "patch": { "currency": null }
+    },
+    {
+      "id": "use-cases-not-an-object",
+      "patch": { "use_cases": [] }
+    },
+    {
+      "id": "use-case-model-not-a-string",
+      "patch": { "use_cases": { "chat": ["openai/gpt-4o"] } }
+    },
+    {
+      "id": "default-model-not-a-string",
+      "patch": { "default_model": ["openai/gpt-4o"] }
+    },
+    {
       "id": "non-usd-currency",
       "patch": { "currency": "EUR" }
     },

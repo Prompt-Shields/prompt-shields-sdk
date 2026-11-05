@@ -16,7 +16,7 @@ import {
   parseBaseline,
   setBaseline,
 } from './baseline';
-import { loadBaselineFromEnv } from './baselineLoader';
+import { loadBaselineFromEnv, MAX_BASELINE_FILE_BYTES } from './baselineLoader';
 import { withBaseline } from '../ps-telemetry';
 
 const VECTORS_DIR = path.resolve(
@@ -88,6 +88,20 @@ describe('loadBaselineFromEnv', () => {
     fs.writeFileSync(bad, '{"schema_version": "baseline.v1"}');
     await expect(
       loadBaselineFromEnv({ PS_BASELINE_FILE: bad })
+    ).rejects.toThrow(BaselineError);
+    fs.rmSync(dir, { recursive: true, force: true });
+    expect(getBaseline()).toBeUndefined();
+  });
+
+  test('rejects a file over the size limit or a directory', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-baseline-'));
+    const big = path.join(dir, 'big.json');
+    fs.writeFileSync(big, ' '.repeat(MAX_BASELINE_FILE_BYTES + 1));
+    await expect(
+      loadBaselineFromEnv({ PS_BASELINE_FILE: big })
+    ).rejects.toThrow(/at most/);
+    await expect(
+      loadBaselineFromEnv({ PS_BASELINE_FILE: dir })
     ).rejects.toThrow(BaselineError);
     fs.rmSync(dir, { recursive: true, force: true });
     expect(getBaseline()).toBeUndefined();

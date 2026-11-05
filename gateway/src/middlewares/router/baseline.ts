@@ -76,7 +76,7 @@ export function parseBaseline(doc: unknown): Baseline {
       throw new BaselineError(`baseline is missing '${key}'`);
     }
   }
-  if ((doc.currency ?? 'USD') !== 'USD') {
+  if (own(doc, 'currency') && doc.currency !== 'USD') {
     throw new BaselineError("baseline currency must be 'USD'");
   }
   if (!isObject(doc.models) || !Object.keys(doc.models).length) {

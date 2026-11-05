@@ -9,6 +9,9 @@ import {
   setBaseline,
 } from './baseline';
 
+/** A baseline is a few KB; anything larger is not one. */
+export const MAX_BASELINE_FILE_BYTES = 1024 * 1024;
+
 /**
  * Node startup: load the `baseline.v1` document named by `PS_BASELINE_FILE`
  * and make it the gateway's baseline. Returns it, or undefined when the
@@ -19,11 +22,18 @@ export async function loadBaselineFromEnv(
 ): Promise<Baseline | undefined> {
   const path = env.PS_BASELINE_FILE;
   if (!path) return undefined;
-  const { readFile } = await import('fs/promises');
+  const { readFile, stat } = await import('fs/promises');
   let text: string;
   try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > MAX_BASELINE_FILE_BYTES) {
+      throw new BaselineError(
+        `${path} must be a file of at most ${MAX_BASELINE_FILE_BYTES} bytes`
+      );
+    }
     text = await readFile(path, 'utf-8');
-  } catch {
+  } catch (err) {
+    if (err instanceof BaselineError) throw err;
     throw new BaselineError(`cannot read ${path}`);
   }
   let json: unknown;

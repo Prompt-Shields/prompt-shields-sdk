@@ -133,13 +133,15 @@ class Baseline:
                 for name in RATE_FIELDS
             }
         default_model = doc.get("default_model")
-        if default_model not in models:
+        if not isinstance(default_model, str) or default_model not in models:
             raise BaselineError("default_model must be one of the baseline's models")
-        use_cases = doc.get("use_cases") or {}
+        use_cases = doc.get("use_cases")
+        if use_cases is None:
+            use_cases = {}
         if not isinstance(use_cases, Mapping):
             raise BaselineError("use_cases must be an object")
         for use_case, model in use_cases.items():
-            if model not in models:
+            if not isinstance(model, str) or model not in models:
                 raise BaselineError(
                     f"use_cases[{use_case!r}] names {model!r}, which is not in models"
                 )
