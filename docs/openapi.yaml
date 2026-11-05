@@ -468,7 +468,11 @@ components:
             Share (0 to 1) of events reporting a `served_jurisdiction` whose
             jurisdiction is `EEA` or an EEA country code. Events that did not
             report a jurisdiction are left out. Null when no event in the
-            period reported one. See `GET /partner/v1/usage/sovereign-share`.
+            period reported one. This is a share by jurisdiction only: the
+            jurisdiction is the one the route policy states for the serving
+            tier, so a US-headquartered provider's EU region counts when the
+            policy marks it `EEA`. It says nothing about US CLOUD Act
+            exposure. See `GET /partner/v1/usage/sovereign-share`.
           example: 0.62
         period:
           type: string
@@ -604,8 +608,11 @@ components:
         Share of calls and spend served in a sovereign jurisdiction (`EEA` or
         an EEA country code, see `sovereign_jurisdictions`). Events that did
         not report a `served_jurisdiction` are left out of both sides of each
-        share. US CLOUD Act exposure is not stored per event, so this is a
-        jurisdiction share, not a legal assessment.
+        share. The jurisdiction is the one the route policy states for the
+        serving tier, so a US-headquartered provider's EU region counts when
+        the policy marks it `EEA`. US CLOUD Act exposure is not stored per
+        event, so this is a jurisdiction share, not a sovereignty guarantee
+        or a legal assessment.
       properties:
         total_requests:
           type: integer
@@ -2665,9 +2672,10 @@ paths:
         Share of the tenant's calls and spend served in a sovereign
         jurisdiction (`EEA` or an EEA country code), in total and per
         sensitivity level, over the period. Events that did not report a
-        `served_jurisdiction` are left out of both sides of each share. US
-        CLOUD Act exposure is not stored per event, so this is a share by
-        jurisdiction. The window is clamped to the tenant's retention
+        `served_jurisdiction` are left out of both sides of each share. The
+        jurisdiction is the one the route policy states for the serving
+        tier; US CLOUD Act exposure is not stored per event, so this is a
+        share by jurisdiction, not a sovereignty guarantee. The window is clamped to the tenant's retention
         period. Aggregates only.
       parameters:
         - name: period

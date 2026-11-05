@@ -224,7 +224,8 @@ export interface UsageSummary {
   fallbackRate: number | null;
   /**
    * Share (0 to 1) of events reporting a served jurisdiction that were served
-   * in the EEA. `null` when no event reported one.
+   * in the EEA. `null` when no event reported one. By jurisdiction only (as
+   * stated by the route policy), not a US CLOUD Act assessment.
    */
   sovereignShare: number | null;
   period: UsagePeriod;
@@ -278,6 +279,8 @@ export interface SavingsParams {
 /**
  * Share of calls and spend served in a sovereign (EEA) jurisdiction. Events
  * without a reported jurisdiction are left out of both sides of each share.
+ * By jurisdiction only (as stated by the route policy), not a US CLOUD Act
+ * assessment.
  */
 export interface SovereignShareTotals {
   totalRequests: number;

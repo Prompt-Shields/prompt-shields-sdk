@@ -21,9 +21,12 @@ A call is sovereign when its ``served_jurisdiction`` is ``EEA`` or an EEA
 country code (`SOVEREIGN_JURISDICTIONS`, the same set the SDK route policy
 uses). Events that did not report a jurisdiction are excluded from both
 the numerator and the denominator, so the shares describe only calls
-whose serving location is known. US CLOUD Act exposure is not stored per
-event: the catalog's EEA-jurisdiction providers state it as false or
-unknown, so this is a jurisdiction share, not a legal assessment.
+whose serving location is known. ``served_jurisdiction`` is the
+jurisdiction the route policy states for the serving tier, so a
+US-headquartered provider's EU region counts when the policy marks it
+``EEA``. US CLOUD Act exposure is not stored per event (and
+``served_provider`` is a customer-chosen label, not a catalog id), so this
+is a jurisdiction share, not a sovereignty guarantee or a legal assessment.
 """
 
 from __future__ import annotations
