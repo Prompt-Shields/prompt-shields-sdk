@@ -19,7 +19,7 @@
 | Cache-hit potential (upper bound) | USD 0.0046 (3.1% of baseline) | USD 0.1264 |
 | Spend that must stay sovereign | *pending #13* |  |
 
-**In one sentence:** Over 1.08 days the logged AI traffic cost USD 0.1484 (about USD 4.12 a month); same-model price arbitrage would save 0.0% of it and exact-match caching up to 3.1%. Savings from routing at quality parity are not measured yet (pending #14).
+**In one sentence:** Over 1.08 days the logged AI traffic cost USD 0.1484 (about USD 4.12 a month); same-model price arbitrage would save 0.0% of it and exact-match caching up to 3.1%. Savings from routing at quality parity are not measured (pending #14).
 
 **Gate 1 reading** (≥ 30% savings at ≥ 95% parity): not measured — pending #14.
 
@@ -28,7 +28,7 @@
 - Baseline reconciliation with the invoice: {{gap_pct}}% → {{reconciled / unreconciled / no invoice}} (M§3.1).
 - Priced calls: 76.5% of calls, 96.6% of tokens. Null-cost calls are left out (M§4.5).
 - Estimated token counts: 4.6% of baseline spend (M§4.3).
-- Same-model arbitrage does not check the cheaper host against a route policy (pending #13).
+- Same-model arbitrage does not check the cheaper host against a data policy (no route policy given).
 
 ## 2. Scope and data
 
@@ -36,8 +36,8 @@
 |---|---|---|---|
 | ps-events (`ps_events.jsonl`) | 19 | 17 | 1 (gateway_cache_event), 1 (invalid_json) |
 
-- Prompt text: not used. Where an input carried messages, they were read on this machine only to compute a request hash and prompt features; no text was kept.
-- Sensitivity input: declared data_classification only; PII escalation pending #13; see M§5.3.
+- Prompt text: not used by `ps-teardown`. Where an input carried messages, they were read on this machine only to compute a request hash and prompt features; no text was kept.
+- Sensitivity input: declared data_classification only; PII escalation needs a route policy (#13); see M§5.3.
 - Was the window typical? {{customer answer}}
 
 ## 3. Baseline spend
@@ -132,7 +132,7 @@ This report is a projection from 1.08 days of past traffic. It does not guarante
 
 Specific to this teardown:
 
-- Cost-only mode: no prompt text, no policy replay, no quality parity.
+- Cost-only mode: no prompt text, no policy replay or sensitivity mix (no route policy given), no quality parity (no `ps-eval` results given).
 - Costs are list prices at the catalog version below, in USD.
 - {{run-specific limit}}
 
@@ -156,8 +156,8 @@ Specific to this teardown:
 | Calls by cost source | litellm 1, null 4, pricing_table 10, pricing_table_estimated_tokens 1, provider_reported 1 |
 | Null-cost calls by reason | auto_without_served_model 1, missing_tokens 1, unknown_model 1, unpriced_service_tier 1 |
 | `requested_model ≠ served_model` calls | 4 |
-| Route policy file, `policy_version`, SHA-256 | n/a: cost-only mode (pending #13) |
-| Sensitivity input | declared data_classification only; PII escalation pending #13 |
+| Route policy file, `policy_version`, SHA-256 | n/a: no route policy given (pending #13) |
+| Sensitivity input | declared data_classification only; PII escalation needs a route policy (#13) |
 | Cache TTL | 3600 seconds |
 | Sample size per stratum, seed | pending #14 |
 | Scoring method per use case | pending #14 |

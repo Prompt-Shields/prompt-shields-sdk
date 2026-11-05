@@ -13,24 +13,41 @@ Safety rules, enforced before any call is made:
 - **Rate limit.** ``requests_per_minute`` spaces calls out.
 - **Policy.** A prompt is sent only to candidates, and judged only by a judge,
   that :class:`EvalPolicy` allows for the prompt's sensitivity level (M§2.3,
-  M§7.3). Levels the policy does not list allow nothing.
+  M§7.3). Levels the policy does not list allow nothing. Built from a
+  ``route-policy.v1`` file (:meth:`EvalPolicy.from_route_policy`), the level
+  includes PII escalation (recorded categories and a local scan of the
+  prompt) and the allowed models are the policy tiers that meet the level's
+  data policy, for candidates and the judge alike.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from prompt_shields.evals.budget import RateLimiter, SpendCap, worst_case_input_tokens
 from prompt_shields.evals.executors import Candidate, Completion, Executor
-from prompt_shields.evals.records import SENSITIVITY_LEVELS
+from prompt_shields.evals.records import SENSITIVITY_LEVELS, EvalRecord
 from prompt_shields.evals.sampling import Sample, StratumKey
 from prompt_shields.evals.scoring import Score, Scorer
+from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import estimate_cost
-from prompt_shields.route_policy import estimate_input_tokens
+from prompt_shields.route_policy import (
+    DEFAULT_LEVELS,
+    classify_sensitivity,
+    data_policy_rule,
+    estimate_input_tokens,
+    tier_complies,
+)
+from prompt_shields.teardown.records import text_messages
 
 JUDGE_MAX_TOKENS = 64
+
+#: Level of a record when a route policy has no ``sensitivity`` section.
+UNCLASSIFIED = "unclassified"
 
 
 class PromptReexecutionNotAllowed(RuntimeError):
@@ -48,6 +65,10 @@ class EvalPolicy:
 
     allowed: Mapping[str, frozenset[str]] | None
     unclassified_default: str = "confidential"
+    #: The route-policy.v1 document this policy was built from, if any. It
+    #: decides each record's level (PII escalation included).
+    route_policy: Mapping[str, Any] | None = field(default=None, compare=False, repr=False)
+    _levels: dict = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
     def allow_all(cls, unclassified_default: str = "confidential") -> EvalPolicy:
@@ -73,6 +94,55 @@ class EvalPolicy:
             unclassified_default=default,
         )
 
+    @classmethod
+    def from_route_policy(cls, policy: Mapping[str, Any]) -> EvalPolicy:
+        """Allowed models per level from a ``route-policy.v1`` document.
+
+        A level allows the ``provider:model`` of every policy tier that meets
+        the level's ``data_policy`` rule (``tier_complies``; a level with no
+        rule allows every tier). A model that is not a tier of the policy is
+        never allowed, so a candidate or judge outside the policy is skipped,
+        as the router would never send it traffic either.
+        """
+        sensitivity = policy.get("sensitivity") or {}
+        levels = list(sensitivity.get("levels") or DEFAULT_LEVELS)
+        tiers = [t for group in (policy.get("groups") or {}).values()
+                 if isinstance(group, list) for t in group]
+        allowed = {}
+        for level in [*levels, UNCLASSIFIED]:
+            rule = data_policy_rule(policy, level if level != UNCLASSIFIED else None)
+            allowed[level] = frozenset(
+                f"{t['provider']}:{t['model']}" for t in tiers
+                if t.get("provider") and tier_complies(t, rule)
+            )
+        return cls(
+            allowed=allowed,
+            unclassified_default=sensitivity.get("unclassified_default", UNCLASSIFIED),
+            route_policy=policy,
+        )
+
+    def level(self, record: EvalRecord) -> str:
+        """The record's effective sensitivity level.
+
+        With a route policy: ``route_policy.classify_sensitivity`` over the
+        declared level, the recorded PII categories and the categories a local
+        scan of the prompt finds (escalate only; only category names are
+        kept). Without one: the declared level or ``unclassified_default``.
+        """
+        if self.route_policy is None:
+            return record.sensitivity(self.unclassified_default)
+        cached = self._levels.get(id(record))
+        if cached is not None and cached[0] is record:
+            return cached[1]
+        declared = (record.data_classification or "").strip().lower() or None
+        pii = set(record.detected_pii_types)
+        if record.messages:
+            pii.update(scan_messages(text_messages(record.messages)))
+        level, _ = classify_sensitivity(self.route_policy, declared, sorted(pii))
+        level = level or UNCLASSIFIED
+        self._levels[id(record)] = (record, level)
+        return level
+
     def allows(self, candidate: Candidate, level: str) -> bool:
         if self.allowed is None:
             return True
@@ -80,6 +150,17 @@ class EvalPolicy:
         return "*" in models or candidate.label in models or candidate.model in models
 
     def describe(self) -> dict:
+        if self.route_policy is not None:
+            canonical = json.dumps(self.route_policy, sort_keys=True, separators=(",", ":"))
+            return {
+                "route_policy": {
+                    "policy_version": self.route_policy.get("policy_version"),
+                    "sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+                },
+                "unclassified_default": self.unclassified_default,
+                "pii_escalation": True,
+                "allowed_models": {k: sorted(v) for k, v in sorted(self.allowed.items())},
+            }
         if self.allowed is None:
             return {"allow_all": True, "unclassified_default": self.unclassified_default}
         return {
@@ -224,7 +305,7 @@ def run_eval(
     policy = config.policy
 
     for record in sample.records:
-        level = record.sensitivity(policy.unclassified_default)
+        level = policy.level(record)
         stratum = sample.stratum(record)
         scorer = config.scorer_for(record.use_case)
         max_tokens = (

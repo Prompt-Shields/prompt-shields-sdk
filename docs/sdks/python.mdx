@@ -362,12 +362,49 @@ sent. A call is never served by a model the policy does not allow.
   yet: each call makes one attempt.
 - `client.route(messages, ...)` returns the decision without sending the call.
 
+The [routing guide](/guides/routing) walks through a full policy, with
+results you can reproduce offline, and lists what is not enforced yet.
+
 Each call emits the usual telemetry event through the chosen provider's
 instrumented client, plus the route: `requested_model` (`auto`) and
 `served_model`, `route_mode`, `route_group`, `route_reason`, `route_est_cost`,
 `served_provider`, `served_jurisdiction`, `policy_version`,
 `sensitivity_level` and `sensitivity_source`. A model the pricing table does
 not know is priced at the policy tier's rates (`cost_source: "route_policy"`).
+
+### Verified savings: frozen baseline
+
+Freeze a savings baseline once, at onboarding: the model each use case would
+have used without routing, pinned to the current catalog version, with that
+model's prices copied in. Store the document (a
+[`baseline.v1`](https://github.com/Prompt-Shields/prompt-shields-sdk/tree/main/schemas/baseline)
+JSON file) and pass it to every router:
+
+```python
+import json
+from prompt_shields import freeze_baseline
+
+baseline = freeze_baseline(
+    "acme-2026-11",                   # baseline_id, at most 128 characters
+    "openai/gpt-4o",                  # default: "<provider>/<model>" catalog key
+    {"contract-review": "anthropic/claude-sonnet-4-20250514"},
+)
+with open("baseline.json", "w") as f:
+    json.dump(baseline.to_dict(), f, indent=2)
+
+client = ShieldsRouter(..., baseline="baseline.json")
+resp.ps.cost.counterfactual_usd       # what this call would have cost on the baseline
+```
+
+Every routed event then carries `baseline_id` and `counterfactual_cost`: the
+call's actual tokens (cache reads and writes at their own rates) priced at its
+use case's baseline model, else the default. The prices come from the baseline
+file, never from the current catalog, so a later price change does not move
+past or future figures under the same `baseline_id`; freeze a new baseline,
+with a new id, to re-baseline. Calls on a non-standard service tier (batch,
+flex) and calls without token counts get `baseline_id` but no counterfactual.
+The gateway takes the same file in `PS_BASELINE_FILE`; in `mode="gateway"` the
+gateway adds the fields, so the router refuses a `baseline`.
 
 `ShieldsRouter(mode="gateway", gateway_url=..., gateway_api_key=...)` leaves the
 decision to the gateway instead: calls go to the gateway with the hints and the

@@ -1,0 +1,304 @@
+---
+title: Sensitivity-Aware Routing
+description: Pick the model per call under a route policy, from data sensitivity, jurisdiction and cost, and what is and isn't enforced today
+---
+
+# Sensitivity-Aware Routing
+
+Routing picks the model for each call. It does that under a **route policy**
+(`route-policy.v1`), which is a JSON or YAML document. The policy groups models
+into tiers (`cheap`, `balanced`, `frontier`, ...), prices each model, and sets
+the data rules that decide which models may see which data. For example,
+confidential data may only go to EEA-hosted models with zero data retention.
+
+A call is never sent to a model the policy does not allow. If no allowed model
+is left, the call fails closed and nothing is sent.
+
+<Note>
+Routing is opt-in. The `Shields*` clients and `instrument()` never pick a
+model; they only report what you called. Read [Limits](#limits) before you
+rely on routing for compliance.
+</Note>
+
+## Where routing runs
+
+| | `ShieldsRouter` (local mode) | Gateway (`PS_ROUTER_ENABLED=true`) |
+|---|---|---|
+| Who decides | The SDK, in your process | The gateway |
+| Provider keys | Yours, kept in your process (BYOK) | Forwarded by the gateway |
+| Policy | Any `route-policy.v1` document you pass | The built-in default policy. A custom policy needs code (see [Limits](#limits)) |
+| Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
+| Failover between models | No, one attempt per call | Not from the router. Fallback targets in a gateway config still work, and are checked against the data policy |
+| Streaming | Refused (`RouterError`) | Yes |
+
+`ShieldsRouter(mode="gateway", ...)` sends the call to the gateway with your
+hints as `X-PS-*` headers and leaves the decision to it. For the hint headers
+see [Cost-aware routing](/sdks/python#cost-aware-routing).
+
+The SDK (`prompt_shields.route_policy.resolve_policy_route`) and the gateway
+(`resolvePolicyRoute`) implement the same rules. Both pass the shared golden
+vectors in `schemas/route-policy/vectors/`, so a call gets the same decision
+in either place.
+
+## A route policy
+
+The example policy
+[`schemas/route-policy/examples/nordic-sovereign.json`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/schemas/route-policy/examples/nordic-sovereign.json)
+is used on the rest of this page. These are the parts that matter for
+sensitivity:
+
+```json
+{
+  "schema_version": "route-policy.v1",
+  "groups": {
+    "cheap": [
+      { "model": "gpt-4o-mini", "provider": "openai",
+        "input_cost_per_1k": 0.00015, "output_cost_per_1k": 0.0006,
+        "jurisdiction": "US", "zdr": false, "us_cloud_act_exposure": true },
+      { "model": "scaleway-small", "provider": "scaleway",
+        "input_cost_per_1k": 0.0002, "output_cost_per_1k": 0.0005,
+        "jurisdiction": "EEA", "zdr": true, "us_cloud_act_exposure": false }
+    ]
+  },
+  "sensitivity": {
+    "levels": ["public", "internal", "confidential", "restricted"],
+    "unclassified_default": "confidential",
+    "pii_escalation": { "health_data": "restricted", "national_id": "restricted",
+                        "email": "internal" }
+  },
+  "data_policy": {
+    "public":       { "jurisdictions": ["any"] },
+    "internal":     { "jurisdictions": ["EEA", "US"], "require_zdr": false },
+    "confidential": { "jurisdictions": ["EEA"], "require_zdr": true,
+                      "us_cloud_act_exposure": false },
+    "restricted":   { "jurisdictions": ["NO", "EEA"],
+                      "providers": ["berget", "mistral-eu"], "require_zdr": true }
+  },
+  "use_cases": {
+    "legal-review":  { "min_group": "frontier" },
+    "claim-summary": { "eval_set": "claims-v3", "min_parity": 0.95,
+                       "eligible_models": ["mistral-small-eu", "berget-llama-70b"] }
+  }
+}
+```
+
+The JSON Schema is `schemas/route-policy/route-policy.v1.schema.json`.
+
+## How a call is routed
+
+1. **Sensitivity.** The level is the call's declared `data_classification`.
+   If there is none, or it is not one of the policy's `levels`, the level is
+   `unclassified_default`. PII found in the prompt can raise the level through
+   `pii_escalation`. It never lowers it. `sensitivity_source` records which
+   rule set the level: `declared`, `default` or `pii_escalated`.
+2. **Data policy.** Only models whose facts meet the level's rule stay in the
+   running. The facts are `jurisdiction`, `provider`, `zdr` and
+   `us_cloud_act_exposure`. This filter applies in every group, under the
+   budget clamp, and to a pinned model.
+3. **Group.** The group is chosen in this order: an explicit
+   `RouteHint(model_group=...)`, then a `quality` hint, then the policy's
+   strategy. The `heuristic` strategy sends long prompts, code and JSON-schema
+   prompts to `frontier`, and everything else to `cheap`.
+4. **Quality bar.** Without an explicit group, the use case can raise the
+   group to its `min_group`. An `eval_set` limits the choice to
+   `eligible_models`, moving up `group_order` if none of them is in the group.
+5. **Cost.** The router picks the cheapest allowed model in the group. If that
+   costs more than `max_cost`, it falls back to the most capable allowed model
+   under budget, from any group.
+
+If step 2 or 4 leaves no model, the router raises `PolicyViolation` and sends
+nothing. The gateway answers `403` (`error.code: policy_violation`) and records
+a `policy.denied` security event.
+
+## Try it without sending anything
+
+`client.route(...)` returns the decision without calling a provider. No keys
+or network are needed, so every result below is reproducible.
+
+```python
+import json
+from pathlib import Path
+
+from prompt_shields import PolicyViolation, RouteHint, ShieldsRouter
+
+policy = json.loads(
+    Path("schemas/route-policy/examples/nordic-sovereign.json").read_text()
+)
+
+client = ShieldsRouter(
+    providers={                      # BYOK: one entry per provider the policy names
+        "openai":     {"api_key": "sk-..."},
+        "anthropic":  {"api_key": "sk-ant-..."},
+        "scaleway":   {"api_key": "...", "base_url": "https://api.scaleway.ai/v1"},
+        "mistral-eu": {"api_key": "...", "base_url": "https://..."},
+        "berget":     {"api_key": "...", "base_url": "https://api.berget.ai/v1"},
+    },
+    policy=policy,                   # a dict, or a .json / .yaml path
+    ps_api_key="ps-...",
+)
+
+minutes = [{"role": "user", "content": "Summarise the attached board minutes."}]
+claim = [{"role": "user",
+          "content": "Summarise: the claimant's diagnosis delays their return to work."}]
+
+# No classification: the policy's default (confidential) applies.
+d = client.route(minutes)
+d.model, d.sensitivity_level, d.sensitivity_source
+# => ("scaleway-small", "confidential", "default")
+
+# Declared internal, but "diagnosis" is health data: escalated to restricted.
+d = client.route(claim, data_classification="internal")
+d.model, d.sensitivity_level, d.sensitivity_source
+# => ("mistral-small-eu", "restricted", "pii_escalated")
+```
+
+Only a provider listed in `providers` can serve a call. A tier whose provider
+is missing from `providers` is never a candidate.
+
+### Fail closed
+
+```python
+# Restricted data cannot be pinned to the US-hosted group.
+try:
+    client.route(claim, route=RouteHint(model_group="us-hosted"))
+except PolicyViolation as exc:
+    exc.sensitivity_level, exc.group  # => ("restricted", "us-hosted")
+
+# A concrete model with no hint is pinned, but must still be allowed.
+try:
+    client.route(minutes, model="gpt-4o")
+except PolicyViolation as exc:
+    str(exc)  # => "model 'gpt-4o' is not allowed at sensitivity 'confidential'"
+
+client.route(minutes, model="gpt-4o", data_classification="internal").reason
+# => "pinned"
+```
+
+### Use-case quality bar and budget
+
+```python
+d = client.route(minutes, use_case="legal-review")
+d.model, d.reason  # => ("mistral-large-eu", "heuristic:simple+use-case-min-group")
+
+d = client.route(minutes, use_case="claim-summary", route=RouteHint(quality="balanced"))
+d.model  # => "berget-llama-70b"
+
+d = client.route(minutes, data_classification="public",
+                 route=RouteHint(quality="critical", max_cost=0.001))
+d.model, d.reason  # => ("mistral-small-eu", "quality:critical+budget-clamp")
+```
+
+If nothing fits the budget, the router uses the cheapest allowed model and
+says so in the reason (`+budget-unsatisfiable`). The budget never overrides
+the data policy.
+
+## Sending calls
+
+`client.chat.completions.create(...)` takes the same arguments as `route()`,
+sends the call through the chosen provider's instrumented client, and returns
+an OpenAI-shaped `RoutedChatCompletion`, whichever provider served it:
+
+```python
+resp = client.chat.completions.create(
+    model="auto", messages=minutes, route=RouteHint(quality="draft"),
+    data_classification="confidential", use_case="claim-summary",
+)
+resp.choices[0].message.content
+resp.ps.route      # model, provider, group, reason, jurisdiction,
+                   # policy_version, sensitivity_level, sensitivity_source
+resp.ps.cost       # usd, source, estimated_usd
+resp.ps.attempts   # always one Attempt today
+```
+
+The telemetry event carries `requested_model` (`auto`), `served_model`,
+`route_mode` (`local` or `gateway`), `route_group`, `route_reason`,
+`route_est_cost`, `served_provider`, `served_jurisdiction`, `policy_version`,
+`sensitivity_level` and `sensitivity_source`. The collector stores these
+fields on `ai_usage_events`.
+
+## Sovereignty facts and the model catalog
+
+A tier's `jurisdiction`, `zdr` and `us_cloud_act_exposure` are facts about the
+provider, and the policy author states them. The
+[model catalog](/guides/model-catalog) records them per model, with `null`
+for anything not verified. When you copy catalog facts into a policy, **leave
+a `null` fact out of the tier**. The schema does not accept `null`, and a
+missing fact fails closed:
+
+```python
+from prompt_shields.route_policy import tier_complies
+
+tier = {"model": "new-eu-model", "provider": "berget",
+        "input_cost_per_1k": 0.001, "output_cost_per_1k": 0.002,
+        "zdr": True}                 # jurisdiction not verified: left out
+tier_complies(tier, policy["data_policy"]["confidential"])  # => False
+tier_complies(tier, policy["data_policy"]["public"])        # => True
+```
+
+A tier with no `jurisdiction` passes only a rule that allows `any`. A tier
+with no `provider` never passes a `providers` list. `require_zdr` needs
+`zdr: true`, and `us_cloud_act_exposure: false` needs the tier to say `false`.
+A rule that allows `EEA` also allows EEA member countries (`NO`, `SE`, ...).
+The reverse is not true: a rule that allows only `NO` does not allow a model
+that is only known to be somewhere in the EEA.
+
+## Offline demo
+
+[`demo/demo_route.py`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/demo/demo_route.py)
+runs the policy above end to end with stub providers and a stub collector. It
+needs no keys and no network:
+
+```bash
+pip install -e "packages/sdk[all]"
+python demo/demo_route.py
+```
+
+It shows the routing decisions above, a `PolicyViolation` that sends nothing,
+a provider outage (which surfaces as an error, because failover is not wired
+in yet), and the savings against a single hardcoded model. The SDK tests run
+it on every pull request.
+
+## Limits
+
+These are the limits on what routing enforces today. Each one is checked
+against the code.
+
+- **The PII detector sets the level, and it misses things.** Escalation only
+  happens for what the detector finds: regular expressions, keywords, and
+  checksummed Nordic national IDs. Names, addresses and most free-text
+  identifiers are not detected. Declare `data_classification` yourself, and
+  set `unclassified_default` to a level you are willing to accept for
+  undeclared calls.
+- **Sovereignty facts are the policy author's claims.** Neither the router
+  nor the catalog verifies where a provider processes data. A wrong fact in
+  the policy routes data to the wrong place. Check catalog facts
+  (`sovereignty_checked`) before you copy them.
+- **No failover yet (#21).** The failover engine and circuit breaker exist
+  (`prompt_shields.failover` and the gateway's `psFailover`), but neither
+  `ShieldsRouter` nor the gateway router uses them. A `ShieldsRouter` call
+  makes one attempt. If that provider fails, the provider SDK's error is
+  raised, even when another allowed model exists. The provider SDK's own
+  retries (`max_retries`) still go to the same provider.
+- **Local mode refuses streaming.** `stream=True` raises `RouterError` in
+  local mode. Gateway mode streams.
+- **Local mode does not translate tools for Anthropic.** Tool messages and
+  OpenAI-only parameters (`tools`, `response_format`, `n`, ...) raise
+  `RouterError` when the call is routed to Anthropic. They are not silently
+  dropped.
+- **The gateway's default policy has no data rules.** The gateway mounts
+  `psRouter()` with its built-in default policy, which has no `sensitivity`,
+  `data_policy` or `use_cases` section. Those stages, and the data-policy
+  gate on concrete models and config overrides, only run when a policy with
+  those sections is passed in code (`psRouter(fromRoutePolicyDoc(doc))`).
+  There is no environment variable or file setting for a gateway route policy
+  yet.
+- **Only the `heuristic` strategy is implemented.** In the SDK, a policy
+  whose `strategy` is `cheapest`, `latency` or `learned` raises
+  `NotImplementedError` when no hint picks the group.
+- **Cost figures are estimates.** `route_est_cost` comes from a token
+  estimate (about 4 characters per token) and the policy's prices. `cost` on
+  the event comes from the pricing table, or from the policy tier's prices
+  (`cost_source: "route_policy"`) for a model the table does not know. Neither
+  will match an invoice exactly.
+- **Routing is not an access control.** Code that calls a provider directly,
+  or through a plain `Shields*` client, is not routed or checked.
