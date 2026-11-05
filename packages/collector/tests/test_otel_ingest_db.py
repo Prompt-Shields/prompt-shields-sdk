@@ -5,6 +5,7 @@ end to end, and checks that no content reaches any stored row."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from collector.app import app
@@ -169,3 +170,45 @@ async def test_out_of_range_numbers_do_not_drop_the_batch(seeded_db):
             "order by tokens_in nulls first, latency_ms nulls first"
         ))).all()
     assert [tuple(r) for r in rows] == [(None, 300, None), (None, None, 450), (7, 300, 450)]
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "otel"
+OPENLLMETRY = "openllmetry-0.33-openai-joke-workflow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("suffix", "content_type"),
+    [(".pb", "application/x-protobuf"), (".json", "application/json")],
+)
+async def test_openllmetry_demo_spans_create_assets(seeded_db, suffix, content_type):
+    """#92: the trace OpenLLMetry's demo app exports, in its default
+    protobuf encoding and in JSON, creates one asset per model."""
+    body = (FIXTURES / (OPENLLMETRY + suffix)).read_bytes()
+    headers = {**HEADERS, "Content-Type": content_type}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post(URL, content=body, headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith(content_type)
+
+    async with seeded_db.connect() as conn:
+        assets = (await conn.execute(text(
+            "select vendor, model, calling_service, discovery_source from ai_assets "
+            "order by model"
+        ))).all()
+        events = (await conn.execute(text(
+            "select tokens_in, tokens_out, latency_ms, source, served_model "
+            "from ai_usage_events order by tokens_in"
+        ))).all()
+        dump = await _dump(conn)
+    assert [tuple(a) for a in assets] == [
+        ("openai", "davinci-002", "joke_generation_service", ["otel"]),
+        ("openai", "gpt-3.5-turbo", "joke_generation_service", ["otel"]),
+    ]
+    assert [tuple(e) for e in events] == [
+        (15, 27, 1283, "otel", "gpt-3.5-turbo-0125"),
+        (42, 9, 632, "otel", "davinci-002"),
+        (46, 33, 1185, "otel", "gpt-3.5-turbo-0125"),
+    ]
+    for content in ("Tell me a joke", "OpenTelemetry collector", "Captain Telemetry"):
+        assert content not in dump

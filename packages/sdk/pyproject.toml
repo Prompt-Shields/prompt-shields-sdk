@@ -1,6 +1,6 @@
 [project]
 name = "prompt-shields"
-version = "0.2.0"
+version = "0.3.0"
 description = "Prompt Shields SDK — discover, classify, and govern AI usage in your codebase"
 requires-python = ">=3.11"
 dependencies = [

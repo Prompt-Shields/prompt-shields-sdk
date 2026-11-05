@@ -156,11 +156,12 @@ def _duration_ms(span: dict) -> int | None:
     return _count((end - start) // 1_000_000)
 
 
+# An attribute with one of these keys makes a span a GenAI span.
+GENAI_MARKER_KEYS = ("gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.system")
+
+
 def is_genai_span(attrs: dict[str, Any]) -> bool:
-    return any(
-        k in attrs
-        for k in ("gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.system")
-    )
+    return any(k in attrs for k in GENAI_MARKER_KEYS)
 
 
 def map_span(span: dict, resource_attrs: dict[str, Any]) -> GenAISpan | None:

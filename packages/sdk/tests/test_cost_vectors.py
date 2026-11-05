@@ -2,8 +2,8 @@
 
 `schemas/pricing/cost-vectors.v1.json` holds normalised usage and the cost
 computed by hand from vendor list prices, one or more vectors per pricing
-dimension. Only data is shared; the gateway will get its own runner once it
-prices calls.
+dimension. Only data is shared; the gateway runs the same file in
+gateway/src/middlewares/psPricing.test.ts.
 """
 
 from __future__ import annotations

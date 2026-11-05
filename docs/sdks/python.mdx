@@ -111,6 +111,31 @@ Requires Python 3.11+.
   </Card>
 </CardGroup>
 
+### Outcome signals
+
+Every event carries `outcome_signals`, a sorted list of classes the SDK works
+out locally, and `outcome_signals_version` (now `1`). They are inputs for the
+self-learning router; an empty list means none fired.
+
+| Class | When |
+|-------|------|
+| `max_tokens` | The answer stopped at the output token limit (`length`, `max_tokens`, `max_output_tokens`) |
+| `refusal` | A refusal or content filter (`refusal` field or stop reason, `content_filter`, Gemini `SAFETY`, Bedrock `guardrail_intervened`, ...) |
+| `schema_invalid` | `response_format` / Responses `text.format` asked for JSON and the answer is not valid JSON, or misses the schema's top-level type or required keys |
+| `tool_call_invalid` | A tool call's `arguments` are not a JSON object |
+| `fallback` | The event records a fallback (`fallback_chain`) |
+| `stream_error`, `abandoned` | A stream ended with an error, or the caller stopped reading early |
+| `regenerate` | The same request was sent again within 120 s (with `ps_metadata={"session_id": ...}`: the same last user message in that session, case and spacing ignored) |
+| `retry` | The same, after a call that raised |
+
+Prompt and answer text are only read in process, to parse JSON and to
+fingerprint requests (a bounded in-memory table of truncated SHA-256 digests,
+salted per process); neither is sent. Without a `session_id`, two identical
+requests from different end users within 120 s also count as a `regenerate`,
+so pass `session_id` when one process serves many users. Until the collector
+stores these fields it lists them under `ignored_fields` in `/telemetry/loss`;
+they do not count as lost events. JSON and tool-call checks cover non-streamed calls.
+
 ## Per-Request Metadata
 
 For data that varies per call, use `ps_metadata`:
@@ -366,6 +391,7 @@ business context as `X-PS-*` headers, and responses come back in the same
 | `scan_pii` | bool | `True` | Disable to skip local PII detection. |
 | `send_prompt_text` | bool | `False` | Opt-in to log full prompt content. |
 | `pricing_table` | dict | built-in | Override token-to-USD pricing. |
+| `on_prompt_features` | callable | — | Called per call with local `PromptFeatures` (see below). Nothing is sent. |
 
 ## Privacy Model
 
@@ -375,12 +401,35 @@ business context as `X-PS-*` headers, and responses come back in the same
 | Token counts, latency, cost | Yes |
 | Tool call names | Yes |
 | PII category labels | Yes |
+| Outcome signal classes | Yes (class names only; `PS_OUTCOME_SIGNALS=0` turns them off) |
 | API key fingerprint | Yes (SHA-256, truncated) |
 | Business metadata | Yes (only what you pass) |
 | **Prompt content** | **No** (unless `send_prompt_text=True`) |
 | **Response content** | **Never** |
 | **Raw API key** | **Never** |
 | **Tool call arguments** | **Never** |
+| **Prompt features / embedding** | **Never** (local only) |
+
+## Local Prompt Features
+
+`prompt_shields.prompt_features` turns a `messages` list into routing context in your process:
+approximate input tokens, message count, code fences, JSON-schema wording, a coarse language
+label, your `use_case`, the router's `simple`/`complex` label and, with `embed=True`, a
+64-dimension hashed-word embedding. `to_dict()` holds no prompt text and no hash of it; the
+embedding is left out of `to_dict()` and is never sent anywhere. Output is deterministic and
+carries `feature_schema` (`ps-prompt-features.v1`), which is bumped whenever a field's meaning
+changes. Extraction takes about 2 ms on a 4k-token prompt with the embedding (the PRD target is under 10 ms p50).
+
+```python
+from prompt_shields.prompt_features import extract_prompt_features
+
+features = extract_prompt_features(messages, use_case="contract-review", embed=True)
+features.to_dict()   # {"feature_schema": ..., "approx_input_tokens": 812, "language": "en", ...}
+features.embedding   # tuple of 64 floats, local only
+
+# Or per call, from the client (e.g. to feed a local learner). The telemetry event is unchanged.
+client = ShieldsOpenAI(api_key=..., ps_api_key=..., on_prompt_features=my_learner.observe)
+```
 
 ## PII Detection
 

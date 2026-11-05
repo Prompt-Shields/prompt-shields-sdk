@@ -20,12 +20,14 @@ from collections.abc import Callable
 from typing import Any
 
 from prompt_shields.instrumentation import suppress_instrumentation
+from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.pii import scan_messages
 from prompt_shields.pricing import (
     add_usage_detail_fields,
     resolve_pricing_model,
     usage_cost,
 )
+from prompt_shields.prompt_features import PromptFeatures, notify_prompt_features
 from prompt_shields.providers import get_adapter
 from prompt_shields.streaming import (
     ShieldsStream,
@@ -92,6 +94,10 @@ class ShieldsClient:
         scan_pii: bool = True,
         send_prompt_text: bool = False,
         pricing_table: dict | None = None,
+        # Local prompt features (#45): when set, called once per call with
+        # PromptFeatures (incl. a local embedding) before the provider call.
+        # Nothing from it is added to telemetry.
+        on_prompt_features: Callable[[PromptFeatures], Any] | None = None,
         # Optional atlas.ai sink (second destination; collector unchanged).
         # Env fallback: PS_ATLAS_URL / PS_ATLAS_API_KEY. Inactive unless BOTH set.
         atlas_url: str | None = None,
@@ -118,6 +124,7 @@ class ShieldsClient:
         self._scan_pii = scan_pii
         self._send_prompt_text = send_prompt_text
         self._pricing_table = pricing_table
+        self._on_prompt_features = on_prompt_features
         self._api_key_fingerprint = _fingerprint(api_key)
 
         # Build immutable per-client metadata (None values are filtered out)
@@ -323,11 +330,21 @@ class _CompletionsNamespace:
         ):
             hide_usage_chunk = request_openai_stream_usage(kwargs)
 
+        notify_prompt_features(
+            self._parent._on_prompt_features,
+            messages,
+            self._parent._metadata.get("use_case"),
+        )
+
         start = time.monotonic()
         # This client emits its own event; keep instrument() from adding one.
         with suppress_instrumentation():
-            response = self._call_upstream(model=model, messages=messages,
-                                            max_tokens=max_tokens, **kwargs)
+            try:
+                response = self._call_upstream(model=model, messages=messages,
+                                                max_tokens=max_tokens, **kwargs)
+            except Exception:
+                record_failure(model, messages, (ps_metadata or {}).get("session_id"))
+                raise
 
         if streaming:
             return self._wrap_stream(
@@ -347,6 +364,8 @@ class _CompletionsNamespace:
         )
         if _event_hook is not None:
             _event_hook(event)
+        attach_outcome_signals(event, model=model, messages=messages,
+                               response=response, request=kwargs)
         self._send(event, messages)
         return response
 
@@ -378,6 +397,9 @@ class _CompletionsNamespace:
                 event["tokens_estimated"] = True
             if event_hook is not None:
                 event_hook(event)
+            attach_outcome_signals(
+                event, model=model, messages=messages,
+                reasons=adapter_fields.get("finish_reasons") or [])
             self._send(event, messages, flush=flush)
 
         try:

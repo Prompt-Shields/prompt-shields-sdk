@@ -216,8 +216,9 @@ async def test_content_never_reaches_writer(mocked):
     assert SECRET not in repr(mocked.await_args)
 
 
-async def test_protobuf_rejected(mocked):
-    resp = await _post(b"\x0a\x00", {**AUTH, "Content-Type": "application/x-protobuf"})
+async def test_unsupported_media_type_rejected(mocked):
+    # Protobuf is covered in test_otel_protobuf.py.
+    resp = await _post(b"<spans/>", {**AUTH, "Content-Type": "application/xml"})
     assert resp.status_code == 415
     mocked.assert_not_awaited()
 
