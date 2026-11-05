@@ -460,6 +460,16 @@ components:
             is not empty, i.e. at least one upstream attempt failed before the
             call was served. Null when no event in the period reported one.
           example: 0.0125
+        sovereign_share:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Share (0 to 1) of events reporting a `served_jurisdiction` whose
+            jurisdiction is `EEA` or an EEA country code. Events that did not
+            report a jurisdiction are left out. Null when no event in the
+            period reported one. See `GET /partner/v1/usage/sovereign-share`.
+          example: 0.62
         period:
           type: string
           description: Time period for this summary
@@ -476,7 +486,211 @@ components:
         - avg_latency_ms
         - savings_usd
         - fallback_rate
+        - sovereign_share
         - period
+
+    SavingsTotals:
+      type: object
+      description: >
+        Realised routing savings over a set of usage events. An event counts
+        towards savings only when it reported both `cost` and
+        `counterfactual_cost` (what the call would have cost on its baseline
+        model). An event missing either one still counts in `total_requests`
+        and `estimated_cost_usd`, but adds nothing to `compared_cost_usd`,
+        `counterfactual_cost_usd` or `savings_usd`: a missing counterfactual
+        means "not measured", never "saved nothing".
+      properties:
+        total_requests:
+          type: integer
+          example: 15420
+        estimated_cost_usd:
+          type: number
+          format: float
+          nullable: true
+          description: Sum of `cost` over every event. Null when no event reported a cost.
+          example: 482.5
+        requests_with_counterfactual:
+          type: integer
+          description: Events that reported both `cost` and `counterfactual_cost`.
+          example: 12000
+        counterfactual_coverage:
+          type: number
+          format: float
+          nullable: true
+          description: requests_with_counterfactual / total_requests (0 to 1). Null when there were no requests.
+          example: 0.7782
+        compared_cost_usd:
+          type: number
+          format: float
+          nullable: true
+          description: Sum of `cost` over the events that reported both costs. Null when none did.
+          example: 310.2
+        counterfactual_cost_usd:
+          type: number
+          format: float
+          nullable: true
+          description: Sum of `counterfactual_cost` over the events that reported both costs. Null when none did.
+          example: 430.95
+        savings_usd:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            counterfactual_cost_usd - compared_cost_usd. Negative when routing
+            cost more than the baseline. Null when no event reported both costs.
+          example: 120.75
+        savings_rate:
+          type: number
+          format: float
+          nullable: true
+          description: savings_usd / counterfactual_cost_usd. Null when either is null or the counterfactual is 0.
+          example: 0.2802
+      required:
+        - total_requests
+        - estimated_cost_usd
+        - requests_with_counterfactual
+        - counterfactual_coverage
+        - compared_cost_usd
+        - counterfactual_cost_usd
+        - savings_usd
+        - savings_rate
+
+    SavingsBreakdown:
+      description: Savings for one bucket of a `group_by`.
+      allOf:
+        - type: object
+          properties:
+            key:
+              type: string
+              nullable: true
+              description: >
+                The bucket: the UTC start date (`YYYY-MM-DD`) for `day`, `week`
+                (weeks start on Monday) and `month`; the asset id for `asset`;
+                the asset's use case or business unit for `use_case` and
+                `business_unit`. Null for assets without a use case or business unit.
+              example: "support"
+          required:
+            - key
+        - $ref: '#/components/schemas/SavingsTotals'
+
+    SavingsReport:
+      type: object
+      description: Tenant-wide routing savings over the period, in total and per bucket.
+      properties:
+        period:
+          type: string
+          enum: [7d, 30d, 90d]
+          example: "30d"
+        group_by:
+          type: string
+          enum: [none, day, week, month, asset, use_case, business_unit]
+          example: use_case
+        total:
+          $ref: '#/components/schemas/SavingsTotals'
+        data:
+          type: array
+          description: One entry per bucket, ordered by key (null last). Empty when `group_by` is `none`.
+          items:
+            $ref: '#/components/schemas/SavingsBreakdown'
+      required:
+        - period
+        - group_by
+        - total
+        - data
+
+    SovereignShareTotals:
+      type: object
+      description: >
+        Share of calls and spend served in a sovereign jurisdiction (`EEA` or
+        an EEA country code, see `sovereign_jurisdictions`). Events that did
+        not report a `served_jurisdiction` are left out of both sides of each
+        share. US CLOUD Act exposure is not stored per event, so this is a
+        jurisdiction share, not a legal assessment.
+      properties:
+        total_requests:
+          type: integer
+          example: 15420
+        requests_with_jurisdiction:
+          type: integer
+          description: Events that reported a `served_jurisdiction`.
+          example: 9000
+        sovereign_requests:
+          type: integer
+          description: Events served in a sovereign jurisdiction.
+          example: 5580
+        request_share:
+          type: number
+          format: float
+          nullable: true
+          description: sovereign_requests / requests_with_jurisdiction (0 to 1). Null when no event reported a jurisdiction.
+          example: 0.62
+        cost_with_jurisdiction_usd:
+          type: number
+          format: float
+          nullable: true
+          description: Sum of `cost` over events that reported a jurisdiction. Null when none reported a cost.
+          example: 300.4
+        sovereign_cost_usd:
+          type: number
+          format: float
+          nullable: true
+          description: Sum of `cost` over sovereign events. 0 when costs were reported but none was sovereign; null when no cost was reported.
+          example: 140.1
+        spend_share:
+          type: number
+          format: float
+          nullable: true
+          description: sovereign_cost_usd / cost_with_jurisdiction_usd. Null when that is null or 0.
+          example: 0.4664
+      required:
+        - total_requests
+        - requests_with_jurisdiction
+        - sovereign_requests
+        - request_share
+        - cost_with_jurisdiction_usd
+        - sovereign_cost_usd
+        - spend_share
+
+    SovereignShareByLevel:
+      description: Sovereign share for one sensitivity level.
+      allOf:
+        - type: object
+          properties:
+            sensitivity_level:
+              type: string
+              nullable: true
+              description: The effective sensitivity level the events reported. Null groups events that reported none.
+              example: confidential
+          required:
+            - sensitivity_level
+        - $ref: '#/components/schemas/SovereignShareTotals'
+
+    SovereignShareReport:
+      type: object
+      description: Tenant-wide sovereign share over the period, in total and per sensitivity level.
+      properties:
+        period:
+          type: string
+          enum: [7d, 30d, 90d]
+          example: "30d"
+        sovereign_jurisdictions:
+          type: array
+          description: The jurisdiction codes counted as sovereign.
+          items:
+            type: string
+          example: ["AT", "BE", "EEA", "SE"]
+        total:
+          $ref: '#/components/schemas/SovereignShareTotals'
+        by_sensitivity_level:
+          type: array
+          description: One entry per reported sensitivity level, ordered by level (null last).
+          items:
+            $ref: '#/components/schemas/SovereignShareByLevel'
+      required:
+        - period
+        - sovereign_jurisdictions
+        - total
+        - by_sensitivity_level
 
     ChangeEvent:
       type: object
@@ -2398,6 +2612,83 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UsageSummary'
+
+  /partner/v1/usage/savings:
+    get:
+      operationId: getUsageSavings
+      tags: [Assets]
+      summary: Get routing savings
+      description: |
+        Realised savings across the tenant over the period: what calls cost
+        against what they would have cost on their baseline model
+        (`counterfactual_cost`), in total and per bucket of `group_by`.
+
+        Only events that reported both `cost` and `counterfactual_cost`
+        count towards savings. Others are still counted in `total_requests`
+        and `estimated_cost_usd`; `counterfactual_coverage` says what share
+        of requests were compared. The window is clamped to the tenant's
+        retention period. Aggregates only, never individual events.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 30d, 90d]
+            default: 30d
+          description: Time period for aggregation
+        - name: group_by
+          in: query
+          schema:
+            type: string
+            enum: [none, day, week, month, asset, use_case, business_unit]
+            default: none
+          description: Bucket by UTC day, week or month, asset, use case or business unit
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Savings report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavingsReport'
+
+  /partner/v1/usage/sovereign-share:
+    get:
+      operationId: getUsageSovereignShare
+      tags: [Assets]
+      summary: Get sovereign share
+      description: |
+        Share of the tenant's calls and spend served in a sovereign
+        jurisdiction (`EEA` or an EEA country code), in total and per
+        sensitivity level, over the period. Events that did not report a
+        `served_jurisdiction` are left out of both sides of each share. US
+        CLOUD Act exposure is not stored per event, so this is a share by
+        jurisdiction. The window is clamped to the tenant's retention
+        period. Aggregates only.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 30d, 90d]
+            default: 30d
+          description: Time period for aggregation
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Sovereign share report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SovereignShareReport'
 
   /partner/v1/telemetry/coverage:
     get:

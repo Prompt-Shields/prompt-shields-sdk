@@ -244,7 +244,7 @@ async def test_reports_are_clamped_to_retention(seeded_db):
 
 @pytest.mark.asyncio
 async def test_reports_work_under_rls(seeded_db):
-    seed = await _seed(seeded_db, admin_info=rls.bypass_info("test-seed"))
+    await _seed(seeded_db, admin_info=rls.bypass_info("test-seed"))
     async with seeded_db.begin() as conn:
         await rls.enable(conn)
     savings = await _get("/partner/v1/usage/savings?period=7d&group_by=use_case", PARTNER_KEY_A)

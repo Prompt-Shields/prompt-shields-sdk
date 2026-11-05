@@ -1,0 +1,16 @@
+---
+title: Get Sovereign Share
+openapi: get /partner/v1/usage/sovereign-share
+---
+
+The share of calls and of spend served in a sovereign jurisdiction: `EEA` or an
+EEA country code, as listed in `sovereign_jurisdictions`. Shares are given in
+total and per sensitivity level, so you can check that confidential and
+restricted traffic stays in the EEA.
+
+<Note>
+Calls that did not report a `served_jurisdiction` are left out of both sides of
+each share. US CLOUD Act exposure is not stored per call, so this is a share by
+jurisdiction, not a legal assessment. The model catalog lists each provider's
+`us_cloud_act_exposure`.
+</Note>

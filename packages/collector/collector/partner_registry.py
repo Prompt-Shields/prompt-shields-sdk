@@ -511,7 +511,7 @@ async def get_usage_savings(
     period: Literal["7d", "30d", "90d"] = Query(
         default="30d", description="Time period for aggregation"
     ),
-    group_by: SavingsGroupBy = Query(
+    group_by: SavingsGroupBy = Query(  # noqa: B008 - FastAPI query marker, by design
         default="none",
         description="Bucket by time (UTC day/week/month), asset, use case or business unit",
     ),
