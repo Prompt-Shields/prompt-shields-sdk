@@ -222,7 +222,93 @@ export interface UsageSummary {
    * attempt failed. `null` when no event reported one.
    */
   fallbackRate: number | null;
+  /**
+   * Share (0 to 1) of events reporting a served jurisdiction that were served
+   * in the EEA. `null` when no event reported one. By jurisdiction only (as
+   * stated by the route policy), not a US CLOUD Act assessment.
+   */
+  sovereignShare: number | null;
   period: UsagePeriod;
+}
+
+/** How `usage.savings()` buckets its results. */
+export type SavingsGroupBy = OpenString<'none' | 'day' | 'week' | 'month' | 'asset' | 'use_case' | 'business_unit'>;
+
+/**
+ * Realised routing savings over a set of events. Only events that reported
+ * both a cost and a counterfactual cost count towards the savings figures;
+ * `counterfactualCoverage` says what share of requests that is.
+ */
+export interface SavingsTotals {
+  totalRequests: number;
+  /** Sum of cost over every event; `null` when none reported a cost. */
+  estimatedCostUsd: number | null;
+  /** Events that reported both `cost` and `counterfactual_cost`. */
+  requestsWithCounterfactual: number;
+  /** `requestsWithCounterfactual / totalRequests`; `null` with no requests. */
+  counterfactualCoverage: number | null;
+  /** Cost of the compared events; `null` when none. */
+  comparedCostUsd: number | null;
+  /** Counterfactual cost of the compared events; `null` when none. */
+  counterfactualCostUsd: number | null;
+  /** `counterfactualCostUsd - comparedCostUsd`; negative when routing cost more. */
+  savingsUsd: number | null;
+  /** `savingsUsd / counterfactualCostUsd`. */
+  savingsRate: number | null;
+}
+
+/** Savings for one bucket. */
+export interface SavingsBreakdown extends SavingsTotals {
+  /** UTC bucket start date, asset id, use case or business unit; `null` when unset. */
+  key: string | null;
+}
+
+export interface SavingsReport {
+  period: UsagePeriod;
+  groupBy: SavingsGroupBy;
+  total: SavingsTotals;
+  /** Empty when `groupBy` is `none`. */
+  data: SavingsBreakdown[];
+}
+
+export interface SavingsParams {
+  period?: UsagePeriod;
+  groupBy?: SavingsGroupBy;
+}
+
+/**
+ * Share of calls and spend served in a sovereign (EEA) jurisdiction. Events
+ * without a reported jurisdiction are left out of both sides of each share.
+ * By jurisdiction only (as stated by the route policy), not a US CLOUD Act
+ * assessment.
+ */
+export interface SovereignShareTotals {
+  totalRequests: number;
+  requestsWithJurisdiction: number;
+  sovereignRequests: number;
+  /** `sovereignRequests / requestsWithJurisdiction`; `null` when no jurisdiction was reported. */
+  requestShare: number | null;
+  costWithJurisdictionUsd: number | null;
+  sovereignCostUsd: number | null;
+  /** `sovereignCostUsd / costWithJurisdictionUsd`. */
+  spendShare: number | null;
+}
+
+/** Sovereign share for one sensitivity level (`null`: none reported). */
+export interface SovereignShareByLevel extends SovereignShareTotals {
+  sensitivityLevel: string | null;
+}
+
+export interface SovereignShareReport {
+  period: UsagePeriod;
+  /** Jurisdiction codes counted as sovereign. */
+  sovereignJurisdictions: string[];
+  total: SovereignShareTotals;
+  bySensitivityLevel: SovereignShareByLevel[];
+}
+
+export interface SovereignShareParams {
+  period?: UsagePeriod;
 }
 
 /** A telemetry source. `unidentified`: events sent without delivery metadata. */

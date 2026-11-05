@@ -19,6 +19,7 @@ import pytest
 from collector import partner_auth
 from collector.partner_auth import PartnerPrincipal
 from collector.partner_registry import router
+from collector.usage_reports import SOVEREIGN_JURISDICTIONS
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from sqlalchemy.sql import operators as sa_ops
@@ -129,6 +130,7 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         and r.values.get("cost") is not None
     ]
     chains = present("fallback_chain")
+    jurisdictions = present("served_jurisdiction")
     computed = {
         "total_requests": len(rows),
         "total_tokens_in": total("tokens_in"),
@@ -144,6 +146,8 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         "savings_usd": sum(savings) if savings else None,
         "fallback_reported": len(chains),
         "fallback_requests": sum(1 for c in chains if c),
+        "jurisdiction_reported": len(jurisdictions),
+        "sovereign_requests": sum(1 for j in jurisdictions if j in SOVEREIGN_JURISDICTIONS),
     }
     labels = [c.name for c in stmt.selected_columns]
     assert set(labels) == set(computed), labels
@@ -187,6 +191,7 @@ def _seed() -> dict[str, list[Row]]:
                 tokens_reasoning=150,
                 counterfactual_cost=Decimal("0.025000"),
                 fallback_chain=["rate_limited"],
+                served_jurisdiction="SE",
             ),
             _event(
                 ASSET_A,
@@ -199,6 +204,7 @@ def _seed() -> dict[str, list[Row]]:
                 session_id="s1",
                 tokens_cache_write=10,
                 fallback_chain=[],
+                served_jurisdiction="US",
             ),
             _event(
                 ASSET_A,
@@ -273,6 +279,7 @@ class TestUsageSummary:
             "avg_latency_ms": 334,
             "savings_usd": 0.015,
             "fallback_rate": 0.5,
+            "sovereign_share": 0.5,
             "period": "30d",
         }
 
@@ -326,6 +333,7 @@ class TestUsageSummary:
             "avg_latency_ms": None,
             "savings_usd": None,
             "fallback_rate": None,
+            "sovereign_share": None,
             "period": "30d",
         }
 

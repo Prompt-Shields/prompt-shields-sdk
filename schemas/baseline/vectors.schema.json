@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://promptshields.com/schemas/baseline/vectors.schema.json",
+  "title": "Counterfactual cost vectors",
+  "description": "Golden vectors shared by the SDK (packages/sdk/tests/test_baseline.py) and the gateway (gateway/src/middlewares/router/baseline.test.ts). Each vector applies `baseline` (a path relative to the vectors file) to a routed telemetry event: the event must get baseline_id, and counterfactual_cost within 1e-12 USD of expected (none when null). Each invalid_baselines entry shallow-merges `patch` onto the baseline document, and both implementations must reject the result.",
+  "type": "object",
+  "required": ["baseline", "vectors"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "description": { "type": "string" },
+    "baseline": { "type": "string" },
+    "vectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "event", "expected"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "event": { "type": "object" },
+          "expected": {
+            "type": "object",
+            "required": ["baseline_model", "counterfactual_cost"],
+            "additionalProperties": false,
+            "properties": {
+              "baseline_model": { "type": "string" },
+              "counterfactual_cost": { "type": ["number", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "invalid_baselines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "patch"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "patch": { "type": "object" }
+        }
+      }
+    }
+  }
+}

@@ -75,6 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge", help="judge model as vendor:model")
     policy = p.add_mutually_exclusive_group(required=True)
     policy.add_argument("--policy", help="eval policy JSON (allowed models per level)")
+    policy.add_argument("--route-policy",
+                        help="route-policy.v1 JSON: candidates and judge must meet its "
+                             "data policy at each call's level (PII escalation included)")
     policy.add_argument("--allow-all-models", action="store_true",
                         help="no per-sensitivity model restriction")
     p.add_argument("--allow-prompt-reexecution", action="store_true",
@@ -100,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _policy(args) -> EvalPolicy:
     if args.allow_all_models:
         return EvalPolicy.allow_all()
+    if args.route_policy:
+        return EvalPolicy.from_route_policy(json.loads(Path(args.route_policy).read_text()))
     return EvalPolicy.from_dict(json.loads(Path(args.policy).read_text()))
 
 
@@ -127,7 +132,7 @@ def plan(sample: Sample, config: EvalConfig) -> dict:
         worst = 0.0
         unpriced = 0
         for record in sample.records:
-            level = record.sensitivity(config.policy.unclassified_default)
+            level = config.policy.level(record)
             if not config.policy.allows(candidate, level):
                 blocked += 1
                 continue
@@ -195,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     sample = stratified_sample(
         records, per_stratum=args.per_stratum, seed=args.seed,
         unclassified_default=policy.unclassified_default, use_cases=args.use_case,
+        level_of=policy.level,
     )
     config = EvalConfig(
         candidates=candidates, scorers=scorers, policy=policy,

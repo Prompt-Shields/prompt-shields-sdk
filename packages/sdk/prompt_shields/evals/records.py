@@ -32,6 +32,8 @@ Field                  Accepted keys (first present wins)
                        ``metadata``), else ``"(unattributed)"``
 ``data_classification`` ``sensitivity_level``, ``data_classification`` (also
                        in ``metadata``)
+``detected_pii_types`` ``detected_pii_types`` (also in ``metadata`` or
+                       ``flow_context``): PII categories the SDK recorded
 ``tokens_in`` / out    ``tokens_in``/``tokens_out``, or ``usage`` as above
 ``tokens_cached``      ``tokens_cached``
 ``cost``               ``cost`` (USD; used only when the call cannot be
@@ -41,8 +43,9 @@ Field                  Accepted keys (first present wins)
 ``max_tokens``         ``max_tokens``
 =====================  =====================================================
 
-The teardown record format (#12) is still being defined; when it lands,
-``from_dict`` is the one place that needs to learn it.
+``from_dict`` reads the same SDK-event and generic-JSONL shapes as the
+teardown's ``ps-events`` and ``generic-jsonl`` inputs (#12), so one log file
+feeds both ``ps-teardown`` and ``ps-eval``.
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ from typing import Any
 
 from prompt_shields.pricing import estimate_cost
 from prompt_shields.route_policy import estimate_input_tokens
+from prompt_shields.teardown.records import pii_categories
 
 SENSITIVITY_LEVELS = ("public", "internal", "confidential", "restricted")
 UNATTRIBUTED = "(unattributed)"
@@ -99,6 +103,9 @@ class EvalRecord:
     messages: list[dict] | None
     use_case: str = UNATTRIBUTED
     data_classification: str | None = None
+    #: PII categories the SDK recorded (lower case); they escalate the level
+    #: under a route policy (:meth:`EvalPolicy.level`).
+    detected_pii_types: tuple[str, ...] = ()
     response_text: str | None = None
     expected: str | None = None
     tokens_in: int | None = None
@@ -130,6 +137,8 @@ class EvalRecord:
         if tokens_out is None:
             tokens_out = _int(_first((usage,), "completion_tokens", "output_tokens"))
 
+        flow = data.get("flow_context")
+        flow = flow if isinstance(flow, Mapping) else {}
         record_id = _first((data,), "record_id", "id", "event_id")
         return cls(
             record_id=str(record_id) if record_id is not None else default_id,
@@ -139,6 +148,9 @@ class EvalRecord:
             use_case=_str(_first(top, "use_case", "use_case_name")) or UNATTRIBUTED,
             data_classification=_str(
                 _first(top, "sensitivity_level", "data_classification")
+            ),
+            detected_pii_types=pii_categories(
+                _first((data, metadata, flow), "detected_pii_types")
             ),
             response_text=_str(
                 _first((data,), "response_text", "completion_text", "response")
@@ -165,7 +177,8 @@ class EvalRecord:
         return self.expected if self.expected is not None else self.response_text
 
     def sensitivity(self, unclassified_default: str = "confidential") -> str:
-        """Declared level, else the policy default (M§5.1; PII escalation is #13).
+        """Declared level, else the policy default (M§5.1). PII escalation
+        needs a route policy: see :meth:`EvalPolicy.level`.
 
         A declared label that is not a known level is treated as
         ``restricted``: an unrecognised label must not loosen the policy.

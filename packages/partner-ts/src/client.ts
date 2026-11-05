@@ -29,6 +29,10 @@ import type {
   RiskMapping,
   RisksParams,
   RotateWebhookSecretParams,
+  SavingsParams,
+  SavingsReport,
+  SovereignShareParams,
+  SovereignShareReport,
   TelemetryCoverage,
   TokenResponse,
   UpdateWebhookSubscriptionParams,
@@ -166,6 +170,7 @@ export class PartnerClient {
   readonly models: TaxonomyResource;
   readonly businessUnits: TaxonomyResource;
   readonly telemetry: TelemetryResource;
+  readonly usage: UsageResource;
   /**
    * Webhook subscriptions: the tenant admin API (`/api/v1/admin/webhooks`).
    * Needs a client built with the tenant's own API key (`apiKey`), not
@@ -218,6 +223,7 @@ export class PartnerClient {
     this.models = new TaxonomyResource(this, '/partner/v1/models');
     this.businessUnits = new TaxonomyResource(this, '/partner/v1/business-units');
     this.telemetry = new TelemetryResource(this);
+    this.usage = new UsageResource(this);
     this.webhooks = new WebhooksResource(this);
   }
 
@@ -523,6 +529,21 @@ export class TelemetryResource {
   /** `GET /partner/v1/telemetry/coverage`: coverage overall and per source. Needs `usage:read`. */
   coverage(): Promise<TelemetryCoverage> {
     return this.client.get<TelemetryCoverage>('/partner/v1/telemetry/coverage');
+  }
+}
+
+/** `/partner/v1/usage/*`: tenant-wide routing savings and sovereign share. Needs `usage:read`. */
+export class UsageResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** `GET /partner/v1/usage/savings`: realised savings against the counterfactual. */
+  savings(params: SavingsParams = {}): Promise<SavingsReport> {
+    return this.client.get<SavingsReport>('/partner/v1/usage/savings', { ...params });
+  }
+
+  /** `GET /partner/v1/usage/sovereign-share`: calls and spend served in the EEA, per sensitivity level. */
+  sovereignShare(params: SovereignShareParams = {}): Promise<SovereignShareReport> {
+    return this.client.get<SovereignShareReport>('/partner/v1/usage/sovereign-share', { ...params });
   }
 }
 
