@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://promptshields.com/schemas/baseline/baseline.v1.schema.json",
+  "title": "Frozen savings baseline (baseline.v1)",
+  "description": "The model each use case would have used without Prompt Shields routing, frozen at onboarding with the prices of those models copied from the catalog (PRD 0001 §7.10). Routed telemetry events carry baseline_id and counterfactual_cost: the event's actual tokens priced at its baseline model's rates in this document. The prices live in the document, so a later catalog release never moves the counterfactual cost under the same baseline_id; a new baseline needs a new baseline_id. Read by the SDK (prompt_shields.baseline) and the gateway (PS_BASELINE_FILE).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "baseline_id",
+    "catalog_version",
+    "frozen_at",
+    "default_model",
+    "models"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": "baseline.v1" },
+    "baseline_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Sent as baseline_id on every routed event (the collector stores at most 128 characters)."
+    },
+    "catalog_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "catalog_version of the model catalog the rates were copied from."
+    },
+    "frozen_at": {
+      "type": "string",
+      "minLength": 1,
+      "description": "When the baseline was frozen (ISO 8601 date)."
+    },
+    "currency": { "const": "USD" },
+    "default_model": {
+      "type": "string",
+      "description": "Key in models: the baseline model of calls whose use case is not in use_cases."
+    },
+    "use_cases": {
+      "type": "object",
+      "description": "Use case name (X-PS-Use-Case; use_case_name on events) to a key in models.",
+      "additionalProperties": { "type": "string" }
+    },
+    "models": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Frozen per-token USD rates, keyed \"<provider>/<model>\" as in the catalog.",
+      "additionalProperties": { "$ref": "#/$defs/rates" }
+    }
+  },
+  "$defs": {
+    "rate": { "type": "number", "minimum": 0 },
+    "rates": {
+      "type": "object",
+      "required": [
+        "input_cost_per_token",
+        "output_cost_per_token",
+        "cache_read_input_token_cost",
+        "cache_creation_input_token_cost"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "input_cost_per_token": { "$ref": "#/$defs/rate" },
+        "output_cost_per_token": { "$ref": "#/$defs/rate" },
+        "cache_read_input_token_cost": { "$ref": "#/$defs/rate" },
+        "cache_creation_input_token_cost": { "$ref": "#/$defs/rate" }
+      }
+    }
+  }
+}

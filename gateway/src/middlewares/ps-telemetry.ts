@@ -22,6 +22,7 @@ import { PSTelemetrySender } from './psTelemetrySender';
 import { isMcpProxyPath } from '../mcp/paths';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 import { oidcTelemetryFields } from './psOidc/telemetry';
+import { applyBaseline, getBaseline } from './router/baseline';
 import { RESPONSE_HEADER_KEYS } from '../globals';
 import {
   COST_SOURCE_PROVIDER_REPORTED,
@@ -74,6 +75,10 @@ interface TelemetryEvent {
   // it was declared, the policy default, or raised by detected PII.
   route_sensitivity_level?: string;
   route_sensitivity_source?: string;
+  // Verified savings (#24): the frozen baseline (PS_BASELINE_FILE) and what
+  // the call's tokens would have cost on its baseline model, in USD.
+  baseline_id?: string;
+  counterfactual_cost?: number;
   // Exact-match cache (populated by emitCacheTelemetry)
   cache_status?: string;
   est_tokens_saved?: number;
@@ -375,7 +380,24 @@ function extractPSHeaders(
  */
 async function sendTelemetry(event: TelemetryEvent): Promise<void> {
   // Fail-open: never block LLM requests due to telemetry issues
-  await psTelemetrySender.send(event);
+  await psTelemetrySender.send(withBaseline(event));
+}
+
+/**
+ * A routed event (ps-router made the decision) with `baseline_id` and
+ * `counterfactual_cost` from the gateway's baseline, when one is loaded.
+ * Applied at send time, so streamed events are priced on their final usage.
+ */
+export function withBaseline(event: TelemetryEvent): TelemetryEvent {
+  const baseline = getBaseline();
+  if (!baseline || event.route_mode !== 'gateway') return event;
+  try {
+    const out = { ...event };
+    applyBaseline(baseline, out);
+    return out;
+  } catch {
+    return event; // fail-open
+  }
 }
 
 export function buildCacheEvent(

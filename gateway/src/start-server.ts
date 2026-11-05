@@ -20,6 +20,7 @@ import { flushSecurityEvents } from './middlewares/psSecurityEvents';
 import { flushSecurityLogsExporter } from './middlewares/psSecurityEvents/otlp';
 import { createDrain, shutdownTimeoutMs } from './psShutdown';
 import { loadMcpServersFromEnv } from './mcp/loadConfig';
+import { loadBaselineFromEnv } from './middlewares/router/baselineLoader';
 import { psMcpTelemetrySender } from './mcp/telemetry';
 
 // Extract the port number from the command line arguments
@@ -37,6 +38,15 @@ try {
   if (mcpServers) console.log(`MCP proxy: ${mcpServers} server(s) configured`);
 } catch (err) {
   console.error(`MCP proxy configuration error: ${(err as Error).message}`);
+  process.exit(1);
+}
+// PS fork (#24): the frozen savings baseline. An invalid file stops the
+// gateway rather than reporting savings against the wrong baseline.
+try {
+  const baseline = await loadBaselineFromEnv();
+  if (baseline) console.log(`Savings baseline: ${baseline.baselineId}`);
+} catch (err) {
+  console.error(`Savings baseline error: ${(err as Error).message}`);
   process.exit(1);
 }
 const hasAdminToken = Boolean(readAdminToken());

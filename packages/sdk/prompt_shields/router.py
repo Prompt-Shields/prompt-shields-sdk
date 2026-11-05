@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from prompt_shields.baseline import Baseline, BaselineError, load_baseline
 from prompt_shields.pii import detect_pii_categories
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
@@ -115,11 +116,15 @@ class RouteInfo:
 class CostInfo:
     """``usd`` is the event's cost (``None`` when unknown), ``source`` how it
     was produced (the event's ``cost_source``), ``estimated_usd`` the router's
-    estimate before the call."""
+    estimate before the call. ``counterfactual_usd`` is what the call would
+    have cost on its baseline model (``baseline_id``), when the router has a
+    baseline and the call could be priced."""
 
     usd: float | None
     source: str | None
     estimated_usd: float | None = None
+    counterfactual_usd: float | None = None
+    baseline_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -524,6 +529,7 @@ class _RouterCore:
         pricing_table: dict | None = None,
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
+        baseline: Baseline | Mapping[str, Any] | str | os.PathLike | None = None,
     ):
         if mode not in ("local", "gateway"):
             raise RouterError(f"mode must be 'local' or 'gateway', got {mode!r}")
@@ -548,8 +554,14 @@ class _RouterCore:
         self._clients: dict[str, Any] = {}
         self.policy: dict | None = None
         self._providers: dict[str, _Provider] = {}
+        self.baseline: Baseline | None = None
 
         if mode == "gateway":
+            if baseline is not None:
+                raise RouterError(
+                    "mode='gateway': the gateway adds the counterfactual cost; "
+                    "set its baseline with PS_BASELINE_FILE"
+                )
             if not gateway_url:
                 raise RouterError("mode='gateway' needs gateway_url")
             headers = {
@@ -588,6 +600,11 @@ class _RouterCore:
             raise RouterError(f"default_provider {default_provider!r} is not configured")
         self._default_provider = default_provider
         self.policy = load_policy(policy)
+        if baseline is not None:
+            try:
+                self.baseline = load_baseline(baseline)
+            except BaselineError as exc:
+                raise RouterError(f"invalid baseline: {exc}") from exc
         self._reachable = self._reachable_policy(self.policy)
         if not any(self._reachable["groups"].values()):
             raise RouterError(
@@ -771,6 +788,7 @@ class _RouterCore:
     def _event_hook(self, plan: _Plan, captured: dict):
         decision, tier = plan.decision, plan.tier
         policy_version = (self.policy or {}).get("policy_version")
+        baseline = self.baseline
 
         def hook(event: dict) -> None:
             event["requested_model"] = plan.requested_model
@@ -802,6 +820,9 @@ class _RouterCore:
                     tier, event["tokens_in"], event["tokens_out"]
                 )
                 event["cost_source"] = COST_SOURCE_ROUTE_POLICY
+            # Verified savings (#24): the same tokens on the frozen baseline.
+            if baseline is not None:
+                baseline.apply(event)
             captured.update(event)
 
         return hook
@@ -868,7 +889,13 @@ class _RouterCore:
                 sensitivity_source=d.sensitivity_source,
                 est_cost=d.est_cost,
             ),
-            cost=CostInfo(event.get("cost"), event.get("cost_source"), d.est_cost),
+            cost=CostInfo(
+                event.get("cost"),
+                event.get("cost_source"),
+                d.est_cost,
+                counterfactual_usd=event.get("counterfactual_cost"),
+                baseline_id=event.get("baseline_id"),
+            ),
             attempts=(attempt,),
         )
         return out
