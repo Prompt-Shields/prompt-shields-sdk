@@ -10,8 +10,9 @@ the decision, and aggregates:
   jurisdictions each level allows (methodology §5);
 * the **policy outcome** and **projected spend per strategy**: baseline,
   policy (cheapest compliant candidate in the group the policy picks) and
-  policy at parity, which stays "not measured" until the eval harness (#14)
-  exists (methodology §6).
+  policy at parity, which this module reports as "not measured"; the
+  ``ps-teardown --eval-results`` report fills it from ``ps-eval`` results
+  (#14; methodology §6).
 
 The method is ``docs/teardown/methodology.md`` §4.6, §5 and §6.
 
@@ -23,24 +24,20 @@ report holds aggregates and category names only: no prompt text, no
 
 Records
 -------
-Replay consumes *normalised usage records*: one per logged call, already
-mapped from the source format (provider export, SDK events, gateway logs,
-generic JSONL). ``UsageRecord`` is the shape; ``UsageRecord.from_mapping``
-accepts a ``dict`` with the same keys (unknown keys are ignored), so an
-ingest step that yields dicts or its own dataclass can feed ``replay``
-directly. Fields:
+Replay consumes the teardown's normalised record,
+:class:`prompt_shields.teardown.TeardownRecord`: one per logged call (or one
+aggregated usage-export row, weighted by its ``calls``). ``UsageRecord`` is
+kept as a compatible name for it: a subclass whose constructor also takes
+``vendor`` for ``provider``. A ``dict`` with the record's field names (unknown
+keys ignored, ``vendor`` / ``model`` accepted as aliases) or another
+dataclass is converted with ``TeardownRecord.from_mapping``. Fields replay
+reads, beyond the usage fields ``pricing.usage_cost`` prices:
 
 ==========================  ===================================================
-``vendor``                  Pricing vendor that served the call (``openai``,
-                            ``anthropic``, ...), as ``pricing.py`` keys it.
+``provider`` (``vendor``)   Pricing vendor that served the call.
 ``requested_model``         Model the caller asked for (``auto`` allowed).
-                            Key ``model`` is accepted as an alias.
 ``served_model``            Model that served the call. Baseline is priced
                             here; ``requested_model`` is the fallback (§4.2).
-``tokens_in``/``tokens_out``  Token counts. ``tokens_in`` is the whole prompt.
-``tokens_cached`` ...       Every ``pricing.PRICING_DIMENSIONS`` field, plus
-                            ``provider_cost``, ``usage_units`` and
-                            ``usage_unit_type``, with ``usage_cost`` meanings.
 ``baseline_cost``           Optional USD cost the ingest step already computed
                             per §4. When absent, replay re-prices from tokens.
                             An SDK event's ``cost`` field is *not* read (§4.2).
@@ -54,9 +51,16 @@ directly. Fields:
                             absent.
 ``messages``                Prompt messages, full mode only. Read locally,
                             never copied to the report.
+``aggregated``/``calls``    A usage-export row stands for ``calls`` requests
+                            (None: not reported). The router sees the
+                            per-request average prompt size; with no request
+                            count it treats the row as complex, which
+                            understates savings.
 ==========================  ===================================================
 
-Standalone use until the ``ps-teardown`` CLI (#12) wires this in::
+The ``ps-teardown run --policy`` CLI (#12) runs replay on its records and
+adds the result to the teardown report (``prompt_shields.teardown.policy``).
+Standalone use, on a JSONL of records::
 
     python -m prompt_shields.teardown_replay --policy policy.json calls.jsonl
 """
@@ -67,14 +71,16 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import re
 import sys
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from prompt_shields.pii import scan_messages
-from prompt_shields.pricing import PRICING_DIMENSIONS, usage_cost
+from prompt_shields.pricing import usage_cost
 from prompt_shields.route_policy import (
+    COMPLEX_TOKEN_THRESHOLD,
     EEA_COUNTRIES,
     PolicyViolation,
     RouteRequest,
@@ -83,6 +89,11 @@ from prompt_shields.route_policy import (
     estimate_input_tokens,
     resolve_policy_route,
     tier_complies,
+)
+from prompt_shields.teardown.records import (
+    TeardownRecord,
+    pii_categories,
+    text_messages,
 )
 
 REPORT_SCHEMA = "teardown-replay.v1"
@@ -98,65 +109,21 @@ OUTCOME_ROUTED = "routed"
 OUTCOME_UNCHANGED = "unchanged"
 OUTCOME_NO_COMPLIANT = "no_compliant_candidate"
 
-_USAGE_FIELDS = (
-    "tokens_in",
-    "tokens_out",
-    *PRICING_DIMENSIONS,
-    "provider_cost",
-    "usage_units",
-    "usage_unit_type",
-)
+class UsageRecord(TeardownRecord):
+    """Compatible name for :class:`TeardownRecord` (the old replay record).
+
+    Same fields; the constructor also accepts ``vendor`` for ``provider``.
+    """
+
+    def __init__(self, vendor: str | None = None, **kwargs: Any) -> None:
+        if vendor is not None and kwargs.get("provider") is None:
+            kwargs["provider"] = vendor
+        super().__init__(**kwargs)
 
 
-@dataclass
-class UsageRecord:
-    """One logged call, normalised for replay. See the module docstring."""
-
-    vendor: str | None = None
-    requested_model: str | None = None
-    served_model: str | None = None
-    tokens_in: int | None = None
-    tokens_out: int | None = None
-    tokens_cached: int | None = None
-    tokens_cache_write: int | None = None
-    tokens_cache_write_1h: int | None = None
-    tokens_audio_in: int | None = None
-    tokens_audio_out: int | None = None
-    web_search_requests: int | None = None
-    service_tier: str | None = None
-    provider_cost: float | None = None
-    usage_units: float | None = None
-    usage_unit_type: str | None = None
-    baseline_cost: float | None = None
-    data_classification: str | None = None
-    detected_pii_types: tuple[str, ...] = ()
-    use_case: str | None = None
-    quality: str | None = None
-    max_cost: float | None = None
-    route_group: str | None = None
-    max_output_tokens: int | None = None
-    messages: list[Any] | None = field(default=None, repr=False)
-
-    @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> UsageRecord:
-        """Build from a dict with the field names above; extra keys are ignored."""
-        names = {f.name for f in dataclasses.fields(cls)}
-        kwargs = {k: v for k, v in data.items() if k in names}
-        if "requested_model" not in kwargs and data.get("model") is not None:
-            kwargs["requested_model"] = data["model"]
-        kwargs["detected_pii_types"] = _pii_list(kwargs.get("detected_pii_types"))
-        return cls(**kwargs)
-
-    def usage_fields(self) -> dict[str, Any]:
-        return {name: getattr(self, name) for name in _USAGE_FIELDS}
-
-    def baseline_model(self) -> str | None:
-        """The model the baseline is priced at: served, else requested (§4.2)."""
-        if self.served_model:
-            return self.served_model
-        if self.requested_model and self.requested_model != "auto":
-            return self.requested_model
-        return None
+#: Projects one call onto a policy tier: ``(cost, pricing)`` where pricing is
+#: ``"catalog"`` or ``"policy_rates"``, or ``(None, None)`` when unpriced.
+Projector = Callable[[TeardownRecord, Mapping[str, Any]], "tuple[float | None, str | None]"]
 
 
 @dataclass(frozen=True)
@@ -180,19 +147,13 @@ class CallReplay:
     baseline_null_reason: str | None
     projected_cost: float | None
     projected_pricing: str | None
+    #: Requests this result stands for (an aggregated row's ``calls``; None
+    #: when not reported). Aggregates are weighted by it.
+    calls: int | None = 1
+    use_case: str | None = None
 
 
-def _pii_list(value: Any) -> tuple[str, ...]:
-    """PII categories as a tuple of lower-case names.
-
-    A bare string (``"iban"`` or ``"iban,email"``) is split on commas, never
-    iterated per character, so a recorded category always escalates.
-    """
-    if not value:
-        return ()
-    if isinstance(value, str):
-        value = value.split(",")
-    return tuple(str(v).strip().lower() for v in value if str(v).strip())
+_pii_list = pii_categories
 
 
 def _declared_level(value: Any) -> str | None:
@@ -206,13 +167,13 @@ def _declared_level(value: Any) -> str | None:
     return value.strip().lower()
 
 
-def _to_record(item: UsageRecord | Mapping[str, Any] | Any) -> UsageRecord:
-    if isinstance(item, UsageRecord):
+def _to_record(item: TeardownRecord | Mapping[str, Any] | Any) -> TeardownRecord:
+    if isinstance(item, TeardownRecord):
         return item
     if isinstance(item, Mapping):
-        return UsageRecord.from_mapping(item)
+        return TeardownRecord.from_mapping(item)
     if dataclasses.is_dataclass(item) and not isinstance(item, type):
-        return UsageRecord.from_mapping(dataclasses.asdict(item))
+        return TeardownRecord.from_mapping(dataclasses.asdict(item))
     raise TypeError(f"cannot replay a {type(item).__name__}; pass a mapping")
 
 
@@ -250,20 +211,39 @@ def _policy_tiers(policy: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return tiers
 
 
+_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+def _model_key(model: str) -> str:
+    """A served id without its ``models/`` prefix and dated-snapshot suffix,
+    so ``gpt-4o-2024-08-06`` finds the policy's ``gpt-4o`` tier."""
+    return _DATE_SUFFIX.sub("", model.rsplit("models/", 1)[-1])
+
+
+def _same_model(a: str | None, b: str | None) -> bool:
+    return a is not None and b is not None and (a == b or _model_key(a) == _model_key(b))
+
+
 def _find_tier(
     policy: Mapping[str, Any], model: str | None, vendor: str | None = None
 ) -> Mapping[str, Any] | None:
-    """The policy tier for ``model``, preferring one whose provider is ``vendor``."""
+    """The policy tier for ``model``, preferring one whose provider is ``vendor``.
+
+    An exact id wins; otherwise a dated snapshot matches its base id.
+    """
     if model is None:
         return None
-    matches = [t for t in _policy_tiers(policy) if t["model"] == model]
+    tiers = _policy_tiers(policy)
+    matches = [t for t in tiers if t["model"] == model] or [
+        t for t in tiers if _model_key(t["model"]) == _model_key(model)
+    ]
     for tier in matches:
         if vendor is not None and tier.get("provider") == vendor:
             return tier
     return matches[0] if matches else None
 
 
-def _baseline(record: UsageRecord) -> tuple[float | None, str | None]:
+def _baseline(record: TeardownRecord) -> tuple[float | None, str | None]:
     """Baseline cost and, when it is null, why (§4.5)."""
     if record.baseline_cost is not None:
         return float(record.baseline_cost), None
@@ -271,9 +251,9 @@ def _baseline(record: UsageRecord) -> tuple[float | None, str | None]:
     fields = record.usage_fields()
     if model is None and fields.get("provider_cost") is None:
         return None, "no_model"
-    if record.vendor is None and fields.get("provider_cost") is None:
+    if record.provider is None and fields.get("provider_cost") is None:
         return None, "no_vendor"
-    cost = usage_cost(record.vendor or "", model, fields)
+    cost = usage_cost(record.provider or "", model, fields)
     if cost is not None:
         return cost, None
     if record.tokens_in is None or record.tokens_out is None:
@@ -282,7 +262,7 @@ def _baseline(record: UsageRecord) -> tuple[float | None, str | None]:
 
 
 def _project(
-    record: UsageRecord, tier: Mapping[str, Any]
+    record: TeardownRecord, tier: Mapping[str, Any]
 ) -> tuple[float | None, str | None]:
     """Cost of this call's usage on the policy's candidate (§4.6).
 
@@ -310,34 +290,57 @@ def _project(
     return round(cost, 6), "policy_rates"
 
 
+def _approx_input_tokens(record: TeardownRecord, messages: list[Any]) -> int:
+    """Prompt size the router sees for one request of this record.
+
+    An aggregated row sums many requests: the router gets the per-request
+    average, and a row with no request count is treated as complex (above
+    the heuristic's token threshold), so savings are understated.
+    """
+    if record.tokens_in is None:
+        return estimate_input_tokens(messages)
+    if record.aggregated:
+        if record.calls:
+            return record.tokens_in // record.calls
+        return COMPLEX_TOKEN_THRESHOLD + 1
+    return record.tokens_in
+
+
 def replay_call(
-    record: UsageRecord | Mapping[str, Any],
+    record: TeardownRecord | Mapping[str, Any],
     policy: Mapping[str, Any],
     *,
     scan_prompts: bool = False,
     sovereign_jurisdictions: Iterable[str] = DEFAULT_SOVEREIGN_JURISDICTIONS,
+    baseline: tuple[float | None, str | None] | None = None,
+    projector: Projector | None = None,
 ) -> CallReplay:
-    """Replay one call under ``policy`` (methodology §6.1)."""
+    """Replay one call under ``policy`` (methodology §6.1).
+
+    ``baseline`` is ``(cost, null_reason)`` when the caller already priced
+    the call (``ps-teardown`` passes its own baseline, so the report has one
+    baseline); otherwise the call is priced here. ``projector`` prices the
+    call on the chosen policy tier; by default the SDK catalog, then the
+    policy's per-1k rates.
+    """
     record = _to_record(record)
     messages = record.messages if scan_prompts and record.messages else []
 
     declared = _declared_level(record.data_classification)
     pii = set(_pii_list(record.detected_pii_types))
     if messages:
-        pii.update(scan_messages(messages))
+        pii.update(scan_messages(text_messages(messages)))
     pii_categories = tuple(sorted(pii))
 
-    if record.tokens_in is not None:
-        approx_in = record.tokens_in
-    else:
-        approx_in = estimate_input_tokens(messages)
     max_out = record.max_output_tokens
     if max_out is None:
         max_out = record.tokens_out
+        if record.aggregated and max_out is not None:
+            max_out = max_out // record.calls if record.calls else None
     req = RouteRequest(
         messages=list(messages),
         requested_model=record.requested_model or "auto",
-        approx_input_tokens=approx_in,
+        approx_input_tokens=_approx_input_tokens(record, messages),
         max_output_tokens=max_out,
         quality=record.quality,  # type: ignore[arg-type]
         max_cost=record.max_cost,
@@ -348,9 +351,9 @@ def replay_call(
     )
 
     level, source = classify_sensitivity(policy, declared, pii_categories)
-    baseline_cost, null_reason = _baseline(record)
+    baseline_cost, null_reason = baseline if baseline is not None else _baseline(record)
     baseline_model = record.baseline_model()
-    baseline_tier = _find_tier(policy, baseline_model, record.vendor)
+    baseline_tier = _find_tier(policy, baseline_model, record.provider)
     rule = data_policy_rule(policy, level)
     baseline_compliant = (
         tier_complies(baseline_tier, rule) if baseline_tier is not None else None
@@ -366,6 +369,8 @@ def replay_call(
         "priced_at_requested": not record.served_model and baseline_model is not None,
         "baseline_cost": baseline_cost,
         "baseline_null_reason": null_reason,
+        "calls": record.calls,
+        "use_case": record.use_case,
     }
 
     try:
@@ -383,12 +388,16 @@ def replay_call(
         )
 
     tier = _find_tier(policy, decision.model)
-    if decision.model == baseline_model:
+    if _same_model(decision.model, baseline_model) and (
+        baseline_tier is None or tier is None
+        or baseline_tier.get("provider") == tier.get("provider")
+    ):
         outcome = OUTCOME_UNCHANGED
         projected, pricing = baseline_cost, "baseline"
     else:
         outcome = OUTCOME_ROUTED
-        projected, pricing = _project(record, tier) if tier else (None, None)
+        project = projector or _project
+        projected, pricing = project(record, tier) if tier else (None, None)
     return CallReplay(
         outcome=outcome,
         reason=decision.reason,
@@ -412,12 +421,18 @@ def _money(value: float) -> float:
     return round(float(value), 6)
 
 
+def _n(call: CallReplay) -> int:
+    """Requests a result stands for; an unreported count weighs 0 calls (its
+    spend still counts, and ``calls_unknown_rows`` says how many rows)."""
+    return call.calls or 0
+
+
 def _bucket() -> dict[str, Any]:
     return {"calls": 0, "spend": 0.0}
 
 
-def _add(bucket: dict[str, Any], cost: float | None) -> None:
-    bucket["calls"] += 1
+def _add(bucket: dict[str, Any], call: CallReplay, cost: float | None) -> None:
+    bucket["calls"] += _n(call)
     if cost is not None:
         bucket["spend"] += cost
 
@@ -433,8 +448,9 @@ def summarize(
 
     Spend is baseline spend over priced calls; null-cost calls are counted,
     never priced at zero. Savings compare only calls priced on both sides.
+    Counts are requests: an aggregated row counts as its ``calls``.
     """
-    n = len(calls)
+    n = sum(_n(c) for c in calls)
     priced = [c for c in calls if c.baseline_cost is not None]
     baseline_spend = sum(c.baseline_cost for c in priced)  # type: ignore[misc]
 
@@ -442,7 +458,7 @@ def summarize(
     for c in calls:
         if c.baseline_cost is None:
             key = c.baseline_null_reason or "unpriced"
-            null_by_reason[key] = null_by_reason.get(key, 0) + 1
+            null_by_reason[key] = null_by_reason.get(key, 0) + _n(c)
 
     # Sensitivity mix (§5.2), levels in policy order then any others.
     sensitivity = policy.get("sensitivity") or {}
@@ -453,17 +469,18 @@ def summarize(
     levels = []
     for level in order:
         rows = [c for c in calls if c.sensitivity_level == level]
+        level_calls = sum(_n(c) for c in rows)
         spend = sum(c.baseline_cost or 0.0 for c in rows)
         policy_level = level if level != UNCLASSIFIED else None
         rule = data_policy_rule(policy, policy_level)
         by_source = {"declared": 0, "pii_escalated": 0, "default": 0}
         for c in rows:
-            by_source[c.sensitivity_source] += 1
+            by_source[c.sensitivity_source] += _n(c)
         levels.append(
             {
                 "level": level,
-                "calls": len(rows),
-                "share_calls": _share(len(rows), n),
+                "calls": level_calls,
+                "share_calls": _share(level_calls, n),
                 "spend": _money(spend),
                 "share_spend": _share(spend, baseline_spend),
                 "by_source": by_source,
@@ -474,12 +491,13 @@ def summarize(
             }
         )
     sovereign_rows = [c for c in calls if c.sovereign]
+    sovereign_calls = sum(_n(c) for c in sovereign_rows)
     sovereign_spend = sum(c.baseline_cost or 0.0 for c in sovereign_rows)
 
     pii_counts: dict[str, int] = {}
     for c in calls:
         for category in c.pii_categories:
-            pii_counts[category] = pii_counts.get(category, 0) + 1
+            pii_counts[category] = pii_counts.get(category, 0) + _n(c)
 
     # Jurisdictions: where the baseline ran and where the policy would route.
     baseline_jur: dict[str, dict[str, Any]] = {}
@@ -487,12 +505,13 @@ def summarize(
     for c in calls:
         _add(
             baseline_jur.setdefault(c.baseline_jurisdiction or "unknown", _bucket()),
+            c,
             c.baseline_cost,
         )
         key = c.routed_jurisdiction or (
             "no_compliant_candidate" if c.outcome == OUTCOME_NO_COMPLIANT else "unknown"
         )
-        _add(policy_jur.setdefault(key, _bucket()), c.projected_cost)
+        _add(policy_jur.setdefault(key, _bucket()), c, c.projected_cost)
     for table in (baseline_jur, policy_jur):
         for bucket in table.values():
             bucket["spend"] = _money(bucket["spend"])
@@ -502,7 +521,7 @@ def summarize(
     # Policy strategy (§6.2): compare only calls priced on both sides.
     outcomes = {OUTCOME_ROUTED: 0, OUTCOME_UNCHANGED: 0, OUTCOME_NO_COMPLIANT: 0}
     for c in calls:
-        outcomes[c.outcome] += 1
+        outcomes[c.outcome] += _n(c)
     compared = [
         c for c in calls if c.baseline_cost is not None and c.projected_cost is not None
     ]
@@ -511,7 +530,7 @@ def summarize(
     by_model: dict[str, dict[str, Any]] = {}
     for c in calls:
         key = c.routed_model or OUTCOME_NO_COMPLIANT
-        _add(by_model.setdefault(key, _bucket()), c.projected_cost)
+        _add(by_model.setdefault(key, _bucket()), c, c.projected_cost)
     for bucket in by_model.values():
         bucket["spend"] = _money(bucket["spend"])
 
@@ -524,23 +543,24 @@ def summarize(
             "strategy": policy.get("strategy", "heuristic"),
         },
         "calls": n,
+        "calls_unknown_rows": sum(1 for c in calls if c.calls is None),
         "baseline": {
             "spend": _money(baseline_spend),
-            "calls_priced": len(priced),
-            "calls_null_cost": n - len(priced),
+            "calls_priced": sum(_n(c) for c in priced),
+            "calls_null_cost": n - sum(_n(c) for c in priced),
             "null_cost_by_reason": dict(sorted(null_by_reason.items())),
-            "priced_at_requested": sum(1 for c in calls if c.priced_at_requested),
+            "priced_at_requested": sum(_n(c) for c in calls if c.priced_at_requested),
         },
         "sensitivity_mix": {
             "levels": levels,
             "sovereign": {
-                "calls": len(sovereign_rows),
-                "share_calls": _share(len(sovereign_rows), n),
+                "calls": sovereign_calls,
+                "share_calls": _share(sovereign_calls, n),
                 "spend": _money(sovereign_spend),
                 "share_spend": _share(sovereign_spend, baseline_spend),
             },
             "pii_escalated_share_calls": _share(
-                sum(1 for c in calls if c.sensitivity_source == "pii_escalated"), n
+                sum(_n(c) for c in calls if c.sensitivity_source == "pii_escalated"), n
             ),
             "pii_categories": dict(sorted(pii_counts.items())),
         },
@@ -549,22 +569,22 @@ def summarize(
             "policy": dict(sorted(policy_jur.items())),
         },
         "baseline_noncompliant": {
-            "calls": len(noncompliant),
+            "calls": sum(_n(c) for c in noncompliant),
             "spend": _money(sum(c.baseline_cost or 0.0 for c in noncompliant)),
             "calls_served_model_not_in_policy": sum(
-                1 for c in calls if c.baseline_compliant is None
+                _n(c) for c in calls if c.baseline_compliant is None
             ),
         },
         "strategies": {
             "baseline": {"spend": _money(baseline_spend)},
             "policy_cheapest": {
                 "outcomes": outcomes,
-                "calls_compared": len(compared),
+                "calls_compared": sum(_n(c) for c in compared),
                 "calls_projected_null": sum(
-                    1 for c in calls if c.projected_cost is None
+                    _n(c) for c in calls if c.projected_cost is None
                 ),
                 "calls_priced_at_policy_rates": sum(
-                    1 for c in calls if c.projected_pricing == "policy_rates"
+                    _n(c) for c in calls if c.projected_pricing == "policy_rates"
                 ),
                 "baseline_spend_compared": _money(cmp_baseline),
                 "projected_spend": _money(cmp_projected),
@@ -581,7 +601,7 @@ def summarize(
 
 
 def replay(
-    records: Iterable[UsageRecord | Mapping[str, Any]],
+    records: Iterable[TeardownRecord | Mapping[str, Any]],
     policy: Mapping[str, Any],
     *,
     scan_prompts: bool = False,
@@ -608,7 +628,7 @@ def replay(
     )
 
 
-# --- standalone entry point (until the ps-teardown CLI wires this in) --------
+# --- standalone entry point ---------------------------------------------------
 
 
 def _read_jsonl(path: str) -> list[dict[str, Any]]:

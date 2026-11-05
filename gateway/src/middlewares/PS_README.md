@@ -87,7 +87,23 @@ gateway logs a warning at startup when both target the collector.
 
 ## Cost-aware routing (spec)
 
-The SDK never picks a model. It expresses *intent*; the gateway owns the
+User-facing guide, with a worked policy and the current limits:
+`docs/guides/routing.mdx`. In short, what the gateway router does **not** do
+yet:
+
+- **Load a route policy from configuration.** `src/index.ts` mounts
+  `psRouter()` with `defaultPolicy`, which has no `sensitivity`, `dataPolicy`
+  or `useCases` section, so the policy stages and the data-policy gate below
+  are off in a stock gateway. They run only with
+  `psRouter(fromRoutePolicyDoc(doc))` in code.
+- **Fail over between routed models (#21).** `psFailover/` (engine and
+  per-provider circuit breaker) is not in the request path; the router picks
+  one model. Fallback targets in a gateway config still work, are checked by
+  the data-policy gate when one is active, and are recorded in
+  `fallback_chain`.
+
+The SDK's ordinary clients never pick a model (`ShieldsRouter` is the opt-in
+exception). They express *intent*; the gateway owns the
 decision, the model catalog, pricing, and policy. This keeps routing in one
 place instead of scattered across every service.
 
@@ -243,6 +259,13 @@ When the router made a decision, the telemetry event carries:
 - `route_group` — the resolved group (`cheap` / `frontier` / ...)
 - `route_reason` — why (`heuristic:simple`, `quality:critical`, `override`, `...+budget-clamp`)
 - `route_est_cost` — the router's pre-flight USD estimate
+- `baseline_id` / `counterfactual_cost` — with `PS_BASELINE_FILE` set to a
+  frozen `baseline.v1` document (`schemas/baseline/`, written by the SDK's
+  `freeze_baseline`), the baseline's id and what the call's tokens would have
+  cost on the use case's baseline model at the baseline's frozen prices
+  (`router/baseline.ts`, same rules and shared vectors as the SDK). Added at
+  send time, so streamed calls are priced on their final usage. An invalid
+  file (or one over 1 MiB) stops the gateway at startup.
 - `route_sensitivity_level` / `route_sensitivity_source` — the call's
   effective sensitivity level and `declared` / `default` / `pii_escalated`
   (only under a policy with the policy stages; OTel: `ps.route.sensitivity_level`,

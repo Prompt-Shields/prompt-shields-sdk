@@ -1,0 +1,277 @@
+{
+  "cells": [
+    {
+      "use_case": "contract-review",
+      "candidate": "mistral-eu:mistral-small-eu",
+      "method": "llm_judge",
+      "n": 40,
+      "passed": 40,
+      "parity": 1.0,
+      "ci_low": 0.9124,
+      "ci_high": 1.0,
+      "status": "at_parity",
+      "conservative_at_parity": false,
+      "trials_by_status": {
+        "scored": 40
+      },
+      "judge_outcomes": {
+        "tie": 40
+      },
+      "cost_ratio": null,
+      "median_latency_delta_ms": null,
+      "output_token_ratio": 0.0275
+    },
+    {
+      "use_case": "contract-review",
+      "candidate": "openai:gpt-4o-mini",
+      "method": "llm_judge",
+      "n": 0,
+      "passed": 0,
+      "parity": null,
+      "ci_low": null,
+      "ci_high": null,
+      "status": "insufficient_sample",
+      "conservative_at_parity": false,
+      "trials_by_status": {
+        "skipped_policy": 40
+      },
+      "judge_outcomes": {},
+      "cost_ratio": null,
+      "median_latency_delta_ms": null,
+      "output_token_ratio": null
+    },
+    {
+      "use_case": "faq",
+      "candidate": "mistral-eu:mistral-small-eu",
+      "method": "exact_match",
+      "n": 80,
+      "passed": 80,
+      "parity": 1.0,
+      "ci_low": 0.9542,
+      "ci_high": 1.0,
+      "status": "at_parity",
+      "conservative_at_parity": true,
+      "trials_by_status": {
+        "scored": 80
+      },
+      "judge_outcomes": {},
+      "cost_ratio": null,
+      "median_latency_delta_ms": null,
+      "output_token_ratio": 0.0288
+    },
+    {
+      "use_case": "faq",
+      "candidate": "openai:gpt-4o-mini",
+      "method": "exact_match",
+      "n": 80,
+      "passed": 80,
+      "parity": 1.0,
+      "ci_low": 0.9542,
+      "ci_high": 1.0,
+      "status": "at_parity",
+      "conservative_at_parity": true,
+      "trials_by_status": {
+        "scored": 80
+      },
+      "judge_outcomes": {},
+      "cost_ratio": 0.001,
+      "median_latency_delta_ms": null,
+      "output_token_ratio": 0.0288
+    },
+    {
+      "use_case": "support-bot",
+      "candidate": "mistral-eu:mistral-small-eu",
+      "method": "exact_match",
+      "n": 40,
+      "passed": 30,
+      "parity": 0.75,
+      "ci_low": 0.5981,
+      "ci_high": 0.8581,
+      "status": "below_parity",
+      "conservative_at_parity": false,
+      "trials_by_status": {
+        "scored": 40
+      },
+      "judge_outcomes": {},
+      "cost_ratio": null,
+      "median_latency_delta_ms": null,
+      "output_token_ratio": 0.0257
+    },
+    {
+      "use_case": "support-bot",
+      "candidate": "openai:gpt-4o-mini",
+      "method": "exact_match",
+      "n": 40,
+      "passed": 39,
+      "parity": 0.975,
+      "ci_low": 0.8712,
+      "ci_high": 0.9956,
+      "status": "at_parity",
+      "conservative_at_parity": false,
+      "trials_by_status": {
+        "scored": 40
+      },
+      "judge_outcomes": {},
+      "cost_ratio": 0.0014,
+      "median_latency_delta_ms": null,
+      "output_token_ratio": 0.0275
+    }
+  ],
+  "use_cases": [
+    {
+      "use_case": "contract-review",
+      "calls": 40,
+      "baseline_usd": 0.08,
+      "at_parity_usd": 0.08,
+      "saving_pct": 0.0,
+      "from_model": "openai:gpt-4o",
+      "to_model": null,
+      "conservative_at_parity_usd": 0.08,
+      "conservative_to_model": null,
+      "eval_cells": 2
+    },
+    {
+      "use_case": "faq",
+      "calls": 80,
+      "baseline_usd": 0.16,
+      "at_parity_usd": 0.0096,
+      "saving_pct": 0.94,
+      "from_model": "openai:gpt-4o",
+      "to_model": "openai:gpt-4o-mini",
+      "conservative_at_parity_usd": 0.0096,
+      "conservative_to_model": "openai:gpt-4o-mini",
+      "eval_cells": 2
+    },
+    {
+      "use_case": "support-bot",
+      "calls": 40,
+      "baseline_usd": 0.08,
+      "at_parity_usd": 0.0048,
+      "saving_pct": 0.94,
+      "from_model": "openai:gpt-4o",
+      "to_model": "openai:gpt-4o-mini",
+      "conservative_at_parity_usd": 0.08,
+      "conservative_to_model": null,
+      "eval_cells": 2
+    }
+  ],
+  "baseline_usd": 0.32,
+  "at_parity_usd": 0.0944,
+  "saving_pct": 0.705,
+  "saving_ci": [
+    0.47,
+    0.705
+  ],
+  "conservative_at_parity_usd": 0.1696,
+  "conservative_saving_pct": 0.47,
+  "unpriced_calls": 0,
+  "population_calls": 160,
+  "params": {
+    "min_parity": 0.95,
+    "min_cell_samples": 30,
+    "min_cell_calls": 10,
+    "bootstrap_resamples": 200,
+    "bootstrap_seed": 3
+  },
+  "methodology": {
+    "sample_seed": 7,
+    "per_stratum": 100,
+    "strata": [
+      {
+        "use_case": "contract-review",
+        "sensitivity": "confidential",
+        "complexity": "short",
+        "population": 40,
+        "eligible": 40,
+        "sampled": 40
+      },
+      {
+        "use_case": "faq",
+        "sensitivity": "public",
+        "complexity": "short",
+        "population": 80,
+        "eligible": 80,
+        "sampled": 80
+      },
+      {
+        "use_case": "support-bot",
+        "sensitivity": "internal",
+        "complexity": "short",
+        "population": 40,
+        "eligible": 40,
+        "sampled": 40
+      }
+    ],
+    "candidates": [
+      "openai:gpt-4o-mini",
+      "mistral-eu:mistral-small-eu"
+    ],
+    "scoring": {
+      "*": "exact_match",
+      "contract-review": "llm_judge"
+    },
+    "judges": [
+      "mistral-eu:mistral-large-eu (prompt pairwise-v1)"
+    ],
+    "policy": {
+      "route_policy": {
+        "policy_version": "nordic-sovereign-1",
+        "sha256": "82a2c33e46f258b8c38979f8928a6b4e7e83fb08d4d17a6bf6981d74e6b88c23"
+      },
+      "unclassified_default": "confidential",
+      "pii_escalation": true,
+      "allowed_models": {
+        "confidential": [
+          "berget:berget-llama-70b",
+          "mistral-eu:mistral-large-eu",
+          "mistral-eu:mistral-small-eu",
+          "scaleway:scaleway-small"
+        ],
+        "internal": [
+          "anthropic:claude-sonnet-4-20250514",
+          "berget:berget-llama-70b",
+          "mistral-eu:mistral-large-eu",
+          "mistral-eu:mistral-small-eu",
+          "openai:gpt-4o",
+          "openai:gpt-4o-mini",
+          "scaleway:scaleway-small"
+        ],
+        "public": [
+          "anthropic:claude-sonnet-4-20250514",
+          "berget:berget-llama-70b",
+          "mistral-eu:mistral-large-eu",
+          "mistral-eu:mistral-small-eu",
+          "openai:gpt-4o",
+          "openai:gpt-4o-mini",
+          "scaleway:scaleway-small"
+        ],
+        "restricted": [
+          "berget:berget-llama-70b",
+          "mistral-eu:mistral-large-eu",
+          "mistral-eu:mistral-small-eu"
+        ],
+        "unclassified": [
+          "anthropic:claude-sonnet-4-20250514",
+          "berget:berget-llama-70b",
+          "mistral-eu:mistral-large-eu",
+          "mistral-eu:mistral-small-eu",
+          "openai:gpt-4o",
+          "openai:gpt-4o-mini",
+          "scaleway:scaleway-small"
+        ]
+      }
+    },
+    "temperature_default": 0.0,
+    "max_tokens": 1024,
+    "prompts_sent_to_providers": false,
+    "max_spend_usd": null,
+    "spend_usd": 0.00027,
+    "calls": 280,
+    "judge_calls": 80,
+    "baseline_reruns": 0,
+    "requests_per_minute": null
+  },
+  "notes": [
+    "judge mistral-eu:mistral-large-eu is from the same family as candidate mistral-eu:mistral-small-eu (M\u00a77.3)"
+  ]
+}

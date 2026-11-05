@@ -1,10 +1,14 @@
-"""``ps-teardown``: the AI bill teardown CLI, cost-only mode (#12).
+"""``ps-teardown``: the AI bill teardown CLI (#12, #13, #14).
 
     ps-teardown run usage.json events.jsonl --out-dir report/ --customer-label "Acme"
+    ps-teardown run events.jsonl --policy policy.json --eval-results eval.json
 
 Reads local files only and makes no network calls. Writes the report as
 Markdown, HTML and JSON (``teardown-report.{md,html,json}``), and with
-``--learning-tuples`` the learning-tuple export (#42).
+``--learning-tuples`` the learning-tuple export (#42). ``--policy`` adds the
+sensitivity mix and policy replay; ``--eval-results`` (the JSON a prior
+``ps-eval`` run wrote) adds quality parity and savings at parity. The
+teardown run itself never executes a prompt.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from prompt_shields.teardown.engine import (
     build_report,
     price_records,
 )
+from prompt_shields.teardown.policy import EvalResultsError, read_eval_results
 from prompt_shields.teardown.records import FORMATS, load_records
 from prompt_shields.teardown.render import render_report
 from prompt_shields.teardown.tuples import write_learning_tuples
@@ -35,11 +40,11 @@ _EXT = {"markdown": "md", "html": "html", "json": "json"}
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ps-teardown",
-        description="AI bill teardown from usage logs, run locally (cost-only mode).",
+        description="AI bill teardown from usage logs, run locally.",
     )
     parser.add_argument("--version", action="version", version=f"ps-teardown {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="build a cost-only teardown report from input files")
+    run = sub.add_parser("run", help="build a teardown report from input files")
     run.add_argument("inputs", nargs="+", help="usage exports, event logs or JSONL files")
     run.add_argument("--input-format", choices=FORMATS,
                      help="force the input format for every file (default: detect per file)")
@@ -66,7 +71,33 @@ def _parser() -> argparse.ArgumentParser:
                      help="limit same-model arbitrage to these providers (repeatable)")
     run.add_argument("--learning-tuples", metavar="PATH",
                      help="also write learning tuples (JSONL, no prompt text) to PATH")
+    run.add_argument("--policy", metavar="JSON",
+                     help="route-policy.v1 file: replay every call through it and add the "
+                          "sensitivity mix and projected spend per strategy (#13)")
+    run.add_argument("--scan-prompts", action="store_true",
+                     help="full mode (needs --policy): scan generic-jsonl message text "
+                          "locally for PII and use it in the policy heuristic; only "
+                          "category names reach the report")
+    run.add_argument("--eval-results", metavar="JSON",
+                     help="ps-eval --out-json results (needs --policy): add quality parity "
+                          "and savings at parity (#14); no prompt is executed")
     return parser
+
+
+def _read_json(parser: argparse.ArgumentParser, flag: str, path: str):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        parser.error(f"{flag}: {exc}")
+
+
+def _check_policy(parser: argparse.ArgumentParser, policy) -> None:
+    if not isinstance(policy, dict) or policy.get("schema_version") != "route-policy.v1":
+        parser.error("--policy: expected a route-policy.v1 document")
+    if not isinstance(policy.get("groups"), dict) or "default_group" not in policy:
+        parser.error("--policy: missing 'groups' or 'default_group'")
+    if policy.get("strategy", "heuristic") != "heuristic":
+        parser.error("--policy: replay supports only the 'heuristic' strategy")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,7 +116,21 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(key_map, dict):
             parser.error("--key-map: expected a JSON object")
 
-    loaded = load_records(args.inputs, fmt=args.input_format, key_map=key_map)
+    policy = eval_results = None
+    if (args.scan_prompts or args.eval_results) and not args.policy:
+        parser.error("--scan-prompts and --eval-results need --policy")
+    if args.policy:
+        policy = _read_json(parser, "--policy", args.policy)
+        _check_policy(parser, policy)
+    if args.eval_results:
+        eval_results = _read_json(parser, "--eval-results", args.eval_results)
+        try:
+            read_eval_results(eval_results)
+        except EvalResultsError as exc:
+            parser.error(f"--eval-results: {exc}")
+
+    loaded = load_records(args.inputs, fmt=args.input_format, key_map=key_map,
+                          keep_messages=args.scan_prompts)
     source = SdkPriceSource()
     priced = price_records(loaded.records, source)
     date = args.report_date or datetime.now(UTC).strftime("%Y-%m-%d")
@@ -99,6 +144,10 @@ def main(argv: list[str] | None = None) -> int:
         cache_off_at=args.cache_off_at,
         unclassified_default=args.unclassified_default,
         allowed_providers=args.allow_provider,
+        policy=policy,
+        policy_name=Path(args.policy).name if args.policy else "",
+        scan_prompts=args.scan_prompts,
+        eval_results=eval_results,
     )
     report = build_report(priced, loaded.sources, options, source)
 

@@ -40,6 +40,12 @@ from prompt_shields.async_client import (
     AsyncShieldsClient,
     AsyncShieldsOpenAI,
 )
+from prompt_shields.baseline import (
+    Baseline,
+    BaselineError,
+    freeze_baseline,
+    load_baseline,
+)
 from prompt_shields.client import (
     ShieldsAnthropic,
     ShieldsClient,
@@ -76,6 +82,8 @@ __all__ = [
     "AsyncShieldsClient",
     "AsyncShieldsOpenAI",
     "AsyncShieldsRouter",
+    "Baseline",
+    "BaselineError",
     "DataClassification",
     "DiscoverySource",
     "PSConfig",
@@ -93,7 +101,9 @@ __all__ = [
     "detect_pii_categories",
     "estimate_cost",
     "estimate_unit_cost",
+    "freeze_baseline",
     "instrument",
+    "load_baseline",
     "scan_messages",
     "suppress_instrumentation",
     "uninstrument",
