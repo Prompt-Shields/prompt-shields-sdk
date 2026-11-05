@@ -44,6 +44,15 @@ events per process), so the default leaves room for many processes per tenant.
 off). Kong's http-log plugin sends one request per proxied call unless
 batching is on, and retries a `429`.
 
+## Failed authentication limit
+
+Each failed tenant key or admin token check from one client address (an IPv6
+address counts by its /64) is counted per minute. Past
+`PS_AUTH_FAILURE_LIMIT_PER_MINUTE` (default 60, `0` turns it off), further
+requests from that address that would need a key check get `429` with
+`Retry-After` until the minute ends. A valid key the collector has verified in
+the last `PS_INGEST_KEY_CACHE_TTL_SECONDS` (default 30) is not affected.
+
 <Info>
   The limiter is in-process, so each collector worker counts separately.
   Running N workers allows up to N times the configured limit.

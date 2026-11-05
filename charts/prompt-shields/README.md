@@ -234,6 +234,20 @@ The partner and ingest rate limits are kept per process, so with N collector
 replicas a tenant can reach N times `PS_RATE_LIMIT_PER_MINUTE`. Divide the
 limit by the replica count if it must hold globally.
 
+Tenant key auth keeps two more per-process structures. A key that passed its
+bcrypt check is remembered for `PS_INGEST_KEY_CACHE_TTL_SECONDS` (by an HMAC
+of the key, never the key), so its next requests skip bcrypt while the stored
+hash is unchanged; the key row is still read on every request, so revoking,
+rotating or expiring a key, or disabling its tenant, applies at once on every
+replica. A client address with more than `PS_AUTH_FAILURE_LIMIT_PER_MINUTE`
+failed authentications in a minute gets `429` (with `Retry-After`) instead of
+further bcrypt checks; keys already cached keep working. The address is the
+one uvicorn reports, which follows `X-Forwarded-For` only from proxies listed
+in uvicorn's `FORWARDED_ALLOW_IPS` (default `127.0.0.1`). Behind an ingress
+or load balancer, set `FORWARDED_ALLOW_IPS` in `collector.config` to its
+addresses, or every client shares one address and one bad client can make
+uncached valid keys wait out the minute.
+
 ## Security defaults
 
 Every pod meets the **restricted** Pod Security Standard:
@@ -481,6 +495,9 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_COLLECTOR_API_DOCS_ENABLED` (*chart*) | `false` | `/docs`, `/redoc`, `/openapi.json` |
 | `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process) |
 | `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart (per process) |
+| `PS_INGEST_KEY_CACHE_TTL_SECONDS`, `PS_INGEST_KEY_CACHE_MAX_ENTRIES` | `30`, `10000` | Verified tenant key cache (skips bcrypt; `0` TTL turns it off; per process) |
+| `PS_AUTH_FAILURE_LIMIT_PER_MINUTE`, `PS_AUTH_FAILURE_TRACKED_CLIENTS` | `60`, `10000` | Failed tenant key / admin token checks per client address per minute before `429` (`0` turns it off; per process) |
+| `FORWARDED_ALLOW_IPS` (uvicorn) | `127.0.0.1` | Proxies whose `X-Forwarded-For` sets the client address (failed-auth limiter, audit) |
 | `PS_AUDIT_RETENTION_DAYS` | `365` | Partner audit log retention |
 | `PS_AUDIT_EVENT_RETENTION_DAYS` | `0` (keep) | Audit trail retention for `python -m collector.audit_trail purge` (leaves a checkpoint row) |
 | `PS_RETENTION_DAYS_DEFAULT`, `PS_RETENTION_BATCH_SIZE` | `365`, `5000` | Usage event retention |

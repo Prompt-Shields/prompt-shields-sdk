@@ -346,6 +346,9 @@ collector:
   #   PS_EMBEDDINGS_BACKEND: "none"        # auto | openai | local | none
   #   PS_EMBEDDINGS_OPENAI_BASE_URL: "https://llm-proxy.internal/v1"
   #   PS_RATE_LIMIT_PER_MINUTE: "100"
+  #   PS_INGEST_KEY_CACHE_TTL_SECONDS: "30"     # 0: bcrypt on every request
+  #   PS_AUTH_FAILURE_LIMIT_PER_MINUTE: "60"    # per client address; 0: off
+  #   FORWARDED_ALLOW_IPS: "10.0.0.0/8"         # ingress addresses (uvicorn)
   #   PS_AUDIT_RETENTION_DAYS: "365"
   #   PS_RETENTION_DAYS_DEFAULT: "365"
   #   PS_WEBHOOK_TIMEOUT_SECONDS: "10"

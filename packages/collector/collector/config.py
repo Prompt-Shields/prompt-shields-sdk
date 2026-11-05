@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     # /ingest/events so MCP telemetry cannot use up the LLM telemetry
     # budget (the SDK batches MCP events); 0 or less disables it.
     mcp_rate_limit_per_minute: int = 600
+    # Tenant key auth (collector/auth_cache.py). Seconds a key that passed
+    # bcrypt is remembered (by an HMAC of the key, never the key), so its
+    # next requests skip bcrypt while the stored hash is unchanged; the key
+    # row is still read on every request. 0 turns the cache off.
+    ingest_key_cache_ttl_seconds: float = 30.0
+    ingest_key_cache_max_entries: int = 10000
+    # Failed tenant key / admin token authentications per client address per
+    # minute before requests that need a bcrypt check get 429 without it.
+    # 0 turns it off.
+    auth_failure_limit_per_minute: int = 60
+    auth_failure_tracked_clients: int = 10000
     # Rows in partner_audit_log older than this are deleted by
     # `python -m collector.audit purge`.
     audit_retention_days: int = 365

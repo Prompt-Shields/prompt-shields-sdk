@@ -14,6 +14,17 @@ TEST_DB_URL = os.environ.get(
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_auth_cache():
+    """The verified key cache and the failed-auth limiter are process-wide;
+    start every test without entries from another."""
+    from collector import auth_cache
+
+    auth_cache.get_key_cache().clear()
+    auth_cache.get_failed_auth_limiter().reset()
+    yield
+
+
 @pytest.fixture
 def test_database_url() -> str:
     """For tests that manage their own engine (e.g. a server on another loop)."""
