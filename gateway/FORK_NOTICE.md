@@ -112,10 +112,12 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `plugins/utils.ts`
 - `plugins/walledai/walledprotect.ts`
 - `src/globals.ts`
+- `src/handlers/chatCompletionsHandler.ts`
 - `src/handlers/createTranscriptionHandler.ts`
 - `src/handlers/createTranslationHandler.ts`
 - `src/handlers/handlerUtils.ts`
 - `src/handlers/imageEditsHandler.ts`
+- `src/handlers/messagesHandler.ts`
 - `src/handlers/modelResponsesHandler.ts`
 - `src/handlers/modelsHandler.ts`
 - `src/handlers/proxyHandler.ts`
@@ -323,3 +325,4 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 The original Portkey AI Gateway is licensed under the MIT License. See [`LICENSE`](./LICENSE).
 
 The `ps-telemetry.ts` middleware and the PS-specific configuration glue are wholly original code by Prompt Shields, also released under MIT.
+35. **Added** (PS failover between routed models, #21; fork behaviour): `src/handlers/chatCompletionsHandler.ts` and `src/handlers/messagesHandler.ts` call `tryTargetsWithRouteFailover` (`src/middlewares/router/failover.ts`) instead of `tryTargetsRecursively`. Without a router decision listing more than one candidate it is `tryTargetsRecursively` unchanged; with one, it calls `tryTargetsRecursively` once per compliant candidate through the `psFailover` engine (5xx, 429, timeout move on; any other answer is returned as is). A request whose `x-portkey-config` sets a `strategy` / `targets`, `retry` attempts or `override_params.model` is never failed over by the router.

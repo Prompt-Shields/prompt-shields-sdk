@@ -96,11 +96,10 @@ yet:
   or `useCases` section, so the policy stages and the data-policy gate below
   are off in a stock gateway. They run only with
   `psRouter(fromRoutePolicyDoc(doc))` in code.
-- **Fail over between routed models (#21).** `psFailover/` (engine and
-  per-provider circuit breaker) is not in the request path; the router picks
-  one model. Fallback targets in a gateway config still work, are checked by
-  the data-policy gate when one is active, and are recorded in
-  `fallback_chain`.
+- **Fail over across providers' credentials.** Router failover (below)
+  changes the model only; every attempt uses the request's own provider and
+  credentials (`x-portkey-provider` + `Authorization`, or a single-target
+  config).
 
 The SDK's ordinary clients never pick a model (`ShieldsRouter` is the opt-in
 exception). They express *intent*; the gateway owns the
@@ -271,6 +270,50 @@ When the router made a decision, the telemetry event carries:
   (only under a policy with the policy stages; OTel: `ps.route.sensitivity_level`,
   `ps.route.sensitivity_source`)
 - `route_mode` — `gateway` (the PRD 0001 §7.12 value for a gateway decision)
+
+### Failover between routed models (#21)
+
+When the router decides a call it also lists the ordered failover
+candidates (`routeCandidates`, `psRoute.candidates`): the decided model, then
+the other tiers of the served group, cheapest first, that pass the same data
+policy and use-case bar and fit `X-PS-Max-Cost`. A fallback is always a model
+the router could itself have picked; it never widens the constraint set.
+
+`/v1/chat/completions` and `/v1/messages` run those candidates through the
+`psFailover` engine (`router/failover.ts`), with the request's own provider
+and credentials and `body.model` set per attempt:
+
+| Upstream answer | What happens |
+|---|---|
+| 5xx, 408/504 (timeout), connection error | next candidate; counts against the candidate provider's circuit breaker |
+| 429 | waits `Retry-After` once when it is at most 10 s, else next candidate |
+| content-filter refusal, any other 4xx, guardrail denial, data-policy 403 | returned as is, no fallback |
+| every candidate failed | the last upstream answer is returned |
+| every candidate's breaker open | 503 `error.code: no_available_candidate`, no upstream call |
+
+- Every attempt still goes through `tryPost`, so the data-policy gate checks
+  the model the attempt actually runs, and the engine re-checks each
+  candidate against the gate before calling it. A non-compliant model is never
+  called.
+- The engine returns once the upstream answered with its headers; a streamed
+  body is read after that, so nothing is retried once bytes may have reached
+  the client.
+- Breakers are per process and keyed by the tier's `provider` (else the
+  request's gateway provider) plus the caller's scope (a digest of the
+  gateway provider, credentials and upstream host), so one caller's failing
+  key or custom host never opens another caller's breaker. Transitions are
+  counted in `ps_gateway_circuit_breaker_transitions_total{provider,to}` on
+  `/metrics` (the label is the provider alone).
+- Telemetry: `attempts`, `retry_count` and `fallback_chain` come from the
+  recorded attempts; `served_model` is the candidate that answered.
+
+**Precedence with `x-portkey-config`.** A config that sets its own `strategy`
+/ `targets` (fallback, load balance, conditional), `retry` attempts, or
+`override_params.model` owns retries and fallbacks for that call: the router
+sets the decided model as before and does not fail over, so a call is never
+retried by both. A single-target config without `retry` is failed over like a
+header-only request. Each fallback target in a config is still checked by the
+data-policy gate.
 
 When the gateway recorded upstream attempts (retries, fallback targets), the
 event also carries `fallback_chain`: the error class of each failed attempt,
