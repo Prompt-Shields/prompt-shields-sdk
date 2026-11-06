@@ -187,6 +187,39 @@ await csv.saveTo(csv.filename ?? 'focus-cost.csv');
 
 `focusExport` resolves once the response headers arrive, and errors such as a 400 for a window over 366 days are thrown then, with the usual retries. The body is read only as you consume it, through `rows()` (JSON Lines only), `lines()`, `for await (const chunk of focus)`, `saveTo(path)` or `body` (a `ReadableStream`), and is never held in memory whole unless you call `text()`. Rows keep FOCUS's own column names (`BilledCost`, `x_EstimatedCost`). A CSV cell can contain a line break, so parse CSV with a CSV parser rather than with `lines()`. `timeoutMs` covers only the wait for the headers; pass `{ signal }` as the second argument to cancel or time-limit the download. `saveTo(path)` writes to a temporary file beside `path` and renames it into place only when the download completes, so a failure leaves no partial file and an existing file untouched; `filename` is reduced to a bare name, so it never points outside the current directory. A connection lost or aborted mid-body throws an `APIConnectionError`, as does a body that ends mid-line (every export ends with a newline). The server sends no length or footer, so a body cut cleanly at a row boundary without a transport error cannot be detected.
 
+## MCP Tools, Routing Learner and SIEM Pull
+
+```typescript
+// MCP tools seen in telemetry, and daily tool-call metering (needs mcp:read)
+for await (const tool of client.mcp.listTools({ source: 'gateway' })) {
+  console.log(`${tool.serverName}/${tool.toolName}: ${tool.callCount} calls, owner ${tool.ownerEmail}`);
+}
+const days = await client.mcp.listUsage({ since: '2026-10-01', serverName: 'github' });
+console.log(`${days.reduce((n, d) => n + d.blockedCount, 0)} blocked calls`);
+
+// Learner recommendations awaiting review (learner:read), accepted or rejected with learner:review
+const { data: pending } = await client.learner.listRecommendations({ status: 'pending' });
+for (const rec of pending) {
+  console.log(`${rec.useCase}: ${rec.currentModel} -> ${rec.recommendedModel}, ${rec.projection.savingsPct}% cheaper`);
+  await client.learner.reviewRecommendation(rec.id, {
+    decision: 'accepted',
+    reviewedBy: 'finops@acme.com',
+    comment: 'Quality holds on the eval set',
+  });
+}
+
+// Routing evidence as Sentinel-schema records (needs evidence:read), from the last saved cursor
+const feed = client.siem.callsFeed({ cursor: savedCursor, since: '2026-11-01T00:00:00Z' });
+for await (const record of feed) {
+  await forwardToSiem(record);
+}
+savedCursor = feed.cursor;
+```
+
+`listTools` and `listUsage` page through `meta.nextCursor` as you iterate (pages of up to 1000 rows); `listToolsPage` and `listUsagePage` return one page. Learner snapshots and recommendations have no cursor: they return up to `limit` (at most 200), newest first. `getSnapshot` returns the uploaded `snapshot` document with its keys exactly as sent. A recommendation is decided once: a second review is a 409 `APIError`, and `reviewRecommendation` is not retried after a network error or a 5xx. Accepting changes no routing; apply it by editing the route policy.
+
+`callsFeed` and `auditFeed` stream NDJSON batches until one is not full. `feed.cursor` moves only once a whole batch has been yielded, so if your loop stops or fails part way through a batch, the saved cursor replays that batch next time (at-least-once). For one batch at a time, `client.siem.calls()` and `client.siem.audit()` return a `SiemBatch` with `cursor`, `hasMore` and `records()`. Records keep the Sentinel column names (`TimeGenerated`, `PsServedModel`, `PsAuditRowHash`).
+
 ## Webhook Subscriptions
 
 Webhook subscriptions are managed by the tenant, not the partner, so these calls need a client built with the tenant's own API key. See [Change Webhooks](/api-reference/sync/webhooks).
@@ -214,7 +247,7 @@ for (const delivery of await admin.webhooks.deliveries.list({ status: 'dead' }))
 }
 ```
 
-POST calls (`attest`, `reviewRisk`, `subscriptions.create`, `rotateSecret`, `redeliver`) are not retried after a network error or a 5xx, since the server may have acted. They are still retried after a 429. `spendAlerts.acknowledge` is the exception: acknowledging twice changes nothing, so it is retried like a GET.
+POST calls (`attest`, `reviewRisk`, `reviewRecommendation`, `subscriptions.create`, `rotateSecret`, `redeliver`) are not retried after a network error or a 5xx, since the server may have acted. They are still retried after a 429. `spendAlerts.acknowledge` is the exception: acknowledging twice changes nothing, so it is retried like a GET.
 
 ## Error Handling
 
@@ -249,6 +282,9 @@ import type {
   WebhookSubscription,
   SpendAlert,
   FocusCostRow,
+  McpTool,
+  LearnerRecommendation,
+  SiemRecord,
 } from '@prompt-shields/partner';
 ```
 
