@@ -220,6 +220,26 @@ savedCursor = feed.cursor;
 
 `callsFeed` and `auditFeed` stream NDJSON batches until one is not full. `feed.cursor` moves past a batch only once its body has been read to the end, so if your loop stops or fails part way through a batch, the saved cursor replays that batch next time (at-least-once). With `feed.batches()`, read each batch in full (`records()`, `lines()`, `text()` or `saveTo()`) or call `batch.markConsumed()` before the loop asks for the next one; otherwise the batch is cancelled and a `PartnerError` is thrown with `feed.cursor` still at its start, so no record is skipped. For one batch at a time, `client.siem.calls()` and `client.siem.audit()` return a `SiemBatch` with `cursor`, `hasMore` and `records()`. Records keep the Sentinel column names (`TimeGenerated`, `PsServedModel`, `PsAuditRowHash`).
 
+## Provider Credentials
+
+A tenant can let a partner manage the provider admin keys the collector uses to pull OpenAI and Anthropic usage. These calls need the `provider-credentials:manage` scope, which is never granted by default. Keys are write-only: every response is masked.
+
+```typescript
+// Store a provider admin key; a 409 means one is stored already, so rotate it
+const stored = await client.providerCredentials.create('openai', { adminKey: process.env.OPENAI_ADMIN_KEY! });
+console.log(`Stored ${stored.provider} key ${stored.keyHint}`);
+await client.providerCredentials.rotate('openai', { adminKey: process.env.OPENAI_ADMIN_KEY! });
+
+const { data: keys, meta } = await client.providerCredentials.list();
+console.log(`${keys.length} stored, env fallback for: ${meta.envFallback.join(', ') || 'none'}`);
+
+// Link the provider's key id to the SDK's api_key_fingerprint (sha256 of the key, first 16 hex characters)
+const link = await client.providerKeyFingerprints.put('openai', 'key_abc123', { apiKeyFingerprint: '3f9a1c0b7d2e4f60' });
+console.log(`Corroborated ${link.meta.corroboratedAssets} assets`);
+```
+
+`providerKeyFingerprints.put` refuses anything that is not 16 lowercase hex characters before sending it, so a raw key never leaves your process by mistake. It is idempotent and retried like a GET; `create` and `rotate` are POSTs and are not retried after a network error or a 5xx. `delete(provider)` and `providerKeyFingerprints.delete(provider, apiKeyId)` remove a key or a link.
+
 ## Webhook Subscriptions
 
 Webhook subscriptions are managed by the tenant, not the partner, so these calls need a client built with the tenant's own API key. See [Change Webhooks](/api-reference/sync/webhooks).

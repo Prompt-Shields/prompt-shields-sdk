@@ -5,6 +5,7 @@ jest.mock('../../../utils/fetch', () => ({ upstreamFetch: jest.fn() }));
 import { upstreamFetch } from '../../../utils/fetch';
 import {
   VERTEX_TOKEN_CACHE_MAX_ENTRIES,
+  VERTEX_TOKEN_SCOPE,
   clearVertexTokenCache,
   getAccessToken,
   vertexTokenCacheKey,
@@ -85,6 +86,93 @@ describe('vertexTokenCacheKey', () => {
     expect(a).not.toBe(b);
     expect(a).not.toContain('kid-1');
     expect(a).not.toContain('sa@proj');
+  });
+
+  it('depends on the OAuth scope and audience', async () => {
+    const base = await vertexTokenCacheKey(account());
+    expect(
+      await vertexTokenCacheKey(account(), VERTEX_TOKEN_SCOPE, undefined)
+    ).toBe(base);
+    expect(
+      await vertexTokenCacheKey(
+        account(),
+        'https://www.googleapis.com/auth/devstorage.read_only'
+      )
+    ).not.toBe(base);
+    expect(
+      await vertexTokenCacheKey(
+        account(),
+        VERTEX_TOKEN_SCOPE,
+        'https://example.test/token'
+      )
+    ).not.toBe(base);
+  });
+});
+
+describe('getAccessToken single-flight', () => {
+  const deferred = () => {
+    let resolve!: (r: Response) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<Response>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+  // Lets the callers reach the token exchange (key digest, JWT signing).
+  const waitForFetch = async (calls: number) => {
+    for (let i = 0; i < 200 && fetchMock.mock.calls.length < calls; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+
+  it('shares one token exchange between concurrent callers', async () => {
+    const pending = deferred();
+    fetchMock.mockReturnValueOnce(pending.promise);
+    const callers = Array.from({ length: 8 }, () =>
+      getAccessToken(ctx, account())
+    );
+    await waitForFetch(1);
+    pending.resolve(
+      tokenResponse({ access_token: 'shared', expires_in: 3599 })
+    );
+    expect(await Promise.all(callers)).toEqual(Array(8).fill('shared'));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // And the result is cached for later callers.
+    expect(await getAccessToken(ctx, account())).toBe('shared');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not share an exchange between different credentials', async () => {
+    fetchMock.mockImplementation(async () =>
+      tokenResponse({ access_token: 'tok' })
+    );
+    await Promise.all([
+      getAccessToken(ctx, account()),
+      getAccessToken(ctx, account({ private_key_id: 'kid-2' })),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails every waiting caller on a failed exchange; the next call refetches', async () => {
+    const first = deferred();
+    const retry = deferred();
+    fetchMock
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(retry.promise);
+    const callers = Array.from({ length: 5 }, () =>
+      getAccessToken(ctx, account())
+    );
+    await waitForFetch(1);
+    first.reject(new Error('ECONNRESET'));
+    await waitForFetch(2);
+    retry.resolve(tokenResponse({ error: 'backend' }, 503));
+    expect(await Promise.all(callers)).toEqual(Array(5).fill(''));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    fetchMock.mockResolvedValueOnce(tokenResponse({ access_token: 'later' }));
+    expect(await getAccessToken(ctx, account())).toBe('later');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
