@@ -51,6 +51,7 @@ import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
 import { recordAttempt } from '../middlewares/psAttempts';
+import { recordServedTarget } from '../middlewares/psServedTarget';
 import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
 import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
@@ -360,7 +361,9 @@ export async function tryPost(
     c,
     providerOption.provider,
     targetModels(providerOption, requestBody),
-    MODEL_ENDPOINTS.has(fn)
+    MODEL_ENDPOINTS.has(fn),
+    // As RequestContext.customHost: the header wins over the config.
+    requestHeaders[HEADER_KEYS.CUSTOM_HOST] || providerOption.customHost
   );
   if (dataDenied) return dataDenied;
   const isRawBody =
@@ -1543,6 +1546,15 @@ export async function recursiveAfterRequestHookHandler(
   ));
   // PS fork (#76): stable credential fingerprint for ps-telemetry (opt-in).
   await recordCredentialFingerprint(c, providerOption, env(c));
+  // PS fork (#20): the target that served the call (the last successful
+  // one), for served_provider / served_jurisdiction in ps-telemetry.
+  if (response?.ok)
+    recordServedTarget(
+      c,
+      providerOption.provider,
+      requestContext.customHost,
+      gatewayParams?.model
+    );
 
   if (requestContext.customHost) {
     response = limitResponseSize(

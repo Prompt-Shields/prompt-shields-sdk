@@ -11,16 +11,25 @@
  * classifies every request and stashes a gate on the context, and tryPost
  * checks each target's model (after override_params, plus the Azure
  * deployment) before hooks, cache or upstream, like the OIDC group policy.
+ * A tier's facts count only for the target it describes: a tier that names a
+ * provider does not vouch for the same model id sent to another provider or
+ * to a custom host (#20).
  */
 import { Context } from 'hono';
 import { reportPolicyDenied } from '../psSecurityEvents';
+import { tierServesTarget } from '../psServedTarget';
 import {
   classifySensitivity,
   dataPolicyRule,
   modelComplies,
 } from './constraints';
 import { parseRouteHeaders } from './index';
-import { DataPolicyRule, RoutePolicy, SensitivitySource } from './types';
+import {
+  DataPolicyRule,
+  ModelTier,
+  RoutePolicy,
+  SensitivitySource,
+} from './types';
 
 export const DATA_POLICY_GATE_KEY = 'psDataPolicyGate';
 
@@ -56,7 +65,8 @@ export function dataPolicyTargetDenied(
   c: Context,
   provider: string | undefined,
   models: string[],
-  requireModel: boolean
+  requireModel: boolean,
+  customHost?: string
 ): Response | undefined {
   let gate: DataPolicyGate | undefined;
   try {
@@ -71,8 +81,24 @@ export function dataPolicyTargetDenied(
     : requireModel
       ? [undefined]
       : [];
+  let routedModel: string | undefined;
+  try {
+    routedModel = c.get('psRoute')?.servedModel;
+  } catch {
+    routedModel = undefined;
+  }
   for (const model of toCheck) {
-    if (!modelComplies(gate.policy, model, gate.rule)) {
+    // A tier naming a provider vouches only for a call sent to that
+    // provider at its own base URL (#20, psServedTarget.ts). The model the
+    // router chose is not held to the provider yet: the gateway router
+    // rewrites only the model, not the provider (see PS_README.md), so a
+    // routed call is checked against the provider only with a custom host.
+    const target = { provider, customHost };
+    const applies =
+      model !== undefined && model === routedModel && !customHost
+        ? undefined
+        : (tier: ModelTier) => tierServesTarget(tier, target);
+    if (!modelComplies(gate.policy, model, gate.rule, applies)) {
       return policyViolationResponse(c, {
         requestedModel: model ?? '',
         provider,

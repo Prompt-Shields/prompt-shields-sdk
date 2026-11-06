@@ -42,6 +42,11 @@ from typing import Any, Literal
 
 from prompt_shields.baseline import Baseline, BaselineError, load_baseline
 from prompt_shields.pii import detect_pii_categories
+from prompt_shields.pricing import (
+    COST_SOURCE_PRICING_TABLE,
+    COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
+    estimate_cost,
+)
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
     PolicyViolation,
@@ -54,6 +59,11 @@ from prompt_shields.route_policy import (
     parse_route_headers,
     resolve_policy_route,
     tier_complies,
+)
+from prompt_shields.sovereign import (
+    SovereignProviderError,
+    get_openai_compatible,
+    resolve_base_url,
 )
 from prompt_shields.types import PSMetadata, RouteHint
 
@@ -466,6 +476,18 @@ class _Provider:
     vendor: str
     api_key: str
     options: dict
+    #: Catalog provider id behind an OpenAI-compatible entry, if known.
+    catalog: str | None = None
+
+    @property
+    def openai_compatible(self) -> bool:
+        """Reached through the OpenAI SDK at another provider's base URL, so
+        the OpenAI price table does not apply to its model ids."""
+        return (
+            self.vendor == "openai"
+            and self.name != "openai"
+            and bool(self.options.get("base_url"))
+        )
 
 
 def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _Provider]:
@@ -484,7 +506,35 @@ def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _P
                 f"got {vendor!r} (use 'openai' with a base_url for "
                 "OpenAI-compatible APIs)"
             )
-        out[name] = _Provider(name, vendor, api_key, config)
+        # A named OpenAI-compatible provider (catalog id, #20) gets its base
+        # URL from the catalog unless the entry sets one.
+        catalog_provider = config.pop("catalog_provider", None)
+        region = config.pop("region", None)
+        catalog_id = catalog_provider or (
+            name if get_openai_compatible(name) is not None else None
+        )
+        if vendor == "openai" and not config.get("base_url"):
+            known = catalog_provider or name
+            if known != "openai":
+                if catalog_provider is None and get_openai_compatible(name) is None:
+                    # Never send this provider's key to api.openai.com.
+                    raise RouterError(
+                        f"provider {name!r} has no base_url and is not a known "
+                        "OpenAI-compatible provider; set base_url or "
+                        "catalog_provider"
+                    )
+                try:
+                    config["base_url"] = resolve_base_url(known, region)
+                except SovereignProviderError as exc:
+                    raise RouterError(f"provider {name!r}: {exc}") from exc
+            elif region is not None:
+                raise RouterError(f"provider {name!r}: region needs a catalog provider")
+        elif region is not None:
+            raise RouterError(
+                f"provider {name!r}: region selects a catalog base URL; "
+                "it cannot be combined with base_url"
+            )
+        out[name] = _Provider(name, vendor, api_key, config, catalog_id)
     return out
 
 
@@ -808,6 +858,31 @@ class _RouterCore:
                 event["data_classification"] = plan.data_classification
             if plan.use_case is not None:
                 event["use_case_name"] = plan.use_case
+            # An OpenAI-compatible provider is dispatched as vendor "openai";
+            # a price from OpenAI's table would be the wrong vendor's rate
+            # for its model id. Use the catalog's USD rate for the provider
+            # instead, else the tier's rates below. A provider-reported cost
+            # is kept.
+            if plan.provider.openai_compatible and event.get("cost_source") in (
+                COST_SOURCE_PRICING_TABLE, COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
+            ):
+                event["cost"] = None
+                event.pop("cost_source", None)
+            if (
+                plan.provider.openai_compatible
+                and plan.provider.catalog is not None
+                and event.get("cost") is None
+            ):
+                cost = estimate_cost(
+                    plan.provider.catalog,
+                    event.get("served_model") or decision.model,
+                    event.get("tokens_in"),
+                    event.get("tokens_out"),
+                    tokens_cached=event.get("tokens_cached"),
+                )
+                if cost is not None:
+                    event["cost"] = cost
+                    event["cost_source"] = COST_SOURCE_PRICING_TABLE
             # No provider-reported cost and no pricing-table entry (an
             # OpenAI-compatible provider's own model id): price the actual
             # tokens at the policy tier's rates.
@@ -935,8 +1010,12 @@ class ShieldsRouter(_RouterCore):
     ``providers`` maps a provider name, as policy tiers name it in
     ``provider``, to ``{"api_key": ..., "vendor": "openai" | "anthropic",
     **client options}``. ``vendor`` defaults to ``anthropic`` for the
-    ``anthropic`` provider and to ``openai`` (OpenAI-compatible, set
-    ``base_url``) for every other. Tiers without ``provider`` go to
+    ``anthropic`` provider and to ``openai`` (OpenAI-compatible) for every
+    other. A provider named after a catalog OpenAI-compatible provider
+    (``mistral``, ``berget``, ``infercom``, ``regolo``, ``ionos``,
+    ``stackit``, ``scaleway``, ``ovhcloud``; see ``prompt_shields.sovereign``)
+    gets its base URL from the catalog; any other name needs ``base_url`` or
+    ``catalog_provider``. ``region`` picks a catalogued region. Tiers without ``provider`` go to
     ``default_provider`` (the only provider when there is one).
 
     ``client.chat.completions.create(model="auto", messages=[...],

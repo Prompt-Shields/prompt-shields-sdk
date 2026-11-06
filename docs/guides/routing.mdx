@@ -129,9 +129,9 @@ client = ShieldsRouter(
     providers={                      # BYOK: one entry per provider the policy names
         "openai":     {"api_key": "sk-..."},
         "anthropic":  {"api_key": "sk-ant-..."},
-        "scaleway":   {"api_key": "...", "base_url": "https://api.scaleway.ai/v1"},
-        "mistral-eu": {"api_key": "...", "base_url": "https://..."},
-        "berget":     {"api_key": "...", "base_url": "https://api.berget.ai/v1"},
+        "scaleway":   {"api_key": "..."},   # base URL from the catalog
+        "mistral-eu": {"api_key": "...", "catalog_provider": "mistral"},
+        "berget":     {"api_key": "..."},
     },
     policy=policy,                   # a dict, or a .json / .yaml path
     ps_api_key="ps-...",
@@ -215,6 +215,30 @@ The telemetry event carries `requested_model` (`auto`), `served_model`,
 `route_est_cost`, `served_provider`, `served_jurisdiction`, `policy_version`,
 `sensitivity_level` and `sensitivity_source`. The collector stores these
 fields on `ai_usage_events`.
+
+## EU sovereign providers
+
+Every non-Anthropic provider is reached through one adapter: the OpenAI SDK
+at the provider's base URL with a bearer key. A provider entry named after a
+catalog OpenAI-compatible provider (`mistral`, `berget`, `infercom`,
+`regolo`, `ionos`, `stackit`, `scaleway`, `ovhcloud`) gets its base URL from
+the [model catalog](/guides/model-catalog); any other name needs `base_url`,
+or `catalog_provider` naming the catalog provider. `region` accepts only the
+region in the catalogued base URL (for example `de-txl` for IONOS). An entry
+with neither is refused, so its key is never sent to OpenAI.
+`prompt_shields.sovereign.catalog_tier("scaleway", "gpt-oss-120b",
+input_cost_per_1k=..., output_cost_per_1k=...)` builds a policy tier with the
+catalog's verified facts and leaves unverified ones out. Calls to these
+providers are priced at the catalog's USD rate when it has one, else at the
+tier's rates; OpenAI's price table never applies to them.
+
+The gateway has the same providers (`x-portkey-provider: scaleway`, ...) on
+fixed base URLs and reports `served_provider` and `served_jurisdiction` on
+each event. Under a data policy, a tier that names a provider vouches for a
+model only when the call goes to that provider at its own base URL; the same
+model id sent directly to another provider, or to another custom host, has no
+facts and fails closed. The gateway router still rewrites only the model, so
+a routed call goes to the provider the request names.
 
 ## Sovereignty facts and the model catalog
 

@@ -169,19 +169,22 @@ export function tierComplies(
  * body model, a config's `override_params.model`, an Azure deployment) meets
  * the rule. The facts come from the policy tiers listing that model; a model
  * the policy does not list has no facts and fails closed (only an `any`
- * jurisdiction rule with no other condition lets it through).
+ * jurisdiction rule with no other condition lets it through). `applies`
+ * (gateway only, #20) drops the tiers whose facts do not apply to the
+ * target the call is sent to (another provider, a custom host).
  */
 export function modelComplies(
   policy: RoutePolicy,
   model: string | undefined,
-  rule: DataPolicyRule | undefined
+  rule: DataPolicyRule | undefined,
+  applies: (tier: ModelTier) => boolean = () => true
 ): boolean {
   if (!rule) return true;
   const tiers: ModelTier[] = [];
   if (model) {
     for (const group of Object.keys(policy.groups)) {
       for (const tier of policy.groups[group])
-        if (tier.model === model) tiers.push(tier);
+        if (tier.model === model && applies(tier)) tiers.push(tier);
     }
   }
   if (!tiers.length) {

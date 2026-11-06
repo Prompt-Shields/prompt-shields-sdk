@@ -39,6 +39,7 @@ import {
   PSRouteViolation,
 } from './middleware';
 import { scanRequestBody } from './pii';
+import { ROUTE_POLICY_KEY } from '../psServedTarget';
 import { defaultPolicy } from './policy';
 import { RoutePolicy, RouterStrategy } from './types';
 
@@ -56,6 +57,8 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
   return async (c: Context, next: Next) => {
     // MCP proxy traffic is not a model call (#63).
     if (isMcpProxyPath(c.req.path)) return next();
+    // ps-telemetry looks up served_jurisdiction in the active policy (#20).
+    c.set(ROUTE_POLICY_KEY as any, active);
     const contentType = c.req.header('content-type') || '';
     const isJsonPost =
       c.req.method === 'POST' && contentType.includes('application/json');
@@ -93,7 +96,10 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
               c.req.query('model') || '',
               ...targetModels(options as any, undefined),
             ],
-            true
+            true,
+            typeof (options as any)?.customHost === 'string'
+              ? (options as any).customHost
+              : undefined
           );
           if (denied) return denied;
         }
