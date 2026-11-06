@@ -32,7 +32,7 @@ from db.models import (
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, case, func, not_, or_, select
+from sqlalchemy import and_, case, func, select
 
 from collector import aibom, attestation, focus_export
 from collector.attestation import (
@@ -41,7 +41,7 @@ from collector.attestation import (
     attestation_changes_since,
 )
 from collector.audit import record_read
-from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE
+from collector.ingest import CACHE_HIT_STATUSES
 from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.loss_accounting import tenant_coverage
 from collector.mcp_usage import MAX_PAGE, tools_page, usage_page
@@ -554,24 +554,25 @@ def budget_cache_columns() -> list:
     count() skips NULL, so the *_reported counts are the events that sent
     the field at all, and the case() counts only the matching ones.
 
-    The gateway reports each cache lookup as cache_status on the call's own
-    event, once per request; a hit's event has cost_source "cache". Older
-    gateways also sent a cache-only event per lookup (no cost_source), which
-    repeats each hit. So a hit is counted from its cost_source "cache" event
-    only, and every other status from any event: each lookup counts once
-    for both gateway versions.
+    The gateway reports each cache lookup once: current gateways as
+    cache_status on the call's own event (cost_source "cache" on a hit),
+    released gateways up to sdk v0.4.0 as a cache-only event per lookup (no
+    cost_source; the call's own event has no cache_status). So every event
+    with a cache_status is one lookup, and the hit rate is right for both,
+    and for a mix of them during a rollout. Only unreleased main builds
+    between #261 and the per-request event sent a hit twice (the cache-only
+    event and the call's cost_source "cache" event); taking hits from
+    cost_source "cache" events alone would instead count no hit at all for
+    the released gateways.
     """
     action = AIUsageEvent.budget_action
     status = AIUsageEvent.cache_status
-    is_hit = status.in_(CACHE_HIT_STATUSES)
-    own_hit = and_(is_hit, AIUsageEvent.cost_source == COST_SOURCE_CACHE)
-    lookup = or_(own_hit, and_(status.is_not(None), not_(is_hit)))
     return [
         func.count(action).label("budget_reported"),
         func.count(case((action == "downgraded", 1))).label("budget_downgraded"),
         func.count(case((action == "blocked", 1))).label("budget_blocked"),
-        func.count(case((lookup, 1))).label("cache_reported"),
-        func.count(case((own_hit, 1))).label("cache_hits"),
+        func.count(status).label("cache_reported"),
+        func.count(case((status.in_(CACHE_HIT_STATUSES), 1))).label("cache_hits"),
         func.sum(AIUsageEvent.cache_saved_cost).label("cache_saved_usd"),
     ]
 

@@ -348,9 +348,9 @@ separate cache-only event per lookup (no attribution, no call id, one per
 failover attempt), which joined the wrong asset, counted as an extra request
 and counted hits twice. The status is the final response's, so a call that
 fell back to another target reports one lookup. A collector computing a hit
-rate should count each event with a `cache_status` once; to stay correct for
-older gateways, take hits only from `cost_source: cache` events (an older
-gateway's cache-only event repeats them without a `cost_source`).
+rate counts each event with a `cache_status` once: released gateways (up to
+sdk v0.4.0) sent the cache-only event per lookup and no `cache_status` on the
+call's event, so that count is right for them too.
 
 ## psBudget/ (spend budgets, #28)
 

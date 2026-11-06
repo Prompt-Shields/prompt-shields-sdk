@@ -209,21 +209,18 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
             "budget_id": "mkt-monthly",
             "budget_action": "blocked",
         },
-        # An older gateway: a cache-only event for every lookup and, on a
-        # hit, the call's own event (cost_source cache) with the same status.
+        # A released gateway (up to sdk v0.4.0): a cache-only event for
+        # every lookup; the call's own event has no cache status.
         CACHE_LOOKUP,
-        CACHE_HIT,
-        {**CACHE_LOOKUP, "cache_status": "HIT"},
-        {**CACHE_HIT, "cache_status": "HIT", "cache_saved_cost": 0.0009},
-        # A hit whose cached response had no priced usage: counted, saves 0.
-        CACHE_LOOKUP,
-        {**CACHE_HIT, "cache_saved_cost": None},
-        # A miss: the call's own event carries no cache status.
+        {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"},
         {**CACHE_LOOKUP, "cache_status": "MISS"},
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway", "cost": 0.003},
         {**CACHE_LOOKUP, "cache_status": "SEMANTIC BYPASS"},
         # A current gateway: one event per call, carrying its lookup.
-        {**CACHE_HIT, "cache_status": "HIT", "cache_saved_cost": 0.001},
+        CACHE_HIT,
+        {**CACHE_HIT, "cache_status": "HIT", "cache_saved_cost": 0.0009},
+        # A hit whose cached response had no priced usage: counted, saves 0.
+        {**CACHE_HIT, "cache_saved_cost": None},
         {
             "vendor": "openai",
             "model": "gpt-4o-mini",
@@ -241,11 +238,64 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
     body = await _summary(seeded_db)
     assert body["budget_downgraded_requests"] == 1
     assert body["budget_blocked_requests"] == 1
-    # Four hits among seven lookups: an older gateway's hits are counted
-    # once (from the cost_source cache event), a current gateway's miss
-    # from the call's own event.
+    # Four hits among seven lookups, each counted once for either gateway.
     assert body["cache_hit_rate"] == round(4 / 7, 4)
-    assert body["cache_saved_usd"] == 0.004
+    assert body["cache_saved_usd"] == 0.003
+    # The blocked call is a request with no cost.
+    assert body["total_requests"] == len(events)
+    assert body["estimated_cost_usd"] == round(0.0004 * 2 + 0.003 * 2, 6)
+
+
+def _released_gateway(hit: bool) -> list[dict]:
+    """A call through a released gateway (sdk v0.3.0, v0.4.0): a cache-only
+    event per lookup, and the call's event without a cache status (a hit is
+    not priced)."""
+    call = {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"}
+    if not hit:
+        call |= {"cost": 0.003, "cost_source": "pricing_table"}
+    return [{**CACHE_LOOKUP, "cache_status": "HIT" if hit else "MISS"}, call]
+
+
+def _current_gateway(hit: bool) -> list[dict]:
+    """A call through a current gateway: its own event carries the lookup."""
+    if hit:
+        return [{**CACHE_HIT, "cache_status": "HIT"}]
+    return [
+        {
+            "vendor": "openai",
+            "model": "gpt-4o-mini",
+            "source": "gateway",
+            "cost": 0.003,
+            "cost_source": "pricing_table",
+            "cache_status": "MISS",
+        }
+    ]
+
+
+# (released gateway hits, misses), (current gateway hits, misses)
+HIT_RATE_MIXES = [
+    pytest.param((1, 3), (0, 0), id="released-only"),
+    pytest.param((0, 0), (1, 3), id="current-only"),
+    pytest.param((2, 2), (1, 3), id="rollout-mix"),
+    pytest.param((0, 2), (0, 2), id="no-hits"),
+    pytest.param((2, 0), (2, 0), id="all-hits"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("released", "current"), HIT_RATE_MIXES)
+async def test_cache_hit_rate_counts_each_lookup_once(seeded_db, released, current):
+    events = []
+    for build, (hits, misses) in ((_released_gateway, released), (_current_gateway, current)):
+        for hit in [True] * hits + [False] * misses:
+            events += build(hit)
+    resp, _ = await _ingest(events)
+    assert resp.status_code == 200, resp.text
+
+    body = await _summary(seeded_db)
+    hits = released[0] + current[0]
+    lookups = hits + released[1] + current[1]
+    assert body["cache_hit_rate"] == round(hits / lookups, 4)
 
 
 @pytest.mark.asyncio

@@ -134,11 +134,6 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
     jurisdictions = present("served_jurisdiction")
     actions = present("budget_action")
     statuses = present("cache_status")
-    # A hit counts from its cost_source "cache" event only (an older
-    # gateway's cache-only event repeats it); see budget_cache_columns.
-    hits = [r for r in rows if r.values.get("cache_status") in ("hit", "semantic hit")]
-    own_hits = [r for r in hits if r.values.get("cost_source") == "cache"]
-    legacy_hits = len(hits) - len(own_hits)
     signals = present("outcome_signals")
     computed = {
         "total_requests": len(rows),
@@ -160,8 +155,8 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         "budget_reported": len(actions),
         "budget_downgraded": actions.count("downgraded"),
         "budget_blocked": actions.count("blocked"),
-        "cache_reported": len(statuses) - legacy_hits,
-        "cache_hits": len(own_hits),
+        "cache_reported": len(statuses),
+        "cache_hits": sum(1 for c in statuses if c in ("hit", "semantic hit")),
         "cache_saved_usd": total("cache_saved_cost"),
         "outcome_signals_reported": len(signals),
         **{

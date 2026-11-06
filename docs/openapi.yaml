@@ -532,11 +532,11 @@ components:
           nullable: true
           description: >
             Share (0 to 1) of the gateway's cache lookups that were served
-            from the cache (exact or semantic hit). Each call's event carries
-            its lookup's `cache_status`; a hit is counted from its
-            `cost_source: cache` event only, so the cache-only events older
-            gateways also sent do not count a hit twice. Null when no lookup
-            was reported in the period.
+            from the cache (exact or semantic hit): each event with a
+            `cache_status` is one lookup. Current gateways put it on the
+            call's own event; released gateways up to sdk v0.4.0 send a
+            cache-only event per lookup instead. Null when no lookup was
+            reported in the period.
           example: 0.31
         cache_saved_usd:
           type: number
