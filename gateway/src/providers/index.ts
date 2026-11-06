@@ -93,6 +93,7 @@ import SCXAIConfig from './scx-ai';
 import ClaudePlatformAwsConfig from './claude-platform-aws';
 import BedrockMantleConfig from './bedrock-mantle';
 import FalAIConfig from './fal-ai';
+import MetaModelAPIProviderConfig from './meta-model-api';
 
 const Providers: { [key: string]: ProviderConfigs } = {
   openai: OpenAIConfig,
@@ -186,6 +187,7 @@ const Providers: { [key: string]: ProviderConfigs } = {
   'claude-platform-aws': ClaudePlatformAwsConfig,
   'bedrock-mantle': BedrockMantleConfig,
   'fal-ai': FalAIConfig,
+  'meta-model-api': MetaModelAPIProviderConfig,
 };
 
 export default Providers;
