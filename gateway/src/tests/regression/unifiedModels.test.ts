@@ -137,6 +137,70 @@ describe('GET /v1/models (#79)', () => {
     expect(await res.json()).toEqual(error);
   });
 
+  test('retrieve on Anthropic: native object passed through', async () => {
+    const model = {
+      type: 'model',
+      id: 'model-a',
+      display_name: 'Model A',
+      created_at: '2025-01-01T00:00:00Z',
+    };
+    upstream(/^https:\/\/api\.anthropic\.com\/v1\/models\/model-a$/, () =>
+      json(model)
+    );
+    const res = await list(
+      '/v1/models/model-a',
+      claudeCode('anthropic', { 'x-api-key': 'sk-ant-regression' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(model);
+    expect(upstreamCalls[0].method).toBe('GET');
+    expect(upstreamCalls[0].headers['x-api-key']).toBe('sk-ant-regression');
+  });
+
+  test('retrieve on OpenAI: Anthropic shape for Claude Code, OpenAI otherwise', async () => {
+    const model = {
+      id: 'model-b',
+      object: 'model',
+      created: 1700000000,
+      owned_by: 'org',
+    };
+    upstream(/^https:\/\/api\.openai\.com\/v1\/models\/model-b$/, () =>
+      json(model)
+    );
+    const res = await list(
+      '/v1/models/model-b',
+      claudeCode('openai', { authorization: 'Bearer sk-regression' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      type: 'model',
+      id: 'model-b',
+      display_name: 'model-b',
+      created_at: new Date(1700000000 * 1000).toISOString(),
+    });
+    const plain = await list('/v1/models/model-b', {
+      'x-portkey-provider': 'openai',
+      authorization: 'Bearer sk-regression',
+    });
+    expect(await plain.json()).toEqual(model);
+  });
+
+  test('retrieve: provider errors keep their status and body', async () => {
+    const error = {
+      type: 'error',
+      error: { type: 'not_found_error', message: 'model: nope' },
+    };
+    upstream(/^https:\/\/api\.anthropic\.com\/v1\/models\/nope$/, () =>
+      json(error, 404)
+    );
+    const res = await list(
+      '/v1/models/nope',
+      claudeCode('anthropic', { 'x-api-key': 'sk-ant-regression' })
+    );
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(error);
+  });
+
   test('without a provider or config it is a 400 and nothing is called', async () => {
     const res = await list('/v1/models', {
       'anthropic-version': '2023-06-01',
