@@ -13,5 +13,20 @@
     "national_id@no": 1.0,
     "national_id@se": 1.0,
     "phone": 0.82
+  },
+  "opt_in": {
+    "_comment": "Recall gate for the opt-in detector prompt_shields.pii_extended.detect_pii_categories_extended, rule-based (ner=None), #351. min_recall: on dataset.v1.jsonl, on top of the default gate above, which it must also pass. min_recall_holdout: on the hand-written held-out set dataset.optin.v1.jsonl, which the rules were not tuned on. Each value is the measured recall rounded down to 2 decimals; never lower one without a security review. Detection and telemetry only: these categories must not be used for blocking until security signs off (#35).",
+    "min_recall": {
+      "financial_data": 1.0,
+      "health_data": 0.95,
+      "person_name": 1.0,
+      "postal_address": 1.0
+    },
+    "min_recall_holdout": {
+      "financial_data": 0.95,
+      "health_data": 0.86,
+      "person_name": 0.68,
+      "postal_address": 0.81
+    }
   }
 }
