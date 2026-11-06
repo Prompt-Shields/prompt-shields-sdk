@@ -1,0 +1,11 @@
+{
+    "modelSummaries": [
+        {
+            "modelArn": "arn:aws:bedrock:eu-central-1:123456789012:imported-model/k3x9q2m7v1ab",
+            "modelName": "llama-3-8b-underwriting",
+            "creationTime": "2026-08-02T16:40:01+00:00",
+            "instructSupported": true,
+            "modelArchitecture": "llama3"
+        }
+    ]
+}
