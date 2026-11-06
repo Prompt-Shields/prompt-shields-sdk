@@ -139,6 +139,54 @@ console.log(`${usage.totalTokensIn} in (${usage.totalTokensCached} cached), ${us
 
 Attestation maps (`asset.attestation` and `meta.current`) keep the wire field names as keys (`asset`, `owner`, `data_classification`), so they match `attestation.field`.
 
+## Reviewing Risk Suggestions
+
+```typescript
+// Confirm or reject rule-based suggestions (needs the risks:review scope)
+for (const risk of await client.assets.risks(assetId, { status: 'suggested' })) {
+  const { meta } = await client.assets.reviewRisk(assetId, risk.id, {
+    status: 'confirmed',
+    reviewedBy: 'dpo@acme.com',
+    comment: 'Candidate screening is an Annex III use',
+  });
+  console.log(`${meta.current.frameworkRef}: ${meta.current.status}`);
+}
+
+// Who decided what, newest first (needs risks:read)
+const reviews = await client.assets.riskReviews(assetId, '<risk mapping id>');
+for (const review of reviews.data) {
+  console.log(`${review.reviewedBy}: ${review.previousStatus} -> ${review.status}`);
+}
+```
+
+## Spend Alerts and Cost Export
+
+```typescript
+// Spend anomaly alerts (needs spend-alerts:read; acknowledging needs spend-alerts:acknowledge)
+const { data: alerts } = await client.spendAlerts.list({ status: 'open', severity: 'critical' });
+for (const alert of alerts) {
+  console.log(`${alert.day} ${alert.groupKey}: $${alert.observedCost} against a $${alert.baselineCost} baseline`);
+  await client.spendAlerts.acknowledge(alert.id);
+}
+
+// FinOps FOCUS v1.4 cost export, streamed row by row (needs usage:export)
+const focus = await client.usage.focusExport({ start: '2026-10-01', end: '2026-11-01', format: 'jsonl' });
+console.log(`FOCUS ${focus.focusVersion} from ${focus.windowStart} to ${focus.windowEnd}`);
+let estimated = 0;
+for await (const row of focus.rows()) {
+  estimated += row.x_EstimatedCost;
+}
+console.log(`Estimated cost: $${estimated.toFixed(2)}`);
+
+// Or stream the CSV straight into a file (Node)
+const csv = await client.usage.focusExport({ start: '2026-10-01', end: '2026-11-01', costMode: 'merge_safe' });
+await csv.saveTo(csv.filename ?? 'focus-cost.csv');
+```
+
+`spendAlerts.list` has no cursor: it returns up to `limit` alerts (default 100, at most 500), newest day first, so narrow older ones with `since` and `until`.
+
+`focusExport` resolves once the response headers arrive, and errors such as a 400 for a window over 366 days are thrown then, with the usual retries. The body is read only as you consume it, through `rows()` (JSON Lines only), `lines()`, `for await (const chunk of focus)`, `saveTo(path)` or `body` (a `ReadableStream`), and is never held in memory whole unless you call `text()`. Rows keep FOCUS's own column names (`BilledCost`, `x_EstimatedCost`). A CSV cell can contain a line break, so parse CSV with a CSV parser rather than with `lines()`. `timeoutMs` covers only the wait for the headers; pass `{ signal }` as the second argument to cancel or time-limit the download.
+
 ## Webhook Subscriptions
 
 Webhook subscriptions are managed by the tenant, not the partner, so these calls need a client built with the tenant's own API key. See [Change Webhooks](/api-reference/sync/webhooks).
@@ -166,7 +214,7 @@ for (const delivery of await admin.webhooks.deliveries.list({ status: 'dead' }))
 }
 ```
 
-POST calls (`attest`, `subscriptions.create`, `rotateSecret`, `redeliver`) are not retried after a network error or a 5xx, since the server may have acted. They are still retried after a 429.
+POST calls (`attest`, `reviewRisk`, `subscriptions.create`, `rotateSecret`, `redeliver`) are not retried after a network error or a 5xx, since the server may have acted. They are still retried after a 429. `spendAlerts.acknowledge` is the exception: acknowledging twice changes nothing, so it is retried like a GET.
 
 ## Error Handling
 
@@ -199,6 +247,8 @@ import type {
   UsageSummary,
   Attestation,
   WebhookSubscription,
+  SpendAlert,
+  FocusCostRow,
 } from '@prompt-shields/partner';
 ```
 

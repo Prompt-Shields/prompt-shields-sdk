@@ -111,12 +111,12 @@ function flatten(schema: Json): { props: Record<string, Json>; required: Set<str
  * exists on both sides, a property is optional (`?`) exactly when the spec
  * does not list it in `required`, and every enum value is in the type.
  */
-function compareSchema(schema: Json, iface: string): string[] {
+function compareSchema(schema: Json, iface: string, rename: (wire: string) => string = camelKey): string[] {
   const members = membersOf(iface);
   const { props, required } = flatten(schema);
   const problems: string[] = [];
   for (const [wire, prop] of Object.entries(props)) {
-    const name = camelKey(wire);
+    const name = rename(wire);
     const m = members.get(name);
     if (!m) {
       problems.push(`${iface}.${name} is missing (spec property ${wire})`);
@@ -128,7 +128,7 @@ function compareSchema(schema: Json, iface: string): string[] {
       if (!m.literals.has(v)) problems.push(`${iface}.${name} does not list enum value '${v}'`);
     }
   }
-  const documented = new Set(Object.keys(props).map(camelKey));
+  const documented = new Set(Object.keys(props).map(rename));
   for (const name of members.keys()) {
     if (!documented.has(name)) problems.push(`${iface}.${name} is not in the spec`);
   }
@@ -164,6 +164,21 @@ const SCHEMAS: Record<string, string> = {
   CreateWebhookSubscriptionRequest: 'CreateWebhookSubscriptionParams',
   UpdateWebhookSubscriptionRequest: 'UpdateWebhookSubscriptionParams',
   RotateWebhookSecretRequest: 'RotateWebhookSecretParams',
+  // Risk mapping reviews (client.assets.riskReviews / reviewRisk).
+  RiskMappingReview: 'RiskMappingReview',
+  RiskReviewRequest: 'RiskReviewRequest',
+  RiskReviewHistory: 'RiskReviewHistory',
+  // Spend anomaly alerts (client.spendAlerts). The settings are an operator
+  // tenant setting, typed for convenience.
+  SpendAlert: 'SpendAlert',
+  SpendAnomalySettings: 'SpendAnomalySettings',
+};
+/**
+ * Schemas whose property names the SDK keeps as sent (not camelCased):
+ * FOCUS column names (client.usage.focusExport rows).
+ */
+const VERBATIM_SCHEMAS: Record<string, string> = {
+  FocusCostRow: 'FocusCostRow',
 };
 /** Schemas the SDK handles without a matching interface. */
 const UNMAPPED_SCHEMAS = new Set([
@@ -200,18 +215,6 @@ const UNMAPPED_SCHEMAS = new Set([
   'CreateTenantRequest',
   'UpdateTenantRequest',
   'ConnectorSyncRequest',
-  // Risk mapping review history and review (#98): not wrapped yet; call
-  // them with client.send().
-  'RiskMappingReview',
-  'RiskReviewRequest',
-  'RiskReviewHistory',
-  // Spend anomaly alerts (#30): not wrapped yet; call them with
-  // client.send(). The thresholds are operator tenant settings.
-  'SpendAlert',
-  'SpendAnomalySettings',
-  // FOCUS cost export (#31): a streamed CSV / JSON Lines file, not wrapped;
-  // download it with fetch or curl.
-  'FocusCostRow',
 ]);
 
 interface Operation {
@@ -250,7 +253,7 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/business-units': { methods: ['businessUnits.list'] },
   'GET /partner/v1/changes': { methods: ['changes.list', 'changes.listPage'], params: 'ListChangesParams' },
   'GET /partner/v1/export': { methods: ['export.get'], params: 'ExportParams' },
-  'GET /partner/v1/usage/focus-export': NOT_WRAPPED, // streamed CSV / JSON Lines file
+  'GET /partner/v1/usage/focus-export': { methods: ['usage.focusExport'], params: 'FocusExportParams' },
   'GET /partner/v1/health': { methods: ['health'] },
   'GET /partner/v1/provider-credentials': NOT_WRAPPED,
   'GET /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
@@ -313,11 +316,17 @@ const OPERATIONS: Record<string, Operation> = {
   'POST /api/v1/admin/risk-suggestions/run': NOT_WRAPPED,
   'POST /api/v1/admin/risk-mappings/{risk_id}/review': NOT_WRAPPED,
   'GET /api/v1/admin/risk-mappings/{risk_id}/reviews': NOT_WRAPPED,
-  'GET /partner/v1/assets/{asset_id}/risks/{risk_id}/reviews': NOT_WRAPPED,
-  'POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review': NOT_WRAPPED,
-  'GET /partner/v1/spend-alerts': NOT_WRAPPED,
-  'GET /partner/v1/spend-alerts/{alert_id}': NOT_WRAPPED,
-  'POST /partner/v1/spend-alerts/{alert_id}/acknowledge': NOT_WRAPPED,
+  'GET /partner/v1/assets/{asset_id}/risks/{risk_id}/reviews': {
+    methods: ['assets.riskReviews'],
+    params: 'ListRiskReviewsParams',
+  },
+  'POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review': {
+    methods: ['assets.reviewRisk'],
+    body: 'RiskReviewRequest',
+  },
+  'GET /partner/v1/spend-alerts': { methods: ['spendAlerts.list'], params: 'ListSpendAlertsParams' },
+  'GET /partner/v1/spend-alerts/{alert_id}': { methods: ['spendAlerts.get'] },
+  'POST /partner/v1/spend-alerts/{alert_id}/acknowledge': { methods: ['spendAlerts.acknowledge'] },
   'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,
   'POST /api/v1/admin/cloud-inventory/pull': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/leanix/sync': NOT_WRAPPED,
@@ -364,8 +373,15 @@ describe('docs/openapi.yaml drift check', () => {
     expect(compareSchema(spec.components.schemas[schema], iface)).toEqual([]);
   });
 
+  it.each(Object.entries(VERBATIM_SCHEMAS))('schema %s matches interface %s, names as sent', (schema, iface) => {
+    expect(spec.components.schemas[schema]).toBeDefined();
+    expect(compareSchema(spec.components.schemas[schema], iface, (wire) => wire)).toEqual([]);
+  });
+
   it('maps every documented schema', () => {
-    const unmapped = Object.keys(spec.components.schemas).filter((s) => !(s in SCHEMAS) && !UNMAPPED_SCHEMAS.has(s));
+    const unmapped = Object.keys(spec.components.schemas).filter(
+      (s) => !(s in SCHEMAS) && !(s in VERBATIM_SCHEMAS) && !UNMAPPED_SCHEMAS.has(s),
+    );
     expect(unmapped).toEqual([]);
   });
 
@@ -375,6 +391,18 @@ describe('docs/openapi.yaml drift check', () => {
       compareSchema(responseSchema('GET /partner/v1/assets/{asset_id}/attestations').properties.meta, 'AttestationsMeta'),
     ).toEqual([]);
     expect(compareSchema(responseSchema('GET /partner/v1/health'), 'HealthStatus')).toEqual([]);
+    expect(compareSchema(responseSchema('GET /partner/v1/spend-alerts').properties.meta, 'SpendAlertListMeta')).toEqual(
+      [],
+    );
+    expect(
+      compareSchema(responseSchema('POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review', '201'), 'RiskReviewResult'),
+    ).toEqual([]);
+  });
+
+  it('documents the FOCUS export as CSV and JSON Lines', () => {
+    const content = specOperations().get('GET /partner/v1/usage/focus-export').responses['200'].content;
+    expect(Object.keys(content).sort()).toEqual(['application/x-ndjson', 'text/csv']);
+    expect(deref(content['application/x-ndjson'].schema)).toBe(spec.components.schemas.FocusCostRow);
   });
 
   it('lists exactly the documented operations', () => {

@@ -11,7 +11,12 @@ import type {
   UsageSummary,
   Attestation,
   WebhookSubscription,
+  SpendAlert,
+  FocusCostRow,
 } from '../src';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { asset, json, token } from './helpers';
 
 type Handler = (url: URL) => Response;
@@ -221,6 +226,113 @@ describe('docs/sdks/typescript.mdx', () => {
     expect(posted).toEqual([{ field: 'owner', state: 'attested', attested_by: 'ciso@acme.com' }]);
   });
 
+  it('Reviewing Risk Suggestions', async () => {
+    const mappingWire = { id: 'r1', risk_category: 'compliance', risk_level: 'high', framework: 'EU_AI_ACT', status: 'confirmed', source: 'rules', framework_ref: 'Annex III, point 4(a)' };
+    const reviewWire = { id: 'rev1', risk_mapping_id: 'r1', asset_id: 'a1', status: 'confirmed', previous_status: 'suggested', comment: null, reviewed_by: 'dpo@acme.com', reviewed_at: '2026-11-04T10:00:00Z', actor_type: 'partner', partner_id: 'p1', mapping: null };
+    const posted: unknown[] = [];
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/oauth/token') return token('docs.jwt.token');
+      if (url.pathname.endsWith('/risks')) return json({ data: [{ ...mappingWire, status: 'suggested' }] });
+      if (url.pathname.endsWith('/risks/r1/review') && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+        return json({ data: reviewWire, meta: { current: mappingWire } }, 201);
+      }
+      if (url.pathname.endsWith('/reviews')) return json({ data: [reviewWire], meta: { total: 1, current: mappingWire } });
+      throw new Error(`unexpected ${url}`);
+    });
+    const client = new PartnerClient({ clientId: 'id', clientSecret: 'secret' });
+    const assetId = '019e1a2b-3c4d-7000-8000-000000000001';
+
+    // ---- begin docs ----
+    // Confirm or reject rule-based suggestions (needs the risks:review scope)
+    for (const risk of await client.assets.risks(assetId, { status: 'suggested' })) {
+      const { meta } = await client.assets.reviewRisk(assetId, risk.id, {
+        status: 'confirmed',
+        reviewedBy: 'dpo@acme.com',
+        comment: 'Candidate screening is an Annex III use',
+      });
+      console.log(`${meta.current.frameworkRef}: ${meta.current.status}`);
+    }
+
+    // Who decided what, newest first (needs risks:read)
+    const reviews = await client.assets.riskReviews(assetId, '<risk mapping id>');
+    for (const review of reviews.data) {
+      console.log(`${review.reviewedBy}: ${review.previousStatus} -> ${review.status}`);
+    }
+    // ---- end docs ----
+
+    expect(posted).toEqual([{ status: 'confirmed', reviewed_by: 'dpo@acme.com', comment: 'Candidate screening is an Annex III use' }]);
+    expect(logs).toEqual(['Annex III, point 4(a): confirmed', 'dpo@acme.com: suggested -> confirmed']);
+  });
+
+  it('Spend Alerts and Cost Export', async () => {
+    const alertWire = { id: 'al1', group_by: 'use_case', group_key: 'interview-screening', day: '2026-11-02', observed_cost: 412.5, baseline_cost: 80.1, baseline_sigma: 21.4, z_score: 15.5, threshold_sigma: 3, history_days: 28, severity: 'critical', status: 'open', acknowledged_at: null, acknowledged_by: null, created_at: '2026-11-03T02:00:04Z' };
+    const acked: string[] = [];
+    const focusHeaders = { 'x-focus-version': '1.4', 'x-export-window-start': '2026-10-01T00:00:00Z', 'x-export-window-end': '2026-11-01T00:00:00Z' };
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/oauth/token') return token('docs.jwt.token');
+      if (url.pathname === '/partner/v1/spend-alerts') {
+        expect(url.searchParams.get('status')).toBe('open');
+        return json({ data: [alertWire], meta: { total: 1 } });
+      }
+      if (url.pathname.endsWith('/acknowledge') && init?.method === 'POST') {
+        acked.push(url.pathname);
+        return json({ data: { ...alertWire, status: 'acknowledged' } });
+      }
+      if (url.pathname === '/partner/v1/usage/focus-export') {
+        if (url.searchParams.get('format') === 'jsonl') {
+          const rows = [{ x_EstimatedCost: 1.25 }, { x_EstimatedCost: 2.5 }].map((r) => JSON.stringify(r)).join('\n');
+          return new Response(rows + '\n', { headers: { 'content-type': 'application/x-ndjson', ...focusHeaders } });
+        }
+        expect(url.searchParams.get('cost_mode')).toBe('merge_safe');
+        return new Response('BilledCost,x_EstimatedCost\n0,1.25\n', {
+          headers: { 'content-type': 'text/csv', 'content-disposition': 'attachment; filename="focus-cost.csv"', ...focusHeaders },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const client = new PartnerClient({ clientId: 'id', clientSecret: 'secret' });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-docs-'));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      // ---- begin docs ----
+      // Spend anomaly alerts (needs spend-alerts:read; acknowledging needs spend-alerts:acknowledge)
+      const { data: alerts } = await client.spendAlerts.list({ status: 'open', severity: 'critical' });
+      for (const alert of alerts) {
+        console.log(`${alert.day} ${alert.groupKey}: $${alert.observedCost} against a $${alert.baselineCost} baseline`);
+        await client.spendAlerts.acknowledge(alert.id);
+      }
+
+      // FinOps FOCUS v1.4 cost export, streamed row by row (needs usage:export)
+      const focus = await client.usage.focusExport({ start: '2026-10-01', end: '2026-11-01', format: 'jsonl' });
+      console.log(`FOCUS ${focus.focusVersion} from ${focus.windowStart} to ${focus.windowEnd}`);
+      let estimated = 0;
+      for await (const row of focus.rows()) {
+        estimated += row.x_EstimatedCost;
+      }
+      console.log(`Estimated cost: $${estimated.toFixed(2)}`);
+
+      // Or stream the CSV straight into a file (Node)
+      const csv = await client.usage.focusExport({ start: '2026-10-01', end: '2026-11-01', costMode: 'merge_safe' });
+      await csv.saveTo(csv.filename ?? 'focus-cost.csv');
+      // ---- end docs ----
+
+      expect(fs.readFileSync(path.join(dir, 'focus-cost.csv'), 'utf8')).toBe('BilledCost,x_EstimatedCost\n0,1.25\n');
+    } finally {
+      process.chdir(cwd);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(acked).toEqual(['/partner/v1/spend-alerts/al1/acknowledge']);
+    expect(logs).toEqual([
+      '2026-11-02 interview-screening: $412.5 against a $80.1 baseline',
+      'FOCUS 1.4 from 2026-10-01T00:00:00Z to 2026-11-01T00:00:00Z',
+      'Estimated cost: $3.75',
+    ]);
+  });
+
   it('Webhook Subscriptions', async () => {
     const sub = { id: 's1', partner_id: 'p1', url: 'https://ea-tool.example.com/hooks/prompt-shields', event_types: [], description: null, is_active: true, rotation_grace_ends_at: null, created_at: null, updated_at: null };
     const calls: string[] = [];
@@ -302,7 +414,17 @@ describe('docs/sdks/typescript.mdx', () => {
   });
 
   it('exports the documented types', () => {
-    const t: [AIAsset?, DataFlow?, RiskMapping?, ChangeEvent?, UsageSummary?, Attestation?, WebhookSubscription?] = [];
+    const t: [
+      AIAsset?,
+      DataFlow?,
+      RiskMapping?,
+      ChangeEvent?,
+      UsageSummary?,
+      Attestation?,
+      WebhookSubscription?,
+      SpendAlert?,
+      FocusCostRow?,
+    ] = [];
     expect(t).toEqual([]);
   });
 });

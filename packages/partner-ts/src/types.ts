@@ -544,3 +544,230 @@ export interface CycloneDxBom {
   components?: Array<Record<string, unknown>>;
   [key: string]: unknown;
 }
+
+// Risk mapping reviews (partner routes under /partner/v1/assets/{id}/risks/{risk_id}).
+
+/** The decision in a review. */
+export type RiskReviewStatus = OpenString<'confirmed' | 'rejected'>;
+/** The credential that recorded a review. */
+export type RiskReviewActorType = OpenString<'tenant_key' | 'admin_token' | 'partner'>;
+
+/** One immutable review of a risk mapping (append-only history). */
+export interface RiskMappingReview {
+  id: string;
+  riskMappingId: string;
+  /** The asset the mapping belonged to when it was reviewed. */
+  assetId: string;
+  status: RiskReviewStatus;
+  /** Status before this review; `null` for reviews made before the history existed. */
+  previousStatus: RiskStatus | null;
+  comment: string | null;
+  reviewedBy: string;
+  /** ISO 8601 timestamp. */
+  reviewedAt: string;
+  actorType: RiskReviewActorType;
+  partnerId: string | null;
+  /**
+   * The mapping as reviewed (`riskCategory`, `riskLevel`, `framework`,
+   * `ruleId`, `rulesetVersion`, `frameworkRef`), camelCased.
+   */
+  mapping: Record<string, unknown> | null;
+}
+
+/** Body for `client.assets.reviewRisk()`. Needs the `risks:review` scope. */
+export interface RiskReviewRequest {
+  status: RiskReviewStatus;
+  /** The person deciding, e.g. an email (1 to 320 characters). */
+  reviewedBy: string;
+  /** Why the mapping was confirmed or rejected (up to 4000 characters). */
+  comment?: string | null;
+}
+
+export interface RiskReviewHistoryMeta {
+  total: number;
+  /** The mapping now; `null` if it no longer exists. */
+  current: RiskMapping | null;
+}
+
+/** `client.assets.riskReviews()`: newest first. */
+export interface RiskReviewHistory {
+  data: RiskMappingReview[];
+  meta: RiskReviewHistoryMeta;
+}
+
+/** `client.assets.reviewRisk()`: the review recorded and the mapping now. */
+export interface RiskReviewResult {
+  data: RiskMappingReview;
+  meta: { current: RiskMapping };
+}
+
+export interface ListRiskReviewsParams {
+  /** 1 to 500. Server default is 100. */
+  limit?: number;
+}
+
+// Spend anomaly alerts (/partner/v1/spend-alerts).
+
+export type SpendAlertGroupBy = OpenString<'use_case' | 'asset'>;
+export type SpendAlertSeverity = OpenString<'warning' | 'critical'>;
+export type SpendAlertStatus = OpenString<'open' | 'acknowledged'>;
+
+/**
+ * One UTC day whose spend for a use case or asset was far above its EWMA
+ * baseline. Amounts are USD.
+ */
+export interface SpendAlert {
+  id: string;
+  groupBy: SpendAlertGroupBy;
+  /** The use case name (`(none)` for assets without one), or the asset id. */
+  groupKey: string;
+  /** UTC day, `YYYY-MM-DD`. */
+  day: string;
+  /** The day's spend. */
+  observedCost: number;
+  /** EWMA of the days before. */
+  baselineCost: number;
+  /** The standard deviation used (after its floors). */
+  baselineSigma: number;
+  zScore: number;
+  thresholdSigma: number;
+  historyDays: number;
+  severity: SpendAlertSeverity;
+  status: SpendAlertStatus;
+  /** ISO 8601 timestamp. */
+  acknowledgedAt: string | null;
+  /** `partner:<credential id>`, never a person. */
+  acknowledgedBy: string | null;
+  /** ISO 8601 timestamp. */
+  createdAt: string;
+}
+
+export interface SpendAlertListMeta {
+  /** Alerts in `data`. */
+  total: number;
+}
+
+export interface SpendAlertList {
+  data: SpendAlert[];
+  meta: SpendAlertListMeta;
+}
+
+export interface ListSpendAlertsParams {
+  status?: SpendAlertStatus;
+  severity?: SpendAlertSeverity;
+  /** First UTC day to include, `YYYY-MM-DD`. */
+  since?: string;
+  /** Last UTC day to include, `YYYY-MM-DD`. */
+  until?: string;
+  /** 1 to 500. Server default is 100. */
+  limit?: number;
+}
+
+/**
+ * Per-tenant spend anomaly thresholds (tenant `settings.spend_anomaly`).
+ * An operator setting: the Partner API does not read or change it. Every
+ * field falls back to its default when omitted.
+ */
+export interface SpendAnomalySettings {
+  /** Default true. */
+  enabled?: boolean;
+  /** Default `use_case`. */
+  groupBy?: SpendAlertGroupBy;
+  /** EWMA smoothing factor, 0.01 to 1. Default 0.3. */
+  alpha?: number;
+  /** Alert at this many standard deviations above the baseline (0.5 to 20, default 3); 2x is `critical`. */
+  sigma?: number;
+  /** 3 to 90. Default 28. */
+  baselineDays?: number;
+  /** Days of spend a group needs before it is judged (2 to 90, default 7). */
+  minHistoryDays?: number;
+  /** The day must also be at least this many USD above the baseline. Default 1. */
+  minDeltaUsd?: number;
+  /** The standard deviation used is at least this fraction of the baseline. Default 0.1. */
+  minSigmaFraction?: number;
+}
+
+// FinOps FOCUS cost export (/partner/v1/usage/focus-export).
+
+export type FocusExportFormat = OpenString<'csv' | 'jsonl'>;
+export type FocusGranularity = OpenString<'hour' | 'day'>;
+export type FocusCostMode = OpenString<'estimated' | 'merge_safe'>;
+
+export interface FocusExportParams {
+  /** Inclusive start. Default: 30 days before `end`. */
+  start?: Timestamp;
+  /** Exclusive end. Default: now. The window may span at most 366 days. */
+  end?: Timestamp;
+  /** `csv` (default, with a header row) or `jsonl` (one JSON object per line). */
+  format?: FocusExportFormat;
+  /** Charge period of each row (UTC). Default `day`. */
+  granularity?: FocusGranularity;
+  /**
+   * `estimated` (default): the FOCUS cost columns carry the estimated cost.
+   * `merge_safe`: they are 0 and the estimate is only in `x_EstimatedCost`.
+   */
+  costMode?: FocusCostMode;
+}
+
+/**
+ * One FOCUS v1.4 Cost and Usage row from a `jsonl` export. The column names
+ * are FOCUS's own and are kept exactly as sent (not camelCased).
+ */
+export interface FocusCostRow {
+  BilledCost: number;
+  EffectiveCost: number;
+  ListCost: number;
+  ContractedCost: number;
+  BillingCurrency: string;
+  BillingAccountId: string;
+  BillingAccountName: string | null;
+  BillingAccountType: string;
+  BillingPeriodStart: string;
+  BillingPeriodEnd: string;
+  ChargePeriodStart: string;
+  ChargePeriodEnd: string;
+  ChargeCategory: string;
+  ChargeClass: string | null;
+  ChargeDescription: string | null;
+  ChargeFrequency: string;
+  ServiceProviderName: string;
+  HostProviderName: string | null;
+  InvoiceIssuerName: string;
+  ServiceName: string;
+  ServiceCategory: string;
+  ServiceSubcategory: string;
+  ResourceId: string | null;
+  ResourceName: string | null;
+  ResourceType: string | null;
+  RegionId: string | null;
+  RegionName: string | null;
+  AvailabilityZone: string | null;
+  SkuId: string | null;
+  PricingQuantity: number | null;
+  PricingUnit: string | null;
+  ConsumedQuantity: number | null;
+  ConsumedUnit: string | null;
+  AllocatedMethodDetails: Record<string, unknown> | null;
+  Tags: Record<string, string> | null;
+  /** Estimated cost in USD, in both cost modes. */
+  x_EstimatedCost: number;
+  /** Calls in the row. */
+  x_RequestCount: number;
+  x_InputTokens: number | null;
+  x_OutputTokens: number | null;
+  /** Model that served the calls (same as `SkuId`). */
+  x_ModelName: string | null;
+  x_BusinessUnit: string | null;
+  x_UseCaseName: string | null;
+  x_Environment: string | null;
+}
+
+/** Options for `client.usage.focusExport()` and `client.getStream()` that are not query parameters. */
+export interface DownloadOptions {
+  /**
+   * Cancels the request, and the download once it has started. The
+   * client's `timeoutMs` only covers the wait for the response headers;
+   * reading the body has no timeout, so use this to bound a download.
+   */
+  signal?: AbortSignal;
+}
