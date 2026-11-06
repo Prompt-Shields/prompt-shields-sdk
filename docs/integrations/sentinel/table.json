@@ -1,0 +1,244 @@
+{
+  "properties": {
+    "schema": {
+      "name": "PromptShieldsAudit_CL",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime",
+          "description": "Call time (AICall) or audit row time (Audit), UTC"
+        },
+        {
+          "name": "EventUid",
+          "type": "string",
+          "description": "Prompt Shields id of the usage event or audit row; stable across resends"
+        },
+        {
+          "name": "EventType",
+          "type": "string",
+          "description": "AICall or Audit"
+        },
+        {
+          "name": "EventProduct",
+          "type": "string",
+          "description": "Prompt Shields"
+        },
+        {
+          "name": "EventVendor",
+          "type": "string",
+          "description": "Prompt Shields"
+        },
+        {
+          "name": "EventSchemaVersion",
+          "type": "string",
+          "description": "Version of this mapping (1.0)"
+        },
+        {
+          "name": "EventResult",
+          "type": "string",
+          "description": "Success, Failure or NA (ASIM)"
+        },
+        {
+          "name": "EventSeverity",
+          "type": "string",
+          "description": "Informational, Low or Medium (ASIM)"
+        },
+        {
+          "name": "Operation",
+          "type": "string",
+          "description": "ai.call, or the audit action (e.g. partner_credential.update)"
+        },
+        {
+          "name": "ActorUserType",
+          "type": "string",
+          "description": "Audit: tenant_key, admin_token, partner, operator, system or anonymous"
+        },
+        {
+          "name": "ActorUserId",
+          "type": "string",
+          "description": "Audit: credential lookup prefix or id, never a secret"
+        },
+        {
+          "name": "Object",
+          "type": "string",
+          "description": "Audit: target id"
+        },
+        {
+          "name": "ObjectType",
+          "type": "string",
+          "description": "Audit: target type"
+        },
+        {
+          "name": "HttpStatusCode",
+          "type": "int",
+          "description": "Audit: HTTP status of the audited request"
+        },
+        {
+          "name": "PsTenantId",
+          "type": "string",
+          "description": "Prompt Shields tenant id"
+        },
+        {
+          "name": "PsRequestId",
+          "type": "string",
+          "description": "Audit: X-Request-ID of the audited request"
+        },
+        {
+          "name": "PsCallId",
+          "type": "string",
+          "description": "AICall: per-call id from the SDK or gateway"
+        },
+        {
+          "name": "PsAssetId",
+          "type": "string",
+          "description": "AICall: AI asset id in the registry"
+        },
+        {
+          "name": "PsVendor",
+          "type": "string",
+          "description": "AICall: asset vendor"
+        },
+        {
+          "name": "PsBusinessUnit",
+          "type": "string",
+          "description": "AICall: asset business unit"
+        },
+        {
+          "name": "PsEnvironment",
+          "type": "string",
+          "description": "AICall: asset environment"
+        },
+        {
+          "name": "PsSource",
+          "type": "string",
+          "description": "AICall: telemetry source (sdk, gateway, otel, kong, ...)"
+        },
+        {
+          "name": "PsApiSurface",
+          "type": "string",
+          "description": "AICall: API the caller spoke (chat, messages, responses, ...)"
+        },
+        {
+          "name": "PsRequestedModel",
+          "type": "string",
+          "description": "AICall: model the caller asked for (may be auto)"
+        },
+        {
+          "name": "PsServedModel",
+          "type": "string",
+          "description": "AICall: model that served the call"
+        },
+        {
+          "name": "PsServedProvider",
+          "type": "string",
+          "description": "AICall: provider that served the call"
+        },
+        {
+          "name": "PsServedJurisdiction",
+          "type": "string",
+          "description": "AICall: jurisdiction of the serving tier (EEA, US, DE, ...)"
+        },
+        {
+          "name": "PsSovereign",
+          "type": "boolean",
+          "description": "AICall: served in the EEA; empty when the jurisdiction is unknown"
+        },
+        {
+          "name": "PsPolicyVersion",
+          "type": "string",
+          "description": "AICall: route policy version that decided the call"
+        },
+        {
+          "name": "PsSensitivityLevel",
+          "type": "string",
+          "description": "AICall: sensitivity level the call was routed at"
+        },
+        {
+          "name": "PsSensitivitySource",
+          "type": "string",
+          "description": "AICall: declared, pii_escalated or default"
+        },
+        {
+          "name": "PsRouteMode",
+          "type": "string",
+          "description": "AICall: gateway, local or none"
+        },
+        {
+          "name": "PsRouteGroup",
+          "type": "string",
+          "description": "AICall: route group"
+        },
+        {
+          "name": "PsRouteReason",
+          "type": "string",
+          "description": "AICall: why the router chose the model"
+        },
+        {
+          "name": "PsFallbackChain",
+          "type": "dynamic",
+          "description": "AICall: error class of each failed attempt, in order"
+        },
+        {
+          "name": "PsBaselineId",
+          "type": "string",
+          "description": "AICall: baseline model of the counterfactual cost"
+        },
+        {
+          "name": "PsTokensIn",
+          "type": "long",
+          "description": "AICall: input tokens"
+        },
+        {
+          "name": "PsTokensOut",
+          "type": "long",
+          "description": "AICall: output tokens"
+        },
+        {
+          "name": "PsCostUsd",
+          "type": "real",
+          "description": "AICall: cost in USD"
+        },
+        {
+          "name": "PsCounterfactualCostUsd",
+          "type": "real",
+          "description": "AICall: cost on the baseline model in USD"
+        },
+        {
+          "name": "PsRouteEstCostUsd",
+          "type": "real",
+          "description": "AICall: router's cost estimate before the call, USD"
+        },
+        {
+          "name": "PsLatencyMs",
+          "type": "long",
+          "description": "AICall: latency in milliseconds"
+        },
+        {
+          "name": "PsAuditSeq",
+          "type": "long",
+          "description": "Audit: position in the tenant's hash chain"
+        },
+        {
+          "name": "PsAuditPrevHash",
+          "type": "string",
+          "description": "Audit: row_hash of the previous row"
+        },
+        {
+          "name": "PsAuditRowHash",
+          "type": "string",
+          "description": "Audit: sha256 over prev_hash and the canonical row"
+        },
+        {
+          "name": "PsAuditHashVersion",
+          "type": "int",
+          "description": "Audit: hash algorithm version"
+        },
+        {
+          "name": "PsAuditDetails",
+          "type": "dynamic",
+          "description": "Audit: ids, counts and names (never secrets or free text)"
+        }
+      ]
+    }
+  }
+}

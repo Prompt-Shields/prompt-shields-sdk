@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
-from collector import audit_trail, rls, spend_anomalies
+from collector import audit_trail, learner, rls, spend_anomalies
 from collector.app import app
 from collector.config import settings
 from collector.partner_auth import hash_secret
@@ -33,7 +33,10 @@ from db.models import (
     Base,
     CallFeedback,
     DataFlow,
+    LearnerRecommendation,
+    LearnerSnapshot,
     McpToolUsage,
+    McpToolUsageDaily,
     PartnerAuditLog,
     PartnerCredential,
     ProviderCredential,
@@ -163,6 +166,14 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     tool_name="search",
                     call_count=1,
                 ),
+                McpToolUsageDaily(
+                    tenant_id=tenant_id,
+                    day=date(2026, 11, 1),
+                    source="sdk",
+                    server_name=f"server-{name}",
+                    tool_name="search",
+                    call_count=1,
+                ),
                 CallFeedback(
                     tenant_id=tenant_id,
                     call_id=f"seed-call-{name}",
@@ -212,15 +223,39 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
         )
         s.add(sub)
         await s.flush()
-        s.add(
-            WebhookDelivery(
-                tenant_id=tenant_id,
-                subscription_id=sub.id,
-                event_id=uuid.uuid4(),
-                event_type="asset.created",
-                payload={},
-                status="succeeded",
-            )
+        snap = LearnerSnapshot(
+            tenant_id=tenant_id,
+            learner_version=f"lv1-seed{name:0>12}",
+            mode="recommend",
+            algorithm="linear-thompson.v1",
+            data_fingerprint="0" * 64,
+            training_rows=0,
+            scored_rows=0,
+            snapshot={},
+        )
+        s.add(snap)
+        await s.flush()
+        s.add_all(
+            [
+                WebhookDelivery(
+                    tenant_id=tenant_id,
+                    subscription_id=sub.id,
+                    event_id=uuid.uuid4(),
+                    event_type="asset.created",
+                    payload={},
+                    status="succeeded",
+                ),
+                LearnerRecommendation(
+                    tenant_id=tenant_id,
+                    snapshot_id=snap.id,
+                    learner_version=snap.learner_version,
+                    sensitivity_level="internal",
+                    current_model="openai:gpt-4o",
+                    recommended_model="mistral:mistral-small",
+                    candidates=["mistral:mistral-small"],
+                    projection={},
+                ),
+            ]
         )
         await s.commit()
 
@@ -597,6 +632,117 @@ async def test_call_feedback_under_rls(rls_db):
         await s.rollback()
 
 
+async def test_budget_and_cache_fields_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    event = {
+        "vendor": "openai", "model": "gpt-4o-mini", "source": "gateway",
+        "budget_state": "exceeded", "budget_id": "mkt-monthly",
+        "budget_action": "downgraded", "cache_status": "SEMANTIC HIT",
+        "cache_saved_cost": 0.002,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
+                            json={"events": [event]})
+        assert resp.status_code == 200, resp.text
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, a)
+            ev = (await s.execute(
+                select(AIUsageEvent).where(AIUsageEvent.budget_id.is_not(None))
+            )).scalar_one()
+        assert (ev.budget_state, ev.budget_action, ev.cache_status) == (
+            "exceeded", "downgraded", "semantic hit")
+        url = f"/partner/v1/assets/{ev.asset_id}/usage-summary"
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_A}"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["budget_downgraded_requests"] == 1
+        assert body["cache_hit_rate"] == 1.0 and body["cache_saved_usd"] == 0.002
+        # Tenant b neither sees the asset nor its aggregates.
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
+        assert resp.status_code == 404
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        n = (await s.execute(
+            text("SELECT count(*) FROM ai_usage_events WHERE budget_id IS NOT NULL")
+        )).scalar_one()
+    assert n == 0
+
+
+def _learner_snapshot() -> dict:
+    snap = {
+        "schema": "ps-learner-snapshot.v1",
+        "mode": "recommend",
+        "algorithm": "linear-thompson.v1",
+        "data": {"fingerprint": "1" * 64, "rows": 10, "scored_rows": 10},
+        "groups": [],
+        "recommendations": [
+            {
+                "use_case": "support",
+                "sensitivity": "internal",
+                "current_model": "openai:gpt-4o",
+                "recommended_model": "mistral:mistral-small",
+                "candidates": ["mistral:mistral-small", "openai:gpt-4o"],
+                "projection": {
+                    "calls": 10,
+                    "current": {"quality": 0.9, "cost_per_call": 0.01},
+                    "recommended": {"quality": 0.9, "cost_per_call": 0.002},
+                    "quality_delta": 0.0,
+                    "savings_per_call": 0.008,
+                    "savings_pct": 0.8,
+                    "prob_best": 0.95,
+                },
+            }
+        ],
+    }
+    snap["learner_version"] = learner.expected_version(snap)
+    return snap
+
+
+async def test_learner_snapshots_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    snap = _learner_snapshot()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key in (KEY_A, KEY_B):
+            # The same snapshot is a new row per tenant; nothing is superseded
+            # across tenants.
+            resp = await c.post(
+                "/ingest/learner-snapshots",
+                headers={"Authorization": f"Bearer {key}"},
+                json=snap,
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["created"] is True
+            assert resp.json()["superseded"] == 0
+
+    async with rls_db["admin"]() as s:
+        rows = (
+            await s.execute(
+                select(LearnerRecommendation.tenant_id, LearnerRecommendation.status).where(
+                    LearnerRecommendation.learner_version == snap["learner_version"]
+                )
+            )
+        ).all()
+    assert sorted(str(t) for t, _ in rows) == sorted([str(a), str(b)])
+    assert {st for _, st in rows} == {"pending"}
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        s.add(
+            LearnerSnapshot(
+                tenant_id=b,
+                learner_version="lv1-0000000000000bad",
+                mode="recommend",
+                algorithm="x",
+                data_fingerprint="0" * 64,
+                training_rows=0,
+                scored_rows=0,
+                snapshot={},
+            )
+        )
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+
 async def test_spend_anomaly_job_and_partner_api_under_rls(rls_db, caplog):
     a, b = rls_db["a"], rls_db["b"]
     day = date(2026, 2, 10)
@@ -676,6 +822,8 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         assert resp.json()["rows_deleted"]["webhook_subscriptions"] == 1
         assert resp.json()["rows_deleted"]["mcp_tool_usage"] == 1
         assert resp.json()["rows_deleted"]["call_feedback"] == 1
+        assert resp.json()["rows_deleted"]["learner_recommendations"] == 1
+        assert resp.json()["rows_deleted"]["learner_snapshots"] == 1
         assert resp.json()["rows_deleted"]["spend_alerts"] == 1
 
     assert any(
@@ -1456,3 +1604,50 @@ async def test_audit_trail_under_rls(rls_db, monkeypatch):
         await rls.set_tenant(s, a)
         actions = (await s.execute(select(AuditEvent.action))).scalars().all()
     assert "auth.failure" not in actions  # on the system chain, not tenant a's
+
+
+async def test_sentinel_export_runs_per_tenant_under_rls(rls_db):
+    """`--all-tenants` exports each configured tenant in a session scoped
+    to it (no bypass): each upload holds only that tenant's calls and
+    audit rows, and each tenant's cursor lands in its own settings."""
+    from collector import sentinel_export as se
+
+    a, b = rls_db["a"], rls_db["b"]
+    uploads: list[list[dict]] = []
+
+    def azure(r: httpx.Request) -> httpx.Response:
+        if r.headers["host"] == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        uploads.append(json.loads(r.content))
+        return httpx.Response(204)
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    def conn(dcr: str) -> dict:
+        return {
+            "entra_tenant_id": "22222222-2222-2222-2222-222222222222",
+            "client_id": "33333333-3333-3333-3333-333333333333",
+            "client_secret": "s",
+            "ingestion_endpoint": "https://x.westeurope-1.ingest.monitor.azure.com",
+            "dcr_immutable_id": "dcr-" + dcr * 32,
+        }
+
+    results = await se.export_all_tenants(
+        rls_db["plain"],
+        settings=se.SentinelSettings(sentinel_export={str(a): conn("a"), str(b): conn("b")}),
+        transport=httpx.MockTransport(azure),
+        resolver=public,
+        # Past the settle time of the seeded call made "now".
+        now=datetime.now(UTC) + timedelta(hours=1),
+    )
+    assert [r["status"] for r in results] == ["ok", "ok"], results
+    for r in results:
+        assert r["calls"] == 2 and r["audit"] == 1, r
+    for batch in uploads:
+        assert len({row["PsTenantId"] for row in batch}) == 1
+    assert {row["PsTenantId"] for batch in uploads for row in batch} == {str(a), str(b)}
+    async with rls_db["admin"]() as s:
+        for t in (a, b):
+            state = (await s.get(Tenant, t)).settings["connectors"]["sentinel"]
+            assert state["audit_seq"] == 1 and state["calls_cursor"]

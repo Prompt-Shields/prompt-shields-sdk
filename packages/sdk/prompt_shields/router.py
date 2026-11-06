@@ -19,6 +19,12 @@ gateway:
 When no allowed candidate is left, ``PolicyViolation`` is raised and nothing
 is sent: a call is never served by a non-compliant model.
 
+``pseudonymise=True`` (local mode only, off by default) replaces the PII the
+SDK detects with placeholders before the call and restores the answer
+(``prompt_shields.pseudonymise``). The call keeps the original prompt's
+sensitivity unless the policy's ``sensitivity.anonymise_then_route`` lists
+that level; then it is routed at the level of what is left.
+
 Only candidates whose provider is configured are considered: a policy tier
 whose provider has no entry in ``providers`` is removed before routing, the
 same as a tier the data policy does not allow.
@@ -38,6 +44,12 @@ When every candidate failed or was skipped, ``NoCompliantCandidate`` (a
 ``PolicyViolation``) is raised. Per-provider circuit breakers are shared by
 every router in the process unless ``breakers=`` / ``breaker_config=`` say
 otherwise.
+
+Routing learner, auto mode (``learner=``, #34; opt-in, local mode only): an
+``prompt_shields.learner_auto.AutoLearner`` may replace the heuristic's pick
+on ``model="auto"`` calls without an explicit group or quality hint, with a
+model from ``route_policy.policy_safe_tiers`` (data policy, eligible models,
+min group) within the budget clamp. Without it nothing changes.
 
 Spend budgets (``budgets=``, a budget.v1 document, #29) are checked before
 each call in local mode: an exhausted ``block`` budget raises
@@ -78,22 +90,28 @@ from prompt_shields.failover import (
     classify_failure,
     default_registry,
 )
+from prompt_shields.learner import context_vector
+from prompt_shields.learner_auto import CALL_FAILED, AutoLearner, LearnerChoice
 from prompt_shields.pii import detect_pii_categories
 from prompt_shields.pricing import (
     COST_SOURCE_PRICING_TABLE,
     COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
     estimate_cost,
 )
+from prompt_shields.prompt_features import extract_prompt_features
+from prompt_shields.pseudonymise import Pseudonymisation, pseudonymise
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
     PolicyViolation,
     RouteDecision,
     RouteRequest,
+    anonymise_then_route_allowed,
     build_route_request,
     classify_sensitivity,
     data_policy_rule,
     estimate_tier_cost,
     parse_route_headers,
+    policy_safe_tiers,
     resolve_policy_route,
     tier_complies,
 )
@@ -157,6 +175,8 @@ class RouteInfo:
     sensitivity_level: str | None = None
     sensitivity_source: str | None = None
     est_cost: float | None = None
+    #: Set when the routing learner (auto mode) decided this call.
+    learner: LearnerChoice | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +221,28 @@ class BudgetInfo:
 
 
 @dataclass(frozen=True)
+class PseudonymisationInfo:
+    """What pseudonymisation did on a call (``pseudonymise=True``). Counts
+    and levels only, never values.
+
+    ``entities`` is distinct values replaced per PII category; ``restored``
+    placeholders put back into the answer; ``unknown_placeholders``
+    placeholder-shaped tokens in the answer that were left as they are.
+    ``detected_level`` is the sensitivity of the original prompt;
+    ``anonymise_then_route`` is True when the policy let the call be routed
+    at the lower level of what was left after pseudonymisation
+    (``sensitivity.anonymise_then_route``); the route's ``sensitivity_level``
+    is then that lower level.
+    """
+
+    entities: Mapping[str, int]
+    restored: int
+    unknown_placeholders: int
+    detected_level: str | None
+    anonymise_then_route: bool
+
+
+@dataclass(frozen=True)
 class PSResult:
     """``fallback_chain`` is the error class of each failed attempt, in
     order: empty when the first attempt succeeded."""
@@ -210,6 +252,7 @@ class PSResult:
     attempts: tuple[Attempt, ...]
     budget: BudgetInfo | None = None
     fallback_chain: tuple[str, ...] = ()
+    pseudonymisation: PseudonymisationInfo | None = None
 
 
 @dataclass
@@ -597,7 +640,12 @@ def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _P
 
 @dataclass(frozen=True)
 class _Plan:
-    """What one call will do: the decision, the tier and its provider."""
+    """What one call will do: the decision, the tier and its provider.
+
+    ``messages`` is what is sent: the caller's messages, or their
+    pseudonymised copy when ``pseudo`` is set (its mapping never leaves this
+    process and is cleared when the call is done).
+    """
 
     decision: RouteDecision
     tier: Mapping[str, Any]
@@ -608,6 +656,15 @@ class _Plan:
     budget: BudgetCheck | None = None
     budget_action: str = "none"
     request: RouteRequest | None = None
+    messages: list = field(default_factory=list)
+    pseudo: Pseudonymisation | None = None
+    original_pii: tuple[str, ...] = ()
+    detected_level: str | None = None
+    anonymised_route: bool = False
+    learner: LearnerChoice | None = None
+    #: Auto mode moved the pick: the policy's own (decision, tier, provider),
+    #: used when the learner's model cannot take the request.
+    policy_pick: tuple | None = None
 
 
 class _AttemptLimit(Exception):
@@ -669,10 +726,29 @@ class _RouterCore:
         max_attempts: int | None = None,
         retry_after_max_wait: float | None = None,
         rate_limit_retries: int = 1,
+        pseudonymise: bool = False,
+        learner: AutoLearner | None = None,
     ):
         if mode not in ("local", "gateway"):
             raise RouterError(f"mode must be 'local' or 'gateway', got {mode!r}")
+        if pseudonymise and mode != "local":
+            # The gateway classifies what it receives: it would see only the
+            # placeholders and route at a lower level than the policy allows.
+            raise RouterError(
+                "pseudonymise=True needs mode='local'; the gateway would "
+                "classify the placeholders, not the original prompt"
+            )
+        if learner is not None and not isinstance(learner, AutoLearner):
+            raise RouterError("learner must be a prompt_shields.learner_auto.AutoLearner")
+        if learner is not None and mode != "local":
+            # Auto mode runs in the SDK router only; the gateway decides by
+            # its own policy and does not run the learner yet.
+            raise RouterError("learner= (auto mode) needs mode='local'")
         self.mode: RouteMode = mode
+        #: The routing learner in auto mode (opt-in; None routes as before).
+        self.learner = learner
+        self.pseudonymise = bool(pseudonymise)
+        self._scan_pii_events = scan_pii
         self._use_case = use_case
         self._data_classification = data_classification
         client_kwargs = {
@@ -844,6 +920,7 @@ class _RouterCore:
         data_classification: str | None,
         use_case: str | None,
         pii_detected: list[str] | None,
+        pii_categories: set[str] | None = None,
     ) -> RouteRequest:
         hints = parse_route_headers(route.to_headers() if route else {})
         req = build_route_request(
@@ -851,6 +928,9 @@ class _RouterCore:
         )
         req.data_classification = data_classification
         req.use_case = use_case
+        if pii_categories is not None:
+            req.pii_detected = sorted(pii_categories)
+            return req
         # Always scanned, also with scan_pii=False: escalation is a safety
         # control and nothing leaves the process here.
         found = set(_scan_pii(messages))
@@ -952,12 +1032,17 @@ class _RouterCore:
         ``pii_detected`` adds categories found elsewhere (a DLP scan) to the
         ones the local scanner finds. Raises ``PolicyViolation`` when the call
         would fail closed, ``BudgetExceeded`` when a block budget is
-        exhausted. Spend budgets are read but nothing is recorded.
+        exhausted. Spend budgets are read but nothing is recorded. With
+        ``pseudonymise=True`` the decision is the one the pseudonymised call
+        would get.
         """
-        return self._plan(
+        plan = self._plan(
             messages, model, route, max_tokens, data_classification, use_case,
             pii_detected, budget=self._budget_check(use_case),
-        ).decision
+        )
+        if plan.pseudo is not None:
+            plan.pseudo.clear()
+        return plan.decision
 
     # --- budgets --------------------------------------------------------------
 
@@ -1019,17 +1104,133 @@ class _RouterCore:
             raise RouterError("route() decides locally; this router delegates to the gateway")
         declared = data_classification or self._data_classification
         use_case = use_case or self._use_case
-        req = self._route_request(
-            messages, model, route, max_tokens, declared, use_case, pii_detected
-        )
-        decision = self._decide(req)
-        budget_action = "none"
-        if budget is not None:
-            decision, budget_action, req = self._apply_budget(decision, req, budget)
-        tier = self._find_tier(decision, req)
-        provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
+        pseudo = pseudonymise(messages) if self.pseudonymise else None
+        try:
+            extra: dict[str, Any] = {"messages": messages}
+            if pseudo is None:
+                req = self._route_request(
+                    messages, model, route, max_tokens, declared, use_case,
+                    pii_detected,
+                )
+            else:
+                # Categories the caller supplied (a DLP scan) cannot be
+                # shown to be gone, so they always count.
+                supplied = set(pii_detected or ())
+                local = set(_scan_pii(messages))
+                original = local | supplied
+                # What is still detected in what is sent: keyword topics
+                # (health_data, ...) and anything that was not replaced.
+                residual = set(_scan_pii(pseudo.messages)) | supplied
+                detected_level, _ = classify_sensitivity(
+                    self._reachable, declared, original
+                )
+                allowed = anonymise_then_route_allowed(self._reachable, detected_level)
+                req = self._route_request(
+                    pseudo.messages, model, route, max_tokens, declared, use_case,
+                    None, pii_categories=residual if allowed else original,
+                )
+                extra = {
+                    "messages": pseudo.messages, "pseudo": pseudo,
+                    "original_pii": tuple(sorted(local)),
+                    "detected_level": detected_level,
+                }
+            decision = self._decide(req)
+            if pseudo is not None and decision.sensitivity_level != extra["detected_level"]:
+                # Only reachable when the policy allowed the lower level.
+                decision = replace(
+                    decision, reason=decision.reason + "+anonymise-then-route"
+                )
+                extra["anonymised_route"] = True
+            budget_action = "none"
+            if budget is not None:
+                decision, budget_action, req = self._apply_budget(decision, req, budget)
+            tier = self._find_tier(decision, req)
+            provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
+            if self.learner is not None:
+                learned = self._learner_pick(
+                    req, decision, tier, provider, extra["messages"]
+                )
+                if learned is not None:
+                    if learned[1] is not tier:
+                        extra["policy_pick"] = (decision, tier, provider)
+                    decision, tier, provider, extra["learner"] = learned
+        except BaseException:
+            if pseudo is not None:
+                pseudo.clear()
+            raise
         return _Plan(decision, tier, provider, model, declared, use_case,
-                     budget, budget_action, req)
+                     budget, budget_action, req, **extra)
+
+    def _learner_pick(
+        self, req: RouteRequest, decision: RouteDecision,
+        tier: Mapping[str, Any], provider: _Provider, messages: list,
+    ) -> tuple[RouteDecision, Mapping[str, Any], _Provider, LearnerChoice] | None:
+        """Auto mode: let the learner pick within the policy-safe set.
+
+        Only on the strategy path (``model="auto"``, no explicit group, no
+        quality hint): those are the caller's choices. The options are the
+        policy's own pick plus ``policy_safe_tiers`` for the call's
+        sensitivity and use case (data policy, eligible models, min group),
+        served by a configured provider and within the ``max_cost`` /
+        budget clamp, the same bound failover uses.
+        """
+        learner = self.learner
+        assert learner is not None
+        if (
+            decision.reason == "pinned"
+            or req.requested_model != "auto"
+            or req.explicit_group is not None
+            or req.quality is not None
+            or not learner.enabled_for(req.use_case)
+        ):
+            return None
+        out = (
+            DEFAULT_OUTPUT_TOKENS
+            if req.max_output_tokens is None
+            else req.max_output_tokens
+        )
+        budget = None if req.max_cost is None else max(req.max_cost, decision.est_cost)
+        policy_label = f"{provider.name}:{tier['model']}"
+        options: dict[str, tuple[str, Mapping[str, Any], str, float]] = {
+            policy_label: (decision.group, tier, provider.name, decision.est_cost),
+        }
+        for group, t in policy_safe_tiers(
+            self._reachable, decision.sensitivity_level, req.use_case
+        ):
+            name = self._tier_provider(t)
+            if name is None:
+                continue
+            label = f"{name}:{t['model']}"
+            if label in options:
+                continue
+            cost = estimate_tier_cost(t, req.approx_input_tokens, out)
+            if budget is not None and cost > budget:
+                continue
+            options[label] = (group, t, name, cost)
+        features = extract_prompt_features(messages, use_case=req.use_case)
+        choice = learner.choose(
+            req.use_case, decision.sensitivity_level, list(options), policy_label,
+            self._reachable,
+            context=context_vector({
+                "approx_input_tokens": features.approx_input_tokens,
+                "message_count": features.message_count,
+                "has_code": features.has_code,
+                "has_json_schema": features.has_json_schema,
+                "complexity": features.complexity,
+                "language": features.language,
+            }),
+        )
+        if choice is None:
+            return None
+        group, t, name, cost = options[choice.model]
+        if choice.model != policy_label:
+            decision = replace(
+                decision, model=t["model"], group=group, est_cost=cost,
+                reason=f"{decision.reason}+learner-{choice.mode}",
+            )
+        elif choice.mode == "explore":
+            decision = replace(decision, reason=f"{decision.reason}+learner-explore")
+        return decision, t, self._providers[name], choice
 
     # --- failover -------------------------------------------------------------
 
@@ -1113,7 +1314,18 @@ class _RouterCore:
         parameters on an Anthropic model) is left out; the chosen candidate
         raises ``RouterError`` as before.
         """
-        plans = [(plan, self._call_args(plan, messages, max_tokens, kwargs))]
+        try:
+            first = self._call_args(plan, messages, max_tokens, kwargs)
+        except RouterError:
+            if plan.policy_pick is None:
+                raise
+            # The learner's model cannot take this request (an Anthropic
+            # model and OpenAI-only parameters): route as the policy would.
+            d, t, p = plan.policy_pick
+            plan = replace(plan, decision=d, tier=t, provider=p,
+                           learner=None, policy_pick=None)
+            first = self._call_args(plan, messages, max_tokens, kwargs)
+        plans = [(plan, first)]
         if self.failover:
             for fallback in self._fallback_plans(plan)[1:]:
                 try:
@@ -1171,6 +1383,7 @@ class _RouterCore:
         decision, tier = plan.decision, plan.tier
         policy_version = (self.policy or {}).get("policy_version")
         baseline = self.baseline
+        scan_pii = self._scan_pii_events
 
         def hook(event: dict) -> None:
             # Failover (#21): the error class of each failed attempt before
@@ -1206,6 +1419,18 @@ class _RouterCore:
                 event["data_classification"] = plan.data_classification
             if plan.use_case is not None:
                 event["use_case_name"] = plan.use_case
+            if plan.learner is not None:
+                event["route_learner_mode"] = plan.learner.mode
+                event["route_propensity"] = plan.learner.propensity
+                if plan.learner.learner_version is not None:
+                    event["route_learner_version"] = plan.learner.learner_version
+            # Pseudonymised: the client scanned the placeholders. Report the
+            # categories of the original prompt (labels only, never values).
+            if plan.pseudo is not None and scan_pii:
+                if plan.original_pii:
+                    event["detected_pii_types"] = list(plan.original_pii)
+                else:
+                    event.pop("detected_pii_types", None)
             # An OpenAI-compatible provider is dispatched as vendor "openai";
             # a price from OpenAI's table would be the wrong vendor's rate
             # for its model id. Use the catalog's USD rate for the provider
@@ -1249,6 +1474,9 @@ class _RouterCore:
             if baseline is not None:
                 baseline.apply(event)
             captured.update(event)
+            # The live event: outcome signals are added to it after this
+            # hook, and auto mode reads them once the call returns.
+            captured["_event"] = event
 
         return hook
 
@@ -1300,6 +1528,7 @@ class _RouterCore:
             from_anthropic(response) if plan.provider.vendor == "anthropic"
             else from_openai(response)
         )
+        pseudo_info = _restore_completion(out, plan) if plan.pseudo is not None else None
         d = plan.decision
         out.ps = PSResult(
             route=RouteInfo(
@@ -1314,6 +1543,7 @@ class _RouterCore:
                 sensitivity_level=d.sensitivity_level,
                 sensitivity_source=d.sensitivity_source,
                 est_cost=d.est_cost,
+                learner=plan.learner,
             ),
             cost=CostInfo(
                 event.get("cost"),
@@ -1331,11 +1561,24 @@ class _RouterCore:
                 if plan.budget is not None and plan.budget.state is not None
                 else None
             ),
+            pseudonymisation=pseudo_info,
         )
         return out
 
+    def _learner_failed(self, plan: _Plan) -> None:
+        """Auto mode: the call failed outright (no candidate served it)."""
+        if plan.learner is not None and self.learner is not None:
+            self.learner.observe(None, plan.learner, [CALL_FAILED])
+
     def _routed(self, candidate: Candidate, response: Any, captured: dict,
                 attempts: tuple[Attempt, ...]) -> RoutedChatCompletion:
+        plan = candidate.data[0]
+        if plan.learner is not None and self.learner is not None:
+            live = captured.get("_event") or captured
+            signals = live.get("outcome_signals")
+            if signals is None and len(attempts) > 1:
+                signals = ["fallback"]  # outcome signals are turned off
+            self.learner.observe(captured.get("call_id"), plan.learner, signals)
         return self._local_result(
             candidate.data[0], response, captured, attempts,
             (self.policy or {}).get("policy_version"),
@@ -1376,6 +1619,29 @@ class _RouterCore:
     def telemetry_stats(self) -> dict:
         """Delivery counters of each provider client used so far, by name."""
         return {name: c.telemetry_stats() for name, c in self._clients.items()}
+
+
+def _restore_completion(out: RoutedChatCompletion, plan: _Plan) -> PseudonymisationInfo:
+    """Put the call's values back into ``out``: content, refusal and tool-call
+    arguments. ``out.raw`` stays as the provider returned it."""
+    pseudo = plan.pseudo
+    assert pseudo is not None
+    for choice in out.choices:
+        m = choice.message
+        m.content = pseudo.restore(m.content)
+        m.refusal = pseudo.restore(m.refusal)
+        for tc in m.tool_calls or ():
+            tc.function.arguments = pseudo.restore(
+                tc.function.arguments, json_escape=True
+            ) or ""
+    stats = pseudo.stats()
+    return PseudonymisationInfo(
+        entities=dict(stats.entities),
+        restored=stats.restored,
+        unknown_placeholders=stats.unknown,
+        detected_level=plan.detected_level,
+        anonymise_then_route=plan.anonymised_route,
+    )
 
 
 def _refuse_stream(kwargs: dict) -> None:
@@ -1500,7 +1766,28 @@ class _RouterCompletions:
             data_classification, use_case,
             budget=r._budget_check(use_case),
         )
-        candidates = r._candidates(plan, messages, max_tokens, kwargs)
+        try:
+            return self._send(plan, max_tokens, kwargs, ps_metadata, captured)
+        finally:
+            # The mapping lives for this call only.
+            if plan.pseudo is not None:
+                plan.pseudo.clear()
+
+    def _send(self, plan: Any, max_tokens: int | None, kwargs: dict,
+              ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
+        candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
+        try:
+            return self._dispatch(candidates, ps_metadata, captured)
+        except Exception:
+            # Auto mode: a call that failed outright counts against the
+            # learner's pick (the rollback guard sees it).
+            r._learner_failed(candidates[0].data[0])
+            raise
+
+    def _dispatch(self, candidates: list[Candidate],
+                  ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
         tracker = _AttemptTracker()
 
         def call(c: Candidate) -> Any:
@@ -1579,7 +1866,28 @@ class _AsyncRouterCompletions:
             data_classification, use_case,
             budget=await r._abudget_check(use_case),
         )
-        candidates = r._candidates(plan, messages, max_tokens, kwargs)
+        try:
+            return await self._send(plan, max_tokens, kwargs, ps_metadata, captured)
+        finally:
+            # The mapping lives for this call only.
+            if plan.pseudo is not None:
+                plan.pseudo.clear()
+
+    async def _send(self, plan: Any, max_tokens: int | None, kwargs: dict,
+              ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
+        candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
+        try:
+            return await self._dispatch(candidates, ps_metadata, captured)
+        except Exception:
+            # Auto mode: a call that failed outright counts against the
+            # learner's pick (the rollback guard sees it).
+            r._learner_failed(candidates[0].data[0])
+            raise
+
+    async def _dispatch(self, candidates: list[Candidate],
+                  ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
         tracker = _AttemptTracker()
 
         async def call(c: Candidate) -> Any:

@@ -1,0 +1,277 @@
+---
+title: Routing Learner (Recommend Mode)
+description: Learn from your own traffic which policy-compliant model serves each use case best, and review the route changes it recommends
+---
+
+# Routing Learner (Recommend Mode)
+
+The routing learner reads your logged calls and works out, per use case and
+data sensitivity, which model gives the best trade-off between quality, cost
+and latency. It then **recommends** route changes, each with projected
+savings and quality. A person accepts or rejects each recommendation.
+
+<Note>
+In `recommend` mode the learner never routes a call and never changes a
+route policy. Accepting a recommendation records a decision; you apply it
+by editing your route policy. Live routing by the learner is the separate,
+opt-in [auto mode](#auto-mode), in the SDK router only.
+</Note>
+
+## Where it runs
+
+The learner runs on your machine, with the Python SDK (`ps-learn`). Its input
+is the learning tuples that `ps-teardown --learning-tuples` writes (prompt
+features, model, cost, token counts) plus whatever quality signals you have.
+Prompt text and the local embedding never leave your environment. You can
+upload the resulting snapshot to the collector for review: it holds only
+aggregates over the prompt features and the recommendations.
+
+## How it decides
+
+* **One bandit per (use case, sensitivity).** The arms are the models your
+  [route policy](/guides/routing) allows for that group: the sensitivity
+  level's `data_policy` rule, and the use case's `eligible_models` and
+  `min_group`. The learner only re-ranks that set. It never recommends a
+  model the policy does not allow.
+* **Context.** A small vector from the local prompt features: approximate
+  input tokens, message count, code, JSON-schema wording, complexity,
+  English or not.
+* **Reward** = quality − λ·cost (USD per call) − μ·latency (seconds).
+  Defaults: λ = 20, μ = 0.02. Set per run with `--lambda-cost` and
+  `--mu-latency`, or per use case with `LearnerConfig(use_case_rewards=...)`.
+* **Quality**, strongest signal first: a shadow-eval score, explicit
+  feedback (`client.feedback`), an eval-harness score, then implicit outcome
+  signals (a failure class such as `refusal` or `schema_invalid` scores 0, a
+  retry or regenerate 0.5, no signal 1). Implicit signals count a quarter as
+  much as explicit ones. Rows with no signal count as traffic only.
+* **Thompson sampling.** Each arm keeps a Bayesian linear regression. The
+  learner draws every arm's parameters from its posterior many times (seeded,
+  so a run is reproducible) and counts how often each arm has the best mean
+  reward over the group's logged traffic. `prob_best` is that share.
+
+## Off-policy projection
+
+For the current model and the best one, the learner replays the group's
+logged contexts as if every call had gone to that model:
+
+* **Quality and latency** come from the arm's regression (direct method).
+  When every logged row carries a `propensity` (the probability the logging
+  policy chose that model), quality is doubly robust instead.
+* **Cost** is the counterfactual price of each call's logged token counts at
+  that model (the policy's tier prices, else the SDK price table). If any
+  call cannot be priced, the cost regression is used.
+
+A group gets a recommendation only when both models have enough scored rows
+(`min_arm_samples`, default 30), `prob_best` is at least 0.8, projected
+quality drops by no more than 0.02, and the reward improves. Otherwise the
+group's `status` says why: `keep_current`, `not_confident`,
+`quality_below_parity` or `insufficient_data`.
+
+## Run it
+
+```bash
+ps-teardown run usage.jsonl --learning-tuples tuples.jsonl
+ps-learn --tuples tuples.jsonl --policy route-policy.json \
+  --feedback feedback.jsonl --out snapshot.json
+```
+
+On the synthetic traffic in `packages/sdk/tests/test_learner.py` it prints:
+
+```text
+learner_version lv1-660c243263417596 (recommend mode, 1000 rows, 1000 scored)
+  support / confidential: recommend (current openai:gpt-4o, 1000 calls)
+  recommend openai:gpt-4o -> mistral:mistral-small for support / confidential: saves 92.9% per call, quality +0.003, P(best) 1.00
+```
+
+From Python:
+
+```python
+from prompt_shields.learner import LearnerConfig, train, shadow_tuples
+
+snapshot = train(tuples + shadow_tuples(shadow_results), route_policy, LearnerConfig(seed=1))
+```
+
+`--prior snapshot.json` (or `train(..., prior=...)`) warm-starts from an
+earlier snapshot, for example one built from a teardown.
+
+## Snapshots
+
+A snapshot (`ps-learner-snapshot.v1`) holds the config, each group's
+candidates, status and per-arm statistics, and the recommendations. Its
+`learner_version` is `lv1-` plus the first 16 hex characters of the SHA-256
+of its canonical JSON, so the same input and config always give the same
+version, and any edit changes it. There is no timestamp inside.
+
+Upload it with `PS_API_KEY=... ps-learn ... --upload` (or
+`upload_snapshot()`), which calls `POST /ingest/learner-snapshots`. The
+collector checks the version against the content, accepts only `recommend`
+mode, and refuses a recommended model outside its group's candidates. A
+resend is a no-op. A newer snapshot marks pending recommendations for the
+same group `superseded`.
+
+## Review recommendations
+
+On the Partner API (scopes `learner:read` and `learner:review`, never
+granted by default):
+
+| Route | What it does |
+|---|---|
+| `GET /partner/v1/learner/snapshots` | Snapshots, newest first |
+| `GET /partner/v1/learner/snapshots/{learner_version}` | One snapshot with its full state |
+| `GET /partner/v1/learner/recommendations?status=pending` | Recommendations with projections |
+| `GET /partner/v1/learner/recommendations/{id}` | One recommendation |
+| `POST /partner/v1/learner/recommendations/{id}/review` | Accept or reject it |
+
+```bash
+curl -X POST "$COLLECTOR/partner/v1/learner/recommendations/$ID/review" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"decision": "accepted", "reviewed_by": "finops@example.com", "comment": "Pilot on support first"}'
+```
+
+A recommendation is decided once. The decision, the reviewer and the
+comment are stored on it, and the admin audit trail records
+`learner.recommendation_review` (ids and decision only).
+
+## Realised vs. projected
+
+Once a recommendation is accepted, reads include `realised`: the usage
+events of that use case and sensitivity since the decision, with the cost
+per call, the share served by the recommended model (`adoption`), explicit
+feedback on those calls, and `delta_points`, the gap between realised and
+projected savings in percentage points. The P2 gate asks for this to stay
+within ±5 points.
+
+## Auto mode
+
+Auto mode lets the learner route live calls itself. It is opt-in, off by
+default, and per use case. It runs in the Python SDK router in local mode
+(`ShieldsRouter(mode="local", learner=...)`). The router refuses a learner in
+gateway mode, and the gateway does not run auto mode yet.
+
+```python
+from prompt_shields import ShieldsRouter
+from prompt_shields.learner_auto import AutoLearner, fetch_recommendations
+
+learner = AutoLearner(
+    # Each use case to enable, with its recommend-mode track record.
+    {"support": fetch_recommendations("support", partner_token=TOKEN,
+                                      ps_collector_url=COLLECTOR)},
+    snapshot=json.load(open("snapshot.json")),   # what ps-learn wrote
+    on_event=print,                               # loads, rollbacks, freezes
+)
+router = ShieldsRouter(ps_api_key=..., providers=..., policy="route-policy.json",
+                       learner=learner)
+```
+
+### What it may change
+
+The router first decides each call as usual: data policy, use-case bar, then
+the budget clamp. For a call with `model="auto"` and no explicit group or
+quality hint, the learner may then replace the heuristic's choice. It picks
+from the **policy-safe set**: the models the sensitivity level's
+`data_policy` rule and the use case's `eligible_models` and `min_group`
+allow (`route_policy.policy_safe_tiers`, the same function that gives the
+offline learner its arms), served by a configured provider and within the
+`max_cost` or budget clamp. The policy's own pick is always in the set. The
+learner never changes a pinned model, an explicit group or a quality hint.
+Failover starts from the chosen model and stays inside the data policy.
+
+* **Exploit**: route to the active snapshot's recommendation for the call's
+  (use case, sensitivity) when that model is in the safe set. Otherwise,
+  keep the policy's pick.
+* **Explore**: with probability `explore_rate` (default 5%, at most 20%),
+  pick a model from the safe set at random instead. The rate is 0 for
+  the `restricted` level (or the policy's highest level), for a use case
+  whose `min_group` is `frontier` (or the top group), and while learning is
+  frozen.
+
+`resp.ps.route.learner` records the choice: model, `exploit` / `explore` /
+`policy`, the propensity, the rate, the policy's pick and the snapshot
+version. The route reason ends in `+learner-exploit` or `+learner-explore`.
+The telemetry event carries `route_learner_mode`, `route_propensity` and
+`route_learner_version` for your own logs. The collector does not store
+these three fields yet.
+
+### The enablement gate
+
+You can only enable a use case that has a proven `recommend` track record.
+`AutoLearner` takes the Partner API's
+`GET /partner/v1/learner/recommendations?use_case=...` answer
+(`fetch_recommendations`, scope `learner:read`) and counts the following
+recommendations:
+
+* **Evaluated**: accepted recommendations whose realised savings were
+  measured on at least 50 calls.
+* **Accurate**: evaluated recommendations within ±5 percentage points of
+  the projected savings. If feedback quality is known, it must also be no
+  more than 0.05 below the projected quality.
+
+The gate needs at least 2 evaluated recommendations, and at least 80% of
+them must be accurate. Otherwise `AutoGateError` names what is missing. The
+counts are worked out from the records themselves, and an `eligible` flag in
+the input is ignored. The thresholds are constants, not options. The gate
+stops auto mode being switched on by mistake. It is not an access control.
+
+### Auto-rollback
+
+Every call the learner routes is observed. Its outcome signals come from the
+call itself. You add explicit quality later with
+`learner.record_outcome(call_id, quality=...)`: feedback, eval parity or a
+shadow-eval score. The guard looks at each (use case, sensitivity) over the
+last `window` calls (default 200). It compares two kinds of call:
+
+* **Treated**: calls the learner moved off the policy's pick.
+* **Control**: calls it left on the policy's pick.
+
+Once there are at least `min_samples` treated calls (default 50), the
+snapshot is rolled back on either of these:
+
+* **Implicit failure**: the treated share of strong failures (`fallback`,
+  `refusal`, `schema_invalid`, `tool_call_invalid`, `max_tokens`,
+  `stream_error`) is above the control share plus 0.05. With too few control
+  calls, the limit is an absolute 0.15.
+* **Parity**: the treated mean quality is more than 0.05 below the control
+  mean. With too few control calls, the reference is the recommendation's
+  projected quality for the current route.
+
+Rollback restores the last good snapshot. A snapshot is good once it has
+served `promote_after` treated calls (default 200) without a breach. With no
+good snapshot, the router falls back to the route policy's own decisions. A
+rolled-back version is never loaded again. Every threshold is in
+`GuardConfig`.
+
+### Freezing on drift and poisoning
+
+Any of these heuristics freezes learning:
+
+* **Drift**: over the last `window` calls of a group, the mean context
+  vector moves more than 0.25 from the mean of the rows the snapshot was
+  trained on, on any feature.
+* **Poisoning**, checked when a new snapshot is loaded over the active one:
+  * an arm's scored-row count grew more than 5× in one warm-started retrain;
+  * an arm's fitted quality at the group's training context moved more than
+    0.2.
+
+While learning is frozen, there is no exploration, no new snapshot and no
+`retrain()`. The active snapshot keeps serving, and the rollback guard keeps
+running. A person calls `learner.unfreeze()` after reviewing
+`learner.freeze_reasons`.
+
+### Retraining
+
+`learner.retrain(tuples, route_policy)` trains on new tuples, warm-started
+from the active snapshot. It then loads the result through the same checks.
+Schedule it yourself. A periodic retrain that runs on its own, and a
+RouteLLM-style cold-start prior, are not built yet.
+
+## Limits
+
+* Offline only: retrain and re-upload to pick up new traffic.
+* The current route is the model most of a group's logged traffic used.
+  A model with too few scored rows is listed in `unevaluated_candidates`;
+  shadow evals are the way to give it data.
+* Realised savings match events by the asset's use case and the event's
+  `sensitivity_level`, so they need both to be reported.
+* Tuples from `ps-teardown` carry no quality score unless you join feedback,
+  shadow-eval results or eval scores; without them the learner recommends
+  nothing.

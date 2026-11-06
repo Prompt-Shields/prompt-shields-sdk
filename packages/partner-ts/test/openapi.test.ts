@@ -205,6 +205,21 @@ const UNMAPPED_SCHEMAS = new Set([
   'RiskMappingReview',
   'RiskReviewRequest',
   'RiskReviewHistory',
+  // MCP observability (#77): not wrapped yet; call them with client.send().
+  'McpTool',
+  'McpUsageDay',
+  'McpPageMeta',
+  'McpToolPage',
+  'McpUsagePage',
+  // Routing learner snapshots and recommendation review (#47, #48): not
+  // wrapped yet; call them with client.send().
+  'LearnerSnapshotSummary',
+  'LearnerSnapshot',
+  'LearnerArmProjection',
+  'LearnerRealised',
+  'LearnerRecommendation',
+  'LearnerReviewRequest',
+  'LearnerSnapshotUploadResult',
   // Spend anomaly alerts (#30): not wrapped yet; call them with
   // client.send(). The thresholds are operator tenant settings.
   'SpendAlert',
@@ -324,6 +339,11 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /api/v1/admin/connectors/leanix/status': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/servicenow/sync': NOT_WRAPPED,
   'GET /api/v1/admin/connectors/servicenow/status': NOT_WRAPPED,
+  'POST /api/v1/admin/connectors/sentinel/sync': NOT_WRAPPED,
+  'GET /api/v1/admin/connectors/sentinel/status': NOT_WRAPPED,
+  // SIEM export (#32): NDJSON for log forwarders, not wrapped.
+  'GET /partner/v1/siem/calls': NOT_WRAPPED,
+  'GET /partner/v1/siem/audit': NOT_WRAPPED,
   'GET /api/v1/operator/tenants': NOT_WRAPPED,
   'POST /api/v1/operator/tenants': NOT_WRAPPED,
   'GET /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,
@@ -337,6 +357,19 @@ const OPERATIONS: Record<string, Operation> = {
   // Call feedback (#43) is sent by the Python SDK and the gateway with the
   // tenant ingest key, never by a partner.
   'POST /ingest/feedback': NOT_WRAPPED,
+  // MCP observability (#77): not wrapped yet. The registry route takes the
+  // tenant ingest key.
+  'GET /partner/v1/mcp/tools': NOT_WRAPPED,
+  'GET /partner/v1/mcp/usage': NOT_WRAPPED,
+  'GET /api/v1/registry/mcp-tools': NOT_WRAPPED,
+  // Learner snapshots are uploaded by the Python SDK's ps-learn with the
+  // tenant ingest key; the learner routes are not wrapped yet (#47, #48).
+  'POST /ingest/learner-snapshots': NOT_WRAPPED,
+  'GET /partner/v1/learner/snapshots': NOT_WRAPPED,
+  'GET /partner/v1/learner/snapshots/{learner_version}': NOT_WRAPPED,
+  'GET /partner/v1/learner/recommendations': NOT_WRAPPED,
+  'GET /partner/v1/learner/recommendations/{rec_id}': NOT_WRAPPED,
+  'POST /partner/v1/learner/recommendations/{rec_id}/review': NOT_WRAPPED,
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

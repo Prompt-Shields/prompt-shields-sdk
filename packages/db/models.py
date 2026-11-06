@@ -190,6 +190,16 @@ class AIUsageEvent(Base):
     baseline_id = Column(Text)
     # Per-call id from the SDK or gateway (#43): what call feedback names.
     call_id = Column(Text)
+    # Spend budgets (#28 gateway, #29 SDK; schemas/budget/README.md), all
+    # optional. budget_state: ok, warn, unknown or exceeded; budget_id: the
+    # budget that set it; budget_action: none, downgraded or blocked.
+    budget_state = Column(Text)
+    budget_id = Column(Text)
+    budget_action = Column(Text)
+    # Gateway cache (#33): the lower-cased cache status (hit, semantic hit,
+    # miss, ...) and, on a hit, the upstream cost in USD the hit avoided.
+    cache_status = Column(Text)
+    cache_saved_cost = Column(Numeric(10, 6))
     # Implicit outcome signals (#44): sorted list of known class names
     # ("max_tokens", "refusal", ...; collector.ingest.OUTCOME_SIGNAL_CLASSES),
     # [] when measured and nothing happened, NULL when not reported; and the
@@ -361,9 +371,11 @@ class McpToolUsage(Base):
     spans) or the server's ``service.name`` (server spans); "unknown" when
     none is known. ``source`` is ``sdk``, ``otel``, ``gateway`` or ``scan``.
     ``calling_service`` and ``environment`` are "" when not reported, so the
-    upsert key has no NULLs. Separate from ``ai_assets`` on purpose: an MCP
-    server is not an AI model. Rows not seen within the tenant's retention
-    period are purged (collector/retention.py).
+    upsert key has no NULLs. Usage is kept apart from ``ai_assets`` (an MCP
+    server is not an AI model), but each named server is also registered as
+    an asset (vendor ``mcp``, model = ``server_name``) so it has an owner and
+    a lifecycle (#77, collector/mcp_usage.py). Rows not seen within the
+    tenant's retention period are purged (collector/retention.py).
     """
 
     __tablename__ = "mcp_tool_usage"
@@ -400,6 +412,40 @@ class McpToolUsage(Base):
     )
 
 
+class McpToolUsageDaily(Base):
+    """MCP tool-call metering (#77): one row per (tenant, UTC day, source,
+    server, tool) with counts, latency and bytes. Names and numbers only.
+    ``bytes_count`` is how many calls reported bytes (the gateway does), so
+    a mean can be taken. Rows older than the retention period are purged.
+    """
+
+    __tablename__ = "mcp_tool_usage_daily"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    day = Column(Date, nullable=False)
+    source = Column(Text, nullable=False)
+    server_name = Column(Text, nullable=False)
+    tool_name = Column(Text, nullable=False)
+    call_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    error_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    blocked_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    latency_ms_total = Column(BigInteger, nullable=False, default=0, server_default="0")
+    latency_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    request_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    response_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    bytes_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (
+        Index(
+            "ux_mcp_tool_usage_daily_key",
+            "tenant_id", "day", "source", "server_name", "tool_name",
+            unique=True,
+        ),
+        Index("ix_mcp_tool_usage_daily_tenant_day", "tenant_id", "day"),
+    )
+
+
 class CallFeedback(Base):
     """Explicit feedback on one LLM call (#43), for the routing learner.
 
@@ -428,6 +474,81 @@ class CallFeedback(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "call_id", name="ux_call_feedback_call"),
         Index("ix_call_feedback_tenant_updated", "tenant_id", "updated_at"),
+    )
+
+
+class LearnerSnapshot(Base):
+    """One versioned snapshot of a tenant's routing learner (#47, #48).
+
+    Uploaded by the SDK's offline learner (``ps-learn``, recommend mode) to
+    ``POST /ingest/learner-snapshots``. ``learner_version`` is derived from
+    the content (SHA-256), so a snapshot is reproducible and checked on
+    upload; one row per (tenant, learner_version). ``snapshot`` keeps the
+    whole document: config, per-arm statistics over local prompt features
+    (aggregates only, never prompt text or embeddings) and recommendations.
+    See collector/learner.py.
+    """
+
+    __tablename__ = "learner_snapshots"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    learner_version = Column(Text, nullable=False)
+    parent_version = Column(Text)
+    mode = Column(Text, nullable=False)  # recommend
+    algorithm = Column(Text, nullable=False)
+    feature_schema = Column(Text)
+    policy_version = Column(Text)
+    data_fingerprint = Column(Text, nullable=False)
+    training_rows = Column(Integer, nullable=False)
+    scored_rows = Column(Integer, nullable=False)
+    snapshot = Column(JSONB, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "learner_version", name="ux_learner_snapshots_version"),
+        Index("ix_learner_snapshots_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class LearnerRecommendation(Base):
+    """A route change the learner proposes for one (use case, sensitivity),
+    with its off-policy projection, and the human decision on it (#48).
+
+    ``status``: pending -> accepted | rejected (by a person, with their name
+    and an optional comment), or superseded when a newer snapshot proposes
+    something for the same group before anyone decided. Accepting never
+    changes routing: the reviewer edits the route policy. Realised savings
+    after acceptance are computed on read from ``ai_usage_events``.
+    """
+
+    __tablename__ = "learner_recommendations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    snapshot_id = Column(
+        UUID(as_uuid=True), ForeignKey("learner_snapshots.id"), nullable=False
+    )
+    learner_version = Column(Text, nullable=False)
+    use_case = Column(Text)
+    sensitivity_level = Column(Text, nullable=False)
+    current_model = Column(Text, nullable=False)
+    recommended_model = Column(Text, nullable=False)
+    candidates = Column(JSONB, nullable=False)
+    projection = Column(JSONB, nullable=False)
+    status = Column(Text, nullable=False, default="pending", server_default="pending")
+    reviewed_by = Column(Text)
+    reviewed_at = Column(TIMESTAMP(timezone=True))
+    review_comment = Column(Text)
+    reviewer_actor_type = Column(Text)
+    reviewer_partner_id = Column(
+        UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True
+    )
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_learner_recommendations_tenant_status", "tenant_id", "status"),
+        Index("ix_learner_recommendations_snapshot", "snapshot_id"),
     )
 
 

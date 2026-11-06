@@ -162,9 +162,9 @@ variable names**. For each component the chart uses the first of:
 
 | Component | Keys |
 |---|---|
-| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
+| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_SENTINEL_EXPORT`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
-| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
+| `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `PS_BUDGET_REDIS_URL`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
 
 ExternalSecret example (External Secrets Operator with Vault or AWS Secrets
 Manager behind a `ClusterSecretStore`):
@@ -215,7 +215,8 @@ both 0 by default). Run each in exactly one place, not in every API replica:
 
 Add per-tenant connector syncs as extra entries, e.g.
 `args: ["python", "-m", "collector.leanix", "--tenant", "<uuid>"]` (also
-`collector.servicenow`, `collector.cloud_inventory`). One-off maintenance
+`collector.servicenow`, `collector.cloud_inventory`; the Microsoft Sentinel
+export takes `python -m collector.sentinel_export --all-tenants`). One-off maintenance
 (`collector.reembed`, `collector.dedup`, `collector.webhooks rekey`) is best
 run with `kubectl create job --from=cronjob/...` or a temporary pod. The
 chart refuses to render webhook delivery or the provider pull in both the
@@ -427,6 +428,9 @@ can follow the images if those change.
 | `gateway.oidc.jwksUrl` / `.algorithms` / `.clockSkewSeconds` | discovery / asymmetric RS, PS, ES / `60` | `PS_OIDC_JWKS_URL` / `PS_OIDC_ALGORITHMS` / `PS_OIDC_CLOCK_SKEW_SECONDS` |
 | `gateway.oidc.groupsClaim` / `.telemetrySubject` | `groups` / `hash` | `PS_OIDC_GROUPS_CLAIM` / `PS_OIDC_TELEMETRY_SUBJECT` |
 | `gateway.oidc.policy` | `{}` (authentication only) | `PS_OIDC_POLICY` as JSON: groups to provider/model allowlists and rate limits (per replica) |
+| `gateway.budgets.enabled` / `.budgets` | `false` / `[]` | `PS_BUDGETS`: spend budgets (`budget.v1`, [schema](../../schemas/budget/)) per business unit, use case, owner or deployment, by day, week or month; `warn`, `downgrade` (to a cheaper model that still meets the data policy) or `block` (HTTP 429) |
+| `gateway.budgets.redis.url` / `.redis.existingSecret` | `""` / `{}` | `PS_BUDGET_REDIS_URL`: the Redis every replica (and the SDK) shares spend through (a Secret key for a URL with a password). Without one each replica counts its own spend |
+| `gateway.budgets.namespace` / `.onStoreError` / `.reservationTtlMs` | `default` / `open` / `900000` | The document's `namespace` and `on_store_error` (`closed`: block budgets answer 503 while Redis is unreachable) / `PS_BUDGET_RESERVATION_TTL_MS` |
 | `collector.rlsRequired` | `true` | `PS_RLS_REQUIRED` |
 | `collector.runWorkers.envName` / `.value` | `PS_COLLECTOR_RUN_WORKERS` / `""` (auto) | Background loops in API pods; auto = `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob |
 | `collector.metrics.enabled` / `.envName` / `.path` | `false` / `PS_COLLECTOR_METRICS_ENABLED` / `/metrics` | Collector metrics |
@@ -519,6 +523,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_PROVIDER_ADMIN_KEYS` (secret) | — | Operator-held provider admin keys per tenant (JSON) |
 | `PS_LEANIX`, `PS_LEANIX_ALLOWED_HOST_SUFFIXES` | — | LeanIX connector (JSON config is secret) |
 | `PS_SERVICENOW`, `PS_SERVICENOW_ALLOWED_HOST_SUFFIXES` | — | ServiceNow connector |
+| `PS_SENTINEL_EXPORT` | — | Microsoft Sentinel / Defender XDR export (Logs Ingestion API), per tenant; secret |
 | `PS_CLOUD_INVENTORY` (secret) | — | Cloud inventory connector |
 | `HOME`, `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED` (*chart*) | `/tmp`, `1`, `1` | Read-only root filesystem |
 

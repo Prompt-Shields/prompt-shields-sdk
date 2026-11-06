@@ -480,6 +480,20 @@ def classify_sensitivity(
     return level, source
 
 
+def anonymise_then_route_allowed(policy: Mapping[str, Any], level: str | None) -> bool:
+    """True when ``sensitivity.anonymise_then_route`` lists ``level``.
+
+    A pseudonymised call (``ShieldsRouter(pseudonymise=True)``) whose detected
+    level is listed may be routed at the level of what is left after
+    pseudonymisation. Default: no level is listed, so the detected level
+    applies. The gateway does not pseudonymise and ignores the field.
+    """
+    if level is None:
+        return False
+    allowed = (policy.get("sensitivity") or {}).get("anonymise_then_route") or ()
+    return level in allowed
+
+
 def data_policy_rule(
     policy: Mapping[str, Any], level: str | None
 ) -> Mapping[str, Any] | None:
@@ -528,6 +542,59 @@ def _group_rank(policy: Mapping[str, Any], group: str) -> int | None:
     return order.index(group) if group in order else None
 
 
+def use_case_bar(
+    policy: Mapping[str, Any], use_case: str | None
+) -> Mapping[str, Any] | None:
+    """The ``use_cases`` entry (quality bar) for ``use_case``, if any."""
+    if use_case is None:
+        return None
+    return (policy.get("use_cases") or {}).get(use_case)
+
+
+def _eligible_models(bar: Mapping[str, Any] | None) -> set[str] | None:
+    """A bar's ``eligible_models`` when it has an ``eval_set``, else None."""
+    if bar and bar.get("eval_set"):
+        return set(bar.get("eligible_models") or ())
+    return None
+
+
+def policy_safe_tiers(
+    policy: Mapping[str, Any], level: str | None, use_case: str | None
+) -> list[tuple[str, Mapping[str, Any]]]:
+    """Every ``(group, tier)`` the whole policy allows for a call at
+    sensitivity ``level`` of ``use_case``, whichever group a strategy picks.
+
+    A tier is in the set when it meets the level's ``data_policy`` rule
+    (``tier_complies``) and, when the use case has a quality bar, is in its
+    ``eligible_models`` (with an ``eval_set``) and in a group at or above its
+    ``min_group`` by ``group_order`` (a group outside ``group_order`` is then
+    left out). Tiers without a ``provider`` or ``model`` are left out, so a
+    bare model id never admits a vendor. Groups in policy order.
+
+    This is the set the routing learner may re-rank (``prompt_shields.learner``
+    for its arms, ``prompt_shields.learner_auto`` in the router): it never
+    widens what ``resolve_policy_route`` would allow.
+    """
+    rule = data_policy_rule(policy, level)
+    bar = use_case_bar(policy, use_case)
+    eligible = _eligible_models(bar)
+    min_rank = _group_rank(policy, bar["min_group"]) if bar and bar.get("min_group") else None
+    out = []
+    for group in _js_keys(policy.get("groups") or {}):
+        if min_rank is not None:
+            rank = _group_rank(policy, group)
+            if rank is None or rank < min_rank:
+                continue
+        for tier in _tiers(policy, group):
+            if not isinstance(tier, Mapping) or not tier.get("provider") or not tier.get("model"):
+                continue
+            if eligible is not None and tier["model"] not in eligible:
+                continue
+            if tier_complies(tier, rule):
+                out.append((group, tier))
+    return out
+
+
 def resolve_policy_route(req: RouteRequest, policy: Mapping[str, Any]) -> RouteDecision:
     """Decide the model for one call under the whole route-policy.v1 ``policy``.
 
@@ -557,10 +624,8 @@ def resolve_policy_route(req: RouteRequest, policy: Mapping[str, Any]) -> RouteD
 
     bar = None
     if req.explicit_group is None and req.use_case is not None:
-        bar = (policy.get("use_cases") or {}).get(req.use_case)
-    eligible: set[str] | None = None
-    if bar and bar.get("eval_set"):
-        eligible = set(bar.get("eligible_models") or ())
+        bar = use_case_bar(policy, req.use_case)
+    eligible = _eligible_models(bar)
 
     def allow(tier: Mapping[str, Any]) -> bool:
         if eligible is not None and tier["model"] not in eligible:

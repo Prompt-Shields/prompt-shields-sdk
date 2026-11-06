@@ -20,13 +20,16 @@ from collector import (
     admin_api,
     cloud_inventory,
     leanix,
+    learner,
     lifecycle,
+    mcp_usage,
     operator_admin,
     partner_admin,
     provider_credentials_api,
     provider_usage_admin,
     risk_reviews,
     risk_suggestions,
+    sentinel_export,
     servicenow,
     tenant_keys,
     webhook_admin,
@@ -143,6 +146,7 @@ def test_webhook_schemas_match_serializers():
         ("UpdateTenantRequest", operator_admin.UpdateTenantBody),
         ("BootstrapAdminTokenRequest", operator_admin.BootstrapAdminTokenBody),
         ("RiskReviewRequest", risk_reviews.ReviewBody),
+        ("LearnerReviewRequest", learner.LearnerReviewBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -188,6 +192,50 @@ def test_risk_review_schemas_match_serializers():
     assert set(SCHEMAS["RiskMappingReview"]["required"]) == keys
 
 
+def test_learner_schemas_match_serializers():
+    now = datetime.now(UTC)
+    snap = SimpleNamespace(
+        id=uuid.uuid4(),
+        learner_version="lv1-0123456789abcdef",
+        parent_version=None,
+        mode="recommend",
+        algorithm="linear-thompson.v1",
+        feature_schema="ps-prompt-features.v1",
+        policy_version=None,
+        data_fingerprint="0" * 64,
+        training_rows=1,
+        scored_rows=1,
+        snapshot={"recommendations": []},
+        created_at=now,
+    )
+    summary = set(learner.serialize_snapshot(snap))
+    assert _props("LearnerSnapshotSummary") == summary
+    assert set(SCHEMAS["LearnerSnapshotSummary"]["required"]) == summary
+    assert _props("LearnerSnapshot") == set(learner.serialize_snapshot(snap, full=True))
+    rec = SimpleNamespace(
+        id=uuid.uuid4(),
+        snapshot_id=uuid.uuid4(),
+        learner_version="lv1-0123456789abcdef",
+        use_case="support",
+        sensitivity_level="internal",
+        current_model="openai:gpt-4o",
+        recommended_model="mistral:mistral-small",
+        candidates=["mistral:mistral-small"],
+        projection={},
+        status="accepted",
+        reviewed_by="a@example.com",
+        reviewed_at=now,
+        review_comment=None,
+        reviewer_actor_type="partner",
+        created_at=now,
+    )
+    keys = set(learner.serialize_recommendation(rec))
+    assert _props("LearnerRecommendation") == keys
+    assert set(SCHEMAS["LearnerRecommendation"]["required"]) == keys
+    realised_keys = set(SCHEMAS["LearnerRealised"]["required"])
+    assert _props("LearnerRealised") == realised_keys
+
+
 def test_provider_credential_schemas_match_serializers():
     now = datetime.now(UTC)
     cred = SimpleNamespace(
@@ -224,6 +272,27 @@ def test_provider_credential_partner_routes_need_the_scope():
                 }, (method, path)
 
 
+def test_mcp_schemas_match_serializers():
+    now = datetime.now(UTC)
+    asset = {"x": ("id", "owner")}
+    usage = SimpleNamespace(
+        server_name="x", tool_name="t", source="gateway", calling_service="",
+        environment="", transport=None, call_count=1, error_count=0,
+        blocked_count=0, user_hash="", user_group="", latency_ms_total=0,
+        latency_count=0, first_seen=now, last_seen=now,
+    )
+    assert _props("McpTool") == set(mcp_usage._with_asset(mcp_usage._usage_dict(usage), asset))
+    daily = SimpleNamespace(
+        day=now.date(), source="gateway", server_name="x", tool_name="t",
+        call_count=1, error_count=0, blocked_count=0, latency_ms_total=0,
+        latency_count=0, request_bytes=0, response_bytes=0, bytes_count=0,
+    )
+    assert _props("McpUsageDay") == set(mcp_usage._with_asset(mcp_usage._daily_dict(daily), asset))
+    for path in ("/partner/v1/mcp/tools", "/partner/v1/mcp/usage"):
+        assert SPEC["paths"][path]["get"]["security"][0] == {"OAuth2": ["mcp:read"]}
+    assert "/api/v1/registry/mcp-tools" in SPEC["paths"]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Tenant admin and operator routes
 # ──────────────────────────────────────────────────────────────────────
@@ -243,6 +312,7 @@ ADMIN_ROUTERS = (
     cloud_inventory.router,
     leanix.router,
     servicenow.router,
+    sentinel_export.router,
     operator_admin.router,
 )
 

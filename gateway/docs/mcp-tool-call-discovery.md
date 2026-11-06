@@ -1,12 +1,52 @@
 # Decision record: MCP tool-call discovery (#63)
 
-|                    |                                                                                                                                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status             | **Proposed.** Needs a human decision on scope (see _Decision needed_).                                                                                                      |
-| Date               | 2026-10-15                                                                                                                                                                  |
-| Issue              | #63, "[Upstream] Evaluate MCP Gateway for MCP tool-call discovery"                                                                                                          |
-| Upstream evaluated | Portkey `2.0.0` at [`8febc1d`](https://github.com/Portkey-AI/gateway/commit/8febc1d), `src/mcp/`                                                                            |
-| Recommendation     | Do **not** port the upstream MCP Gateway now. Discover MCP usage by observing it: the SDK, config scanning and the collector. The SDK part has started (see _First slice_). |
+|                    |                                                                                                                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Status             | **Decided.** Discovery is in scope, observe-only first (Phase 0). Upstream `src/mcp/` is **not** ported. Our own enforcing proxy (option B) was approved on 2026-10-20 as Phase 1. See _Decision log_. |
+| Date               | 2026-10-15. Updated 2026-11-06 (_Decision log_, _Plan status_, _Upstream re-check_).                                                                                                                   |
+| Issue              | #63, "[Upstream] Evaluate MCP Gateway for MCP tool-call discovery"                                                                                                                                     |
+| Upstream evaluated | Portkey `2.0.0` at [`8febc1d`](https://github.com/Portkey-AI/gateway/commit/8febc1d), `src/mcp/`. Re-checked 2026-11-06: unchanged.                                                                    |
+| Recommendation     | Do **not** port the upstream MCP Gateway. Discover MCP usage by observing it (SDK, OTel ingest, the gateway's own proxy) and enforce policy in our own proxy.                                          |
+
+## Decision log
+
+| Date       | Question (see _Decision needed_)               | Answer                                                                                                                                                                                                                                                                          |
+| ---------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-15 | Port upstream's MCP Gateway?                   | No. This record recommends against it. Nothing since then has changed that (see _Upstream re-check_).                                                                                                                                                                           |
+| 2026-10-20 | 2. Is MCP enforcement (allowlisting) in scope? | **Yes, with our own proxy (option B).** The user approved it. Phase 1 shipped in #222 and #235 (see _Enforcement approved_).                                                                                                                                                    |
+| 2026-10-20 | 1. Is MCP tool-usage discovery in scope?       | **Yes, observe-only.** The approved proxy emits `mcp_tool_call` discovery events by design, and the observe-only Phase 0 (#214, #219) was merged before it. No separate written statement says "discovery is in scope". If this reading is wrong, change this row and _Status_. |
+
+What the issue proposed, and what was decided instead:
+
+| Issue proposal                                     | Decision                                                                                                                                                                                |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Port upstream's proxy and session layer            | Not ported. `gateway/src/mcp/` is our own code on the main app (`/v1/mcp/:server`). It shares no code with upstream (FORK_NOTICE, "Not ported").                                        |
+| Port `emitLog`                                     | Not ported. Upstream's records tool arguments and results. Ours (`gateway/src/mcp/telemetry.ts`) sends names, outcome and latency only.                                                 |
+| Skip control plane, user access and OAuth at first | Agreed. Client auth is `PS_MCP_TOKEN`, or the gateway OIDC identity with per-group MCP policy (#235). Inbound OAuth 2.1 (RFC 9728) is still open (`mcp-proxy.md`, "Not in this slice"). |
+| Emit an `mcp_tool_call` event to the collector     | Done. `POST /ingest/mcp` writes to `mcp_tool_usage` (migration `020`). The gateway, the SDK and OTel spans all feed it, tagged by `source`.                                             |
+
+The issue asks for a list of ported `src/mcp/*` files if the answer is GO. Because nothing of upstream's `src/mcp/` is ported, that list is empty. The file set a port _would_ need, if one is approved later, is under _Recommendation_. The collector schema change is under _Collector schema change_, and it shipped as described in _Phase 0 implemented_.
+
+## Plan status (2026-11-06)
+
+| Item                                                                                                                  | Option     | State                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------- |
+| Provider-hosted MCP calls (`mcp_call`, `mcp_tool_use`) in `tool_calls_used`                                           | C1         | Done (#158)                                                                                                     |
+| Python `mcp.ClientSession.call_tool` instrumentation, batched off the call path                                       | C2         | Done (#214, #219)                                                                                               |
+| `mcp_tool_usage` table, `POST /ingest/mcp`, `GET /api/v1/registry/mcp-tools`                                          | schema     | Done (#214)                                                                                                     |
+| MCP `tools/call` spans on the OTLP receiver (`source: "otel"`)                                                        | D          | Done (#214)                                                                                                     |
+| Enforcing proxy: allow/deny lists, definition pinning, guardrails, no token passthrough                               | B          | Done (#222)                                                                                                     |
+| Per-group MCP policy, user attribution (`user_id` hash, `user_group`), `blocked` outcome                              | B          | Done (#235)                                                                                                     |
+| Partner API scope `mcp:read`, daily metering, gateway MCP OTel spans, MCP servers as assets                           | schema / B | In review (#276, for #77)                                                                                       |
+| MCP config inventory in `ps-scan` (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `claude_desktop_config.json`) | E          | Open. `prompt_shields/scan.py` does not read MCP configs yet                                                    |
+| TypeScript `@modelcontextprotocol/sdk` `Client.callTool` instrumentation                                              | C2         | Open                                                                                                            |
+| AI-BOM `services` entries for MCP servers                                                                             | schema     | Open. With #276, MCP servers become `ai_assets` rows (vendor `mcp`), but no CycloneDX `services` entry is built |
+| Inbound OAuth 2.1, per-consumer rate limits, legacy HTTP+SSE upstreams, Workers support                               | B          | Open. Listed in `mcp-proxy.md` ("Not in this slice") and as F8 in `upstream-triage-2026-11.md`                  |
+
+## Upstream re-check (2026-11-06)
+
+- OSS `Portkey-AI/gateway`: the `2.0.0` branch is still at `8febc1d`, `main` is still at `669825c`, and the newest tag is still `v1.15.2`. This was checked with `git ls-remote` on 2026-11-06. The GitHub REST API for that repository was not reachable from this session, so file contents were not re-read. The `src/mcp/` analysis below is from `8febc1d`, which is still the branch head.
+- Enterprise 2.29.0 to 2.33.0: the MCP entries (SSE-only servers, disabled tools past 100, `traceparent`, per-integration timeout, fail-open access-policy recovery, upstream OAuth client credentials, access policies GA) are triaged in [`upstream-triage-2026-11.md`](upstream-triage-2026-11.md). Each is already covered by our proxy, belongs to upstream's control plane, or is a follow-up under F8. None of them is a reason to port upstream's MCP app.
 
 ## Question
 
@@ -113,7 +153,7 @@ Do not overload AI assets. Add a separate aggregate, and keep `tool_calls_used` 
 - Ingest: either `POST /ingest/mcp` with `{events: [{server_name, tool_name, transport, outcome, latency_ms, calling_service, ...}]}`, or an `event_type: "mcp_tool_call"` discriminator on `/ingest/events` that skips `find_or_create_asset`. Prefer the separate endpoint: today's `IngestEvent.vendor` is required and always creates an asset.
 - Read side: a registry endpoint and a Partner API scope (`mcp:read`, added to `SCOPES` in `collector/partner_scopes.py`), plus AI-BOM `services` entries for MCP servers.
 
-## Decision needed (human)
+## Decision needed (human, answered: see _Decision log_)
 
 1. **Is MCP tool-usage discovery in product scope?** The recommendation assumes yes, as observation only.
 2. **Is MCP enforcement (allowlisting servers and tools) in scope?** If yes, only options A/B can provide it, and porting the upstream gateway should be reconsidered then, with its auth layer replaced. If no, do not port it.
@@ -131,7 +171,7 @@ If the gateway port is approved later, the minimum file set is the proxy + sessi
 
 ## Phase 0 implemented
 
-The observe-only work (option C part 2, option D and the collector schema above) is implemented in the PR that adds `020_mcp_tool_usage.py`. It does not change the status of this record: the scope questions under _Decision needed_ are still open. What it adds:
+The observe-only work (option C part 2, option D and the collector schema above) is implemented in the PR that adds `020_mcp_tool_usage.py`. When it merged, the scope questions under _Decision needed_ were still open (they are answered in _Decision log_). What it adds:
 
 - SDK: `instrument()` wraps `mcp.ClientSession.call_tool` (and `initialize`, only to remember `serverInfo.name` on mcp 1.x) and posts names, outcome and latency to `POST /ingest/mcp`. `list_tools` is not wrapped.
 - Collector: `mcp_tool_usage`, as specified above, plus `latency_ms_total`/`latency_count` and `environment` in the key. `POST /ingest/mcp`, MCP `tools/call` spans on the OTLP receiver (`source: "otel"`), and a tenant read route `GET /api/v1/registry/mcp-tools`.
@@ -141,8 +181,8 @@ The observe-only work (option C part 2, option D and the collector schema above)
 
 The user approved building our own enforcing MCP proxy (option B above, the
 "thin MCP proxy", as Phase 1 of the plan) as the next step. This answers
-question 2 under _Decision needed_ for the proxy; the _Status_ field above is
-left for the user to update.
+question 2 under _Decision needed_ for the proxy. The _Status_ field was updated
+on 2026-11-06 (see _Decision log_).
 
 The first slice is implemented in `src/mcp/` and documented in
 [`mcp-proxy.md`](mcp-proxy.md):
