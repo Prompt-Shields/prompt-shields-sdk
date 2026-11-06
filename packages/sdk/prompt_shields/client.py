@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from prompt_shields.budgets import BudgetStore, budget_event_hook, make_enforcer
 from prompt_shields.feedback import (
     attach_call_id,
     call_id_headers,
@@ -108,10 +109,16 @@ class ShieldsClient:
         # Env fallback: PS_ATLAS_URL / PS_ATLAS_API_KEY. Inactive unless BOTH set.
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
+        # Spend budgets (budget.v1, #29): a document (mapping or path) or a
+        # BudgetEnforcer. budget_store defaults to an in-process store,
+        # which is per-process; see prompt_shields.budgets.
+        budgets: Any = None,
+        budget_store: BudgetStore | None = None,
         **provider_kwargs,
     ):
         self._vendor = vendor
         self._adapter = get_adapter(vendor)
+        self._budgets = make_enforcer(budgets, budget_store)
         self._ps_api_key = ps_api_key
         self._ps_collector_url = ps_collector_url
         self._telemetry = TelemetrySender(ps_collector_url, ps_api_key)
@@ -357,6 +364,27 @@ class _CompletionsNamespace:
             and upstream_accepts_stream_options(self._parent._upstream)
         ):
             hide_usage_chunk = request_openai_stream_usage(kwargs)
+
+        # Spend budgets (#29): refuse (block) or switch to downgrade_model
+        # (downgrade) before anything is sent; the cost is recorded from
+        # the telemetry event.
+        budgets = self._parent._budgets
+        if budgets is not None:
+            attrs = {k: self._parent._metadata.get(k)
+                     for k in ("business_unit", "use_case", "owner")}
+            check = budgets.check(attrs)
+            budgets.raise_if_blocked(check)
+            requested, budget_action = None, "none"
+            if (
+                check.action == "downgrade"
+                and check.downgrade_model
+                and check.downgrade_model != model
+            ):
+                requested, model = model, check.downgrade_model
+                budget_action = "downgraded"
+            _event_hook = budget_event_hook(
+                _event_hook, budgets, check, budget_action, requested
+            )
 
         notify_prompt_features(
             self._parent._on_prompt_features,

@@ -310,6 +310,30 @@ except PolicyViolation:
 
 The response is in the OpenAI chat-completions shape whichever provider served it, with the provider's own object as `resp.raw`. `mode="gateway"` sends the call to the gateway with the hints as headers instead.
 
+### Spend budgets
+
+`ShieldsRouter` (local mode) and the plain clients take `budgets=`, a `budget.v1` document ([`schemas/budget/`](schemas/budget/README.md)): a USD limit per business unit, use case, owner (team) or everything, per UTC day, ISO week or month, with mode `warn`, `downgrade` or `block`.
+
+```python
+from prompt_shields import BudgetExceeded, RedisBudgetStore, ShieldsRouter
+
+client = ShieldsRouter(
+    ...,
+    use_case="support-bot",
+    budgets={"schema_version": "budget.v1", "budgets": [
+        {"id": "support-daily", "scope": "use_case", "subject": "support-bot",
+         "window": "day", "limit_usd": 50, "mode": "downgrade"},
+    ]},
+    budget_store=RedisBudgetStore(url="redis://redis:6379/0"),  # optional
+)
+```
+
+- **block**: once spend reaches the limit, calls raise `BudgetExceeded` and nothing is sent.
+- **downgrade**: the router clamps each call to the remaining budget, like `max_cost` and within the data policy; once exhausted, it serves the cheapest allowed model. A plain client switches to the budget's `downgrade_model`.
+- **warn**: the call is never changed.
+
+Events carry `budget_state` (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`; `resp.ps.budget` has the same. **The default store is per process**: each worker, replica or pod counts on its own and a restart resets it, so N processes can together spend N times a limit. `RedisBudgetStore` (`pip install 'prompt-shields[optimizer-redis]'`) shares counters across processes, and with the gateway when it uses the same Redis and namespace. If the store cannot be read, calls go ahead (`on_store_error: "open"`, the default) with `budget_state: "unknown"`; set `"closed"` to refuse or downgrade instead. Spend is recorded after each call, so calls running when the limit is reached can overshoot it, and a plain client's call with no known price (`cost: null`) is not counted.
+
 ### What routing does not do yet
 
 - **No failover (#21).** `prompt_shields.failover` has the engine and circuit breaker, but `ShieldsRouter` does not use it: each call makes one attempt, and a provider error is raised even when another allowed model exists.
