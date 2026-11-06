@@ -871,6 +871,11 @@ export const getBedrockFoundationModel = async (
   return model;
 };
 
+// PS fork (#74): cross-region inference profile prefixes, including India
+// (`in.`) and GovCloud (`us-gov.`), which upstream did not strip.
+export const BEDROCK_PROFILE_PREFIX =
+  /^(us\.|us-gov\.|eu\.|apac\.|au\.|ca\.|jp\.|in\.|global\.)/;
+
 export const getBedrockModelWithoutRegion = (model: string) => {
-  return model.replace(/^(us\.|eu\.|apac\.|au\.|ca\.|jp\.|global\.)/, '');
+  return model.replace(BEDROCK_PROFILE_PREFIX, '');
 };

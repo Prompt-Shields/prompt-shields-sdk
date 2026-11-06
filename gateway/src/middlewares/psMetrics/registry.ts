@@ -59,6 +59,7 @@ export class Counter extends Metric {
   }
 }
 
+/** A value that can go up and down (PS fork #33: semantic cache size). */
 export class Gauge extends Metric {
   set(labels: Labels, value: number) {
     if (!Number.isFinite(value)) return;

@@ -32,8 +32,16 @@ def test_demo_route_runs_offline():
     assert "sensitivity restricted (pii_escalated)" in out
     assert "PolicyViolation" in out
     assert "requests sent to any provider: 0" in out
-    # Failover is not done yet (#21): one attempt, on the chosen provider only.
-    assert "requests per provider: {'scaleway': 1}" in out
-    # Savings and telemetry.
+    # Failover (#21): scaleway's 503 moves the call to the next compliant
+    # model; the US-hosted model in the same group is never tried.
+    assert "attempt scaleway/scaleway-small: 503 server_error" in out
+    assert "-> served by mistral-small-eu via mistral-eu (EEA)" in out
+    assert "fallback_chain ['server_error']" in out
+    assert "requests per provider: {'scaleway': 1, 'mistral-eu': 1}" in out
+    assert "'openai'" not in out.split("== 2. Failover ==")[1].split("== 3.")[0]
+    # Every compliant provider down: fail closed, nothing else is called.
+    assert "-> NoCompliantCandidate, fallback_chain ['server_error', 'server_error']" in out
+    # Savings and telemetry (the failover call's event carries the chain).
     assert "Saved " in out
-    assert "stub collector received 5 events" in out
+    assert "stub collector received 6 events" in out
+    assert "confidential  heuristic:simple fallback_chain ['server_error']" in out
