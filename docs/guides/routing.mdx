@@ -28,7 +28,7 @@ rely on routing for compliance.
 | Provider keys | Yours, kept in your process (BYOK) | Forwarded by the gateway |
 | Policy | Any `route-policy.v1` document you pass | The built-in default policy. A custom policy needs code (see [Limits](#limits)) |
 | Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
-| Failover between models | No, one attempt per call | Not from the router. Fallback targets in a gateway config still work, and are checked against the data policy |
+| Failover between models | No, one attempt per call | Yes, to the next compliant model in the routed group on a 5xx, 429 or timeout, with the request's own provider credentials. A gateway config with its own fallback or retry settings takes over instead |
 | Streaming | Refused (`RouterError`) | Yes |
 
 `ShieldsRouter(mode="gateway", ...)` sends the call to the gateway with your
@@ -273,10 +273,12 @@ against the code.
   nor the catalog verifies where a provider processes data. A wrong fact in
   the policy routes data to the wrong place. Check catalog facts
   (`sovereignty_checked`) before you copy them.
-- **No failover yet (#21).** The failover engine and circuit breaker exist
-  (`prompt_shields.failover` and the gateway's `psFailover`), but neither
-  `ShieldsRouter` nor the gateway router uses them. A `ShieldsRouter` call
-  makes one attempt. If that provider fails, the provider SDK's error is
+- **No failover in local mode yet (#21).** The gateway router fails over to
+  the next compliant model in the routed group (on a 5xx, 429 or timeout,
+  never after a stream started, never on a content-filter refusal), using the
+  request's own provider credentials for every attempt. The SDK's failover
+  engine (`prompt_shields.failover`) is not used by `ShieldsRouter` yet. A
+  `ShieldsRouter` call makes one attempt. If that provider fails, the provider SDK's error is
   raised, even when another allowed model exists. The provider SDK's own
   retries (`max_retries`) still go to the same provider.
 - **Local mode refuses streaming.** `stream=True` raises `RouterError` in
