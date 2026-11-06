@@ -241,6 +241,7 @@ def test_exploit_routes_to_the_recommendation_inside_the_safe_set():
     (ev,) = events
     assert ev["route_learner_mode"] == "exploit" and ev["route_propensity"] == 1.0
     assert ev["route_learner_version"] == snap["learner_version"]
+    assert ev["route_learner_frozen"] is False and r.learner.frozen is False
     assert ev["served_provider"] == "mistral-eu"
     # Not enabled for this use case, or a pinned model, or a hint: untouched.
     other = router.chat.completions.create(messages=_msg(), use_case="billing",
@@ -472,7 +473,7 @@ def test_drift_freezes_learning():
              "arms": {SCALEWAY: _arm(100, long_mean)}}
     al = _learner(snapshot=_snapshot([_recommend()], groups=[group]), guard=GUARD,
                   explore_rate=0.1)
-    router, _ = _router(learner=al)
+    router, events = _router(learner=al)
     for _ in range(5):
         router.chat.completions.create(messages=_msg(), use_case="support",
                                        data_classification="confidential")
@@ -486,6 +487,8 @@ def test_drift_freezes_learning():
     resp = router.chat.completions.create(messages=_msg(), use_case="support",
                                           data_classification="confidential")
     assert resp.ps.route.model == "mistral-small-eu"
+    assert resp.ps.route.learner.frozen and events[-1]["route_learner_frozen"] is True
+    assert events[-1]["route_propensity"] == 1.0  # no exploration while frozen
     al.unfreeze()
     assert not al.frozen
 

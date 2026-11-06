@@ -42,8 +42,9 @@ Per call (for an enabled use case):
 
 Each routed call records the choice (``resp.ps.route.learner``, the route
 reason suffix ``+learner-exploit`` / ``+learner-explore``, and the event's
-``route_learner_version``, ``route_learner_mode`` and ``route_propensity``),
-so later training can weight it by its propensity.
+``route_learner_version``, ``route_learner_mode``, ``route_propensity`` and
+``route_learner_frozen``), so later training can weight it by its
+propensity. The collector stores these fields on the usage event.
 
 The enablement gate
 -------------------
@@ -102,9 +103,8 @@ rollback guard keeps running.
   warm-started retrain, or an arm's fitted quality at the group's training
   context moved more than ``poison_quality_jump``.
 
-Not built yet (#34): the gateway, a periodic RouteLLM-style retrain as the
-cold-start prior (:meth:`AutoLearner.retrain` is the manual hook), and
-storing the propensity in the collector.
+Not built yet (#34): the gateway, and a periodic RouteLLM-style retrain as the
+cold-start prior (:meth:`AutoLearner.retrain` is the manual hook).
 """
 
 from __future__ import annotations
@@ -310,6 +310,8 @@ class LearnerChoice:
     learner_version: str | None
     use_case: str
     sensitivity: str
+    #: Learning was frozen when the call was routed (no exploration).
+    frozen: bool = False
 
 
 @dataclass
@@ -586,7 +588,7 @@ class AutoLearner:
                 model=pick, mode=mode, propensity=round(propensity, 6),
                 explore_rate=rate, policy_model=policy_model,
                 learner_version=self.active_version, use_case=use_case,
-                sensitivity=level,
+                sensitivity=level, frozen=self.frozen,
             )
 
     # --- observations --------------------------------------------------
