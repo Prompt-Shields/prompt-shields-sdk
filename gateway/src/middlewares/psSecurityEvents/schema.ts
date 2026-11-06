@@ -168,8 +168,11 @@ export interface PolicyDeniedEvent extends SecurityEventBase {
 
 export interface RateLimitHitEvent extends SecurityEventBase {
   'event.name': 'rate_limit.hit';
-  /** `upstream`: a provider answered 429; `gateway`: the gateway did. */
-  'ps.rate_limit.source': 'upstream' | 'gateway';
+  /**
+   * `upstream`: a provider answered 429; `budget`: a spend budget refused
+   * the call (budget_exceeded); `gateway`: another gateway limit did.
+   */
+  'ps.rate_limit.source': 'upstream' | 'gateway' | 'budget';
   'http.response.status_code': 429;
 }
 

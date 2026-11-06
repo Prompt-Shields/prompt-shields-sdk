@@ -277,6 +277,9 @@ lifecycle:
 {{- if and $budgets.redis.url $budgets.redis.existingSecret -}}
 {{- fail "set one of gateway.budgets.redis.url and gateway.budgets.redis.existingSecret" -}}
 {{- end -}}
+{{- if regexMatch "://[^/]*@" (toString $budgets.redis.url) -}}
+{{- fail "gateway.budgets.redis.url must not hold credentials (it renders into a ConfigMap): use gateway.budgets.redis.existingSecret" -}}
+{{- end -}}
 {{- end -}}
 {{- $c := .Values.collector -}}
 {{- if and $c.enabled $c.probes.readiness.enabled (le (float64 $c.probes.readiness.timeoutSeconds) (float64 $c.readyzTimeoutSeconds)) -}}

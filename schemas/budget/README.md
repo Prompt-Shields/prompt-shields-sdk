@@ -32,7 +32,7 @@ gateway gives one spend total per subject.
 | `window` | `day` (00:00 UTC), `week` (ISO week, Monday 00:00 UTC), `month` (calendar month, UTC). |
 | `mode` | `warn`, `downgrade` or `block` (below). |
 | `warn_at` | Fraction of `limit_usd` from which the state is `warn` (default 0.8). |
-| `downgrade_model` | Only for plain SDK clients, which do not route: the model used once a downgrade budget is exhausted. Routers ignore it. |
+| `downgrade_model` | Only for plain SDK clients, which do not route: the model used once a downgrade budget is exhausted, when the client opts in with `allow_budget_downgrade=True` (the switch is not checked against any data policy). Routers ignore it. |
 | `on_store_error` | `open` (default) or `closed` (below). |
 
 ## Counter keys
@@ -95,7 +95,12 @@ Before a call, read the counter of every matching budget.
   clamp over the allowed candidates (so the data policy still applies), and
   serves the cheapest allowed candidate when nothing fits. The route reason
   gets `+budget-downgrade` when the budget changed the model. A plain
-  client switches to `downgrade_model` once the budget is exhausted.
+  client switches to `downgrade_model` once the budget is exhausted, but
+  only when it was built with `allow_budget_downgrade=True`: a plain client
+  runs no data policy, so the switch is not policy-checked (and on a
+  multi-vendor OpenAI-compatible endpoint the model id can pick another
+  provider). Without the opt-in it sends the call unchanged and logs a
+  warning, like a warn budget.
 - **warn**: never changes the call.
 - **Store errors.** `on_store_error: open` (default): budgets that could
   not be read are `unknown` and do not change the call. `closed`: they act

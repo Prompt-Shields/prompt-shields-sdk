@@ -188,7 +188,10 @@ gateway:
     #      models: ["gpt-4o-mini", "gpt-4.1*"]
     #      rate_limit: {requests_per_minute: 60}
   # Spend budgets (#28): per business unit, use case, owner (X-PS-Owner) or
-  # the whole deployment, by UTC day, ISO week or month. Rendered into
+  # the whole deployment, by UTC day, ISO week or month. The X-PS-* headers
+  # are caller-declared, so only global budgets and, with gateway.oidc,
+  # owner budgets (owner = the verified subject hash) hold against a caller
+  # that changes its headers. Rendered into
   # PS_BUDGETS as a budget.v1 document (schemas/budget/, shared with the
   # SDK). Replicas (and SDK processes) share spend through Redis; without a
   # Redis URL each replica counts its own spend.

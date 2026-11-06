@@ -17,6 +17,8 @@ import { estimateCost } from '../psPricing';
 import { defaultRegistry } from '../psMetrics/registry';
 import { RoutePolicy } from '../router/types';
 import { estimateInputTokens } from '../router/policy';
+import { psSecurityEvents } from '../psSecurityEvents';
+import { OIDC_IDENTITY_KEY } from '../psOidc/identity';
 
 const vectorFile = (name: string) =>
   JSON.parse(
@@ -655,5 +657,164 @@ describe('downgrade', () => {
       budgetId: 'team',
       action: 'none',
     });
+  });
+});
+
+// ── review fixes ──────────────────────────────────────────────────────────
+
+describe('trust, leaks and interactions', () => {
+  const perOwner = {
+    id: 'per-owner',
+    scope: 'owner',
+    subject: '*',
+    window: 'month',
+    limit_usd: 1,
+    mode: 'block',
+  };
+  const SUBJECT = 'a'.repeat(32);
+
+  function oidcApp(subjectHash?: string) {
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      if (subjectHash)
+        c.set(OIDC_IDENTITY_KEY as any, { subjectHash, subject: 'u' } as any);
+      return next();
+    });
+    app.use('*', psBudget({ now: () => NOW }));
+    app.post('/v1/chat/completions', (c) =>
+      c.json({ model: 'gpt-4o-mini', usage: USAGE })
+    );
+    return app;
+  }
+
+  test('with OIDC, owner budgets use the verified subject, not X-PS-Owner', async () => {
+    const store = install([perOwner]);
+    await spend(store, key('owner', SUBJECT), 1);
+    const app = oidcApp(SUBJECT);
+    // Another X-PS-Owner (or none) does not dodge the exhausted budget.
+    expect((await post(app, { 'x-ps-owner': 'someone-else' })).status).toBe(
+      429
+    );
+    expect((await post(app)).status).toBe(429);
+    expect(await store.read([key('owner', 'someone-else')], NOW)).toEqual([
+      { spent: 0, reserved: 0 },
+    ]);
+  });
+
+  test('without OIDC, X-PS-Owner is the owner (caller-declared)', async () => {
+    const store = install([perOwner]);
+    await spend(store, key('owner', 'alice'), 1);
+    const app = oidcApp();
+    expect((await post(app, { 'x-ps-owner': 'alice' })).status).toBe(429);
+    expect((await post(app, { 'x-ps-owner': 'bob' })).status).toBe(200);
+  });
+
+  test('a budget 429 is a rate_limit.hit with source budget', async () => {
+    process.env.PS_METRICS_ENABLED = 'true';
+    try {
+      const store = install([
+        { ...perOwner, scope: 'global', subject: undefined },
+      ]);
+      await spend(store, key('global', '_'), 1);
+      const app = new Hono();
+      app.use('*', psSecurityEvents());
+      app.use('*', psBudget({ now: () => NOW }));
+      app.post('/v1/chat/completions', (c) => c.json({}));
+      const line = 'ps_gateway_rate_limited_total{source="budget"}';
+      const count = () => {
+        const m = defaultRegistry
+          .render()
+          .split('\n')
+          .find((l) => l.startsWith(line + ' '));
+        return m ? Number(m.split(' ')[1]) : 0;
+      };
+      const before = count();
+      expect((await post(app)).status).toBe(429);
+      expect(count()).toBe(before + 1);
+    } finally {
+      delete process.env.PS_METRICS_ENABLED;
+    }
+  });
+
+  test('a handler error releases its reservation', async () => {
+    const store = install([
+      { ...perOwner, scope: 'global', subject: undefined },
+    ]);
+    const app = new Hono();
+    app.use('*', psBudget({ now: () => NOW }));
+    app.post('/v1/chat/completions', () => {
+      throw new Error('boom');
+    });
+    app.onError((_err, c) => c.json({ error: 'x' }, 500));
+    const res = await post(app);
+    expect(res.status).toBe(500);
+    expect(await store.read([key('global', '_')], NOW)).toEqual([
+      { spent: 0, reserved: 0 },
+    ]);
+  });
+
+  test('the memory store drops empty reservation sets', async () => {
+    const s = new MemoryBudgetStore();
+    await s.reserve({
+      key: 'k',
+      id: 'a',
+      amount: 1,
+      nowMs: 0,
+      reservationTtlMs: 10,
+    });
+    await s.settle('k', 'a', 1, 0, 60);
+    expect((s as any).reservations.size).toBe(0);
+  });
+
+  test('after a downgrade, failover candidates never cost more than the pick', async () => {
+    const store = install([
+      {
+        id: 'team',
+        scope: 'use_case',
+        subject: 'rag',
+        window: 'month',
+        limit_usd: 1,
+        mode: 'downgrade',
+      },
+    ]);
+    await spend(store, key('use_case', 'rag'), 1);
+    const app = new Hono();
+    let route: any;
+    app.use('*', async (c, next) => {
+      // As the router leaves it: the decided (expensive) model first.
+      c.set('psRoute', {
+        requestedModel: 'auto',
+        servedModel: 'eu-large',
+        group: 'frontier',
+        reason: 'quality',
+        estCost: 0.02,
+        candidates: [
+          { model: 'eu-large' },
+          { model: 'eu-medium' },
+          { model: 'us-mini' },
+        ],
+      } as any);
+      return next();
+    });
+    app.use('*', psBudget({ policy: SOVEREIGN, now: () => NOW }));
+    app.post('/v1/chat/completions', (c) => {
+      route = c.get('psRoute');
+      return c.json({ model: 'x', usage: USAGE });
+    });
+    await post(
+      app,
+      { 'x-ps-use-case': 'rag', 'x-ps-data-classification': 'confidential' },
+      {
+        model: 'eu-large',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1000,
+      }
+    );
+    expect(route.servedModel).toBe('eu-small');
+    // eu-large and eu-medium cost more than eu-small; us-mini costs less.
+    expect(route.candidates.map((x: any) => x.model)).toEqual([
+      'eu-small',
+      'us-mini',
+    ]);
   });
 });

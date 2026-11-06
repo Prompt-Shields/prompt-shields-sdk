@@ -374,5 +374,19 @@ Responses carry `x-ps-budget-state`; telemetry events carry `budget_state`
 subject), `ps_gateway_budget_limit_usd{budget,window}` and
 `ps_gateway_budget_store_errors_total{store,op}`.
 
-The attributes are declared by the caller; a caller that can change them can
-move spend between budgets. A `global` budget cannot be dodged that way.
+**Trust: the attributes are declared by the caller.** `X-PS-Business-Unit`,
+`X-PS-Use-Case` and (without OIDC) `X-PS-Owner` are not authenticated: a
+caller can send another value, or none, to move its spend to another budget
+or out of one, so a `block` budget on those scopes caps cooperative callers,
+not adversarial ones. What callers cannot dodge:
+
+- `global` budgets (no header involved);
+- `owner` budgets with OIDC on (`PS_OIDC_*`): the owner is the verified
+  identity's subject hash (the 32-hex `x-ps-auth-subject` value, as in
+  policy-denied responses) and `X-PS-Owner` is ignored. Use `subject: "*"`
+  for one budget per user, or the hash for a single user.
+
+Budget 429s are reported as `rate_limit.hit` security events with
+`ps.rate_limit.source: budget` (and `ps_gateway_rate_limited_total{source="budget"}`).
+After a downgrade, router failover only tries the picked model and router
+candidates that cost no more than it.

@@ -27,11 +27,17 @@
  *    nothing; an unpriced call keeps its estimate). Streams settle at the end.
  *
  * Attributes come from X-PS-Business-Unit, X-PS-Use-Case and X-PS-Owner, as
- * the caller declares them for attribution.
+ * the caller declares them for attribution. They are not authenticated: a
+ * caller can send another value, or none, and so move its spend to another
+ * budget or out of one. Only `global` budgets (never header-controlled) and,
+ * when OIDC is on, `owner` budgets are enforcement against the caller: with
+ * a verified OIDC identity the owner is the identity's subject hash and
+ * X-PS-Owner is ignored.
  */
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
 import { isMcpProxyPath } from '../../mcp/paths';
+import { oidcIdentityOf } from '../psOidc/identity';
 import { RESPONSE_HEADER_KEYS } from '../../globals';
 import { observeStream, StreamSummary } from '../psStreamObserver';
 import {
@@ -52,7 +58,7 @@ import { estimateCost } from '../psPricing';
 import { supportsResponsesApiNatively } from '../../adapters/responses';
 import { classifySensitivity, dataPolicyRule } from '../router/constraints';
 import { DATA_POLICY_GATE_KEY, DataPolicyGate } from '../router/dataPolicyGate';
-import { escalatesOnPii, PSRoute } from '../router/middleware';
+import { escalatesOnPii, PSRoute, RouteCandidate } from '../router/middleware';
 import { scanRequestBody } from '../router/pii';
 import {
   DEFAULT_OUTPUT_TOKENS,
@@ -62,7 +68,7 @@ import {
 } from '../router/policy';
 import { DataPolicyRule, RoutePolicy } from '../router/types';
 import { Budget, BudgetConfig } from './config';
-import { pickDowngrade } from './downgrade';
+import { DowngradePick, pickDowngrade } from './downgrade';
 import {
   BudgetScope,
   counterKey,
@@ -91,9 +97,16 @@ export interface BudgetDecision {
 
 export const BUDGET_STATE_HEADER = 'x-ps-budget-state';
 
+/**
+ * Set on a call psBudget refused with 429, so the security events middleware
+ * reports it as a budget refusal, not a rate limit.
+ */
+export const BUDGET_REFUSED_KEY = 'psBudgetRefused';
+
 declare module 'hono' {
   interface ContextVariableMap {
     psBudget?: BudgetDecision;
+    psBudgetRefused?: boolean;
   }
 }
 
@@ -125,15 +138,20 @@ export interface Matched {
   periodEndsAt: number;
 }
 
-/** The call's attribution attributes from its X-PS-* headers. */
+/**
+ * The call's attribution attributes from its X-PS-* headers. With a verified
+ * OIDC identity (`verifiedOwner`, its subject hash) the owner is that
+ * identity, whatever X-PS-Owner says.
+ */
 export function attributesOf(
-  headers: Record<string, string | undefined>
+  headers: Record<string, string | undefined>,
+  verifiedOwner?: string
 ): BudgetAttributes {
   const clean = (v: string | undefined) => (v && v.trim() ? v : undefined);
   return {
     business_unit: clean(headers['x-ps-business-unit']),
     use_case: clean(headers['x-ps-use-case']),
-    owner: clean(headers['x-ps-owner']),
+    owner: verifiedOwner || clean(headers['x-ps-owner']),
   };
 }
 
@@ -251,6 +269,7 @@ function budgetExceededResponse(
   const scope =
     b.scope === 'global' ? 'all calls' : `${b.scope} "${s.subject}"`;
   const resets = new Date(s.periodEndsAt).toISOString();
+  c.set(BUDGET_REFUSED_KEY, true);
   const res = c.json(
     {
       error: {
@@ -402,6 +421,44 @@ function recordSpend(s: Status, estimate: number) {
   );
 }
 
+/**
+ * The failover candidates after a downgrade: the picked tier first, then the
+ * router's other candidates whose tier costs no more than the pick.
+ */
+function downgradeCandidates(
+  policy: RoutePolicy,
+  candidates: RouteCandidate[] | undefined,
+  pick: DowngradePick,
+  tokensIn: number,
+  maxOutput: number | undefined
+): RouteCandidate[] {
+  const out: RouteCandidate[] = [
+    {
+      model: pick.tier.model,
+      ...(pick.tier.provider ? { provider: pick.tier.provider } : {}),
+    },
+  ];
+  const tierOf = (model: string) => {
+    for (const g of Object.keys(policy.groups)) {
+      const t = policy.groups[g].find((x) => x.model === model);
+      if (t) return t;
+    }
+    return undefined;
+  };
+  for (const cand of candidates ?? []) {
+    if (cand.model === pick.tier.model) continue;
+    const tier = tierOf(cand.model);
+    if (!tier) continue;
+    const cost = estimateTierCost(
+      tier,
+      tokensIn,
+      maxOutput ?? DEFAULT_OUTPUT_TOKENS
+    );
+    if (cost <= pick.estCost) out.push(cand);
+  }
+  return out;
+}
+
 export interface PsBudgetOptions {
   /** The routing policy downgrades choose from (the router's). */
   policy?: RoutePolicy;
@@ -426,7 +483,17 @@ export function psBudget(options: PsBudgetOptions = {}) {
       string,
       string
     >;
-    const matched = matchBudgets(rt.config, attributesOf(headers), nowMs);
+    let verifiedOwner: string | undefined;
+    try {
+      verifiedOwner = oidcIdentityOf(c)?.subjectHash;
+    } catch {
+      verifiedOwner = undefined;
+    }
+    const matched = matchBudgets(
+      rt.config,
+      attributesOf(headers, verifiedOwner),
+      nowMs
+    );
     if (!matched.length) return next();
     const { onStoreError } = rt.config;
     const storeError = (op: string, err: unknown) => {
@@ -509,6 +576,16 @@ export function psBudget(options: PsBudgetOptions = {}) {
           group: pick.tier.group,
           reason: `${route?.reason ?? 'budget'}+budget-downgrade`,
           estCost: pick.estCost,
+          // Failover (router/failover.ts) runs the candidates in order: keep
+          // only the picked model and the router's candidates that cost no
+          // more than it, so a failover never undoes the downgrade.
+          candidates: downgradeCandidates(
+            policy,
+            route?.candidates,
+            pick,
+            estimateInputTokens(body.messages),
+            body.max_tokens ?? body.max_completion_tokens
+          ),
         } as PSRoute;
         c.set('psRoute', route);
         (c.req as any).bodyCache = { json: Promise.resolve(body) };
@@ -578,7 +655,12 @@ export function psBudget(options: PsBudgetOptions = {}) {
     for (const s of statuses) recordSpend(s, estimate);
 
     // 5. The call, then settle with its actual cost on every counter.
-    await next();
+    try {
+      await next();
+    } catch (err) {
+      await release(); // reservations also lapse after reservationTtlMs
+      throw err;
+    }
     setHeader(c, BUDGET_STATE_HEADER, decision.state);
 
     const settle = (actual: number | undefined) =>

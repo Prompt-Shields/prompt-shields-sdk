@@ -228,7 +228,9 @@ export class MemoryBudgetStore implements BudgetStore {
     actual: number,
     ttlSeconds: number
   ): Promise<void> {
-    this.reservations.get(key)?.delete(id);
+    const res = this.reservations.get(key);
+    res?.delete(id);
+    if (res && !res.size) this.reservations.delete(key);
     if (!(actual > 0)) return;
     this.usage(key, 0); // drop an expired counter first
     const c = this.counters.get(key);

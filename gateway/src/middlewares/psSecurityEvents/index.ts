@@ -606,7 +606,8 @@ export function reportPayloadRejected(
 
 /**
  * Middleware: records responses with status 429 (metric and rate_limit.hit
- * event). `upstream` when a provider attempt was made, else `gateway`.
+ * event). `budget` when a spend budget refused the call (psBudget, #28),
+ * `upstream` when a provider attempt was made, else `gateway`.
  */
 export function psSecurityEvents() {
   return async (c: Context, next: Next) => {
@@ -616,7 +617,11 @@ export function psSecurityEvents() {
       const target = sinksOf(c);
       const metrics = isMetricsEnabled(c);
       if (!target && !metrics) return;
-      const source = attemptsOf(c).length ? 'upstream' : 'gateway';
+      const source = c.get('psBudgetRefused' as any)
+        ? 'budget'
+        : attemptsOf(c).length
+          ? 'upstream'
+          : 'gateway';
       if (metrics) rateLimitedTotal.inc({ source });
       if (!target) return;
       const provider = providerFromHeaders(headersOf(c));
