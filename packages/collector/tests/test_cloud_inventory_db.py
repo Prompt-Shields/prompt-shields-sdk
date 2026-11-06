@@ -140,7 +140,9 @@ async def test_operator_route_requires_token_and_known_tenant(seeded_db, monkeyp
 
         # An unknown cloud is a client error, not silently dropped.
         resp = await c.post(
-            url, json={"tenant_id": str(tenant_id), "clouds": ["azure", "gpc"]}, headers=op
+            url,
+            json={"tenant_id": str(tenant_id), "clouds": ["azure", "gpc"]},
+            headers=op,
         )
         assert resp.status_code == 400
         assert "gpc" in resp.json()["detail"]["detail"]
@@ -327,3 +329,158 @@ async def test_gcp_inventory_stores_vertex_assets(seeded_db):
                 f"gcp:{VERTEX_EP}/deployedModels/1",
             )
         ]
+
+
+ML_PROJECT = (
+    f"/subscriptions/{SUB}/resourceGroups/rg/providers/"
+    "Microsoft.MachineLearningServices/workspaces/foundry-project"
+)
+
+
+def _azure_ml_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path.endswith("/Microsoft.MachineLearningServices/workspaces"):
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "id": ML_PROJECT,
+                        "kind": "Project",
+                        "location": "francecentral",
+                        "tags": {"owner": "foundry-lead@acme.com", "env": "staging"},
+                    }
+                ]
+            },
+        )
+    if path == f"{ML_PROJECT}/serverlessEndpoints":
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "name": "mistral-large",
+                        "properties": {
+                            "modelSettings": {
+                                "modelId": "azureml://registries/azureml-mistral/"
+                                "models/Mistral-large-2407"
+                            },
+                            "provisioningState": "Succeeded",
+                            "endpointState": "Online",
+                        },
+                    }
+                ]
+            },
+        )
+    if path.startswith(ML_PROJECT):
+        return httpx.Response(200, json={"value": []})
+    return _handler(request)
+
+
+def _test_account(request: httpx.Request) -> httpx.Response:
+    """One sandbox tenant with a deployment in each cloud."""
+    host = request.url.host
+    if host in ("login.microsoftonline.com", "management.azure.com"):
+        return _azure_ml_handler(request)
+    if host.endswith(".amazonaws.com"):
+        return _bedrock_handler(request)
+    if host == "oauth2.googleapis.com" or host.endswith("aiplatform.googleapis.com"):
+        if request.url.path.endswith("/endpoints"):
+            # The owner label, mapped to an email by the operator config.
+            resp = _vertex_handler(request)
+            body = resp.json()
+            body["endpoints"][0]["labels"]["owner"] = "claims-team"
+            return httpx.Response(200, json=body)
+        return _vertex_handler(request)
+    raise AssertionError(f"unexpected host {host}")
+
+
+async def test_test_account_inventory_has_region_and_owner_on_every_asset(seeded_db):
+    """The issue's acceptance check, against mocked cloud APIs: a test
+    account's inventory, across Azure (OpenAI/Foundry and an ML serverless
+    endpoint), AWS Bedrock and Vertex AI, produces assets with region and
+    owner taken from tags."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    factory = async_sessionmaker(seeded_db, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as db:
+        tenant_id = (await db.execute(select(Tenant.id))).scalar_one()
+
+    settings = ci.CloudInventorySettings(
+        cloud_inventory={
+            str(tenant_id): ci.TenantCloudCredentials(
+                azure=ci.AzureInventoryCredentials(
+                    directory_id="contoso.onmicrosoft.com",
+                    client_id="app",
+                    client_secret="s",
+                    subscription_ids=[SUB],
+                ),
+                aws=ci.AwsInventoryCredentials(
+                    access_key_id="AKIAEXAMPLEKEY12345",
+                    secret_access_key="s",
+                    regions=["eu-central-1"],
+                ),
+                gcp=ci.GcpInventoryCredentials(
+                    service_account={
+                        "type": "service_account",
+                        "project_id": "acme-ml-prod",
+                        "client_email": "inv@acme-ml-prod.iam.gserviceaccount.com",
+                        "private_key": pem,
+                    },
+                    regions=["europe-west4"],
+                    owner_label_emails={"claims-team": "claims-ai@acme.com"},
+                ),
+            )
+        }
+    )
+    async with factory() as db:
+        result = await ci.pull_cloud_inventory(
+            db,
+            tenant_id,
+            settings=settings,
+            transport=httpx.MockTransport(_test_account),
+            sleep=_no_sleep,
+            now=datetime(2026, 11, 6, tzinfo=UTC),
+        )
+    assert {c: r["status"] for c, r in result["clouds"].items()} == {
+        "azure": "ok",
+        "aws": "ok",
+        "gcp": "ok",
+    }
+    assert result["clouds"]["azure"]["ml_workspaces"] == 1
+
+    async with factory() as db:
+        assets = (await db.execute(select(AIAsset))).scalars().all()
+    got = sorted(
+        (a.calling_service.split(":", 1)[0], a.vendor, a.model, a.region, a.owner_email)
+        for a in assets
+    )
+    assert got == [
+        (
+            "aws",
+            "amazon",
+            "anthropic.claude-3-haiku-20240307-v1:0",
+            "eu-central-1",
+            "ai-lead@acme.com",
+        ),
+        (
+            "azure",
+            "microsoft",
+            "Mistral-large-2407",
+            "francecentral",
+            "foundry-lead@acme.com",
+        ),
+        ("azure", "microsoft", "gpt-4o", "germanywestcentral", "ai-lead@acme.com"),
+        ("gcp", "google", "gemma2-claims", "europe-west4", "claims-ai@acme.com"),
+    ]
+    assert all(a.discovery_source == ["platform_signal"] for a in assets)

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { serve } from '@hono/node-server';
+import { serve, upgradeWebSocket } from '@hono/node-server';
+import { WebSocketServer } from 'ws';
 
 import app from './index';
 import { streamSSE } from 'hono/streaming';
 import { Context } from 'hono';
-import { createNodeWebSocket } from '@hono/node-ws';
 import { realTimeHandlerNode } from './handlers/realtimeHandlerNode';
 import { requestValidator } from './middlewares/requestValidator';
 import {
@@ -189,8 +189,6 @@ if (
   });
 }
 
-const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-
 app.get(
   '/v1/realtime',
   requestValidator,
@@ -201,14 +199,16 @@ app.get(
 // draining on SIGTERM (see psShutdown.ts).
 const drain = createDrain();
 
+// PS fork (#208): @hono/node-server 2.x handles WebSocket upgrades itself
+// (replacing @hono/node-ws). Upgrade requests go through the same wrapped
+// fetch, so they also get 503 while draining.
 const server = serve({
   fetch: drain.wrapFetch(app.fetch),
   port: port,
+  websocket: { server: new WebSocketServer({ noServer: true }) },
 });
 
 const url = `http://localhost:${port}`;
-
-injectWebSocket(server);
 
 // Prompt Shields: on SIGTERM/SIGINT, stop accepting connections and wait for
 // in-flight requests, streams included (bounded by PS_SHUTDOWN_TIMEOUT_MS,
