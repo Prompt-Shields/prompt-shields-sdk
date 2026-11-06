@@ -7,7 +7,7 @@ above its EWMA baseline. Numbers only; acknowledged through the Partner API.
 The new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Revision ID: 028
+Revision ID: 029
 Revises: 027
 Create Date: 2026-11-06
 """
@@ -18,7 +18,9 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "028"
+revision: str = "029"
+# Chains from 027 until #262 (028, outcome signals) merges; re-chain to
+# "028" then.
 down_revision: str | None = "027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
