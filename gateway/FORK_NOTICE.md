@@ -112,10 +112,12 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `plugins/utils.ts`
 - `plugins/walledai/walledprotect.ts`
 - `src/globals.ts`
+- `src/handlers/chatCompletionsHandler.ts`
 - `src/handlers/createTranscriptionHandler.ts`
 - `src/handlers/createTranslationHandler.ts`
 - `src/handlers/handlerUtils.ts`
 - `src/handlers/imageEditsHandler.ts`
+- `src/handlers/messagesHandler.ts`
 - `src/handlers/modelResponsesHandler.ts`
 - `src/handlers/modelsHandler.ts`
 - `src/handlers/proxyHandler.ts`
@@ -316,7 +318,9 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 33. **Added** (PS frozen savings baseline, #24; fork behaviour): `src/start-server.ts` loads the `baseline.v1` document named by `PS_BASELINE_FILE` at startup (`src/middlewares/router/baselineLoader.ts`; an invalid file stops the gateway), and `ps-telemetry` adds `baseline_id` and `counterfactual_cost` to routed events (`src/middlewares/router/baseline.ts`).
 34. **Added** (PS call feedback, #43; fork behaviour): `src/index.ts` mounts `POST /v1/feedback` (`src/middlewares/psFeedback.ts`) after `/v1/models`, before the router, telemetry, hooks and cache. It checks the feedback (call id, score, reason label; no free text), rate-limits it per user (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`) and forwards it to the collector's `/ingest/feedback`. `ps-telemetry` puts a `call_id` (the caller's `X-PS-Call-Id`, else a new UUID) on each event and returns it as the `X-PS-Call-Id` response header.
 
-35. **Added** (PS implicit outcome signals, #44; fork behaviour): `ps-telemetry` adds `outcome_signals` / `outcome_signals_version` to events on text-generation surfaces (`src/middlewares/psOutcomeSignals.ts`): `fallback`, `max_tokens`, `refusal`, `stream_error`, `abandoned`, from the fallback chain, stop reasons, refusals and stream state. `src/middlewares/psStreamObserver.ts` also records a stream's stop reasons (at most 8) and whether it carried a refusal.
+35. **Added** (PS semantic cache mode, #33; fork behaviour): upstream's `cache.mode: "semantic"` needs Portkey's hosted service; in this fork it read like the exact cache and never wrote. `src/handlers/services/cacheService.ts` now sends semantic-mode lookups to `src/middlewares/cache/semantic.ts` (embedding of the final user message, compared only within a partition keyed by caller scope, tenant, OIDC principal, use case, model, route policy version, sensitivity level, endpoint, embedder, request params and history; bounded in-memory store in `semanticStore.ts`), and the `memoryCache` write-back in `src/middlewares/cache/index.ts` stores semantic entries from the vector the read recorded per target. Both modes now skip refusals (`isRefusalResponse`) and count write outcomes. See [`docs/semantic-cache.md`](docs/semantic-cache.md).
+36. **Added** (PS failover between routed models, #21; fork behaviour): `src/handlers/chatCompletionsHandler.ts` and `src/handlers/messagesHandler.ts` call `tryTargetsWithRouteFailover` (`src/middlewares/router/failover.ts`) instead of `tryTargetsRecursively`. Without a router decision listing more than one candidate it is `tryTargetsRecursively` unchanged; with one, it calls `tryTargetsRecursively` once per compliant candidate through the `psFailover` engine (5xx, 429, timeout move on; any other answer is returned as is). A request whose `x-portkey-config` sets a `strategy` / `targets`, `retry` attempts or `override_params.model` is never failed over by the router.
+37. **Added** (PS implicit outcome signals, #44; fork behaviour): `ps-telemetry` adds `outcome_signals` / `outcome_signals_version` to events on text-generation surfaces (`src/middlewares/psOutcomeSignals.ts`): `fallback`, `max_tokens`, `refusal`, `stream_error`, `abandoned`, from the fallback chain, stop reasons, refusals and stream state. `src/middlewares/psStreamObserver.ts` also records a stream's stop reasons (at most 8) and whether it carried a refusal.
 
 ## Original License
 
