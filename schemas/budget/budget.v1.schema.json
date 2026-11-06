@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://promptshields.com/schemas/budget/budget.v1.schema.json",
+  "title": "Prompt Shields spend budgets (budget.v1)",
+  "description": "Spend budgets shared by the SDK (ShieldsRouter, the plain clients) and the gateway. A budget caps the USD spend of one attribution subject (business unit, use case, owner, or everything) per UTC day, ISO week or calendar month. Spend counters live in a BudgetStore under the key format in schemas/budget/README.md, so every enforcement point that shares a store and a namespace shares the counters. Cross-field rules JSON Schema cannot express: budget ids are unique; a 'global' budget has no subject; every other scope needs one.",
+  "type": "object",
+  "required": ["schema_version", "budgets"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional pointer to this schema, for editors."
+    },
+    "schema_version": {
+      "const": "budget.v1"
+    },
+    "namespace": {
+      "$ref": "#/$defs/token",
+      "default": "default",
+      "description": "Counter namespace (the key's second segment). Enforcement points that must share spend use the same namespace and the same store; a multi-tenant store uses one namespace per tenant."
+    },
+    "on_store_error": {
+      "enum": ["open", "closed"],
+      "default": "open",
+      "description": "What happens when the store cannot be read. 'open' (default): the call goes ahead unchanged and budget_state is 'unknown'. 'closed': block budgets refuse the call and downgrade budgets downgrade it as if exhausted. Warn budgets never change a call. Recording spend after a call never fails it."
+    },
+    "budgets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/budget" }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "budget": {
+      "type": "object",
+      "required": ["id", "scope", "window", "limit_usd", "mode"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/token",
+          "description": "Unique id, reported as budget_id in telemetry."
+        },
+        "scope": {
+          "enum": ["global", "business_unit", "use_case", "owner"],
+          "description": "The attribution attribute the budget is keyed on: business_unit (X-PS-Business-Unit), use_case (X-PS-Use-Case), owner (X-PS-Owner; use it for team budgets), or global (every call)."
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The attribute value the budget applies to, compared exactly. '*' applies the budget to every value separately (one counter per value). Calls without the attribute never match a non-global budget."
+        },
+        "window": {
+          "enum": ["day", "week", "month"],
+          "description": "UTC calendar window: day (00:00 UTC), ISO week (Monday 00:00 UTC), calendar month."
+        },
+        "limit_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "mode": {
+          "enum": ["warn", "downgrade", "block"],
+          "description": "warn: never changes a call. downgrade: routers clamp each call's estimated cost to the remaining budget within the route policy's constraints (the max_cost clamp); once exhausted, the cheapest allowed candidate. A plain client, which does not route, switches to downgrade_model once the budget is exhausted. block: once exhausted, calls are refused before anything is sent."
+        },
+        "warn_at": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.8,
+          "description": "Fraction of limit_usd from which budget_state is 'warn'."
+        },
+        "downgrade_model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "mode 'downgrade' only: the model a plain (non-routing) client uses once the budget is exhausted. Routers ignore it. Without it, a plain client cannot downgrade and serves the call unchanged."
+        }
+      }
+    }
+  }
+}

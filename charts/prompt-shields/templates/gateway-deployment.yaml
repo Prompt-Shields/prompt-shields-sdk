@@ -72,10 +72,18 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- $tokenEnv := include "ps.metricsTokenEnv" (dict "ctx" $ "component" "gateway") }}
-          {{- if or $tokenEnv $g.extraEnv }}
+          {{- $redisSecret := and $g.budgets.enabled $g.budgets.redis.existingSecret }}
+          {{- if or $tokenEnv $g.extraEnv $redisSecret }}
           env:
             {{- with $tokenEnv }}
             {{- . | nindent 12 }}
+            {{- end }}
+            {{- if $redisSecret }}
+            - name: PS_BUDGET_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "gateway.budgets.redis.existingSecret.name is required" $redisSecret.name }}
+                  key: {{ required "gateway.budgets.redis.existingSecret.key is required" $redisSecret.key }}
             {{- end }}
             {{- with $g.extraEnv }}
             {{- toYaml . | nindent 12 }}

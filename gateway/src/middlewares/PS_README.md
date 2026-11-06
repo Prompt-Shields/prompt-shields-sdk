@@ -277,3 +277,59 @@ event also carries `fallback_chain`: the error class of each failed attempt,
 in order (`["server_error", "rate_limited"]`), or `[]` when the first attempt
 succeeded. Classes only, never error messages. The collector stores all of
 these on `ai_usage_events` (#25).
+
+## psBudget/ (spend budgets, #28)
+
+A `budget.v1` document (`schemas/budget/`, shared with the SDK: same
+document, Redis counter keys, TTL rule and decision rules, checked against
+`schemas/budget/vectors/`) inline in `PS_BUDGETS` or in a file named by
+`PS_BUDGETS_FILE`; an invalid document stops the gateway at startup. Budgets
+are per business unit (`X-PS-Business-Unit`), use case (`X-PS-Use-Case`),
+owner (`X-PS-Owner`, for team budgets) or the whole deployment, by UTC day,
+ISO week or month.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PS_BUDGET_REDIS_URL` | `REDIS_CONNECTION_STRING` | The Redis every replica and SDK process shares counters through. Unset: in-memory, per replica |
+| `PS_BUDGET_NAMESPACE` | the document's `namespace` | Overrides the counter namespace |
+| `PS_BUDGET_RESERVATION_TTL_MS` | `900000` | How long an unsettled reservation holds budget (a replica that dies mid-call) |
+| `PS_BUDGET_REDIS_TIMEOUT_MS` | `500` | Per-command Redis timeout |
+
+Per billed call (chat, completions, messages, responses, embeddings, rerank,
+images, audio, OCR) the middleware, mounted after the router and before
+telemetry, reads the matching counters, decides, reserves the call's
+estimate (the router's `route_est_cost`, else the pricing table on the
+request) and, once the response or stream ends, settles the actual cost,
+priced exactly as telemetry prices it (a failed call or a cache hit costs 0;
+an unpriced call keeps its estimate).
+
+- `warn`: never changes the call.
+- `downgrade`: the least remaining amount of the matching downgrade budgets
+  is a cost ceiling; a call estimated above it moves to the most capable
+  cheaper model under it, else the cheapest, among the models the data policy
+  (and a use-case eval set) allows; never a non-compliant one. The route
+  reason gets `+budget-downgrade`.
+- `block`: an exhausted budget answers HTTP 429 `budget_exceeded` with
+  `budget_id`, `resets_at` and `Retry-After`.
+- `on_store_error`: `open` serves calls with `budget_state: unknown` while
+  Redis is unreachable; `closed` answers 503 `budget_store_unavailable` for
+  block budgets and treats downgrade budgets as exhausted.
+
+Gateway extension to the shared format: each call's estimate is reserved in a
+sorted set at `{<counter key>}:res` (members `<uuid>|<usd>`, scored by expiry;
+the hash tag keeps it in the counter's Redis Cluster slot). Reads add live
+reservations to the counter, and a block budget's reservation is an atomic
+check in one Lua script, so calls racing on several replicas see each other
+and a limit is overrun by at most the estimate error of the calls admitted
+before it. The SDK ignores the set.
+
+Responses carry `x-ps-budget-state`; telemetry events carry `budget_state`
+(`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`
+(`none`, `downgraded`). Prometheus (with `PS_METRICS_ENABLED`):
+`ps_gateway_budget_decisions_total{budget,state,action}`,
+`ps_gateway_budget_spend_usd{budget,window}` (budgets with a concrete
+subject), `ps_gateway_budget_limit_usd{budget,window}` and
+`ps_gateway_budget_store_errors_total{store,op}`.
+
+The attributes are declared by the caller; a caller that can change them can
+move spend between budgets. A `global` budget cannot be dodged that way.

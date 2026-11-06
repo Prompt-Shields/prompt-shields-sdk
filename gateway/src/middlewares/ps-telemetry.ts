@@ -120,6 +120,12 @@ interface TelemetryEvent {
   // The error class of each failed attempt, in order (PRD 0001 §7.12):
   // empty when the first attempt succeeded. Classes only, never messages.
   fallback_chain?: string[];
+  // Spend budgets (#28, psBudget; schemas/budget/README.md): the call's
+  // budget state (ok, warn, unknown, exceeded), the budget that set it, and
+  // what the gateway did (none, downgraded).
+  budget_state?: string;
+  budget_id?: string;
+  budget_action?: string;
 }
 
 /** The error classes of the failed attempts, in order. */
@@ -625,6 +631,13 @@ export function psTelemetry() {
           event.route_sensitivity_level = route.sensitivityLevel;
         if (route.sensitivitySource)
           event.route_sensitivity_source = route.sensitivitySource;
+      }
+
+      const budget = c.get('psBudget');
+      if (budget) {
+        event.budget_state = budget.state;
+        event.budget_action = budget.action;
+        if (budget.budgetId) event.budget_id = budget.budgetId;
       }
 
       const attempts = attemptsOf(c);

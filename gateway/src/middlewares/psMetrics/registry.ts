@@ -59,6 +59,24 @@ export class Counter extends Metric {
   }
 }
 
+export class Gauge extends Metric {
+  set(labels: Labels, value: number) {
+    if (!Number.isFinite(value)) return;
+    this.keys.set(this.keyFor(labels), value);
+  }
+
+  render() {
+    const lines = [
+      `# HELP ${this.name} ${this.help}`,
+      `# TYPE ${this.name} gauge`,
+    ];
+    for (const [key, value] of this.keys) {
+      lines.push(`${this.name}${renderLabels(this.labelNames, key)} ${value}`);
+    }
+    return lines.join('\n');
+  }
+}
+
 type HistogramState = { buckets: number[]; sum: number; count: number };
 
 export class Histogram extends Metric {
