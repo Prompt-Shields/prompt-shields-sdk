@@ -36,7 +36,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import ValidationError
 
-from collector import loss_accounting, tenant_limits
+from collector import loss_accounting, tenant_keys, tenant_limits
 from collector.auth import resolve_tenant
 from collector.ingest import (
     LENIENT_FIELDS,
@@ -271,7 +271,7 @@ async def ingest_kong(
     # /ingest/events one: http-log sends one request per proxied call unless
     # batching is on, so Kong traffic would use up the SDK's budget. Checked
     # before the body is read; Kong retries a 429.
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
     db = request.state.db
     await _enforce_rate_limit(
         limiter, tenant_id, response, await tenant_limits.limit_for(db, tenant_id, "kong")

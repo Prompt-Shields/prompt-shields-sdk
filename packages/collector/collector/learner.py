@@ -61,7 +61,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import audit_trail
+from collector import audit_trail, tenant_keys
 from collector.auth import resolve_tenant
 from collector.partner_auth import PartnerPrincipal, require_scope
 from collector.partner_registry import _audit, _enforce_rate_limit
@@ -304,7 +304,7 @@ ingest_router = APIRouter()
 async def ingest_learner_snapshot(request: Request):
     """Store one learner snapshot (``ps-learn --upload``). See the module
     docstring."""
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
     body = await _read_body(request)
     columns, recs = parse_snapshot(body)
     db = request.state.db

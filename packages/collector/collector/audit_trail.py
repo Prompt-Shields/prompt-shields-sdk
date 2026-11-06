@@ -14,7 +14,9 @@ module records *changes* and security events in ``audit_events``:
   registry.merge_assets                         (duplicate asset merge)
   registry.risk_review                          (risk mapping confirmed/rejected)
   learner.snapshot_upload|learner.recommendation_review   (routing learner)
-  operator.access                               (operator-token routes)
+  operator.access                               (named operator token, #341)
+  operator.break_glass                          (PS_ADMIN_TOKEN, every use)
+  operator_token.issue|rotate|revoke            (named operator tokens)
   auth.failure                                  (admin routes, rate-limited)
   audit_log.purge                               (partner_audit_log purge)
   audit.purge                                   (checkpoint, see below)
@@ -126,7 +128,9 @@ def current_request_id() -> str | None:
 class Actor:
     """Who acted. ``id`` identifies a credential, never contains one."""
 
-    type: str  # tenant_key | admin_token | partner | operator | system | anonymous
+    # tenant_key | admin_token | partner | operator | operator_token | system
+    # | anonymous
+    type: str
     id: str | None = None
 
 
@@ -153,9 +157,18 @@ def system_actor(name: str) -> Actor:
     return Actor("system", name)
 
 
+# Actor type of a named operator token (collector.operator_auth, #341).
+OPERATOR_TOKEN = "operator_token"
+
+
 def actor_from_name(name: str) -> Actor:
-    """For callers that pass an actor string (collector.retention)."""
-    return OPERATOR if name == OPERATOR.id else system_actor(name)
+    """For callers that pass an actor string (collector.retention):
+    ``operator-api``, ``operator_token:<name>`` or a job name."""
+    if name == OPERATOR.id:
+        return OPERATOR
+    if name.startswith(OPERATOR_TOKEN + ":"):
+        return Actor(OPERATOR_TOKEN, name.split(":", 1)[1])
+    return system_actor(name)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -381,7 +394,7 @@ async def record_auth_failure(
     db: AsyncSession | None = None,
 ) -> None:
     """auth.failure on an admin route. `realm`: operator | tenant_admin |
-    partner. `reason`: missing_credentials | invalid_credentials |
+    partner | ingest_key (an ingest key without the route's scope, #341). `reason`: missing_credentials | invalid_credentials |
     insufficient_scope (the gateway security-event vocabulary, #211).
 
     Unknown tenant (a bad operator token or tenant key): the system chain,

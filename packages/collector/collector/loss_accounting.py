@@ -54,6 +54,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import tenant_keys
 from collector.auth import resolve_tenant
 from collector.sanitize import storable_text
 
@@ -489,7 +490,7 @@ async def tenant_coverage(db: AsyncSession, tenant_id: UUID) -> dict:
 async def telemetry_loss(request: Request):
     """Per-tenant delivery accounting: received vs dropped, per client and
     per source (SDK, gateway, OTLP)."""
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     clients = await _client_summaries(request.state.db, tenant_id)
 
     sdk_dropped: dict[str, int] = {}
