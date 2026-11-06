@@ -65,6 +65,24 @@ class Tenant(Base):
     )
 
 
+class TenantSecret(Base):
+    """Collector-generated per-tenant secrets (#334), one row per tenant.
+
+    ``user_id_salt`` keys the HMAC in ``ai_usage_events.user_id_hash``
+    (collector/user_identity.py). It is inserted once, on the first event
+    with a ``user_id`` (``INSERT ... ON CONFLICT DO NOTHING``), and never
+    updated, so no writer of ``tenants.settings`` can replace it and break
+    hash continuity. No API, export or log reads this table; erasing the
+    tenant deletes the row.
+    """
+
+    __tablename__ = "tenant_secrets"
+
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True)
+    user_id_salt = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), default=utcnow, server_default=text("now()"))
+
+
 class AIAsset(Base):
     __tablename__ = "ai_assets"
 
@@ -220,8 +238,9 @@ class AIUsageEvent(Base):
     outcome_signals_version = Column(SmallInteger)
     # Gateway identity and trace fields (#334), all optional. user_id_hash is
     # HMAC-SHA256 of the caller's user_id with the tenant's salt
-    # (tenants.settings["user_id_salt"], never returned by any API);
-    # user_id_raw is the value as sent, set instead of the hash only when the
+    # (tenant_secrets.user_id_salt, never returned by any API), stored for
+    # every event with a user_id: it is the join key for per-user usage and
+    # erasure. user_id_raw is the value as sent, set as well only when the
     # tenant's settings["store_raw_user_ids"] is true. See
     # collector/user_identity.py. user_group: the gateway policy group.
     user_id_hash = Column(Text)

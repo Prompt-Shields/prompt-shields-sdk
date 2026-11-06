@@ -160,7 +160,7 @@ response = client.chat.completions.create(
 | `output_destination` | Where AI output goes — completes the lineage graph |
 | `risk_tags` | Free-form tags for governance filtering (`gdpr`, `hipaa`, ...) |
 | `session_id` | Groups related calls in a multi-turn conversation |
-| `user_id` | Opaque identifier. The collector stores only an HMAC of it keyed with a per-tenant salt, unless the tenant sets `store_raw_user_ids` (see [Data retention](/guides/data-retention#user-ids)) |
+| `user_id` | Opaque identifier. The collector stores an HMAC of it keyed with a per-tenant salt, and the value itself only if the tenant sets `store_raw_user_ids` (see [Data retention](/guides/data-retention#user-ids)) |
 
 ## Auto-Instrumentation
 

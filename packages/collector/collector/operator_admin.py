@@ -198,8 +198,9 @@ async def erase(
 # ──────────────────────────────────────────────────────────────────────
 
 # Settings keys the tenants API never stores: a plaintext ingest key lived
-# under "api_key" before migration 004. The user_id salt (#334) is the
-# collector's own and is never set, cleared or returned through the API.
+# under "api_key" before migration 004. "user_id_salt" is refused so no one
+# believes they set the #334 salt: it lives in tenant_secrets, which no API
+# reads or writes.
 _FORBIDDEN_SETTINGS = frozenset({"api_key"}) | user_identity.PROTECTED_SETTINGS
 
 
@@ -209,7 +210,7 @@ def _tenant_dict(t: Tenant) -> dict:
         "id": tid,
         "name": t.name,
         "domain": t.domain,
-        "settings": user_identity.public_settings(t.settings),
+        "settings": dict(t.settings or {}),
         "status": "disabled" if t.disabled_at else "active",
         "disabled_at": t.disabled_at.isoformat() if t.disabled_at else None,
         "created_at": t.created_at.isoformat() if t.created_at else None,
@@ -269,8 +270,7 @@ async def _name_in_use(db, name: str, exclude: UUID | None = None) -> bool:
 async def _get_tenant(db, tenant_id: UUID, for_update: bool = False) -> Tenant:
     stmt = select(Tenant).where(Tenant.id == tenant_id)
     if for_update:
-        # A settings merge must not overwrite a key written meanwhile, such
-        # as the user_id salt ingest stores on first use.
+        # Concurrent settings merges must not overwrite each other's keys.
         stmt = stmt.with_for_update().execution_options(populate_existing=True)
     row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:

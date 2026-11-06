@@ -376,6 +376,10 @@ MAX_USER_ID_LENGTH = 256
 USER_GROUP_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 HTTP_STATUS_MIN, HTTP_STATUS_MAX = 100, 599
 MAX_IDENTIFIER_LENGTH = 128
+# An attempt record's provider and model (#334): identifier characters only,
+# no spaces, so the attempts JSON cannot carry free text such as a message.
+ATTEMPT_PROVIDER_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+ATTEMPT_MODEL_RE = re.compile(r"[A-Za-z0-9_.:/@+=-]{1,256}")
 # The gateway keeps at most MAX_ATTEMPT_RECORDS (32) attempts per request.
 MAX_FALLBACK_CHAIN = 32
 ERROR_CLASS_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -461,8 +465,8 @@ LEARNER_FIELDS = (
 )
 
 # Gateway identity and trace fields (#334). user_id is stored as
-# user_id_hash or user_id_raw (collector/user_identity.py), the rest as sent
-# once validated.
+# user_id_hash (and user_id_raw if the tenant opted in; see
+# collector/user_identity.py), the rest as sent once validated.
 IDENTITY_TRACE_FIELDS = (
     "user_id",
     "user_group",
@@ -562,10 +566,10 @@ def _attempt_record(raw: Any) -> dict | None:
         if status is None or not HTTP_STATUS_MIN <= status <= HTTP_STATUS_MAX:
             return None
         record["status"] = status
-    for key, max_length in (("provider", MAX_IDENTIFIER_LENGTH), ("model", MAX_MODEL_NAME_LENGTH)):
+    for key, pattern in (("provider", ATTEMPT_PROVIDER_RE), ("model", ATTEMPT_MODEL_RE)):
         if raw.get(key) is not None:
-            text = _lenient_str(raw[key], max_length)
-            if text is None:
+            text = raw[key]
+            if not isinstance(text, str) or not pattern.fullmatch(text):
                 return None
             record[key] = text
     if raw.get("error_class") is not None:

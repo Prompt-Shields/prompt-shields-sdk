@@ -1,7 +1,7 @@
 """Gateway identity and trace fields (#334): user_id, user_group, trace_id,
 retry_count, attempts and the stream flags are stored on ai_usage_events
-instead of landing in ignored_fields; user_id only as a per-tenant salted
-HMAC unless the tenant set store_raw_user_ids; the gateway's
+instead of landing in ignored_fields; user_id always as a per-tenant salted
+HMAC, and as sent too only if the tenant set store_raw_user_ids; the gateway's
 route_sensitivity_* names land in sensitivity_level / sensitivity_source.
 
 GATEWAY_EVENT mirrors the event a current gateway (ps-telemetry.ts) sends for
@@ -20,7 +20,7 @@ from collector.app import app
 from collector.config import settings
 from collector.ingest import IDENTITY_TRACE_FIELDS, IngestEvent
 from db.api_keys import api_key_lookup_prefix, hash_api_key
-from db.models import AIUsageEvent, Tenant
+from db.models import AIUsageEvent, Tenant, TenantSecret
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -120,18 +120,31 @@ async def _add_tenant_b(engine):
         return b.id
 
 
+async def _salt(engine, tenant_id=None):
+    async with _session(engine) as s:
+        if tenant_id is None:
+            tenant_id = (await s.execute(select(Tenant.id))).scalars().first()
+        return (
+            await s.execute(
+                select(TenantSecret.user_id_salt).where(TenantSecret.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+
+
 def _hmac(salt, value):
     return hmac.new(salt.encode(), value.encode(), hashlib.sha256).hexdigest()
 
 
 @pytest.mark.asyncio
 async def test_gateway_event_round_trip(seeded_db):
-    assert (await _tenant(seeded_db)).settings.get("user_id_salt") is None
+    assert await _salt(seeded_db) is None
     resp, loss = await _ingest([GATEWAY_EVENT])
     assert resp.status_code == 200, resp.text
 
-    salt = (await _tenant(seeded_db)).settings["user_id_salt"]
+    salt = await _salt(seeded_db)
     assert len(salt) == 64
+    # The salt is not a tenant setting.
+    assert "user_id_salt" not in ((await _tenant(seeded_db)).settings or {})
     (ev,) = await _events(seeded_db)
     assert ev.user_id_hash == _hmac(salt, SUBJECT)
     assert ev.user_id_raw is None
@@ -163,14 +176,15 @@ async def test_salt_is_stable_and_per_tenant(seeded_db):
     a = await _tenant(seeded_db)
     b = await _tenant(seeded_db, "Other Corp")
     assert b.id == tenant_b
-    assert a.settings["user_id_salt"] != b.settings["user_id_salt"]
+    salt_a, salt_b = await _salt(seeded_db, a.id), await _salt(seeded_db, b.id)
+    assert salt_a != salt_b
     events = await _events(seeded_db)
     by_tenant = {}
     for ev in events:
         by_tenant.setdefault(ev.tenant_id, set()).add(ev.user_id_hash)
     # One user, one hash per tenant; different across tenants.
-    assert by_tenant[a.id] == {_hmac(a.settings["user_id_salt"], SUBJECT)}
-    assert by_tenant[b.id] == {_hmac(b.settings["user_id_salt"], SUBJECT)}
+    assert by_tenant[a.id] == {_hmac(salt_a, SUBJECT)}
+    assert by_tenant[b.id] == {_hmac(salt_b, SUBJECT)}
 
 
 @pytest.mark.asyncio
@@ -178,7 +192,7 @@ async def test_no_salt_without_a_user_id(seeded_db):
     event = {k: v for k, v in GATEWAY_EVENT.items() if k != "user_id"}
     resp, _ = await _ingest([event])
     assert resp.status_code == 200, resp.text
-    assert "user_id_salt" not in (await _tenant(seeded_db)).settings
+    assert await _salt(seeded_db) is None
     (ev,) = await _events(seeded_db)
     assert ev.user_id_hash is None and ev.user_id_raw is None
     assert ev.user_group == "eng-staff"
@@ -192,8 +206,17 @@ async def test_store_raw_user_ids(seeded_db):
     assert resp.status_code == 200, resp.text
     (ev,) = await _events(seeded_db)
     assert ev.user_id_raw == SUBJECT
-    assert ev.user_id_hash is None
-    assert "user_id_salt" not in (await _tenant(seeded_db)).settings
+    # The hash is stored as well: it is the join key for per-user usage and
+    # erasure, whatever the setting.
+    assert ev.user_id_hash == _hmac(await _salt(seeded_db), SUBJECT)
+
+    # Turning raw storage off keeps the same hash for the same user.
+    await _set_settings(seeded_db, tenant.id, {"store_raw_user_ids": False})
+    resp, _ = await _ingest([GATEWAY_EVENT])
+    assert resp.status_code == 200, resp.text
+    events = await _events(seeded_db)
+    assert {e.user_id_hash for e in events} == {ev.user_id_hash}
+    assert sorted(str(e.user_id_raw) for e in events) == sorted(["None", SUBJECT])
 
 
 @pytest.mark.asyncio
@@ -207,14 +230,20 @@ async def test_store_raw_must_be_true_not_truthy(seeded_db):
 
 
 @pytest.mark.asyncio
-async def test_broken_salt_setting_is_replaced(seeded_db):
+async def test_settings_rewrites_never_touch_the_salt(seeded_db):
+    """Retention, connectors and the operator API rewrite tenants.settings
+    whole; the salt is not in it, so hashes stay continuous."""
     tenant = await _tenant(seeded_db)
-    await _set_settings(seeded_db, tenant.id, {"user_id_salt": 7, "retention_days": 90})
     resp, _ = await _ingest([GATEWAY_EVENT])
     assert resp.status_code == 200, resp.text
-    stored = (await _tenant(seeded_db)).settings
-    assert isinstance(stored["user_id_salt"], str) and len(stored["user_id_salt"]) == 64
-    assert stored["retention_days"] == 90
+    salt = await _salt(seeded_db)
+    # A stale whole-document write, and a planted settings key.
+    await _set_settings(seeded_db, tenant.id, {"retention_days": 90})
+    await _set_settings(seeded_db, tenant.id, {"user_id_salt": "attacker-known"})
+    resp, _ = await _ingest([GATEWAY_EVENT])
+    assert resp.status_code == 200, resp.text
+    assert await _salt(seeded_db) == salt
+    assert {e.user_id_hash for e in await _events(seeded_db)} == {_hmac(salt, SUBJECT)}
 
 
 @pytest.mark.asyncio
@@ -223,7 +252,7 @@ async def test_concurrent_first_use_agrees_on_one_salt(seeded_db):
     s1, s2 = _session(seeded_db), _session(seeded_db)
     try:
         p1 = await user_identity.policy_for(s1, tenant_id)
-        # s2 blocks on s1's row lock, then sees s1's salt.
+        # s2's INSERT waits on s1's uncommitted key, then reads s1's salt.
         task = asyncio.create_task(user_identity.policy_for(s2, tenant_id))
         await asyncio.sleep(0.2)
         assert not task.done()
@@ -234,7 +263,36 @@ async def test_concurrent_first_use_agrees_on_one_salt(seeded_db):
         await s1.close()
         await s2.close()
     assert p1.salt == p2.salt
-    assert (await _tenant(seeded_db)).settings["user_id_salt"] == p1.salt
+    assert await _salt(seeded_db, tenant_id) == p1.salt
+
+
+@pytest.mark.asyncio
+async def test_concurrent_settings_write_cannot_drop_a_new_salt(seeded_db):
+    """The race a settings-stored salt had: a writer reads settings, ingest
+    creates the salt, the writer saves its stale copy. The salt survives."""
+    tenant_id = (await _tenant(seeded_db)).id
+    writer, ingest = _session(seeded_db), _session(seeded_db)
+    try:
+        stale = dict(
+            (
+                await writer.execute(select(Tenant.settings).where(Tenant.id == tenant_id))
+            ).scalar_one()
+            or {}
+        )
+        p = await user_identity.policy_for(ingest, tenant_id)
+        await ingest.commit()
+        await writer.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(settings={**stale, "retention_days": 30})
+        )
+        await writer.commit()
+    finally:
+        await writer.close()
+        await ingest.close()
+    assert await _salt(seeded_db, tenant_id) == p.salt
+    async with _session(seeded_db) as s:
+        assert (await user_identity.policy_for(s, tenant_id)).salt == p.salt
 
 
 @pytest.mark.asyncio
@@ -283,7 +341,7 @@ async def test_malformed_fields_are_dropped_and_counted(seeded_db):
     nul = next(e for e in events if e.trace_id)
     assert nul.user_id_hash is None and nul.user_group == "eng-staff"
     # Neither batch event carried a usable user_id: no salt was made.
-    assert "user_id_salt" not in (await _tenant(seeded_db)).settings
+    assert await _salt(seeded_db) is None
 
 
 def test_field_validation():
@@ -317,6 +375,10 @@ def test_field_validation():
         {"attempt": 1, "latency_ms": 0}
     ]
     assert ev(attempts=[]).attempts == []
+    for model in ("us.anthropic.claude-3-5-sonnet-20240620-v1:0", "models/gemini-1.5-pro",
+                  "meta-llama/Llama-3-8b@main", "llama3:8b"):
+        rec = {"attempt": 1, "latency_ms": 1, "provider": "azure-openai", "model": model}
+        assert ev(attempts=[rec]).attempts == [rec], model
     for bad in (
         "x",
         [1],
@@ -327,6 +389,10 @@ def test_field_validation():
         [{"attempt": 1, "latency_ms": 1, "status": "200"}],
         [{"attempt": 1, "latency_ms": 1, "provider": "x" * 129}],
         [{"attempt": 1, "latency_ms": 1, "model": 5}],
+        # Free text never fits: provider and model are identifier tokens.
+        [{"attempt": 1, "latency_ms": 1, "provider": "Upstream said: boom"}],
+        [{"attempt": 1, "latency_ms": 1, "model": "Rate limit hit for org-123"}],
+        [{"attempt": 1, "latency_ms": 1, "model": "gpt-4o\n"}],
         [{"attempt": 1, "latency_ms": 1, "error_class": "Bad Gateway"}],
         [{"attempt": i + 1, "latency_ms": 1} for i in range(33)],
     ):
@@ -340,13 +406,12 @@ def test_field_validation():
 
 
 def test_user_id_policy_columns():
-    raw = user_identity.UserIdPolicy(store_raw=True)
-    assert raw.columns("u") == {"user_id_hash": None, "user_id_raw": "u"}
-    hashed = user_identity.UserIdPolicy(store_raw=False, salt="s")
+    raw = user_identity.UserIdPolicy(salt="s", store_raw=True)
+    assert raw.columns("u") == {"user_id_hash": _hmac("s", "u"), "user_id_raw": "u"}
+    hashed = user_identity.UserIdPolicy(salt="s")
     assert hashed.columns("u") == {"user_id_hash": _hmac("s", "u"), "user_id_raw": None}
     assert hashed.columns(None) == {"user_id_hash": None, "user_id_raw": None}
-    assert user_identity.public_settings({"user_id_salt": "s", "a": 1}) == {"a": 1}
-    assert user_identity.public_settings(None) == {}
+    assert raw.columns(None) == {"user_id_hash": None, "user_id_raw": None}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -359,7 +424,7 @@ async def test_operator_api_never_returns_or_changes_the_salt(seeded_db):
     resp, _ = await _ingest([GATEWAY_EVENT])
     assert resp.status_code == 200, resp.text
     tenant = await _tenant(seeded_db)
-    salt = tenant.settings["user_id_salt"]
+    salt = await _salt(seeded_db)
     tid = str(tenant.id)
 
     async with _client() as c:
@@ -398,7 +463,7 @@ async def test_operator_api_never_returns_or_changes_the_salt(seeded_db):
         assert salt not in ok.text
 
     # Merging other settings keeps the stored salt.
-    assert (await _tenant(seeded_db)).settings["user_id_salt"] == salt
+    assert await _salt(seeded_db) == salt
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -434,6 +499,7 @@ def test_migration_matches_the_model():
     assert set(MIGRATION_COLUMNS) <= set(AIUsageEvent.__table__.columns.keys())
     model_indexes = {i.name for i in AIUsageEvent.__table__.indexes}
     assert {name for name, _ in m.INDEXES} <= model_indexes
+    assert m.SECRETS_TABLE == TenantSecret.__tablename__
 
 
 def _columns(sync_conn, table):
@@ -442,6 +508,10 @@ def _columns(sync_conn, table):
 
 def _indexes(sync_conn, table):
     return {i["name"] for i in inspect(sync_conn).get_indexes(table)}
+
+
+def _tables(sync_conn):
+    return set(inspect(sync_conn).get_table_names())
 
 
 @pytest.mark.asyncio
@@ -460,6 +530,8 @@ async def test_migration_downgrade_and_upgrade(seeded_db):
         await conn.run_sync(run, m.downgrade)
         cols = await conn.run_sync(_columns, "ai_usage_events")
         indexes = await conn.run_sync(_indexes, "ai_usage_events")
+        tables = await conn.run_sync(_tables)
+    assert "tenant_secrets" not in tables
     assert not set(MIGRATION_COLUMNS) & set(cols)
     assert not {name for name, _ in m.INDEXES} & indexes
     # 035 sits on 034: its downgrade leaves est_tokens_saved.
@@ -469,6 +541,15 @@ async def test_migration_downgrade_and_upgrade(seeded_db):
         await conn.run_sync(run, m.upgrade)
         cols = await conn.run_sync(_columns, "ai_usage_events")
         indexes = await conn.run_sync(_indexes, "ai_usage_events")
+        secret_cols = await conn.run_sync(_columns, "tenant_secrets")
+        policies = (
+            await conn.exec_driver_sql(
+                "SELECT policyname FROM pg_policies WHERE tablename = 'tenant_secrets'"
+            )
+        ).scalars().all()
+    assert set(secret_cols) == {"tenant_id", "user_id_salt", "created_at"}
+    assert not secret_cols["user_id_salt"]["nullable"]
+    assert policies == ["tenant_isolation"]
     assert all(cols[f]["nullable"] for f in MIGRATION_COLUMNS)
     assert {name for name, _ in m.INDEXES} <= indexes
 
@@ -476,3 +557,4 @@ async def test_migration_downgrade_and_upgrade(seeded_db):
     assert resp.status_code == 200, resp.text
     (ev,) = await _events(seeded_db)
     assert ev.trace_id == "trace-7f3a" and ev.user_id_hash
+    assert ev.user_id_hash == _hmac(await _salt(seeded_db), SUBJECT)
