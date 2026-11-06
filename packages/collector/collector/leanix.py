@@ -368,12 +368,10 @@ def build_ldif(
 def expected_fact_sheets(ldif: dict) -> dict[str, list[str]]:
     """Fact sheet type -> external ids an LDIF document should create or
     update, in content order."""
-    out: dict[str, list[str]] = {}
+    out: dict[str, dict[str, None]] = {}
     for item in ldif.get("content", []):
-        ids = out.setdefault(item["type"], [])
-        if item["id"] not in ids:
-            ids.append(item["id"])
-    return out
+        out.setdefault(item["type"], {})[item["id"]] = None
+    return {fs_type: list(ids) for fs_type, ids in out.items()}
 
 
 def _verify_query(fs_type: str) -> str:
@@ -697,7 +695,8 @@ async def sync_leanix(
                 conn, transport=leanix_transport, resolver=resolver, sleep=sleep
             ) as lx:
                 await lx.put_processor_configuration()
-                expected: dict[str, list[str]] = {}
+                # Ordered sets: a 50k-asset registry must not cost O(n^2).
+                expected: dict[str, dict[str, None]] = {}
                 for i in range(0, len(assets), conn.batch_size):
                     batch = assets[i : i + conn.batch_size]
                     ldif = build_ldif(
@@ -711,11 +710,15 @@ async def sync_leanix(
                     run_id = await lx.start_run(ldif)
                     run_ids.append(run_id)
                     await lx.wait_for_run(run_id)
-                    for fs_type, ids in expected_fact_sheets(ldif).items():
-                        known = expected.setdefault(fs_type, [])
-                        known += [x for x in ids if x not in known]
+                    if verify:
+                        for fs_type, ids in expected_fact_sheets(ldif).items():
+                            expected.setdefault(fs_type, {}).update(
+                                dict.fromkeys(ids)
+                            )
                 if verify:
-                    verification = await lx.verify(expected)
+                    verification = await lx.verify(
+                        {fs_type: list(ids) for fs_type, ids in expected.items()}
+                    )
                     if verification["missing_count"]:
                         raise VerificationFailed(verification)
     except (ConnectorError, ValueError, TypeError, OverflowError) as exc:

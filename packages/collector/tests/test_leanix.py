@@ -863,9 +863,26 @@ async def test_verify_missing_fact_sheets_fail_the_sync_and_keep_cursor():
 
 async def test_verify_is_off_by_default_and_follows_tenant_setting():
     fakes = Fakes()
-    out = await lx.sync_leanix(FakeSession(), TENANT, **fakes.kwargs())
+    db = FakeSession()
+    out = await lx.sync_leanix(db, TENANT, **fakes.kwargs())
     assert out["status"] == "ok" and "verification" not in out
     assert fakes.graphql_requests == []
+    # Default off is the pre-verify behaviour: same result keys, same
+    # LeanIX calls, no verification state.
+    assert set(out) == {
+        "tenant_id",
+        "status",
+        "mode",
+        "since",
+        "cursor",
+        "run_ids",
+        "assets",
+        "data_flows",
+        "ldif_items",
+        "runs",
+    }
+    assert lx.GRAPHQL_PATH not in [r.url.path for r in fakes.leanix_requests]
+    assert "last_verification" not in db.tenant.settings["connectors"]["leanix"]
 
     fakes = Fakes()
     out = await lx.sync_leanix(
@@ -912,6 +929,28 @@ async def test_verify_graphql_errors_fail_without_echo(response):
     assert out["status"] == "error"
     assert out["error"].startswith("leanix: fact sheet lookup returned")
     assert LX_TOKEN not in json.dumps(out)
+
+
+async def test_verify_http_failure_keeps_cursor():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"leanix": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    leanix = fakes.leanix
+
+    def fail_graphql(r: httpx.Request) -> httpx.Response:
+        if r.url.path == lx.GRAPHQL_PATH:
+            return httpx.Response(403, text=LX_TOKEN)
+        return leanix(r)
+
+    fakes.leanix = fail_graphql
+    out = await lx.sync_leanix(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "error"
+    assert out["error"] == "leanix: fact sheet lookup returned HTTP 403"
+    assert LX_TOKEN not in json.dumps(out)
+    state = db.tenant.settings["connectors"]["leanix"]
+    assert state["cursor"] == cursor and state["last_status"] == "error"
 
 
 def test_verify_query_rejects_unsafe_type():
