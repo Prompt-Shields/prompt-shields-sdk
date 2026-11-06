@@ -176,6 +176,8 @@ def _arm_handler(calls: list[httpx.Request], *, throttle_first_list: bool = Fals
                     ]
                 },
             )
+        if path.endswith("/Microsoft.MachineLearningServices/workspaces"):
+            return httpx.Response(200, json={"value": []})
         raise AssertionError(f"unexpected request {request.url}")
 
     return handler
@@ -188,7 +190,8 @@ async def test_azure_lists_deployments_with_region_and_tags():
         transport=httpx.MockTransport(_arm_handler(calls, throttle_first_list=True)),
         sleep=_no_sleep,
     )
-    assert summary == {"accounts": 1}  # speech skipped, malformed id rejected
+    # speech skipped, malformed id rejected
+    assert summary == {"accounts": 1, "ml_workspaces": 0}
     # Failed and Disabled deployments are not serving and are skipped.
     assert [(d.resource_id, d.region, d.model) for d in deps] == [
         (f"{ACCOUNT}/deployments/chat-prod", "swedencentral", "gpt-4o"),
@@ -232,7 +235,7 @@ async def test_azure_token_is_renewed_before_it_expires():
         sleep=_no_sleep,
         clock=clock,
     )
-    assert summary == {"accounts": 0} and deps == []
+    assert summary == {"accounts": 0, "ml_workspaces": 0} and deps == []
     assert state["n"] >= 3
 
 
@@ -264,6 +267,8 @@ async def test_azure_token_refused_mid_run_is_renewed_and_the_page_retried():
                     "value": [{"id": ACCOUNT, "kind": "OpenAI", "location": "eastus"}]
                 },
             )
+        if path.endswith("/workspaces"):
+            return httpx.Response(200, json={"value": []})
         assert path == f"{ACCOUNT}/deployments"
         assert request.headers["authorization"] == "Bearer tok-2"
         return httpx.Response(
@@ -286,7 +291,7 @@ async def test_azure_token_refused_mid_run_is_renewed_and_the_page_retried():
     )
     assert state["tokens"] == 2
     assert state["refused"] == [f"{ACCOUNT}/deployments"]
-    assert summary == {"accounts": 1}
+    assert summary == {"accounts": 1, "ml_workspaces": 0}
     assert [(d.resource_id, d.model) for d in deps] == [
         (f"{ACCOUNT}/deployments/chat-prod", "gpt-4o")
     ]
@@ -360,6 +365,7 @@ async def test_a_failing_subscription_does_not_stop_the_others():
     )
     assert summary == {
         "accounts": 1,
+        "ml_workspaces": 0,
         "subscription_errors": {SUB_DENIED: "azure: account list returned HTTP 403"},
     }
     assert len(deps) == 2
@@ -374,9 +380,10 @@ async def test_a_failing_subscription_does_not_stop_the_others():
         now=NOW,
     )
     assert result["clouds"]["azure"]["status"] == "ok"
-    assert result["clouds"]["azure"]["subscription_errors"] == summary[
-        "subscription_errors"
-    ]
+    assert (
+        result["clouds"]["azure"]["subscription_errors"]
+        == summary["subscription_errors"]
+    )
     assert result["clouds"]["azure"]["deployments"] == 2
 
 
@@ -473,6 +480,7 @@ async def test_pull_stores_assets_and_is_idempotent():
     assert result["clouds"]["azure"] == {
         "status": "ok",
         "accounts": 1,
+        "ml_workspaces": 0,
         "deployments": 2,
         "assets_created": 0,
         "assets_updated": 2,
@@ -631,7 +639,10 @@ def test_env_tenant_keys_match_case_insensitively(monkeypatch):
     [
         ["not-a-tenant"],
         # The same tenant twice, differing only in case.
-        ["ABCDEF01-2345-6789-ABCD-EF0123456789", "abcdef01-2345-6789-abcd-ef0123456789"],
+        [
+            "ABCDEF01-2345-6789-ABCD-EF0123456789",
+            "abcdef01-2345-6789-abcd-ef0123456789",
+        ],
     ],
 )
 def test_env_tenant_keys_must_be_distinct_uuids(monkeypatch, keys):
@@ -710,3 +721,302 @@ def test_request_body_cannot_carry_credentials():
         {"tenant_id": str(TENANT), "azure": {"client_secret": "x"}}
     )
     assert not hasattr(body, "azure")
+
+
+# --- Azure Machine Learning workspaces / hub-based AI Foundry projects ------
+
+RG = f"/subscriptions/{SUB}/resourceGroups/rg-ml/providers/"
+PROJECT = RG + "Microsoft.MachineLearningServices/workspaces/claims-project"
+CLASSIC = RG + "Microsoft.MachineLearningServices/workspaces/aml-classic"
+HUB = RG + "Microsoft.MachineLearningServices/workspaces/ai-hub"
+FEATURES = RG + "Microsoft.MachineLearningServices/workspaces/features"
+
+
+def _ml_handler(calls: list[httpx.Request], *, failing: set[str] = frozenset()):
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        host, path = request.url.host, request.url.path
+        if host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        assert host == "management.azure.com"
+        assert request.method == "GET"
+        assert request.headers["authorization"] == f"Bearer {TOKEN}"
+        if any(path.startswith(p) for p in failing):
+            return httpx.Response(403, json={"error": {"code": "AuthorizationFailed"}})
+        if path.endswith("/Microsoft.CognitiveServices/accounts"):
+            return httpx.Response(
+                200,
+                json={
+                    "value": [{"id": ACCOUNT, "kind": "OpenAI", "location": "eastus"}]
+                },
+            )
+        if path == f"{ACCOUNT}/deployments":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {"name": "chat", "properties": {"model": {"name": "gpt-4o"}}}
+                    ]
+                },
+            )
+        if path.endswith("/Microsoft.MachineLearningServices/workspaces"):
+            assert request.url.params["api-version"] == ci.ARM_ML_API
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": PROJECT,
+                            "kind": "Project",
+                            "location": "SwedenCentral",
+                            "tags": {
+                                "owner": "claims-ai@acme.com",
+                                "env": "prod",
+                                "department": "Claims",
+                            },
+                        },
+                        {"id": CLASSIC, "kind": "Default", "location": "westeurope"},
+                        {"id": HUB, "kind": "Hub", "location": "swedencentral"},
+                        {"id": FEATURES, "kind": "FeatureStore", "location": "eastus"},
+                        {"id": "/subscriptions/../evil", "kind": "Project"},
+                    ]
+                },
+            )
+        if path == f"{PROJECT}/serverlessEndpoints":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "name": "llama-claims",
+                            "location": "swedencentral",
+                            "tags": {"owner": "llm-team@acme.com"},
+                            "properties": {
+                                "modelSettings": {
+                                    "modelId": "azureml://registries/azureml-meta/"
+                                    "models/Meta-Llama-3.1-70B-Instruct"
+                                },
+                                "provisioningState": "Succeeded",
+                                "endpointState": "Online",
+                            },
+                        },
+                        {
+                            "name": "mistral-paused",
+                            "properties": {
+                                "modelSettings": {"modelId": "azureml://x/models/m"},
+                                "provisioningState": "Succeeded",
+                                "endpointState": "Suspended",
+                            },
+                        },
+                        {
+                            "name": "broken",
+                            "properties": {"provisioningState": "Failed"},
+                        },
+                        {"name": "../escape", "properties": {}},
+                    ]
+                },
+            )
+        if path == f"{PROJECT}/onlineEndpoints":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "name": "phi-endpoint",
+                            "tags": {"env": "dev"},
+                            "properties": {"provisioningState": "Succeeded"},
+                        },
+                        {
+                            "name": "deleting",
+                            "properties": {"provisioningState": "Deleting"},
+                        },
+                    ]
+                },
+            )
+        if path == f"{PROJECT}/onlineEndpoints/phi-endpoint/deployments":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "name": "blue",
+                            "tags": {"owner": "phi-owner@acme.com"},
+                            "properties": {
+                                "model": "azureml://registries/azureml/models/"
+                                "Phi-3-mini-4k-instruct/versions/14",
+                                "provisioningState": "Succeeded",
+                            },
+                        },
+                        {
+                            "name": "green",
+                            "properties": {
+                                "model": "azureml:my-model:3",
+                                "provisioningState": "Failed",
+                            },
+                        },
+                    ]
+                },
+            )
+        if path.startswith(CLASSIC) and path.endswith("Endpoints"):
+            return httpx.Response(200, json={"value": []})
+        raise AssertionError(f"unexpected request {request.url}")
+
+    return handler
+
+
+async def test_ml_endpoints_are_inventoried_with_region_and_owner_tags():
+    calls: list[httpx.Request] = []
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(_ml_handler(calls)),
+        sleep=_no_sleep,
+    )
+    # Hub, feature store and the malformed id are not counted.
+    assert summary == {"accounts": 1, "ml_workspaces": 2}
+    got = {d.resource_id: (d.region, d.model, d.model_format, d.tags) for d in deps}
+    assert got == {
+        f"{ACCOUNT}/deployments/chat": ("eastus", "gpt-4o", None, {}),
+        f"{PROJECT}/serverlessEndpoints/llama-claims": (
+            "swedencentral",
+            "Meta-Llama-3.1-70B-Instruct",
+            "serverless",
+            {"owner": "llm-team@acme.com", "env": "prod", "department": "Claims"},
+        ),
+        # Region from the workspace; deployment tags over endpoint tags over
+        # workspace tags.
+        f"{PROJECT}/onlineEndpoints/phi-endpoint/deployments/blue": (
+            "swedencentral",
+            "Phi-3-mini-4k-instruct",
+            "online",
+            {"owner": "phi-owner@acme.com", "env": "dev", "department": "Claims"},
+        ),
+    }
+    paths = {c.url.path for c in calls}
+    assert not any(p.startswith((HUB, FEATURES)) for p in paths)
+    assert not any("deleting" in p for p in paths)
+    assert {c.method for c in calls if c.url.host == "management.azure.com"} == {"GET"}
+
+
+async def test_ml_permission_missing_keeps_cognitive_deployments():
+    # A custom role written before ML workspaces were inventoried.
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(
+            _ml_handler(
+                [],
+                failing={
+                    f"/subscriptions/{SUB}/providers/Microsoft.MachineLearningServices"
+                },
+            )
+        ),
+        sleep=_no_sleep,
+    )
+    assert summary == {
+        "accounts": 1,
+        "ml_workspaces": 0,
+        "ml_errors": {SUB: "azure: ml workspace list returned HTTP 403"},
+    }
+    assert [d.resource_id for d in deps] == [f"{ACCOUNT}/deployments/chat"]
+
+
+async def test_unregistered_ml_provider_is_not_an_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        if request.url.path.endswith("/workspaces"):
+            return httpx.Response(
+                409, json={"error": {"code": "MissingSubscriptionRegistration"}}
+            )
+        return httpx.Response(200, json={"value": []})
+
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(handler),
+        sleep=_no_sleep,
+    )
+    assert summary == {"accounts": 0, "ml_workspaces": 0} and deps == []
+
+
+async def test_a_failing_workspace_does_not_stop_the_others():
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(
+            _ml_handler([], failing={f"{CLASSIC}/serverlessEndpoints"})
+        ),
+        sleep=_no_sleep,
+    )
+    assert summary["ml_errors"] == {
+        CLASSIC: "azure: serverless endpoint list returned HTTP 403"
+    }
+    assert summary["ml_workspaces"] == 2
+    assert len(deps) == 3
+
+
+async def test_ml_workspaces_can_be_turned_off():
+    calls: list[httpx.Request] = []
+    summary, deps = await ci.fetch_azure_deployments(
+        _creds(subscription_ids=[SUB], include_ml_workspaces=False),
+        transport=httpx.MockTransport(_ml_handler(calls)),
+        sleep=_no_sleep,
+    )
+    assert summary == {"accounts": 1}
+    assert len(deps) == 1
+    assert not any("MachineLearningServices" in c.url.path for c in calls)
+
+
+@pytest.mark.parametrize(
+    "ref, model",
+    [
+        (
+            "azureml://registries/azureml-meta/models/Meta-Llama-3-8B-Instruct",
+            "Meta-Llama-3-8B-Instruct",
+        ),
+        ("azureml://registries/azureml/models/mistral-7b/versions/3", "mistral-7b"),
+        (f"{PROJECT}/models/claims-clf/versions/1", "claims-clf"),
+        ("azureml:claims-clf:2", "claims-clf"),
+        ("azureml:claims-clf", "claims-clf"),
+        ("not a reference", None),
+        ("", None),
+        (7, None),
+        (None, None),
+    ],
+)
+def test_ml_model_reference_parsing(ref, model):
+    assert ci._ml_model(ref) == model
+
+
+async def test_pull_stores_ml_assets_with_owner_and_region(caplog):
+    db = FakeSession()
+    result = await ci.pull_cloud_inventory(
+        db,
+        TENANT,
+        clouds=["azure"],
+        settings=_settings(subscription_ids=[SUB]),
+        transport=httpx.MockTransport(_ml_handler([])),
+        sleep=_no_sleep,
+        now=NOW,
+    )
+    assert result["clouds"]["azure"]["status"] == "ok"
+    assert result["clouds"]["azure"]["deployments"] == 3
+    by_service = {a.calling_service: a for a in db.rows.values()}
+    llama = by_service[f"azure:{PROJECT}/serverlessEndpoints/llama-claims"]
+    assert (
+        llama.vendor,
+        llama.model,
+        llama.region,
+        llama.owner_email,
+        llama.environment,
+        llama.business_unit,
+        llama.discovery_source,
+    ) == (
+        "microsoft",
+        "Meta-Llama-3.1-70B-Instruct",
+        "swedencentral",
+        "llm-team@acme.com",
+        "production",
+        "Claims",
+        ["platform_signal"],
+    )
+    phi = by_service[f"azure:{PROJECT}/onlineEndpoints/phi-endpoint/deployments/blue"]
+    assert (phi.owner_email, phi.environment) == ("phi-owner@acme.com", "dev")
+    assert SECRET not in caplog.text and TOKEN not in caplog.text
