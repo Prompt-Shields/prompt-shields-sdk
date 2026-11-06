@@ -235,6 +235,12 @@ call's (use case, model) cell (`quality_source: "eval_parity"`, cell size in
 `quality_samples`). It stays null with `quality_source: "not_measured"` when no eval results
 were given or that cell was not evaluated; it is never estimated.
 
+A Prompt Shields event the SDK routing learner decided in auto mode (#34; it has
+`route_learner_mode` and a `route_propensity` in (0, 1]) also gives its tuple `propensity`
+(the probability the learner picked the served model), `learner_mode` (`policy`, `exploit`
+or `explore`) and `learner_version`. The offline learner weights quality by `propensity`
+(doubly robust) when every scored row has one. Other tuples have none of these keys.
+
 With `--policy`, each tuple also gets the call's effective `sensitivity_level` (declared
 level plus PII escalation) and a `replay` object, the policy replay's decision for that call:
 
