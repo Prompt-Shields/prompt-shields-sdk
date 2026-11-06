@@ -9,7 +9,7 @@ This directory is a fork of the [Portkey AI Gateway](https://github.com/Portkey-
 | Fork base | [`28ed85e`](https://github.com/Portkey-AI/gateway/commit/28ed85e) | 2026-02-19 | v1.15.2. Forked 2026-03-24. Confirmed by diffing `src/` and `plugins/` against every upstream `main` commit (`plugins/` identical; `src/` differs only by our changes). |
 | OSS `main` triaged to | [`669825c`](https://github.com/Portkey-AI/gateway/commit/669825c) | 2026-05-25 | No upstream commits since (re-checked 2026-11-06, #208). |
 | OSS `2.0.0` triaged to | [`8febc1d`](https://github.com/Portkey-AI/gateway/commit/8febc1d) | 2026-03-14 | Pre-release; branches from our exact base. |
-| Enterprise changelog triaged to | 2.33.0 | 2026-11-04 | Closed source. Features are re-implemented from the public changelog, never copied. Per-entry record of 2.29.0-2.33.0: [`docs/upstream-triage-2026-11.md`](docs/upstream-triage-2026-11.md) (#208). |
+| Enterprise changelog triaged to | 2.33.1 | 2026-11-06 | Closed source. Features are re-implemented from the public changelog, never copied. Per-entry record of 2.29.0-2.33.1: [`docs/upstream-triage-2026-11.md`](docs/upstream-triage-2026-11.md) (#208). |
 
 **Decision (#56, 2026-10-12): stay on `28ed85e` and port features from `2.0.0`; do not rebase.** Run standalone (`FETCH_SETTINGS_FROM_FILE=true`), `2.0.0` rejects every request with `401 Invalid API Key`: its `authNMiddleWare` always validates the caller's key against Portkey's control plane (`ALBUS_BASEPATH`). The branch also does not build on Linux without fixing two filename-case bugs. The features we want (rerank, Responses/Messages adapters, tokenizer, payload-size limit, OTel/metrics, new providers) do not depend on the control plane, so they are ported one at a time (milestone *U1*, #57–#62). Security fixes keep being cherry-picked from `main`.
 
@@ -219,6 +219,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/together-ai/chatComplete.ts`
 - `src/providers/together-ai/complete.ts`
 - `src/providers/types.ts`
+- `src/providers/utils/finishReasonMap.ts`
 - `src/providers/voyage/api.ts`
 - `src/providers/voyage/index.ts`
 - `src/providers/z-ai/api.ts`
@@ -241,7 +242,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 
 ```bash
 # 1. What changed upstream (OSS) and in the enterprise changelog since the triage points above
-python3 scripts/upstream-watch.py --since-enterprise 2.33.0 --since-main 669825c --since-2-0 8febc1d
+python3 scripts/upstream-watch.py --since-enterprise 2.33.1 --since-main 669825c --since-2-0 8febc1d
 
 # 2. Re-confirm the base: an empty plugins/ diff and a src/ diff limited to PS files
 git clone --filter=blob:none https://github.com/Portkey-AI/gateway /tmp/portkey
@@ -342,6 +343,11 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 45. **Changed** (#208, GHSA-rmxm-3fg6-px4f): `@hono/node-server` is on 2.x (2.1.6), which handles WebSocket upgrades itself, so `@hono/node-ws` (whose peer range stops at node-server 1.x) is removed. `src/start-server.ts` imports `upgradeWebSocket` from `@hono/node-server` and passes a `ws` `WebSocketServer({ noServer: true })` to `serve()` instead of calling `createNodeWebSocket`/`injectWebSocket`. Upgrade requests now go through the drain-wrapped fetch (503 while draining). `src/tests/dependencyFloors.test.ts` floors `@hono/node-server` at 2.1.6.
 47. **Changed** (PS count_tokens and hooks, refs #73; fork behaviour; follows 44): hooks are skipped on `messagesCountTokens` and `countResponseInputTokens` (`shouldSkipHook` in `src/middlewares/hooks/index.ts`, unchanged), so a target with any hooks no longer sends its prompt to a provider count API. `messagesCountTokensRoute` (`src/handlers/adapterUtils.ts`) returns the local estimate for such a target on every provider the Messages endpoint can reach (native Anthropic, Bedrock, Claude Platform on AWS and Vertex AI Claude configs included, not only Gemini and OpenAI), and `tryPost` (`src/handlers/handlerUtils.ts`) answers `countResponseInputTokens` on a supported provider with `estimatedResponseInputTokensResponse` (`estimateResponsesInputTokens` in `src/adapters/messages/estimateTokens.ts`), both with `x-ps-token-count: estimated`. The data-policy gate still runs first.
 49. **Added** (Responses adapter thinking round-trip, refs #73; fork behaviour, not in OSS 2.0.0): on `/v1/responses` through the Chat Completions adapter, Anthropic, Bedrock and Vertex AI (Anthropic models) targets now return signed `thinking` and `redacted_thinking` blocks in the reasoning item's `encrypted_content` as `ps-thk1:<provider>:<base64 JSON>` (`src/adapters/responses/thinkingCarry.ts`; JSON in `responseTransform.ts`, SSE in `streamTransform.ts`, whose `createStreamState` now takes the provider). `transformResponsesToChatCompletions` takes the target provider (passed by `applyAdapterRequestTransform` in `src/handlers/adapterUtils.ts`) and turns such a reasoning item, for the provider that issued it only, back into the leading `content_blocks` of the next assistant message, which these providers' chat transforms send as signed thinking; other reasoning items are still dropped. `tryPost` (`src/handlers/handlerUtils.ts`) removes those items (`stripIssuedThinking`) before a request reaches a native Responses target (`createModelResponse`, `countResponseInputTokens`). Only the thinking text, signature and redacted data are encoded.
+50. **Fixed** (#208, Gemini/Vertex follow-ups from the triage in [`docs/upstream-triage-2026-11.md`](docs/upstream-triage-2026-11.md), entries 60-62 and 78; each re-implemented from its one-line Portkey enterprise changelog description, no enterprise code; follows 40):
+   - (2.32) A prompt Gemini blocks (200, `promptFeedback.blockReason`, no candidates) returns one choice carrying the reason (`geminiBlockedPromptChoice` in `src/providers/google/chatComplete.ts`, used by the Gemini API and Vertex AI JSON and stream transforms) instead of an empty `choices` array (Vertex) or an invalid-response error (Gemini API). It finishes with `content_filter` under strict OpenAI compliance, and with the native block reason plus `promptFeedback` otherwise.
+   - (2.32) `MODEL_ARMOR` and `IMAGE_PROHIBITED_CONTENT` finish reasons map to `content_filter` under strict compliance (`src/providers/utils/finishReasonMap.ts`; enums in `src/providers/google/types.ts` and `src/providers/google-vertex-ai/types.ts`); before, an unknown reason became `stop`.
+   - (2.32) Vertex AI service-account tokens (`getAccessToken` in `src/providers/google-vertex-ai/utils.ts`) are cached for their real lifetime (`expires_in` less 5 minutes) instead of a fixed 50 minutes, and the token exchange is retried once on a network error, 429 or 5xx. The fork sets no gateway cache hooks, so tokens were fetched on every request; a bounded in-process cache (256 entries) is used when no hook is set. The cache key is a SHA-256 of the whole credential, private key included (upstream keyed on project, key id and email only). A failed exchange or a response without `access_token` is never cached and returns an empty token.
+   - (2.33) The `googleSearch` tool forwards Vertex AI's `excludeDomains` and `blockingConfidence` (`transformGoogleTools` in `src/providers/google-vertex-ai/utils.ts`).
 
 ## Original License
 
