@@ -18,11 +18,11 @@ Downgrade drops both. Every operator token is lost, and narrowed ingest
 keys get their full access back (the column goes, and with it the check).
 
 Revision ID: 037
-Revises: 034
+Revises: 035
 Create Date: 2026-11-06
 
-Numbered 037 by plan; 035 and 036 are taken by open PRs. It chains from
-034 (main's head when written) and is re-chained onto 036 at merge.
+Numbered 037 by plan; 036 is taken by an open PR (#338). It chains from
+035 (main's head at merge); re-chain it onto 036 if that lands first.
 """
 
 from collections.abc import Sequence
@@ -32,7 +32,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "037"
-down_revision: str | None = "034"
+down_revision: str | None = "035"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
