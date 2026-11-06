@@ -212,8 +212,10 @@ app.include_router(provider_credentials_partner_router)
 
 # Platform signal: cloud AI inventory (admin trigger)
 from collector.cloud_inventory import router as cloud_inventory_router
+from collector.cloud_inventory_import import router as cloud_inventory_import_router
 
 app.include_router(cloud_inventory_router)
+app.include_router(cloud_inventory_import_router)
 
 # EA-tool connectors: push the registry to LeanIX / ServiceNow (operator trigger)
 from collector.leanix import router as leanix_router

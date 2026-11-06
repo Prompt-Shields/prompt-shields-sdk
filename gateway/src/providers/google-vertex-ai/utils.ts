@@ -90,31 +90,171 @@ async function importPrivateKey(pem: string): Promise<CryptoKey> {
   );
 }
 
+// PS fork (#208, re-implemented from the Portkey enterprise 2.32 changelog):
+// a token is cached for its real lifetime (`expires_in`, less a safety margin)
+// instead of a fixed 50 minutes, and the token exchange is retried once on a
+// network error, a 429 or a 5xx. The fork configures no gateway cache hooks
+// (`getFromCacheByKey`/`putInCacheWithValue`), so tokens were fetched again on
+// every request; a small in-process cache is used when no hook is set. The
+// cache key is a SHA-256 of the whole credential, private key included, so a
+// caller who knows another account's project, key id and email but not its
+// private key cannot be handed that account's cached token. The key also
+// covers the OAuth scope and audience, so a token minted for one scope is
+// never reused for another. Concurrent requests for the same key share one
+// in-flight token exchange (single-flight); the entry is dropped when the
+// exchange settles, so a failed exchange is not reused and the next caller
+// tries again.
+const VERTEX_TOKEN_EXPIRY_MARGIN_S = 300;
+const VERTEX_TOKEN_DEFAULT_LIFETIME_S = 3600;
+export const VERTEX_TOKEN_CACHE_MAX_ENTRIES = 256;
+const vertexTokenCache = new Map<
+  string,
+  { token: string; expiresAt: number }
+>();
+
+const vertexTokenInFlight = new Map<string, Promise<string>>();
+
+/** Test hook: empties the in-process Vertex token cache. */
+export const clearVertexTokenCache = () => {
+  vertexTokenCache.clear();
+  vertexTokenInFlight.clear();
+};
+
+const VERTEX_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+export const VERTEX_TOKEN_SCOPE =
+  'https://www.googleapis.com/auth/cloud-platform';
+
+export const vertexTokenCacheKey = async (
+  serviceAccountInfo: Record<string, any>,
+  scope: string = VERTEX_TOKEN_SCOPE,
+  audience: string = VERTEX_TOKEN_URL
+): Promise<string> => {
+  const material = JSON.stringify([
+    serviceAccountInfo.project_id,
+    serviceAccountInfo.client_email,
+    serviceAccountInfo.private_key_id,
+    serviceAccountInfo.private_key,
+    scope,
+    audience,
+  ]);
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(material)
+  );
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return `vertex-access-token:${hex}`;
+};
+
+/** Seconds to cache a token for, from the token endpoint's `expires_in`. */
+export const vertexTokenCacheTtl = (expiresIn: unknown): number => {
+  const lifetime =
+    typeof expiresIn === 'number' && Number.isFinite(expiresIn) && expiresIn > 0
+      ? expiresIn
+      : VERTEX_TOKEN_DEFAULT_LIFETIME_S;
+  return Math.max(0, Math.floor(lifetime - VERTEX_TOKEN_EXPIRY_MARGIN_S));
+};
+
+const readCachedVertexToken = async (
+  c: Context,
+  cacheKey: string
+): Promise<string | undefined> => {
+  const getFromCacheByKey = c.get('getFromCacheByKey');
+  if (getFromCacheByKey) {
+    try {
+      return (await getFromCacheByKey(env(c), cacheKey)) || undefined;
+    } catch (err) {
+      return undefined;
+    }
+  }
+  const entry = vertexTokenCache.get(cacheKey);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    vertexTokenCache.delete(cacheKey);
+    return undefined;
+  }
+  return entry.token;
+};
+
+const storeVertexToken = async (
+  c: Context,
+  cacheKey: string,
+  token: string,
+  ttlSeconds: number
+) => {
+  if (ttlSeconds <= 0) return;
+  const putInCacheWithValue = c.get('putInCacheWithValue');
+  if (putInCacheWithValue) {
+    try {
+      await putInCacheWithValue(env(c), cacheKey, token, ttlSeconds);
+    } catch (err) {}
+    return;
+  }
+  vertexTokenCache.delete(cacheKey);
+  while (vertexTokenCache.size >= VERTEX_TOKEN_CACHE_MAX_ENTRIES) {
+    const oldest = vertexTokenCache.keys().next().value;
+    if (oldest === undefined) break;
+    vertexTokenCache.delete(oldest);
+  }
+  vertexTokenCache.set(cacheKey, {
+    token,
+    expiresAt: Date.now() + ttlSeconds * 1000,
+  });
+};
+
+const isRetryableTokenStatus = (status: number) =>
+  status === 429 || status >= 500;
+
 export const getAccessToken = async (
   c: Context,
   serviceAccountInfo: Record<string, any>
 ): Promise<string> => {
   try {
-    let cacheKey = `${serviceAccountInfo.project_id}/${serviceAccountInfo.private_key_id}/${serviceAccountInfo.client_email}`;
-    // try to get from cache
-    try {
-      const getFromCacheByKey = c.get('getFromCacheByKey');
-      const resp = getFromCacheByKey
-        ? await getFromCacheByKey(env(c), cacheKey)
-        : null;
-      if (resp) {
-        return resp;
-      }
-    } catch (err) {}
+    const scope = VERTEX_TOKEN_SCOPE;
+    const cacheKey = await vertexTokenCacheKey(
+      serviceAccountInfo,
+      scope,
+      VERTEX_TOKEN_URL
+    );
+    const cached = await readCachedVertexToken(c, cacheKey);
+    if (cached) return cached;
 
-    const scope = 'https://www.googleapis.com/auth/cloud-platform';
+    // No await between this lookup and the set below, so concurrent callers
+    // for one key always find the same exchange.
+    const inFlight = vertexTokenInFlight.get(cacheKey);
+    if (inFlight) return await inFlight;
+    const exchange = exchangeVertexToken(
+      c,
+      serviceAccountInfo,
+      cacheKey,
+      scope
+    ).finally(() => {
+      if (vertexTokenInFlight.get(cacheKey) === exchange) {
+        vertexTokenInFlight.delete(cacheKey);
+      }
+    });
+    vertexTokenInFlight.set(cacheKey, exchange);
+    return await exchange;
+  } catch (err) {
+    return '';
+  }
+};
+
+const exchangeVertexToken = async (
+  c: Context,
+  serviceAccountInfo: Record<string, any>,
+  cacheKey: string,
+  scope: string
+): Promise<string> => {
+  try {
     const iat = Math.floor(Date.now() / 1000);
     const exp = iat + 3600; // Token expiration time (1 hour)
 
     const payload = {
       iss: serviceAccountInfo.client_email,
       sub: serviceAccountInfo.client_email,
-      aud: 'https://oauth2.googleapis.com/token',
+      aud: VERTEX_TOKEN_URL,
       iat: iat,
       exp: exp,
       scope: scope,
@@ -130,7 +270,6 @@ export const getAccessToken = async (
 
     const jwtToken = await createJWT(header, payload, privateKey);
 
-    const tokenUrl = 'https://oauth2.googleapis.com/token';
     const tokenHeaders = {
       'Content-Type': 'application/x-www-form-urlencoded',
     };
@@ -139,19 +278,37 @@ export const getAccessToken = async (
       assertion: jwtToken,
     });
 
-    const tokenResponse = await upstreamFetch(tokenUrl, {
-      headers: tokenHeaders,
-      body: tokenData,
-      method: 'POST',
-    });
-
-    const tokenJson: Record<string, any> = await tokenResponse.json();
-    const putInCacheWithValue = c.get('putInCacheWithValue');
-    if (putInCacheWithValue && cacheKey) {
-      await putInCacheWithValue(env(c), cacheKey, tokenJson.access_token, 3000); // 50 minutes
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const isLastAttempt = attempt === 1;
+      let tokenResponse: Response;
+      try {
+        tokenResponse = await upstreamFetch(VERTEX_TOKEN_URL, {
+          headers: tokenHeaders,
+          body: tokenData,
+          method: 'POST',
+        });
+      } catch (err) {
+        if (isLastAttempt) return '';
+        continue;
+      }
+      if (!tokenResponse.ok) {
+        if (!isLastAttempt && isRetryableTokenStatus(tokenResponse.status)) {
+          continue;
+        }
+        return '';
+      }
+      const tokenJson: Record<string, any> = await tokenResponse.json();
+      const accessToken = tokenJson.access_token;
+      if (typeof accessToken !== 'string' || !accessToken) return '';
+      await storeVertexToken(
+        c,
+        cacheKey,
+        accessToken,
+        vertexTokenCacheTtl(tokenJson.expires_in)
+      );
+      return accessToken;
     }
-
-    return tokenJson.access_token;
+    return '';
   } catch (err) {
     return '';
   }
@@ -866,11 +1023,16 @@ export const transformGoogleTools = (tool: Tool) => {
   const tools: any = [];
   if (!tool.function) return tools;
   if (['googleSearch', 'google_search'].includes(tool.function.name)) {
-    const timeRangeFilter = tool.function.parameters?.timeRangeFilter;
+    const { timeRangeFilter, excludeDomains, blockingConfidence } =
+      tool.function.parameters ?? {};
     tools.push({
       googleSearch: {
         // allow null
         ...(timeRangeFilter !== undefined && { timeRangeFilter }),
+        // PS fork (#208, from the Portkey enterprise 2.33 changelog): Vertex
+        // AI's domain exclusions and phishing-block threshold were dropped.
+        ...(excludeDomains !== undefined && { excludeDomains }),
+        ...(blockingConfidence !== undefined && { blockingConfidence }),
       },
     });
   } else if (

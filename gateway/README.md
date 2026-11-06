@@ -110,7 +110,7 @@ X-PS-Environment: production
 
 ### Exact-match cache
 
-Prompt Shields owns an **exact-match** response cache in this fork, and an opt-in **semantic** mode with per-tenant partitions, a sensitivity and data policy gate, and a local or self-hosted embedder ([docs/semantic-cache.md](docs/semantic-cache.md)). Portkey's hosted simple/semantic caching is not used. It short-circuits identical requests to the same endpoint and reports hit/miss telemetry through `ps-telemetry` (`cache_status`, `est_tokens_saved`).
+Prompt Shields owns an **exact-match** response cache in this fork, and an opt-in **semantic** mode with per-tenant partitions, a sensitivity and data policy gate, and a local or self-hosted embedder ([docs/semantic-cache.md](docs/semantic-cache.md)). Portkey's hosted simple/semantic caching is not used. It short-circuits identical requests to the same endpoint and reports hit/miss telemetry through `ps-telemetry` (`cache_status`, `est_tokens_saved`) on the call's own event, once per request.
 
 ```bash
 PS_CACHE_DEFAULT=off        # on | semantic | off — behavior when the request header is omitted (unset: the config's `cache` setting decides; none means off)

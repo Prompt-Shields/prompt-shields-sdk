@@ -1,0 +1,14 @@
+{
+    "arn:aws:bedrock:us-east-1:123456789012:provisioned-model/9q8w7e6r5t4y": {
+        "tags": [
+            {
+                "key": "owner",
+                "value": "search@acme.com"
+            },
+            {
+                "key": "environment",
+                "value": "prod"
+            }
+        ]
+    }
+}

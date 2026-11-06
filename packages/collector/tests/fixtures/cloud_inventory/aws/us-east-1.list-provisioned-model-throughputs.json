@@ -1,0 +1,17 @@
+{
+    "provisionedModelSummaries": [
+        {
+            "provisionedModelName": "search-rerank-pt",
+            "provisionedModelArn": "arn:aws:bedrock:us-east-1:123456789012:provisioned-model/9q8w7e6r5t4y",
+            "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1:0:8k",
+            "desiredModelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1:0:8k",
+            "foundationModelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1:0:8k",
+            "modelUnits": 2,
+            "desiredModelUnits": 2,
+            "status": "InService",
+            "commitmentDuration": "SixMonths",
+            "creationTime": "2026-06-20T09:00:00+00:00",
+            "lastModifiedTime": "2026-06-20T09:30:00+00:00"
+        }
+    ]
+}

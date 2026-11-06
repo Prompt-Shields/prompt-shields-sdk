@@ -30,9 +30,18 @@ rely on routing for compliance.
 | Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
 | Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Yes, to the next compliant model in the routed group on a 5xx, 429 or timeout, with the request's own provider credentials. A gateway config with its own fallback or retry settings takes over instead |
 | Streaming | Refused (`RouterError`) | Yes |
+| Circuit breakers | Per process, shared by the routers in it unless you pass `breakers=` or `breaker_config=` | Per gateway replica |
+| [Spend budgets](#spend-budgets) | `budgets=` (`budget.v1`). Counters are in-process unless you pass `budget_store=` | `PS_BUDGETS` or `PS_BUDGETS_FILE`. Counters are per replica unless Redis is configured |
+| [Savings baseline](#savings) | `baseline=` (`baseline.v1`) | `PS_BASELINE_FILE` |
+| [Pseudonymisation](/guides/pseudonymisation) | `pseudonymise=True`, off by default (the instrumented clients take it too) | No |
+| [Learner auto mode](/guides/routing-learner#auto-mode) | `learner=AutoLearner(...)`, off by default | No |
+| Semantic response cache | No | Opt-in, see [Response cache](#response-cache) |
 
 `ShieldsRouter(mode="gateway", ...)` sends the call to the gateway with your
-hints as `X-PS-*` headers and leaves the decision to it. For the hint headers
+hints as `X-PS-*` headers and leaves the decision to it. In that mode the
+router refuses (`RouterError`) the options that only work in your process:
+`budgets=`, `budget_store=` and `baseline=` (configure them on the gateway
+instead), `pseudonymise=True` and `learner=`. For the hint headers
 see [Cost-aware routing](/sdks/python#cost-aware-routing).
 
 The SDK (`prompt_shields.route_policy.resolve_policy_route`) and the gateway
@@ -316,6 +325,106 @@ replicas. `max_attempts` counts every provider call, 429 retries included.
 Set the provider SDK's own `max_retries=0` if you want failover to move on
 at once: those retries stay on the same provider.
 
+## Spend budgets
+
+`budgets=` takes a `budget.v1` document
+([`schemas/budget/`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/schemas/budget/README.md)):
+a USD limit per business unit, use case, owner or everything, per UTC day,
+ISO week or month. Each budget has a mode:
+
+- `warn` never changes the call.
+- `downgrade` uses the remaining amount as a cost ceiling, like `max_cost`,
+  and within the data policy. Once the budget is used up, the router picks
+  the cheapest allowed model, and failover only tries models that cost no
+  more.
+- `block` raises `BudgetExceeded` once the budget is used up, and nothing
+  is sent.
+
+`route()` applies budgets too, so you can see their effect without sending
+anything:
+
+```python
+from prompt_shields import BudgetExceeded
+
+
+def budgeted(mode, limit_usd):
+    return ShieldsRouter(
+        providers={"scaleway": {"api_key": "..."},
+                   "mistral-eu": {"api_key": "...", "catalog_provider": "mistral"}},
+        policy=policy,
+        ps_api_key="ps-...",
+        use_case="support-bot",
+        budgets={"schema_version": "budget.v1", "budgets": [
+            {"id": "support-daily", "scope": "use_case", "subject": "support-bot",
+             "window": "day", "limit_usd": limit_usd, "mode": mode},
+        ]},
+    )
+
+
+try:
+    budgeted("block", 0).route(minutes)
+except BudgetExceeded as exc:
+    blocked = str(exc)
+blocked  # => "budget 'support-daily' is exhausted; the call was not sent"
+
+hint = RouteHint(quality="critical")
+budgeted("warn", 0).route(minutes, route=hint).model  # => "mistral-large-eu"
+
+d = budgeted("downgrade", 0).route(minutes, route=hint)
+d.model, d.reason
+# => ("scaleway-small", "quality:critical+budget-unsatisfiable+budget-downgrade")
+```
+
+`route()` only reads the counters. A call sent with
+`chat.completions.create` adds the cost of the attempt that served it, and
+its event and `resp.ps.budget` carry `budget_state` (`ok`, `warn`,
+`unknown`, `exceeded`), `budget_id` and `budget_action`.
+
+The default counters live in the process: each worker or replica counts on
+its own, and a restart resets them. `budget_store=RedisBudgetStore(url=...)`
+(`pip install 'prompt-shields[optimizer-redis]'`) shares them between
+processes, and with a gateway that uses the same Redis and namespace. If the
+store cannot be read, calls go ahead with `budget_state: "unknown"`
+(`on_store_error: "open"`, the default). Set `"closed"` to block or downgrade
+instead. The gateway reads the same document from `PS_BUDGETS` or
+`PS_BUDGETS_FILE`; see `gateway/src/middlewares/PS_README.md`.
+
+## Savings
+
+`baseline=` takes a frozen `baseline.v1` document
+([`schemas/baseline/`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/schemas/baseline/examples/onboarding.json)):
+the model each use case would have used without routing, with that model's
+prices copied in. Each routed call is then also priced on its baseline
+model, with the call's own token counts: `resp.ps.cost.counterfactual_usd`,
+and `counterfactual_cost` and `baseline_id` on the event. The savings of a
+call are its counterfactual cost minus its cost. The Partner API adds them
+up (`GET /partner/v1/usage/savings`). The gateway loads its baseline from
+`PS_BASELINE_FILE`. Without a baseline, events carry no counterfactual cost,
+and no savings are measured.
+
+## Response cache
+
+Routing does not cache. The gateway has an exact-match response cache and a
+semantic cache, and both are off unless the deployment or the request asks
+for them (`X-PS-Cache: on | semantic | off | refresh`, or
+`PS_CACHE_DEFAULT`). The semantic cache also needs an embedder
+(`PS_SEMANTIC_CACHE_EMBEDDER`). It runs after the router, so its key holds
+the routed model. By default it skips calls above `internal` sensitivity
+and calls where PII is found. `RouteHint(allow_cache=False)` sends
+`X-PS-Cache: off` for a call that must not be served from a cache. See
+`gateway/docs/semantic-cache.md`.
+
+## Learner auto mode
+
+`ShieldsRouter(learner=AutoLearner(...))` lets the
+[routing learner](/guides/routing-learner#auto-mode) pick the model for
+calls that have `model="auto"` and no group or quality hint. It only picks
+from the models the data policy and the use case allow, within the budget
+clamp, and only for use cases that passed its enablement gate. If the learner
+raises an error, the call keeps the policy's pick and is served (fail open);
+the error is counted in `AutoLearner.fallbacks`. Auto mode is off by default
+and runs in local mode only.
+
 ## EU sovereign providers
 
 Every non-Anthropic provider is reached through one adapter: the OpenAI SDK
@@ -417,6 +526,18 @@ against the code.
   detects, but routes at the original prompt's level unless
   `sensitivity.anonymise_then_route` lists that level. See
   [Pseudonymisation](/guides/pseudonymisation).
+- **SDK budget counters are per process by default.** Without
+  `budget_store=`, N processes can together spend N times a limit, and a
+  restart resets the count. Spend is added after each call, so calls that
+  are running when the limit is reached can go over it.
+- **Learner auto mode runs only in `ShieldsRouter`.** `mode="gateway"`
+  refuses `learner=`, and the gateway does not run auto mode.
+- **Most of it is off by default.** Routing itself (`ShieldsRouter`, or
+  `PS_ROUTER_ENABLED=true`), budgets, the savings baseline,
+  pseudonymisation, learner auto mode and the gateway's response caches all
+  need to be turned on. Failover is the exception: `ShieldsRouter` fails
+  over unless you pass `failover=False`, and the gateway router fails over
+  whenever it routes a call and no `x-portkey-config` owns retries.
 - **Local mode refuses streaming.** `stream=True` raises `RouterError` in
   local mode. Gateway mode streams.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
