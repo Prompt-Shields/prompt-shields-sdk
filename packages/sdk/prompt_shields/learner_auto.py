@@ -290,14 +290,16 @@ def _collector_base_url(url: Any) -> str:
             "base URL (https://...); there is no default"
         )
     url = url.strip()
-    parts = urlsplit(url)
     try:
+        parts = urlsplit(url)
         host = parts.hostname
     except ValueError:
-        host = None
-    if parts.scheme not in ("https", "http") or not host:
+        parts, host = None, None
+    if (parts is None or parts.scheme not in ("https", "http") or not host
+            or parts.query or parts.fragment or "?" in url or "#" in url):
         raise AutoModeError(
-            f"ps_collector_url must be an https:// URL with a host, got {url!r}"
+            "ps_collector_url must be an https:// base URL with a host and "
+            "no query or fragment"
         )
     if parts.scheme == "http" and host not in _LOOPBACK_HOSTS:
         raise AutoModeError(

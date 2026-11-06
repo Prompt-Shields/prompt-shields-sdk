@@ -674,6 +674,11 @@ def test_gate_counts_duplicate_records_without_an_id_once():
     ("ftp://collector.example", "with a host"),
     ("https://", "with a host"),
     ("collector.example", "with a host"),
+    ("http://localhost.evil.example", "must use https"),
+    ("http://127.0.0.1@evil.example", "must use https"),
+    ("http://[::1]@evil.example", "with a host"),
+    ("http://localhost?@evil.example", "no query"),
+    ("http://localhost#@evil.example", "no query"),
 ])
 def test_fetch_recommendations_fails_closed_without_an_https_base_url(monkeypatch, url, why):
     from prompt_shields import learner_auto
@@ -691,6 +696,7 @@ def test_fetch_recommendations_fails_closed_without_an_https_base_url(monkeypatc
     ("https://collector.example/", "https://collector.example"),
     ("http://localhost:8000", "http://localhost:8000"),
     ("http://127.0.0.1:8000/", "http://127.0.0.1:8000"),
+    ("http://[::1]:8000", "http://[::1]:8000"),
 ])
 def test_fetch_recommendations_calls_the_given_base_url(monkeypatch, url, expected):
     from prompt_shields import learner_auto
