@@ -41,7 +41,7 @@ from collector.attestation import (
     attestation_changes_since,
 )
 from collector.audit import record_read
-from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE, LEARNER_EXPLORE
+from collector.ingest import CACHE_HIT_STATUSES, LEARNER_EXPLORE
 from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.loss_accounting import tenant_coverage
 from collector.mcp_usage import MAX_PAGE, tools_page, usage_page
@@ -556,15 +556,19 @@ def budget_cache_columns() -> list:
     count() skips NULL, so the *_reported counts are the events that sent
     the field at all, and the case() counts only the matching ones.
 
-    The gateway reports a cache lookup twice: a cache-only event for every
-    lookup (any status, no cost_source) and, on a hit, the call's own event
-    with the same cache_status and cost_source "cache". The hit rate counts
-    only the former, so a hit is counted once and misses are in the
-    denominator.
+    The gateway reports each cache lookup once: current gateways as
+    cache_status on the call's own event (cost_source "cache" on a hit),
+    released gateways up to sdk v0.4.0 as a cache-only event per lookup (no
+    cost_source; the call's own event has no cache_status). So every event
+    with a cache_status is one lookup, and the hit rate is right for both,
+    and for a mix of them during a rollout. Only unreleased main builds
+    between #261 and the per-request event sent a hit twice (the cache-only
+    event and the call's cost_source "cache" event); taking hits from
+    cost_source "cache" events alone would instead count no hit at all for
+    the released gateways.
     """
     action = AIUsageEvent.budget_action
-    lookup = AIUsageEvent.cost_source.is_distinct_from(COST_SOURCE_CACHE)
-    status = case((lookup, AIUsageEvent.cache_status))
+    status = AIUsageEvent.cache_status
     return [
         func.count(action).label("budget_reported"),
         func.count(case((action == "downgraded", 1))).label("budget_downgraded"),

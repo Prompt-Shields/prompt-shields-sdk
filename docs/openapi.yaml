@@ -519,11 +519,12 @@ components:
           type: integer
           nullable: true
           description: >
-            Events whose `budget_action` is `blocked`. The SDK and gateway
-            refuse an over-budget call before it is sent and report no event
-            for it today, so this stays 0 until an emitter reports refused
-            calls. Null when no event in the period reported a
-            `budget_action`.
+            Events whose `budget_action` is `blocked`: calls the gateway
+            refused for a spend budget (HTTP 429, or 503 when the budget
+            store is down and `on_store_error` is closed). The gateway sends
+            one event per refused call, with no usage or cost; gateways
+            before this change and the SDK send none. Null when no event in
+            the period reported a `budget_action`.
           example: 0
         cache_hit_rate:
           type: number
@@ -531,10 +532,11 @@ components:
           nullable: true
           description: >
             Share (0 to 1) of the gateway's cache lookups that were served
-            from the cache (exact or semantic hit), counted on the gateway's
-            cache-only events; a hit call's own event (`cost_source: cache`)
-            is not counted again. Null when no lookup was reported in the
-            period.
+            from the cache (exact or semantic hit): each event with a
+            `cache_status` is one lookup. Current gateways put it on the
+            call's own event; released gateways up to sdk v0.4.0 send a
+            cache-only event per lookup instead. Null when no lookup was
+            reported in the period.
           example: 0.31
         cache_saved_usd:
           type: number
