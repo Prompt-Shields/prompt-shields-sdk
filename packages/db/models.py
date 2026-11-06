@@ -200,6 +200,9 @@ class AIUsageEvent(Base):
     # miss, ...) and, on a hit, the upstream cost in USD the hit avoided.
     cache_status = Column(Text)
     cache_saved_cost = Column(Numeric(10, 6))
+    # The gateway's estimate of the prompt tokens a cache lookup saved (0 on
+    # a miss); summed as cache_tokens_saved in the usage summary.
+    est_tokens_saved = Column(Integer)
     # Routing learner auto mode (#34), set when the learner decided the call:
     # route_learner_mode policy, exploit or explore; route_propensity the
     # probability it picked the served model; route_learner_version the
