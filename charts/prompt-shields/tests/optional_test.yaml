@@ -12,8 +12,42 @@ release:
 set:
   secrets.collector.existingSecret: ps-collector
 tests:
-  - it: renders no CronJobs by default
+  - it: renders the purge and spend anomaly CronJobs by default
     template: templates/cronjobs.yaml
+    asserts:
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields-audit-purge
+        documentIndex: 0
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command
+          value: ["python", "-m", "collector.audit", "purge"]
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields-retention-purge
+        documentIndex: 1
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields-spend-anomaly
+        documentIndex: 2
+      - equal:
+          path: spec.schedule
+          value: "57 3 * * *"
+        documentIndex: 2
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command
+          value: ["python", "-m", "collector.spend_anomalies", "--all-tenants"]
+        documentIndex: 2
+
+  - it: renders no CronJobs when the default ones are disabled
+    template: templates/cronjobs.yaml
+    set:
+      cronJobs.jobs.auditPurge.enabled: false
+      cronJobs.jobs.retentionPurge.enabled: false
+      cronJobs.jobs.spendAnomaly.enabled: false
     asserts:
       - hasDocuments:
           count: 0
@@ -21,7 +55,8 @@ tests:
   - it: renders an enabled CronJob with the collector image and Secret
     template: templates/cronjobs.yaml
     set:
-      cronJobs.jobs.retentionPurge.enabled: true
+      cronJobs.jobs.auditPurge.enabled: false
+      cronJobs.jobs.spendAnomaly.enabled: false
     asserts:
       - hasDocuments:
           count: 1
