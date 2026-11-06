@@ -335,3 +335,22 @@ tests:
       - equal:
           path: spec.template.spec.securityContext.runAsNonRoot
           value: true
+
+  - it: takes the budget Redis URL from a Secret
+    template: templates/gateway-deployment.yaml
+    set:
+      gateway.budgets.enabled: true
+      gateway.budgets.redis.existingSecret:
+        name: gateway-redis
+        key: url
+      gateway.budgets.budgets:
+        - {id: g, scope: global, window: day, limit_usd: 1, mode: block}
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PS_BUDGET_REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: gateway-redis
+                key: url
