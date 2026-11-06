@@ -118,3 +118,38 @@ describe('served-model pricing (SDK pricing_candidates)', () => {
     ).toEqual({ cost: 0.0225, cost_source: 'pricing_table' });
   });
 });
+
+describe('per-model service-tier rates', () => {
+  test('a served snapshot id is priced at its base model priority rates', () => {
+    expect(
+      costFields('openai', 'gpt-4o', 'gpt-4o-2024-08-06', {
+        tokens_in: 1000,
+        tokens_out: 2000,
+        service_tier: 'priority',
+      })
+    ).toEqual({ cost: 0.03825, cost_source: 'pricing_table' });
+  });
+
+  test('a tier named like an object property is not a rate table', () => {
+    for (const tier of ['constructor', 'toString', '__proto__']) {
+      expect(
+        usageCost('openai', 'gpt-4o', {
+          tokens_in: 1000,
+          tokens_out: 2000,
+          service_tier: tier,
+        })
+      ).toBeNull();
+    }
+  });
+
+  test('long-context prompts keep the tier multiplier', () => {
+    // Gemini 2.5 Pro over 200k at batch: $2.50 / $15.00 x 0.5.
+    expect(
+      usageCost('google', 'gemini-2.5-pro', {
+        tokens_in: 300000,
+        tokens_out: 1000,
+        service_tier: 'batch',
+      })
+    ).toBeCloseTo((300000 * 2.5 + 1000 * 15.0) / 1e6 / 2, 9);
+  });
+});

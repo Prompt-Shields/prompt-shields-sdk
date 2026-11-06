@@ -7,6 +7,7 @@ import {
   RateLimitError,
   makeAPIError,
 } from './errors';
+import { FocusExport } from './download';
 import { PageIterator } from './pagination';
 import type {
   AIAsset,
@@ -17,22 +18,31 @@ import type {
   CreateWebhookSubscriptionParams,
   DataFlow,
   CycloneDxBom,
+  DownloadOptions,
   ExportParams,
   ExportResult,
+  FocusExportParams,
   HealthStatus,
   ListAssetsParams,
   ListAttestationsParams,
   ListChangesParams,
+  ListRiskReviewsParams,
+  ListSpendAlertsParams,
   ListWebhookDeliveriesParams,
   ListWebhookSubscriptionsParams,
   Page,
   RiskMapping,
+  RiskReviewHistory,
+  RiskReviewRequest,
+  RiskReviewResult,
   RisksParams,
   RotateWebhookSecretParams,
   SavingsParams,
   SavingsReport,
   SovereignShareParams,
   SovereignShareReport,
+  SpendAlert,
+  SpendAlertList,
   TelemetryCoverage,
   TokenResponse,
   UpdateWebhookSubscriptionParams,
@@ -88,6 +98,11 @@ export interface SendOptions {
   query?: Query;
   /** JSON request body, camelCase keys (sent as snake_case). */
   body?: unknown;
+  /**
+   * Set `true` for an idempotent POST, so it is also retried after a
+   * network error or a 502/503/504. Default: true for every method but POST.
+   */
+  retrySafe?: boolean;
 }
 
 interface RequestOptions extends SendOptions {
@@ -102,6 +117,12 @@ interface RequestOptions extends SendOptions {
    * 429 and 401 are retried either way: the server did nothing.
    */
   retrySafe?: boolean;
+  /** Return the 2xx `Response` with its body unread, instead of parsed JSON. */
+  raw?: boolean;
+  /** `Accept` header. Default `application/json`. */
+  accept?: string;
+  /** Caller's cancellation signal. */
+  signal?: AbortSignal;
 }
 
 interface CachedToken {
@@ -144,6 +165,14 @@ function requireId(id: string, what: string): string {
   return encodeURIComponent(id);
 }
 
+/**
+ * camelCase the keys of a `meta.current` that holds one record (a risk
+ * mapping) rather than the attestation map that `camelizeKeys` keeps as sent.
+ */
+function recamelize<T>(value: T): T {
+  return value === undefined || value === null ? value : camelizeKeys<T>(value);
+}
+
 function parseJson(text: string): unknown {
   if (text === '') return undefined;
   try {
@@ -171,6 +200,7 @@ export class PartnerClient {
   readonly businessUnits: TaxonomyResource;
   readonly telemetry: TelemetryResource;
   readonly usage: UsageResource;
+  readonly spendAlerts: SpendAlertsResource;
   /**
    * Webhook subscriptions: the tenant admin API (`/api/v1/admin/webhooks`).
    * Needs a client built with the tenant's own API key (`apiKey`), not
@@ -224,6 +254,7 @@ export class PartnerClient {
     this.businessUnits = new TaxonomyResource(this, '/partner/v1/business-units');
     this.telemetry = new TelemetryResource(this);
     this.usage = new UsageResource(this);
+    this.spendAlerts = new SpendAlertsResource(this);
     this.webhooks = new WebhooksResource(this);
   }
 
@@ -253,7 +284,27 @@ export class PartnerClient {
    * wrap yet.
    */
   send<T>(method: string, path: string, opts: SendOptions = {}): Promise<T> {
-    return this.request<T>(method.toUpperCase(), path, { query: opts.query, body: opts.body });
+    return this.request<T>(method.toUpperCase(), path, {
+      query: opts.query,
+      body: opts.body,
+      retrySafe: opts.retrySafe,
+    });
+  }
+
+  /**
+   * Make an authenticated GET and return the `Response` with its body
+   * unread, for streamed downloads. Auth, retries and errors work as for
+   * `get`: a non-2xx status throws an `APIError`. `timeoutMs` covers the
+   * wait for the response headers only; pass `signal` to cancel the
+   * download.
+   */
+  getStream(path: string, query?: Query, options: DownloadOptions & { accept?: string } = {}): Promise<Response> {
+    return this.request<Response>('GET', path, {
+      query,
+      raw: true,
+      accept: options.accept ?? '*/*',
+      signal: options.signal,
+    });
   }
 
   /**
@@ -323,8 +374,9 @@ export class PartnerClient {
     let attempt = 0;
 
     for (;;) {
+      if (opts.signal?.aborted) throw new APIConnectionError(`Request to ${method} ${path} was aborted`);
       const headers: Record<string, string> = {
-        Accept: 'application/json',
+        Accept: opts.accept ?? 'application/json',
         ...this.extraHeaders,
       };
       if (auth) headers.Authorization = `Bearer ${await this.bearer()}`;
@@ -341,14 +393,31 @@ export class PartnerClient {
       let resHeaders: Record<string, string>;
       let text: string;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.timeoutMs);
+      const callerSignal = opts.signal;
+      const onCallerAbort = () => controller.abort();
+      if (callerSignal?.aborted) controller.abort();
+      else callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+      let keepListener = false;
       try {
         const res = await this.fetchImpl(url, { method, headers, body, signal: controller.signal });
         status = res.status;
         resHeaders = headersToRecord(res.headers);
+        if (opts.raw && status >= 200 && status < 300) {
+          // The body is the caller's to read. Their signal still cancels
+          // it; the timeout stops here.
+          keepListener = true;
+          return res as unknown as T;
+        }
         text = await res.text();
       } catch (err) {
-        const timedOut = controller.signal.aborted;
+        if (callerSignal?.aborted) {
+          throw new APIConnectionError(`Request to ${method} ${path} was aborted`, { cause: err });
+        }
         const wrapped = timedOut
           ? new APITimeoutError(`Request to ${method} ${path} timed out after ${this.timeoutMs}ms`, { cause: err })
           : new APIConnectionError(`Request to ${method} ${path} failed: ${(err as Error)?.message ?? err}`, { cause: err });
@@ -360,6 +429,7 @@ export class PartnerClient {
         throw wrapped;
       } finally {
         clearTimeout(timer);
+        if (!keepListener) callerSignal?.removeEventListener('abort', onCallerAbort);
       }
 
       const parsed = parseJson(text);
@@ -436,6 +506,33 @@ export class AssetsResource {
       { ...params },
     );
     return res.data;
+  }
+
+  /**
+   * Review history of one risk mapping, newest first, with the mapping as
+   * it is now in `meta.current`. Needs `risks:read`.
+   */
+  async riskReviews(assetId: string, riskId: string, params: ListRiskReviewsParams = {}): Promise<RiskReviewHistory> {
+    const res = await this.client.get<RiskReviewHistory>(
+      `/partner/v1/assets/${requireId(assetId, 'assetId')}/risks/${requireId(riskId, 'riskId')}/reviews`,
+      { ...params },
+    );
+    return { ...res, meta: { ...res.meta, current: recamelize(res.meta?.current) } };
+  }
+
+  /**
+   * Confirm or reject a risk mapping, typically a rule-based suggestion.
+   * Needs the `risks:review` scope. Every review is appended to the
+   * mapping's history; `confidence` never changes. Not retried on network
+   * errors or 5xx, since a retry could record the review twice.
+   */
+  async reviewRisk(assetId: string, riskId: string, review: RiskReviewRequest): Promise<RiskReviewResult> {
+    const res = await this.client.send<RiskReviewResult>(
+      'POST',
+      `/partner/v1/assets/${requireId(assetId, 'assetId')}/risks/${requireId(riskId, 'riskId')}/review`,
+      { body: review },
+    );
+    return { ...res, meta: { ...res.meta, current: recamelize(res.meta?.current) } };
   }
 
   /**
@@ -544,6 +641,67 @@ export class UsageResource {
   /** `GET /partner/v1/usage/sovereign-share`: calls and spend served in the EEA, per sensitivity level. */
   sovereignShare(params: SovereignShareParams = {}): Promise<SovereignShareReport> {
     return this.client.get<SovereignShareReport>('/partner/v1/usage/sovereign-share', { ...params });
+  }
+
+  /**
+   * `GET /partner/v1/usage/focus-export`: AI usage cost as FinOps FOCUS v1.4
+   * Cost and Usage rows, streamed as CSV (default) or JSON Lines. Needs
+   * `usage:export`. Resolves once the response headers arrive; the body is
+   * read as you consume it and never held whole in memory (unless you
+   * call `text()`):
+   *
+   * ```ts
+   * const exp = await client.usage.focusExport({ format: 'jsonl', start: '2026-10-01', end: '2026-11-01' });
+   * for await (const row of exp.rows()) console.log(row.ChargePeriodStart, row.x_EstimatedCost);
+   * // or, in Node: await (await client.usage.focusExport()).saveTo('focus.csv');
+   * ```
+   *
+   * Errors before the body starts (400, 403, 429, ...) throw as usual. The
+   * server streams rows as it reads them, so a failure part way through
+   * ends the body early.
+   */
+  async focusExport(params: FocusExportParams = {}, options: DownloadOptions = {}): Promise<FocusExport> {
+    const format = params.format ?? 'csv';
+    const res = await this.client.getStream(
+      '/partner/v1/usage/focus-export',
+      { ...params },
+      { signal: options.signal, accept: format === 'jsonl' ? 'application/x-ndjson' : 'text/csv' },
+    );
+    return new FocusExport(res, format);
+  }
+}
+
+/** `/partner/v1/spend-alerts`: spend anomaly alerts. */
+export class SpendAlertsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /**
+   * Alerts, newest day first, at most `limit` (server default 100, up to
+   * 500). The endpoint has no cursor; narrow with `since` / `until` to
+   * reach older alerts. Needs `spend-alerts:read`.
+   */
+  list(params: ListSpendAlertsParams = {}): Promise<SpendAlertList> {
+    return this.client.get<SpendAlertList>('/partner/v1/spend-alerts', { ...params });
+  }
+
+  /** `GET /partner/v1/spend-alerts/{id}`. Throws `NotFoundError` if absent. Needs `spend-alerts:read`. */
+  async get(alertId: string): Promise<SpendAlert> {
+    const res = await this.client.get<{ data: SpendAlert }>(`/partner/v1/spend-alerts/${requireId(alertId, 'alertId')}`);
+    return res.data;
+  }
+
+  /**
+   * Mark an alert `acknowledged`. Acknowledging it again changes nothing,
+   * so unlike other POSTs it is retried after a network error or 5xx.
+   * Needs `spend-alerts:acknowledge`.
+   */
+  async acknowledge(alertId: string): Promise<SpendAlert> {
+    const res = await this.client.send<{ data: SpendAlert }>(
+      'POST',
+      `/partner/v1/spend-alerts/${requireId(alertId, 'alertId')}/acknowledge`,
+      { retrySafe: true },
+    );
+    return res.data;
   }
 }
 
