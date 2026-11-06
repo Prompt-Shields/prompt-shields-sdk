@@ -94,7 +94,7 @@ CAPABILITY_FIELDS = (
     "supports_prompt_caching",
 )
 LIMIT_FIELDS = ("max_input_tokens", "max_output_tokens")
-OTHER_FIELDS = ("mode", "deprecation_date", "litellm_key", "currency", "source", "comment")
+OTHER_FIELDS = ("mode", "deprecation_date", "litellm_key", "currency", "source", "comment", "aliases")
 MODEL_FIELDS = (*OTHER_FIELDS, *LIMIT_FIELDS, *CAPABILITY_FIELDS, *PRICE_FIELDS, *SOVEREIGNTY_FIELDS)
 
 # A later field of each chain needs the earlier ones (the SDK's rate tuple is
@@ -214,6 +214,9 @@ def validate(source: dict) -> None:
             errors.append(f"{where}: mode is required")
         if not isinstance(entry.get("source"), str):
             errors.append(f"{where}: source is required")
+        aliases = entry.get("aliases", [])
+        if not (isinstance(aliases, list) and all(isinstance(a, str) and a for a in aliases)):
+            errors.append(f"{where}: aliases must be a list of model names")
         if entry.get("currency", "USD") not in CURRENCIES:
             errors.append(f"{where}: currency must be one of {CURRENCIES}")
         for field in PRICE_FIELDS:

@@ -79,7 +79,10 @@ ps-teardown reconcile events.jsonl --usage usage-anthropic.json --format json --
   and `-latest` are one row (so two dated versions of one Mistral model are compared
   together). Legacy OpenAI `-MMDD` snapshots (`gpt-4-0613`) are the base model when the
   catalog lists it; `chatgpt-4o-latest` stays separate from `gpt-4o`. Names that already
-  matched still match. An invoice CSV over 32 MiB or past 200,000 rows is not read (counted as `too_large` /
+  matched still match. Folding only merges row labels: each line is still priced at its own
+  model's rate before rows are summed, so totals are unchanged, but snapshots with different
+  prices (`gpt-4o-2024-05-13` / `-08-06`, `mistral-large-2402` / `-2411`) share one row, where
+  opposite gaps on the two snapshots can offset. An invoice CSV over 32 MiB or past 200,000 rows is not read (counted as `too_large` /
   `too_many_rows`).
 - Only days inside the provider side's window are compared; Prompt Shields events outside
   it are counted. A provider with no provider-side data is listed as not compared.
