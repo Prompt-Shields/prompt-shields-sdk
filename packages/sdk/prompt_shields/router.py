@@ -45,6 +45,12 @@ When every candidate failed or was skipped, ``NoCompliantCandidate`` (a
 every router in the process unless ``breakers=`` / ``breaker_config=`` say
 otherwise.
 
+Routing learner, auto mode (``learner=``, #34; opt-in, local mode only): an
+``prompt_shields.learner_auto.AutoLearner`` may replace the heuristic's pick
+on ``model="auto"`` calls without an explicit group or quality hint, with a
+model from ``route_policy.policy_safe_tiers`` (data policy, eligible models,
+min group) within the budget clamp. Without it nothing changes.
+
 Spend budgets (``budgets=``, a budget.v1 document, #29) are checked before
 each call in local mode: an exhausted ``block`` budget raises
 ``BudgetExceeded`` before any attempt; a ``downgrade`` budget's remaining
@@ -84,12 +90,15 @@ from prompt_shields.failover import (
     classify_failure,
     default_registry,
 )
+from prompt_shields.learner import context_vector
+from prompt_shields.learner_auto import AutoLearner, LearnerChoice
 from prompt_shields.pii import detect_pii_categories
 from prompt_shields.pricing import (
     COST_SOURCE_PRICING_TABLE,
     COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
     estimate_cost,
 )
+from prompt_shields.prompt_features import extract_prompt_features
 from prompt_shields.pseudonymise import Pseudonymisation, pseudonymise
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
@@ -102,6 +111,7 @@ from prompt_shields.route_policy import (
     data_policy_rule,
     estimate_tier_cost,
     parse_route_headers,
+    policy_safe_tiers,
     resolve_policy_route,
     tier_complies,
 )
@@ -165,6 +175,8 @@ class RouteInfo:
     sensitivity_level: str | None = None
     sensitivity_source: str | None = None
     est_cost: float | None = None
+    #: Set when the routing learner (auto mode) decided this call.
+    learner: LearnerChoice | None = None
 
 
 @dataclass(frozen=True)
@@ -649,6 +661,7 @@ class _Plan:
     original_pii: tuple[str, ...] = ()
     detected_level: str | None = None
     anonymised_route: bool = False
+    learner: LearnerChoice | None = None
 
 
 class _AttemptLimit(Exception):
@@ -711,6 +724,7 @@ class _RouterCore:
         retry_after_max_wait: float | None = None,
         rate_limit_retries: int = 1,
         pseudonymise: bool = False,
+        learner: AutoLearner | None = None,
     ):
         if mode not in ("local", "gateway"):
             raise RouterError(f"mode must be 'local' or 'gateway', got {mode!r}")
@@ -721,7 +735,15 @@ class _RouterCore:
                 "pseudonymise=True needs mode='local'; the gateway would "
                 "classify the placeholders, not the original prompt"
             )
+        if learner is not None and not isinstance(learner, AutoLearner):
+            raise RouterError("learner must be a prompt_shields.learner_auto.AutoLearner")
+        if learner is not None and mode != "local":
+            # Auto mode runs in the SDK router only; the gateway decides by
+            # its own policy and does not run the learner yet.
+            raise RouterError("learner= (auto mode) needs mode='local'")
         self.mode: RouteMode = mode
+        #: The routing learner in auto mode (opt-in; None routes as before).
+        self.learner = learner
         self.pseudonymise = bool(pseudonymise)
         self._scan_pii_events = scan_pii
         self._use_case = use_case
@@ -1121,12 +1143,89 @@ class _RouterCore:
                 decision, budget_action, req = self._apply_budget(decision, req, budget)
             tier = self._find_tier(decision, req)
             provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
+            if self.learner is not None:
+                learned = self._learner_pick(
+                    req, decision, tier, provider, extra["messages"]
+                )
+                if learned is not None:
+                    decision, tier, provider, extra["learner"] = learned
         except BaseException:
             if pseudo is not None:
                 pseudo.clear()
             raise
         return _Plan(decision, tier, provider, model, declared, use_case,
                      budget, budget_action, req, **extra)
+
+    def _learner_pick(
+        self, req: RouteRequest, decision: RouteDecision,
+        tier: Mapping[str, Any], provider: _Provider, messages: list,
+    ) -> tuple[RouteDecision, Mapping[str, Any], _Provider, LearnerChoice] | None:
+        """Auto mode: let the learner pick within the policy-safe set.
+
+        Only on the strategy path (``model="auto"``, no explicit group, no
+        quality hint): those are the caller's choices. The options are the
+        policy's own pick plus ``policy_safe_tiers`` for the call's
+        sensitivity and use case (data policy, eligible models, min group),
+        served by a configured provider and within the ``max_cost`` /
+        budget clamp, the same bound failover uses.
+        """
+        learner = self.learner
+        assert learner is not None
+        if (
+            decision.reason == "pinned"
+            or req.requested_model != "auto"
+            or req.explicit_group is not None
+            or req.quality is not None
+            or not learner.enabled_for(req.use_case)
+        ):
+            return None
+        out = (
+            DEFAULT_OUTPUT_TOKENS
+            if req.max_output_tokens is None
+            else req.max_output_tokens
+        )
+        budget = None if req.max_cost is None else max(req.max_cost, decision.est_cost)
+        policy_label = f"{provider.name}:{tier['model']}"
+        options: dict[str, tuple[str, Mapping[str, Any], str, float]] = {
+            policy_label: (decision.group, tier, provider.name, decision.est_cost),
+        }
+        for group, t in policy_safe_tiers(
+            self._reachable, decision.sensitivity_level, req.use_case
+        ):
+            name = self._tier_provider(t)
+            if name is None:
+                continue
+            label = f"{name}:{t['model']}"
+            if label in options:
+                continue
+            cost = estimate_tier_cost(t, req.approx_input_tokens, out)
+            if budget is not None and cost > budget:
+                continue
+            options[label] = (group, t, name, cost)
+        features = extract_prompt_features(messages, use_case=req.use_case)
+        choice = learner.choose(
+            req.use_case, decision.sensitivity_level, list(options), policy_label,
+            self._reachable,
+            context=context_vector({
+                "approx_input_tokens": features.approx_input_tokens,
+                "message_count": features.message_count,
+                "has_code": features.has_code,
+                "has_json_schema": features.has_json_schema,
+                "complexity": features.complexity,
+                "language": features.language,
+            }),
+        )
+        if choice is None:
+            return None
+        group, t, name, cost = options[choice.model]
+        if choice.model != policy_label:
+            decision = replace(
+                decision, model=t["model"], group=group, est_cost=cost,
+                reason=f"{decision.reason}+learner-{choice.mode}",
+            )
+        elif choice.mode == "explore":
+            decision = replace(decision, reason=f"{decision.reason}+learner-explore")
+        return decision, t, self._providers[name], choice
 
     # --- failover -------------------------------------------------------------
 
@@ -1304,6 +1403,11 @@ class _RouterCore:
                 event["data_classification"] = plan.data_classification
             if plan.use_case is not None:
                 event["use_case_name"] = plan.use_case
+            if plan.learner is not None:
+                event["route_learner_mode"] = plan.learner.mode
+                event["route_propensity"] = plan.learner.propensity
+                if plan.learner.learner_version is not None:
+                    event["route_learner_version"] = plan.learner.learner_version
             # Pseudonymised: the client scanned the placeholders. Report the
             # categories of the original prompt (labels only, never values).
             if plan.pseudo is not None and scan_pii:
@@ -1354,6 +1458,9 @@ class _RouterCore:
             if baseline is not None:
                 baseline.apply(event)
             captured.update(event)
+            # The live event: outcome signals are added to it after this
+            # hook, and auto mode reads them once the call returns.
+            captured["_event"] = event
 
         return hook
 
@@ -1420,6 +1527,7 @@ class _RouterCore:
                 sensitivity_level=d.sensitivity_level,
                 sensitivity_source=d.sensitivity_source,
                 est_cost=d.est_cost,
+                learner=plan.learner,
             ),
             cost=CostInfo(
                 event.get("cost"),
@@ -1443,6 +1551,13 @@ class _RouterCore:
 
     def _routed(self, candidate: Candidate, response: Any, captured: dict,
                 attempts: tuple[Attempt, ...]) -> RoutedChatCompletion:
+        plan = candidate.data[0]
+        if plan.learner is not None and self.learner is not None:
+            live = captured.get("_event") or captured
+            signals = live.get("outcome_signals")
+            if signals is None and len(attempts) > 1:
+                signals = ["fallback"]  # outcome signals are turned off
+            self.learner.observe(captured.get("call_id"), plan.learner, signals)
         return self._local_result(
             candidate.data[0], response, captured, attempts,
             (self.policy or {}).get("policy_version"),

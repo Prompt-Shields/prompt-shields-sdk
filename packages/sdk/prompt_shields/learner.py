@@ -6,7 +6,8 @@ model gives each (use case, sensitivity) the best reward, and *recommends*
 route changes with a projection of their savings and quality. It never
 routes a call and never changes a policy: a person reviews each
 recommendation (collector Partner API, ``/partner/v1/learner/...``) and, if
-they accept it, edits the route policy themselves.
+they accept it, edits the route policy themselves. Live routing from a
+snapshot is the separate, opt-in auto mode (:mod:`prompt_shields.learner_auto`).
 
 Model
 -----
@@ -80,8 +81,7 @@ from prompt_shields import pricing
 from prompt_shields.prompt_features import FEATURE_SCHEMA_VERSION
 from prompt_shields.route_policy import (
     classify_sensitivity,
-    data_policy_rule,
-    tier_complies,
+    policy_safe_tiers,
 )
 
 SNAPSHOT_SCHEMA = "ps-learner-snapshot.v1"
@@ -191,26 +191,11 @@ def policy_candidates(
     # The group label is looked up as is: a policy can name a level
     # "unclassified" with its own rule, and the router applies that rule. With
     # no such rule the lookup gives None, as the router's level None does.
-    rule = data_policy_rule(policy, sensitivity)
-    bar = (policy.get("use_cases") or {}).get(use_case) if use_case else None
-    eligible = (
-        set(bar.get("eligible_models") or ())
-        if bar and bar.get("eval_set") else None
-    )
-    order = list(policy.get("group_order") or [])
-    min_rank = (
-        order.index(bar["min_group"])
-        if bar and bar.get("min_group") in order else None
-    )
-    out = set()
-    for group, tier in _tiers(policy):
-        if eligible is not None and tier["model"] not in eligible:
-            continue
-        if min_rank is not None and (group not in order or order.index(group) < min_rank):
-            continue
-        if tier_complies(tier, rule):
-            out.add(f"{tier['provider']}:{tier['model']}")
-    return sorted(out)
+    # One implementation with the router's auto mode: route_policy.
+    return sorted({
+        f"{tier['provider']}:{tier['model']}"
+        for _, tier in policy_safe_tiers(policy, sensitivity, use_case or None)
+    })
 
 
 def _tier_prices(policy: Mapping[str, Any]) -> dict[str, tuple[float, float]]:
