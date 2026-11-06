@@ -210,22 +210,42 @@ export const TogetherAIChatCompleteResponseTransform: (
   return generateInvalidProviderResponseError(response, TOGETHER_AI);
 };
 
+/**
+ * PS fork (#208): re-implemented from the Portkey enterprise changelog 2.32
+ * ("Together AI: streamed responses no longer break on keep-alive
+ * messages"; closed source). The stream transforms ran `JSON.parse` on every
+ * SSE event, so a keep-alive comment (`: ...`) or an empty event threw and
+ * ended the client's stream. Comment lines are dropped here, and an event
+ * left empty is skipped (`undefined`, which the stream reader ignores).
+ */
+export const getTogetherAIStreamData = (
+  responseChunk: string
+): string | undefined => {
+  const chunk = responseChunk
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith(':'))
+    .join('\n')
+    .trim()
+    .replace(/^data: ?/, '')
+    .trim();
+  return chunk || undefined;
+};
+
 export const TogetherAIChatCompleteStreamChunkTransform: (
   response: string,
   fallbackId: string,
   streamState: any,
   strictOpenAiCompliance: boolean,
   gatewayRequest: Params
-) => string = (
+) => string | undefined = (
   responseChunk,
   fallbackId,
   streamState,
   strictOpenAiCompliance,
   gatewayRequest
 ) => {
-  let chunk = responseChunk.trim();
-  chunk = chunk.replace(/^data: /, '');
-  chunk = chunk.trim();
+  const chunk = getTogetherAIStreamData(responseChunk);
+  if (chunk === undefined) return undefined;
   if (chunk === '[DONE]') {
     return `data: ${chunk}\n\n`;
   }

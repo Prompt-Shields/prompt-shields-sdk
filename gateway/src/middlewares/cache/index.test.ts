@@ -5,6 +5,7 @@ import {
   memoryCache,
   isCacheableResponse,
   isCompleteResponseBody,
+  cacheExpiresAt,
 } from './index';
 
 const scope = 'scope-a';
@@ -164,5 +165,59 @@ describe('write-back eligibility (#72)', () => {
       expect(isCompleteResponseBody({ status })).toBe(false);
     expect(isCompleteResponseBody(null)).toBe(false);
     expect(isCompleteResponseBody([])).toBe(false);
+  });
+});
+
+// PS fork (#208): `cache.max_age` is in seconds. The fork base added it to
+// Date.now() as milliseconds, so entries expired almost at once.
+describe('cache max_age (#208)', () => {
+  beforeEach(() => __resetCacheForTests());
+
+  it('converts max_age seconds to an absolute expiry', () => {
+    expect(cacheExpiresAt(60, 1_000)).toBe(61_000);
+    expect(cacheExpiresAt('3600', 0)).toBe(3_600_000);
+    for (const unset of [null, undefined, 0, -5, 'abc'])
+      expect(cacheExpiresAt(unset, 0)).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('a write-back with max_age 60 is still served after 100 ms', async () => {
+    const body = { model: 'm', messages: [{ role: 'user', content: 'hi' }] };
+    const values = new Map<string, any>([
+      [
+        'requestOptions',
+        [
+          {
+            requestParams: { stream: false },
+            lastUsedOptionIndex: 0,
+            cacheMode: 'simple',
+            transformedRequest: { body },
+            providerOptions: { rubeusURL: 'chatComplete' },
+            cacheMaxAge: 60,
+            response: new Response(JSON.stringify({ choices: [] }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }),
+          },
+        ],
+      ],
+      ['psCacheScopes', { '0': scope }],
+    ]);
+    const c: any = {
+      set: (k: string, v: any) => values.set(k, v),
+      get: (k: string) => values.get(k),
+    };
+    await memoryCache()(c, async () => {});
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const [, status] = await getFromCache(
+      {},
+      {},
+      body,
+      'chatComplete',
+      '',
+      'simple',
+      null,
+      scope
+    );
+    expect(status).toBe('HIT');
   });
 });

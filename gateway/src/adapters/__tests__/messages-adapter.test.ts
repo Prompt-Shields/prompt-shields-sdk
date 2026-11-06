@@ -453,6 +453,30 @@ describe('Stream Transform', () => {
     const result = transformStreamChunk(chunk, state);
     expect(result).toBeUndefined();
   });
+
+  // PS fork (#208, Portkey enterprise changelog 2.31): providers whose
+  // chunks name no model (e.g. Vertex Gemini) report the requested model.
+  test('message_start falls back to the requested model', () => {
+    const chunk =
+      'data: {"id":"c1","model":"","choices":[{"index":0,"delta":{"content":"Hi"}}]}';
+    const fallback = createStreamState('gemini-2.5-pro');
+    const out = transformStreamChunk(chunk, fallback) as string;
+    const start = JSON.parse(
+      out
+        .split('\n')
+        .find((l) => l.startsWith('data: '))!
+        .slice(6)
+    );
+    expect(start.message.model).toBe('gemini-2.5-pro');
+
+    const named = createStreamState('gemini-2.5-pro');
+    transformStreamChunk(chunk.replace('"model":""', '"model":"x"'), named);
+    expect(named.model).toBe('x');
+
+    const unknown = createStreamState();
+    transformStreamChunk(chunk, unknown);
+    expect(unknown.model).toBe('');
+  });
 });
 
 // ============================================================================
