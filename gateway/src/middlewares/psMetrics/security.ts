@@ -26,7 +26,7 @@ export const piiDetectionsTotal = defaultRegistry.register(
 export const rateLimitedTotal = defaultRegistry.register(
   new Counter(
     'ps_gateway_rate_limited_total',
-    'Requests answered with 429, by source: upstream (a provider) or gateway.',
+    'Requests answered with 429, by source: upstream (a provider), gateway, or budget (a spend budget refused the call).',
     ['source']
   )
 );
