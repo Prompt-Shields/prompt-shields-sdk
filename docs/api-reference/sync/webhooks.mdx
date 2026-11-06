@@ -16,6 +16,7 @@ Instead of polling [`/partner/v1/changes`](/api-reference/sync/get-changes), a p
 | `asset.retired` | The lifecycle sweep retires an asset, or its owner does (an `asset` attestation with state `retired`; `retired_by_owner` is then true) |
 | `asset.attested` | Someone records an attestation (`POST …/assets/{id}/attestations`) for one of the asset's fields (attested, disputed, retired or reset to unreviewed). `data.attestation` says which field and state. |
 | `audit.<action>` | A row was added to the tenant's [audit trail](/guides/audit-trail) (credential, scope, webhook, retention or registry change, or an admin auth failure). Subscribe with the event type `audit.*`; the partner needs the `audit:read` scope. `data.audit` holds the row with its `seq`, `prev_hash` and `row_hash`. Not in the default event list. |
+| `spend.anomaly` | The daily [spend anomaly](/guides/spend-anomaly-alerts) job found a day's spend for a use case (or asset) far above its baseline. The event id is the alert id; `data.alert` holds the alert (numbers only). The partner needs the `spend-alerts:read` scope. Not in the default event list. |
 
 Body:
 

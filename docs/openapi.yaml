@@ -92,6 +92,8 @@ components:
             risks:review: Confirm or reject risk mappings, with reviewer and comment (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
             audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
+            spend-alerts:read: List spend anomaly alerts and receive them as `spend.anomaly` webhook events (never granted by default)
+            spend-alerts:acknowledge: Acknowledge spend anomaly alerts (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
@@ -1212,7 +1214,10 @@ components:
         tenant's hash-chained admin audit trail, delivered as one event per
         row with the type `audit.<action>` (see the Audit trail guide); it
         needs the `audit:read` scope and is not part of the default list.
-      enum: [asset.created, asset.changed, asset.retired, asset.attested, audit.*]
+        `spend.anomaly` delivers spend anomaly alerts (see `SpendAlert`);
+        the event id is the alert id and `data.alert` the alert. It needs
+        `spend-alerts:read` and is not part of the default list either.
+      enum: [asset.created, asset.changed, asset.retired, asset.attested, audit.*, spend.anomaly]
 
     CreateWebhookSubscriptionRequest:
       type: object
@@ -1224,7 +1229,8 @@ components:
           description: >-
             Partner credential (of this tenant) that receives the events. It
             needs `changes:read`, plus `assets:read` for `asset.attested`,
-            and `audit:read` for `audit.*`.
+            `audit:read` for `audit.*` and `spend-alerts:read` for
+            `spend.anomaly`.
         url:
           type: string
           maxLength: 2048
@@ -1234,7 +1240,7 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/WebhookEventType'
-          description: Defaults to every asset event type (not `audit.*`)
+          description: Defaults to every asset event type (not `audit.*` or `spend.anomaly`)
         description:
           type: string
           maxLength: 200
@@ -1827,7 +1833,8 @@ components:
           type: object
           description: >-
             Free-form settings. `retention_days` must be an integer between 1
-            and 36500; `api_key` is refused.
+            and 36500; `spend_anomaly` must be a `SpendAnomalySettings`
+            object; `api_key` is refused.
         issue_api_key:
           type: boolean
           default: true
@@ -1853,13 +1860,119 @@ components:
           maxLength: 253
         settings:
           type: object
-          description: Merged into the stored settings; a key set to null is removed.
+          description: >-
+            Merged into the stored settings; a key set to null is removed.
+            Validated as on create (`retention_days`, `spend_anomaly`).
         disabled:
           type: boolean
           description: >-
             true disables the tenant: its ingest keys, admin tokens and
             Partner API credentials are refused (403) and its data is kept.
             false enables it again.
+
+    SpendAnomalySettings:
+      type: object
+      additionalProperties: false
+      description: >-
+        Per-tenant spend anomaly thresholds, stored as
+        `settings.spend_anomaly`. Every field is optional and falls back to
+        its default. The detector compares a UTC day's spend per use case
+        (or asset) with the EWMA mean and standard deviation of the
+        `baseline_days` days before it.
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        group_by:
+          type: string
+          enum: [use_case, asset]
+          default: use_case
+        alpha:
+          type: number
+          minimum: 0.01
+          maximum: 1
+          default: 0.3
+          description: EWMA smoothing factor (weight of the newest day)
+        sigma:
+          type: number
+          minimum: 0.5
+          maximum: 20
+          default: 3
+          description: Alert at this many standard deviations above the baseline; 2x is `critical`
+        baseline_days:
+          type: integer
+          minimum: 3
+          maximum: 90
+          default: 28
+        min_history_days:
+          type: integer
+          minimum: 2
+          maximum: 90
+          default: 7
+          description: Days of spend a group needs before it is judged; at most `baseline_days`
+        min_delta_usd:
+          type: number
+          minimum: 0
+          default: 1
+          description: The day must also be at least this many USD above the baseline
+        min_sigma_fraction:
+          type: number
+          minimum: 0
+          maximum: 10
+          default: 0.1
+          description: The standard deviation used is at least this fraction of the baseline
+
+    SpendAlert:
+      type: object
+      description: >-
+        One UTC day whose spend for a use case or asset was far above its
+        EWMA baseline. Numbers only.
+      properties:
+        id:
+          type: string
+          format: uuid
+        group_by:
+          type: string
+          enum: [use_case, asset]
+        group_key:
+          type: string
+          description: The use case name (`(none)` for assets without one), or the asset id
+        day:
+          type: string
+          format: date
+        observed_cost:
+          type: number
+          description: The day's spend in USD
+        baseline_cost:
+          type: number
+          description: EWMA of the days before, in USD
+        baseline_sigma:
+          type: number
+          description: The standard deviation used, in USD (after its floors)
+        z_score:
+          type: number
+        threshold_sigma:
+          type: number
+        history_days:
+          type: integer
+        severity:
+          type: string
+          enum: [warning, critical]
+        status:
+          type: string
+          enum: [open, acknowledged]
+        acknowledged_at:
+          type: [string, 'null']
+          format: date-time
+        acknowledged_by:
+          type: [string, 'null']
+          description: "`partner:<credential id>`, never a person"
+        created_at:
+          type: string
+          format: date-time
+      required: [id, group_by, group_key, day, observed_cost, baseline_cost, baseline_sigma,
+                 z_score, threshold_sigma, history_days, severity, status, acknowledged_at,
+                 acknowledged_by, created_at]
 
     ConnectorSyncRequest:
       type: object
@@ -2777,6 +2890,135 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SavingsReport'
+
+  /partner/v1/spend-alerts:
+    get:
+      operationId: listSpendAlerts
+      tags: [Assets]
+      summary: List spend anomaly alerts
+      description: |
+        Spend anomaly alerts for the tenant, newest day first. Alerts are
+        written by the daily job (`python -m collector.spend_anomalies`),
+        which also sends each new one as a `spend.anomaly` webhook event.
+        Requires `spend-alerts:read`.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, acknowledged]
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [warning, critical]
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date
+          description: First day to include (UTC)
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Last day to include (UTC)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+      security:
+        - OAuth2: [spend-alerts:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: Alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SpendAlert'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                    required: [total]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/spend-alerts/{alert_id}:
+    get:
+      operationId: getSpendAlert
+      tags: [Assets]
+      summary: Get a spend anomaly alert
+      description: Requires `spend-alerts:read`.
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      security:
+        - OAuth2: [spend-alerts:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The alert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SpendAlert'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Alert not found
+
+  /partner/v1/spend-alerts/{alert_id}/acknowledge:
+    post:
+      operationId: acknowledgeSpendAlert
+      tags: [Assets]
+      summary: Acknowledge a spend anomaly alert
+      description: |
+        Marks the alert `acknowledged`, recording the time and the
+        credential. Acknowledging it again changes nothing and returns it
+        as it is. Requires `spend-alerts:acknowledge`.
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      security:
+        - OAuth2: [spend-alerts:acknowledge]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The acknowledged alert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SpendAlert'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Alert not found
 
   /partner/v1/usage/sovereign-share:
     get:
