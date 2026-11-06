@@ -14,7 +14,9 @@ Connect Prompt Shields to ServiceNow to add AI assets to your CMDB.
   units and risk mappings when enabled per tenant. It has not
   yet been verified against a live ServiceNow instance (PDI); check the
   identification rules below in a sub-production instance before using it
-  in production.
+  in production. A [dry run](#dry-run) shows what a sync would send
+  without writing anything, and [read-back verification](#read-back-verification)
+  checks that every CI and relationship landed.
 </Info>
 
 ## How it works
@@ -229,8 +231,10 @@ asset), `self_hosted_vendors` (JSON list, see above), `provider_class`
 also closes early once it reaches 500 CIs) and `data_system_class`
 (default `null`, see [Data flows](#data-flows)), `business_unit_table`
 (default `null`: off; e.g. `cmn_department`), `business_unit_field`
-(default `department`) and `push_risk_mappings` (default `false`; see
-[Business units and risk mappings](#business-units-and-risk-mappings-opt-in)).
+(default `department`), `push_risk_mappings` (default `false`; see
+[Business units and risk mappings](#business-units-and-risk-mappings-opt-in))
+and `verify` (default `false`; see
+[Read-back verification](#read-back-verification)).
 For a
 collector reached over an internal network, set
 `"allow_private_network": true` under `partner_api`; it must still be https.
@@ -266,18 +270,51 @@ collector reached over an internal network, set
 # Operator API (Authorization: Bearer $PS_ADMIN_TOKEN)
 curl -X POST https://collector.example.com/api/v1/admin/connectors/servicenow/sync \
   -H "Authorization: Bearer $PS_ADMIN_TOKEN" \
-  -d '{"tenant_id": "<tenant uuid>"}'          # add "full": true to ignore the cursor
+  -d '{"tenant_id": "<tenant uuid>"}'          # add "full": true to ignore the cursor,
+                                               # "dry_run": true or "verify": true
 
 curl "https://collector.example.com/api/v1/admin/connectors/servicenow/status?tenant_id=<tenant uuid>" \
   -H "Authorization: Bearer $PS_ADMIN_TOKEN"
 
 # CLI
-python -m collector.servicenow --tenant <tenant uuid> [--full]
+python -m collector.servicenow --tenant <tenant uuid> [--full] [--dry-run] [--verify]
 ```
 
 Both run as the target tenant, so they work with row-level security
 enforced. Schedule the CLI (for example every 4 hours) with your job
 runner; the collector has no built-in scheduler yet.
+
+### Dry run
+
+`"dry_run": true` (or `--dry-run`) reads the Partner API and builds the
+IRE payloads exactly as a sync would, then stops: nothing is sent to
+ServiceNow (not even a token request), and the tenant's connector state,
+cursor included, is left as it was. The result has the usual counts
+(`assets`, `ci_items`, `relations`, `requests`, and the opt-in counts)
+plus `item_classes` and `relation_types`, the number of items per class
+and relations per type a real run would send, and the `cursor` it would
+store. It carries no asset values. Use it to check a new configuration
+(classes, opt-ins, batch size) before the first real sync.
+
+### Read-back verification
+
+With `"verify": true` per run (or `--verify`, or `"verify": true` in the
+tenant's `PS_SERVICENOW` entry), the sync reads back everything it wrote,
+after the last IRE request, through the Table API, read only:
+
+- `GET /api/now/table/cmdb_ci?sysparm_query=sys_idIN<sys_ids>` for the
+  sys_ids IRE returned, checking each CI's `sys_class_name` and
+  `correlation_id`;
+- `GET /api/now/table/cmdb_rel_ci?sysparm_query=parentIN...^childIN...`,
+  checking each relationship (parent, child, `type.name`).
+
+Business unit records and risk key values are not read back. If any CI or
+relationship is missing, the run fails, the cursor stays where it was, and
+the result and the connector state (`last_verification`) list up to 20
+missing identifiers (`correlation_id`s, and `<parent> <type> <child>` for
+relationships) with the counts. The integration user needs read access to
+`cmdb_ci` and `cmdb_rel_ci` (`itil` has it). Running a first full sync
+with `verify` against a PDI is the round-trip check for a new instance.
 
 ## Do it yourself
 

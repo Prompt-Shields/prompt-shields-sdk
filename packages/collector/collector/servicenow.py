@@ -89,8 +89,24 @@ one of ``PS_SERVICENOW_ALLOWED_HOST_SUFFIXES`` (default
 
 Run with ``POST /api/v1/admin/connectors/servicenow/sync`` (operator only:
 ``Authorization: Bearer $PS_ADMIN_TOKEN``) or ``python -m
-collector.servicenow --tenant <uuid> [--full]``. The cursor is kept in the
-tenant settings and only advances when IRE accepted every item.
+collector.servicenow --tenant <uuid> [--full] [--dry-run] [--verify]``.
+The cursor is kept in the tenant settings and only advances when IRE
+accepted every item.
+
+With ``dry_run`` (``--dry-run`` / ``"dry_run": true``, per run) the sync
+reads the Partner API and builds the IRE payloads but sends nothing to
+ServiceNow and leaves the tenant's connector state (cursor included)
+untouched; it returns what a real run would send, counted per class and
+relation type.
+
+With ``verify`` (per tenant in ``PS_SERVICENOW``, or ``--verify`` /
+``"verify": true`` per run) the sync reads every CI and relation it just
+wrote back through the Table API (``GET /api/now/table/cmdb_ci`` by the
+sys_ids IRE returned, ``GET /api/now/table/cmdb_rel_ci`` by parent and
+child) and checks each CI has the expected class and ``correlation_id``
+and each relation exists with its type. Reads only: the connector never
+writes through the Table API. A CI or relation that is not there fails
+the sync and the cursor stays where it was.
 """
 
 from __future__ import annotations
@@ -144,6 +160,16 @@ logger = logging.getLogger("prompt_shields.servicenow")
 CONNECTOR = "servicenow"
 TOKEN_PATH = "/oauth_token.do"
 IRE_PATH = "/api/now/identifyreconcile"
+# Table API, used read-only by the optional read-back verification.
+TABLE_PATH = "/api/now/table"
+CI_TABLE = "cmdb_ci"
+REL_TABLE = "cmdb_rel_ci"
+# sys_ids per Table API query (keeps the URL well under 8 KB), rows per
+# page, and pages per query before the read-back gives up.
+VERIFY_CHUNK = 100
+VERIFY_PAGE = 1000
+VERIFY_MAX_PAGES = 50
+MAX_MISSING_REPORTED = 20
 
 # CMDB CI Class Models (store app, 1.68.0+): externally hosted AI (SaaS
 # model APIs) and AI the organisation hosts itself.
@@ -239,6 +265,10 @@ class ServiceNowConnection(BaseModel):
     # the asset CI (needs risks:read on the partner key and a Related Entry
     # rule). False: risk mappings are not read or pushed.
     push_risk_mappings: bool = False
+    # Read every written CI and relation back through the Table API after
+    # the sync and fail the run if any is missing (the integration user
+    # needs read access to cmdb_ci and cmdb_rel_ci).
+    verify: bool = False
     batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, le=100)
 
     @field_validator(
@@ -776,6 +806,12 @@ def _error_codes(entry: dict) -> list[str]:
 def check_ire_result(body: Any, sent: dict) -> dict[str, int]:
     """Validate an IRE response against the payload sent; returns counts
     per operation. Any item or relation error fails the whole request."""
+    return parse_ire_result(body, sent)[0]
+
+
+def parse_ire_result(body: Any, sent: dict) -> tuple[dict[str, int], list[str]]:
+    """`check_ire_result` plus the sys_id of every item, in payload order
+    (IRE answers the items in the order they were sent)."""
     result = body.get("result") if isinstance(body, dict) else None
     if isinstance(result, str):
         # Some releases return the result as a JSON string.
@@ -792,6 +828,7 @@ def check_ire_result(body: Any, sent: dict) -> dict[str, int]:
         )
     failed: list[str] = []
     ops: dict[str, int] = {}
+    sys_ids: list[str] = []
     for entry in items:
         if not isinstance(entry, dict):
             failed.append("ERROR")
@@ -800,6 +837,7 @@ def check_ire_result(body: Any, sent: dict) -> dict[str, int]:
         if codes or not _SYS_ID.match(str(entry.get("sysId") or "")):
             failed.extend(codes or ["NO_SYS_ID"])
             continue
+        sys_ids.append(entry["sysId"])
         op = str(entry.get("operation") or "UNKNOWN").upper()
         ops[op] = ops.get(op, 0) + 1
     for entry in result.get("relations") or []:
@@ -810,7 +848,62 @@ def check_ire_result(body: Any, sent: dict) -> dict[str, int]:
         raise ConnectorError(
             f"servicenow: IRE rejected {len(failed)} entries ({', '.join(distinct)})"
         )
-    return ops
+    return ops, sys_ids
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Read-back verification (Table API, read only)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class Expected:
+    """What a sync wrote, keyed on the sys_ids IRE returned: CIs (sys_id ->
+    class, correlation_id) and relations (parent, child, type)."""
+
+    def __init__(self) -> None:
+        self.cis: dict[str, tuple[str, str]] = {}
+        self.relations: dict[tuple[str, str, str], None] = {}
+
+    def add(
+        self, payload: dict, sys_ids: list[str], conn: ServiceNowConnection
+    ) -> None:
+        for item, sys_id in zip(payload["items"], sys_ids, strict=True):
+            ref = (item.get("values") or {}).get("correlation_id")
+            if item.get("className") == conn.business_unit_table or not ref:
+                continue  # non-CMDB records (business units) are not CIs
+            self.cis[sys_id] = (item["className"], ref)
+        for rel in payload["relations"]:
+            key = (sys_ids[rel["parent"]], sys_ids[rel["child"]], rel["type"])
+            self.relations[key] = None
+
+    def label(self, sys_id: str) -> str:
+        return self.cis[sys_id][1] if sys_id in self.cis else sys_id
+
+
+def _field(row: dict, name: str) -> str:
+    """A Table API field value: a plain string, or ``{"value": ...}`` for
+    a reference returned with its link."""
+    v = row.get(name)
+    if isinstance(v, dict):
+        v = v.get("value")
+    return v if isinstance(v, str) else ""
+
+
+def table_rows(body: Any, what: str) -> list[dict]:
+    """Rows of a Table API GET response (``{"result": [...]}``)."""
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, list):
+        raise ConnectorError(f"servicenow: {what} returned an unexpected body")
+    return [r for r in result if isinstance(r, dict)]
+
+
+class VerificationFailed(ConnectorError):
+    def __init__(self, verification: dict):
+        self.verification = verification
+        super().__init__(
+            f"servicenow: {verification['missing_count']} of "
+            f"{verification['checked']} CIs and relations not found after sync"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -861,21 +954,115 @@ class ServiceNowClient:
             },
         )
 
-    async def identify_reconcile(self, payload: dict) -> dict[str, int]:
-        kwargs: dict[str, Any] = {
-            "what": "identify and reconcile",
-            "expected": (200, 201),
-            "params": {"sysparm_data_source": self._conn.data_source},
-            "json": payload,
-            "headers": {"Accept": "application/json"},
-        }
+    async def _call(self, method: str, path: str, **kwargs: Any) -> Any:
         if self._token is not None:
-            body = await self._token.json("POST", IRE_PATH, **kwargs)
-        else:
-            conn = self._conn
-            auth = (conn.username, conn.password.get_secret_value())
-            body = await self._http.json("POST", IRE_PATH, auth=auth, **kwargs)
-        return check_ire_result(body, payload)
+            return await self._token.json(method, path, **kwargs)
+        conn = self._conn
+        auth = (conn.username, conn.password.get_secret_value())
+        return await self._http.json(method, path, auth=auth, **kwargs)
+
+    async def identify_reconcile_ids(
+        self, payload: dict
+    ) -> tuple[dict[str, int], list[str]]:
+        """IRE upsert; counts per operation and the items' sys_ids."""
+        body = await self._call(
+            "POST",
+            IRE_PATH,
+            what="identify and reconcile",
+            expected=(200, 201),
+            params={"sysparm_data_source": self._conn.data_source},
+            json=payload,
+            headers={"Accept": "application/json"},
+        )
+        return parse_ire_result(body, payload)
+
+    async def identify_reconcile(self, payload: dict) -> dict[str, int]:
+        return (await self.identify_reconcile_ids(payload))[0]
+
+    async def query_table(
+        self, table: str, query: str, fields: list[str], what: str
+    ) -> list[dict]:
+        """Every row of ``table`` matching the encoded ``query`` (Table API
+        GET, paged), with ``fields`` only. Read only."""
+        if table not in (CI_TABLE, REL_TABLE):
+            raise ConnectorError("servicenow: refusing to read an unexpected table")
+        rows: list[dict] = []
+        for page in range(VERIFY_MAX_PAGES):
+            body = await self._call(
+                "GET",
+                f"{TABLE_PATH}/{table}",
+                what=what,
+                params={
+                    "sysparm_query": query,
+                    "sysparm_fields": ",".join(fields),
+                    "sysparm_exclude_reference_link": "true",
+                    "sysparm_limit": str(VERIFY_PAGE),
+                    "sysparm_offset": str(page * VERIFY_PAGE),
+                },
+                headers={"Accept": "application/json"},
+            )
+            batch = table_rows(body, what)
+            rows += batch
+            if len(batch) < VERIFY_PAGE:
+                return rows
+        raise ConnectorError(f"servicenow: {what} returned too many rows")
+
+    async def verify(self, expected: Expected) -> dict:
+        """Read the expected CIs and relations back; counts and (capped)
+        missing identifiers. A CI is found when the row with its sys_id
+        has the expected class and correlation_id; a relation when a
+        cmdb_rel_ci row links the same parent and child with its type.
+        Queries only carry sys_ids IRE returned (32 hex characters)."""
+        missing: list[str] = []
+        ids = list(expected.cis)
+        for i in range(0, len(ids), VERIFY_CHUNK):
+            chunk = ids[i : i + VERIFY_CHUNK]
+            rows = await self.query_table(
+                CI_TABLE,
+                "sys_idIN" + ",".join(chunk),
+                ["sys_id", "sys_class_name", "correlation_id"],
+                "CI lookup",
+            )
+            seen = {
+                _field(r, "sys_id"): (
+                    _field(r, "sys_class_name"),
+                    _field(r, "correlation_id"),
+                )
+                for r in rows
+            }
+            missing += [
+                expected.cis[s][1] for s in chunk if seen.get(s) != expected.cis[s]
+            ]
+        rels = list(expected.relations)
+        step = VERIFY_CHUNK // 2
+        for i in range(0, len(rels), step):
+            chunk = rels[i : i + step]
+            parents = ",".join(sorted({p for p, _, _ in chunk}))
+            children = ",".join(sorted({c for _, c, _ in chunk}))
+            rows = await self.query_table(
+                REL_TABLE,
+                f"parentIN{parents}^childIN{children}",
+                ["parent", "child", "type.name"],
+                "relationship lookup",
+            )
+            found = {
+                (_field(r, "parent"), _field(r, "child"), _field(r, "type.name"))
+                for r in rows
+            }
+            missing += [
+                f"{expected.label(p)} {t} {expected.label(c)}"
+                for p, c, t in chunk
+                if (p, c, t) not in found
+            ]
+        checked = len(ids) + len(rels)
+        return {
+            "checked": checked,
+            "found": checked - len(missing),
+            "missing_count": len(missing),
+            "missing": missing[:MAX_MISSING_REPORTED],
+            "cis_checked": len(ids),
+            "relations_checked": len(rels),
+        }
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -883,11 +1070,32 @@ class ServiceNowClient:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def payload_summary(payloads: list[dict]) -> dict:
+    """What a set of IRE payloads would write, counted per item class and
+    relation type (no values: a dry run result carries no asset data).
+    Shared CIs (a vendor in several requests) count once per request."""
+    classes: dict[str, int] = {}
+    rel_types: dict[str, int] = {}
+    for p in payloads:
+        for item in p["items"]:
+            classes[item["className"]] = classes.get(item["className"], 0) + 1
+            for rel in item.get("related", []):
+                classes[rel["className"]] = classes.get(rel["className"], 0) + 1
+        for rel in p["relations"]:
+            rel_types[rel["type"]] = rel_types.get(rel["type"], 0) + 1
+    return {
+        "item_classes": dict(sorted(classes.items())),
+        "relation_types": dict(sorted(rel_types.items())),
+    }
+
+
 async def sync_servicenow(
     db: AsyncSession,
     tenant_id: UUID,
     *,
     full: bool = False,
+    dry_run: bool = False,
+    verify: bool | None = None,
     settings: ServiceNowSettings | None = None,
     partner_transport: httpx.AsyncBaseTransport | None = None,
     servicenow_transport: httpx.AsyncBaseTransport | None = None,
@@ -897,7 +1105,10 @@ async def sync_servicenow(
 ) -> dict:
     """Push the tenant's registry (or what changed since the last run) to
     the ServiceNow CMDB. Records the outcome in the tenant's connector
-    state; the cursor only moves when IRE accepted every item."""
+    state; the cursor only moves when IRE accepted every item (and, with
+    ``verify``, every CI and relation was read back). ``verify=None`` uses
+    the tenant's setting. ``dry_run`` builds the payloads without calling
+    ServiceNow and records nothing."""
     now = now or datetime.now(UTC)
     state = await load_sync_state(db, tenant_id, CONNECTOR)
     if state is None:
@@ -915,6 +1126,8 @@ async def sync_servicenow(
         "mode": "incremental" if since else "full",
         "since": since,
     }
+    verify = conn.verify if verify is None else verify
+    verification: dict | None = None
     try:
         async with PartnerApiClient(
             conn.partner_api,
@@ -936,31 +1149,46 @@ async def sync_servicenow(
         operations: dict[str, int] = {}
         extras = {"business_units": 0, "risk_entries": 0}
         batches = build_payloads(assets, conn, read.flows)
-        if batches:
+        payloads = []
+        for batch in batches:
+            payload = batch.payload()
+            added = add_business_units_and_risks(payload, by_ref, read.risks, conn)
+            payloads.append(payload)
+            requests += 1
+            items += len(payload["items"])
+            relations += len(payload["relations"])
+            flows_skipped += batch.flows_skipped
+            for k, n in added.items():
+                extras[k] += n
+        if payloads and not dry_run:
+            expected = Expected()
             async with ServiceNowClient(
                 conn, transport=servicenow_transport, resolver=resolver, sleep=sleep
             ) as sn:
-                for batch in batches:
-                    payload = batch.payload()
-                    added = add_business_units_and_risks(
-                        payload, by_ref, read.risks, conn
-                    )
-                    ops = await sn.identify_reconcile(payload)
-                    requests += 1
-                    items += len(payload["items"])
-                    relations += len(payload["relations"])
-                    flows_skipped += batch.flows_skipped
+                for payload in payloads:
+                    ops, sys_ids = await sn.identify_reconcile_ids(payload)
                     for op, n in ops.items():
                         operations[op] = operations.get(op, 0) + n
-                    for k, n in added.items():
-                        extras[k] += n
+                    if verify:
+                        expected.add(payload, sys_ids, conn)
+                if verify:
+                    verification = await sn.verify(expected)
+                    if verification["missing_count"]:
+                        raise VerificationFailed(verification)
     except (ConnectorError, ValueError, TypeError, OverflowError) as exc:
         # Malformed Partner API data is a failed run, not a server error.
         error = str(exc) if isinstance(exc, ConnectorError) else "invalid response data"
         logger.warning("servicenow sync failed for tenant %s: %s", tenant_id, error)
+        out = {**result, "status": "error", "error": error}
+        if dry_run:
+            # A dry run records nothing, not even its failure.
+            return {**out, "dry_run": True}
         state.update(last_run_at=now.isoformat(), last_status="error", last_error=error)
+        if isinstance(exc, VerificationFailed):
+            state["last_verification"] = exc.verification
+            out["verification"] = exc.verification
         await save_sync_state(db, tenant_id, CONNECTOR, state)
-        return {**result, "status": "error", "error": error}
+        return out
 
     counts = {
         "assets": len(assets),
@@ -976,6 +1204,18 @@ async def sync_servicenow(
         counts["business_units"] = extras["business_units"]
     if conn.push_risk_mappings:
         counts["risk_entries"] = extras["risk_entries"]
+    if dry_run:
+        # Nothing was sent: what a real run would send, and no state change.
+        del counts["operations"]
+        logger.info("servicenow dry run: tenant=%s %s", tenant_id, counts)
+        return {
+            **result,
+            "status": "ok",
+            "dry_run": True,
+            "cursor": read.cursor or state.get("cursor"),
+            **counts,
+            **payload_summary(payloads),
+        }
     state.update(
         cursor=read.cursor or state.get("cursor"),
         last_run_at=now.isoformat(),
@@ -983,9 +1223,17 @@ async def sync_servicenow(
         last_error=None,
         last_counts=counts,
     )
+    if verification is not None:
+        state["last_verification"] = verification
     await save_sync_state(db, tenant_id, CONNECTOR, state)
     logger.info("servicenow sync: tenant=%s %s", tenant_id, counts)
-    return {**result, "status": "ok", "cursor": state["cursor"], **counts}
+    return {
+        **result,
+        "status": "ok",
+        "cursor": state["cursor"],
+        **counts,
+        **({"verification": verification} if verification is not None else {}),
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1011,6 +1259,11 @@ class ServiceNowSyncBody(BaseModel):
     tenant_id: UUID
     # Ignore the cursor and push the whole registry.
     full: bool = False
+    # Build the payloads, send nothing, record nothing.
+    dry_run: bool = False
+    # Read the written CIs and relations back; null uses the tenant's
+    # setting.
+    verify: bool | None = None
 
 
 @router.post(
@@ -1024,7 +1277,9 @@ async def sync_endpoint(body: ServiceNowSyncBody, request: Request) -> dict:
     await rls.set_tenant(db, body.tenant_id)
     if await db.get(Tenant, body.tenant_id) is None:
         raise _not_found()
-    return await sync_servicenow(db, body.tenant_id, full=body.full)
+    return await sync_servicenow(
+        db, body.tenant_id, full=body.full, dry_run=body.dry_run, verify=body.verify
+    )
 
 
 @router.get(
@@ -1055,19 +1310,24 @@ async def status_endpoint(tenant_id: UUID, request: Request) -> dict:
         "business_unit_table": conn.business_unit_table if conn else None,
         "business_unit_field": conn.business_unit_field if conn else None,
         "push_risk_mappings": conn.push_risk_mappings if conn else None,
+        "verify": conn.verify if conn else None,
         "data_source": conn.data_source if conn else None,
         "config_error": config_error,
         **state,
     }
 
 
-async def _main(tenant: UUID, full: bool) -> dict:
+async def _main(
+    tenant: UUID, full: bool, dry_run: bool = False, verify: bool | None = None
+) -> dict:
     from collector.app import SessionLocal, engine
 
     try:
         async with SessionLocal() as db:
             await rls.set_tenant(db, tenant)
-            return await sync_servicenow(db, tenant, full=full)
+            return await sync_servicenow(
+                db, tenant, full=full, dry_run=dry_run, verify=verify
+            )
     finally:
         await engine.dispose()
 
@@ -1076,8 +1336,20 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tenant", type=UUID, required=True)
     parser.add_argument("--full", action="store_true", help="ignore the cursor")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="build the payloads and print what would be sent; send nothing",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        default=None,
+        help="read the written CIs and relations back (round-trip check)",
+    )
     args = parser.parse_args(argv)
-    print(json.dumps(asyncio.run(_main(args.tenant, args.full)), indent=2))
+    out = asyncio.run(_main(args.tenant, args.full, args.dry_run, args.verify))
+    print(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":
