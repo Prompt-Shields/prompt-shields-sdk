@@ -23,9 +23,11 @@ This is separate from the **registry read log** (`partner_audit_log`), which rec
 | `retention.purge` | A retention run deleted a tenant's expired usage events (row counts) |
 | `registry.attest` / `registry.retire` / `registry.unretire` | An attestation is recorded; an owner retires or un-retires an asset |
 | `registry.risk_review` | A risk mapping is confirmed or rejected (admin or Partner API; `details`: review id, asset id, new and previous status) |
+| `learner.snapshot_upload` | A routing learner snapshot is stored (`details`: learner version, recommendation and superseded counts) |
+| `learner.recommendation_review` | A routing learner recommendation is accepted or rejected (Partner API; `details`: learner version, decision) |
 | `registry.lifecycle_sweep` | A tenant admin runs the lifecycle sweep (counts) |
 | `registry.merge_assets` | An operator merges duplicate assets (`python -m collector.dedup merge-duplicates --apply`) |
-| `auth.failure` | A refused operator token or tenant key on an admin route, or a partner without a write scope (`webhooks:manage`, `attestations:write`, `risks:review`, `provider-credentials:manage`). Rate-limited (below). |
+| `auth.failure` | A refused operator token or tenant key on an admin route, or a partner without a write scope (`webhooks:manage`, `attestations:write`, `risks:review`, `learner:review`, `provider-credentials:manage`). Rate-limited (below). |
 | `operator.access` | An operator-token call to the provider usage, cloud inventory, LeanIX or ServiceNow routes |
 | `audit_log.purge` | `python -m collector.audit purge` deleted read-log rows |
 | `audit.purge` | A checkpoint left by the audit trail's own purge (below) |

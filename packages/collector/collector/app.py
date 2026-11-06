@@ -183,6 +183,12 @@ from collector.risk_reviews import partner_router as risk_reviews_partner_router
 app.include_router(risk_reviews_admin_router)
 app.include_router(risk_reviews_partner_router)
 
+# Routing learner snapshots and recommendation review (#47, #48)
+from collector.learner import ingest_router as learner_ingest_router
+from collector.learner import partner_router as learner_partner_router
+
+app.include_router(learner_ingest_router)
+app.include_router(learner_partner_router)
 # Spend anomaly alerts: Partner API list and acknowledge (#30)
 from collector.spend_anomalies import partner_router as spend_alerts_partner_router
 
