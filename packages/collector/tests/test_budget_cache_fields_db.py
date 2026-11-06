@@ -44,6 +44,15 @@ CACHE_HIT = {
     "cache_saved_cost": 0.0021,
 }
 
+# The cache-only event the gateway sends for every cache lookup
+# (buildCacheEvent): no cost and no cost_source.
+CACHE_LOOKUP = {
+    "vendor": "openai",
+    "model": "gpt-4o-mini",
+    "source": "gateway",
+    "cache_status": "SEMANTIC HIT",
+}
+
 
 def _client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
@@ -191,12 +200,19 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
         BUDGET_EVENT,
         {**BUDGET_EVENT, "budget_state": "warn", "budget_action": "none"},
         {**BUDGET_EVENT, "budget_action": "blocked"},
+        # The gateway sends a cache-only event for every lookup and, on a
+        # hit, the call's own event (cost_source cache) with the same status.
+        CACHE_LOOKUP,
         CACHE_HIT,
+        {**CACHE_LOOKUP, "cache_status": "HIT"},
         {**CACHE_HIT, "cache_status": "HIT", "cache_saved_cost": 0.0009},
         # A hit whose cached response had no priced usage: counted, saves 0.
+        CACHE_LOOKUP,
         {**CACHE_HIT, "cache_saved_cost": None},
-        {**CACHE_HIT, "cache_status": "MISS", "cache_saved_cost": None, "cost": 0.003},
-        {**CACHE_HIT, "cache_status": "SEMANTIC BYPASS", "cache_saved_cost": None},
+        # A miss: the call's own event carries no cache status.
+        {**CACHE_LOOKUP, "cache_status": "MISS"},
+        {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway", "cost": 0.003},
+        {**CACHE_LOOKUP, "cache_status": "SEMANTIC BYPASS"},
         # Reports neither: left out of every rate.
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"},
     ]
@@ -206,7 +222,8 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
     body = await _summary(seeded_db)
     assert body["budget_downgraded_requests"] == 1
     assert body["budget_blocked_requests"] == 1
-    # Three hits among five events reporting a cache status.
+    # Three hits among five lookups; the calls' own hit events are not
+    # counted a second time.
     assert body["cache_hit_rate"] == 0.6
     assert body["cache_saved_usd"] == 0.003
 

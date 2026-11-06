@@ -265,6 +265,8 @@ CACHE_STATUSES = frozenset(
     {"hit", "miss", "semantic hit", "semantic miss", "semantic bypass", "refresh", "disabled"}
 )
 CACHE_HIT_STATUSES = ("hit", "semantic hit")
+# cost_source of a response served from the gateway cache (psPricing.ts).
+COST_SOURCE_CACHE = "cache"
 
 # The modalities telemetry reports, as the gateway's modalityOf() sets them
 # from the endpoint: chat, completions, messages, responses, embeddings and

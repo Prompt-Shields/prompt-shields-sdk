@@ -36,7 +36,7 @@ from sqlalchemy import and_, case, func, select
 from collector import aibom
 from collector.attestation import add_attestation_summaries, attestation_changes_since
 from collector.audit import record_read
-from collector.ingest import CACHE_HIT_STATUSES
+from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE
 from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.loss_accounting import tenant_coverage
 from collector.partner_auth import (
@@ -512,16 +512,22 @@ def budget_cache_columns() -> list:
 
     count() skips NULL, so the *_reported counts are the events that sent
     the field at all, and the case() counts only the matching ones.
+
+    The gateway reports a cache lookup twice: a cache-only event for every
+    lookup (any status, no cost_source) and, on a hit, the call's own event
+    with the same cache_status and cost_source "cache". The hit rate counts
+    only the former, so a hit is counted once and misses are in the
+    denominator.
     """
     action = AIUsageEvent.budget_action
+    lookup = AIUsageEvent.cost_source.is_distinct_from(COST_SOURCE_CACHE)
+    status = case((lookup, AIUsageEvent.cache_status))
     return [
         func.count(action).label("budget_reported"),
         func.count(case((action == "downgraded", 1))).label("budget_downgraded"),
         func.count(case((action == "blocked", 1))).label("budget_blocked"),
-        func.count(AIUsageEvent.cache_status).label("cache_reported"),
-        func.count(case((AIUsageEvent.cache_status.in_(CACHE_HIT_STATUSES), 1))).label(
-            "cache_hits"
-        ),
+        func.count(status).label("cache_reported"),
+        func.count(case((status.in_(CACHE_HIT_STATUSES), 1))).label("cache_hits"),
         func.sum(AIUsageEvent.cache_saved_cost).label("cache_saved_usd"),
     ]
 
@@ -532,8 +538,9 @@ def budget_cache_summary(row) -> dict:
     Each is null when no event in the window reported what it needs: the
     budget counts when none reported a budget_action, cache_hit_rate when
     none reported a cache_status, cache_saved_usd when none reported a
-    cache_saved_cost. cache_hit_rate is the share of events reporting a
-    cache status that were hits (exact or semantic).
+    cache_saved_cost. cache_hit_rate is the share of the gateway's cache
+    lookup events that were hits (exact or semantic); see
+    budget_cache_columns.
     """
     budget_reported = int(row["budget_reported"] or 0)
     cache_reported = int(row["cache_reported"] or 0)
