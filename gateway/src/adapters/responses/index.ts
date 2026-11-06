@@ -26,6 +26,8 @@ const NATIVE_PROVIDERS = new Set([
   'iointelligence',
   // PS fork (#74): Bedrock Mantle serves the OpenAI Responses API.
   'bedrock-mantle',
+  // PS fork (#74): the Meta Model API serves the OpenAI Responses API.
+  'meta-model-api',
 ]);
 
 export function supportsResponsesApiNatively(provider: string): boolean {
