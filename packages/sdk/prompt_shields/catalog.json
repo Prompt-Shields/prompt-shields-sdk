@@ -286,6 +286,20 @@
       "certifications": [],
       "notes": "Meta's hosted Llama models through the OpenAI compatibility endpoint. Hosting countries, retention and training use are not verified. No prices catalogued yet."
     },
+    "meta-model-api": {
+      "name": "Meta Model API",
+      "kind": "direct",
+      "api_base": "https://api.meta.ai/v1",
+      "openai_compatible": true,
+      "jurisdiction": "US",
+      "hosting_countries": null,
+      "provider_hq_country": "US",
+      "us_cloud_act_exposure": true,
+      "zdr": null,
+      "trains_on_data": null,
+      "certifications": [],
+      "notes": "Meta's hosted models through OpenAI Chat Completions and Responses, Anthropic Messages and a Files API at api.meta.ai; a separate product and key from the Llama API (`meta`). Hosting countries, retention and training use are not verified. No prices catalogued yet."
+    },
     "minimax": {
       "name": "MiniMax",
       "kind": "direct",
