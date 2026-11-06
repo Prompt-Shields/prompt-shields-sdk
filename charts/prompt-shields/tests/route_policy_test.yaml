@@ -1,0 +1,96 @@
+suite: gateway route policy file
+templates:
+  - templates/gateway-route-policy.yaml
+  - templates/gateway-deployment.yaml
+  - templates/configmap.yaml
+release:
+  name: ps
+set:
+  secrets.collector.existingSecret: ps-collector
+  secrets.gateway.existingSecret: ps-gateway
+tests:
+  - it: renders no route policy by default
+    template: templates/gateway-route-policy.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: sets no route policy file by default
+    template: templates/configmap.yaml
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: data.PS_ROUTE_POLICY_FILE
+
+  - it: mounts nothing extra by default
+    template: templates/gateway-deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: route-policy
+          any: true
+
+  - it: renders the policy into a ConfigMap
+    template: templates/gateway-route-policy.yaml
+    set:
+      gateway.routePolicy:
+        schema_version: route-policy.v1
+        default_group: balanced
+        quality_to_group: {draft: balanced, balanced: balanced, critical: balanced}
+        groups:
+          balanced:
+            - {model: gpt-4o, provider: openai, input_cost_per_1k: 0.0025, output_cost_per_1k: 0.01, jurisdiction: US}
+        data_policy:
+          confidential: {jurisdictions: [EEA]}
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: ps-prompt-shields-gateway-route-policy
+      - equal:
+          path: data["route-policy.json"]
+          value: '{"data_policy":{"confidential":{"jurisdictions":["EEA"]}},"default_group":"balanced","groups":{"balanced":[{"input_cost_per_1k":0.0025,"jurisdiction":"US","model":"gpt-4o","output_cost_per_1k":0.01,"provider":"openai"}]},"quality_to_group":{"balanced":"balanced","critical":"balanced","draft":"balanced"},"schema_version":"route-policy.v1"}'
+
+  - it: points the gateway at the mounted file
+    template: templates/configmap.yaml
+    documentIndex: 0
+    set:
+      gateway.routePolicy: {schema_version: route-policy.v1}
+      gateway.routePolicyReloadSeconds: 30
+    asserts:
+      - equal:
+          path: data.PS_ROUTE_POLICY_FILE
+          value: /etc/prompt-shields/route-policy/route-policy.json
+      - equal:
+          path: data.PS_ROUTE_POLICY_RELOAD_SECONDS
+          value: "30"
+
+  - it: mounts the ConfigMap as a directory and rolls pods on change
+    template: templates/gateway-deployment.yaml
+    set:
+      gateway.routePolicy: {schema_version: route-policy.v1}
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: route-policy
+            configMap:
+              name: ps-prompt-shields-gateway-route-policy
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: route-policy
+            mountPath: /etc/prompt-shields/route-policy
+            readOnly: true
+      - exists:
+          path: spec.template.metadata.annotations["checksum/route-policy"]
+
+  - it: refuses a policy without the route-policy.v1 schema version
+    template: templates/gateway-route-policy.yaml
+    set:
+      gateway.routePolicy: {default_group: balanced}
+    asserts:
+      - failedTemplate:
+          errorPattern: "gateway.routePolicy.schema_version"
