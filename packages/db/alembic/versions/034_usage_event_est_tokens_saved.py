@@ -9,7 +9,7 @@ already has its tenant_isolation policy (015) and is in the erasure order.
 Nullable with no default, so existing rows and old events are unaffected.
 
 Revision ID: 034
-Revises: 032
+Revises: 033
 Create Date: 2026-11-06
 """
 
@@ -19,7 +19,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "034"
-down_revision: str | None = "032"
+down_revision: str | None = "033"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

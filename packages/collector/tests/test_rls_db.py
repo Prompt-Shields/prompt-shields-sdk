@@ -708,6 +708,46 @@ async def test_cache_tokens_saved_summary_is_tenant_scoped_under_rls(rls_db):
         assert resp.status_code == 404
 
 
+async def test_learner_route_fields_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    event = {
+        "vendor": "mistral", "model": "auto", "served_model": "mistral-small-rls",
+        "source": "sdk", "route_learner_mode": "explore", "route_propensity": 0.0125,
+        "route_learner_version": "lv1-0123456789abcdef", "route_learner_frozen": False,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
+                            json={"events": [event, {**event, "route_learner_mode": "policy",
+                                                     "route_propensity": 0.9875}]})
+        assert resp.status_code == 200, resp.text
+        # Tenant b's learner traffic for the same model stays out of a's numbers.
+        resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_B}"},
+                            json={"events": [event] * 3})
+        assert resp.status_code == 200, resp.text
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, a)
+            rows = (await s.execute(
+                select(AIUsageEvent).where(AIUsageEvent.route_learner_mode.is_not(None))
+            )).scalars().all()
+        assert sorted(e.route_learner_mode for e in rows) == ["explore", "policy"]
+        assert all(e.route_learner_version == "lv1-0123456789abcdef" for e in rows)
+        url = f"/partner/v1/assets/{rows[0].asset_id}/usage-summary"
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_A}"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["learner_requests"] == 2
+        assert body["learner_routed_share"] == 1.0 and body["learner_explore_share"] == 0.5
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
+        assert resp.status_code == 404
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        n = (await s.execute(text(
+            "SELECT count(*) FROM ai_usage_events WHERE route_learner_mode IS NOT NULL"
+        ))).scalar_one()
+    assert n == 3
+
+
 def _learner_snapshot() -> dict:
     snap = {
         "schema": "ps-learner-snapshot.v1",

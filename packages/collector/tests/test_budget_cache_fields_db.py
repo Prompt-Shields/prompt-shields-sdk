@@ -342,6 +342,9 @@ async def test_tokens_saved_migration_downgrade_and_upgrade(seeded_db):
         cols = await conn.run_sync(_columns, "ai_usage_events")
     assert "est_tokens_saved" not in cols
     assert set(MIGRATION_031_FIELDS) <= set(cols)
+    # 034 sits on 033: its downgrade leaves the learner route columns.
+    assert {"route_learner_mode", "route_propensity", "route_learner_version",
+            "route_learner_frozen"} <= set(cols)
 
     async with seeded_db.begin() as conn:
         await conn.run_sync(run, m.upgrade)

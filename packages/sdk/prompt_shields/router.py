@@ -49,7 +49,9 @@ Routing learner, auto mode (``learner=``, #34; opt-in, local mode only): an
 ``prompt_shields.learner_auto.AutoLearner`` may replace the heuristic's pick
 on ``model="auto"`` calls without an explicit group or quality hint, with a
 model from ``route_policy.policy_safe_tiers`` (data policy, eligible models,
-min group) within the budget clamp. Without it nothing changes.
+min group) within the budget clamp. If the learner raises, the call goes
+on with the policy's pick (the error type is logged and counted in
+``AutoLearner.fallbacks``). Without it nothing changes.
 
 Spend budgets (``budgets=``, a budget.v1 document, #29) are checked before
 each call in local mode: an exhausted ``block`` budget raises
@@ -65,6 +67,7 @@ the attempt that served the call is recorded once afterwards in
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections.abc import Mapping
@@ -121,6 +124,8 @@ from prompt_shields.sovereign import (
     resolve_base_url,
 )
 from prompt_shields.types import PSMetadata, RouteHint
+
+logger = logging.getLogger("prompt_shields.router")
 
 RouteMode = Literal["local", "gateway"]
 
@@ -1147,9 +1152,15 @@ class _RouterCore:
             tier = self._find_tier(decision, req)
             provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
             if self.learner is not None:
-                learned = self._learner_pick(
-                    req, decision, tier, provider, extra["messages"]
-                )
+                try:
+                    learned = self._learner_pick(
+                        req, decision, tier, provider, extra["messages"]
+                    )
+                except Exception as exc:  # noqa: BLE001 - the learner never fails the call
+                    # The learner never fails the call: the policy's pick
+                    # stands (counted in the learner's guard state).
+                    self._learner_error("choose", exc)
+                    learned = None
                 if learned is not None:
                     if learned[1] is not tier:
                         extra["policy_pick"] = (decision, tier, provider)
@@ -1422,6 +1433,7 @@ class _RouterCore:
             if plan.learner is not None:
                 event["route_learner_mode"] = plan.learner.mode
                 event["route_propensity"] = plan.learner.propensity
+                event["route_learner_frozen"] = plan.learner.frozen
                 if plan.learner.learner_version is not None:
                     event["route_learner_version"] = plan.learner.learner_version
             # Pseudonymised: the client scanned the placeholders. Report the
@@ -1565,10 +1577,28 @@ class _RouterCore:
         )
         return out
 
+    def _learner_error(self, stage: str, exc: Exception) -> None:
+        """Auto mode: the learner raised in ``stage`` (``choose`` or
+        ``observe``). The call goes on without it; only the error type is
+        logged (the message could carry request data)."""
+        logger.warning(
+            "routing learner %s raised %s; the call proceeds on the policy's pick",
+            stage, type(exc).__name__,
+        )
+        learner = self.learner
+        if learner is not None:
+            try:
+                learner.note_fallback(stage, exc)
+            except Exception:  # noqa: BLE001, S110 - counting is best effort
+                pass
+
     def _learner_failed(self, plan: _Plan) -> None:
         """Auto mode: the call failed outright (no candidate served it)."""
         if plan.learner is not None and self.learner is not None:
-            self.learner.observe(None, plan.learner, [CALL_FAILED])
+            try:
+                self.learner.observe(None, plan.learner, [CALL_FAILED])
+            except Exception as exc:  # noqa: BLE001 - the learner never fails the call
+                self._learner_error("observe", exc)
 
     def _routed(self, candidate: Candidate, response: Any, captured: dict,
                 attempts: tuple[Attempt, ...]) -> RoutedChatCompletion:
@@ -1578,7 +1608,10 @@ class _RouterCore:
             signals = live.get("outcome_signals")
             if signals is None and len(attempts) > 1:
                 signals = ["fallback"]  # outcome signals are turned off
-            self.learner.observe(captured.get("call_id"), plan.learner, signals)
+            try:
+                self.learner.observe(captured.get("call_id"), plan.learner, signals)
+            except Exception as exc:  # noqa: BLE001 - the learner never fails the call
+                self._learner_error("observe", exc)
         return self._local_result(
             candidate.data[0], response, captured, attempts,
             (self.policy or {}).get("policy_version"),

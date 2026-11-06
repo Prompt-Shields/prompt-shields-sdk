@@ -196,6 +196,9 @@ describe('assets', () => {
         cache_hit_rate: 0.31,
         cache_saved_usd: 18.4,
         cache_tokens_saved: 2400000,
+        learner_requests: 4200,
+        learner_routed_share: 0.28,
+        learner_explore_share: 0.05,
         period: '7d',
       }),
     );
@@ -217,6 +220,9 @@ describe('assets', () => {
       cacheHitRate: 0.31,
       cacheSavedUsd: 18.4,
       cacheTokensSaved: 2400000,
+      learnerRequests: 4200,
+      learnerRoutedShare: 0.28,
+      learnerExploreShare: 0.05,
       period: '7d',
     });
     expect(m.calls[0].url).toBe('https://api.promptshields.io/partner/v1/assets/id1/usage-summary?period=7d');

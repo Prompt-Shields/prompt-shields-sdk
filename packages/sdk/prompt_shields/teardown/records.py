@@ -154,6 +154,12 @@ class TeardownRecord:
     api_key_id: str | None = None
     route_group: str | None = None
     prompt_hash: str | None = None
+    #: Routing learner auto mode (#34), from a ps-events row the learner
+    #: routed: ``policy`` / ``exploit`` / ``explore``, the probability it
+    #: picked the served model, and the snapshot version.
+    route_learner_mode: str | None = None
+    route_propensity: float | None = None
+    route_learner_version: str | None = None
     #: Prompt features computed locally (see :func:`prompt_features`), or
     #: None when the input has no message text.
     features: dict[str, Any] | None = None
@@ -644,6 +650,9 @@ def _ps_event_record(e: Mapping[str, Any], file: str) -> TeardownRecord:
         detected_pii_types=_pii(e.get("detected_pii_types") or flow.get("detected_pii_types")),
         route_group=_str(e.get("route_group")),
         prompt_hash=_str(e.get("prompt_hash")),
+        route_learner_mode=_str(e.get("route_learner_mode")),
+        route_propensity=_float(e.get("route_propensity")),
+        route_learner_version=_str(e.get("route_learner_version")),
     )
 
 

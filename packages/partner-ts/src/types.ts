@@ -252,6 +252,21 @@ export interface UsageSummary {
    */
   cacheTokensSaved: number | null;
   /**
+   * Events the SDK routing learner decided in auto mode (exploit, explore or
+   * policy). 0 when it decided none.
+   */
+  learnerRequests: number;
+  /**
+   * Share (0 to 1) of all events that the routing learner decided. `null` when
+   * there were no events.
+   */
+  learnerRoutedShare: number | null;
+  /**
+   * Share (0 to 1) of the learner-decided events on which it explored.
+   * `null` when the learner decided none.
+   */
+  learnerExploreShare: number | null;
+  /**
    * Events that reported implicit outcome signals (#44), including those that
    * reported none happened.
    */

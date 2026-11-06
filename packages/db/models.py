@@ -203,6 +203,15 @@ class AIUsageEvent(Base):
     # The gateway's estimate of the prompt tokens a cache lookup saved (0 on
     # a miss); summed as cache_tokens_saved in the usage summary.
     est_tokens_saved = Column(Integer)
+    # Routing learner auto mode (#34), set when the learner decided the call:
+    # route_learner_mode policy, exploit or explore; route_propensity the
+    # probability it picked the served model; route_learner_version the
+    # active snapshot (lv1-...), null with none active; route_learner_frozen
+    # whether learning was frozen at the time.
+    route_learner_mode = Column(Text)
+    route_propensity = Column(Numeric(7, 6))
+    route_learner_version = Column(Text)
+    route_learner_frozen = Column(Boolean)
     # Implicit outcome signals (#44): sorted list of known class names
     # ("max_tokens", "refusal", ...; collector.ingest.OUTCOME_SIGNAL_CLASSES),
     # [] when measured and nothing happened, NULL when not reported; and the
