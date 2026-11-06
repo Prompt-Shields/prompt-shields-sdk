@@ -506,6 +506,10 @@ def parse_gcp_export(export: dict) -> tuple[dict, list[ci.CloudDeployment]]:
     elsewhere: set[tuple[str, str]] = set()
     for what, region, r in pairs:
         endpoints = _items(r.endpoints, "endpoints", f"{what}.endpoints")
+        if any(
+            not isinstance(ep.get("deployedModels") or [], list) for ep in endpoints
+        ):
+            raise ExportError(f"{what}.endpoints: deployedModels must be a list")
         # The live pull reads these models one by one; an import cannot, so
         # they keep the deployed model's display name until a pull.
         elsewhere.update(ci.vertex_models_elsewhere(region, endpoints, catalog))

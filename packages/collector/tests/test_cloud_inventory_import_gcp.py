@@ -187,6 +187,12 @@ def test_rest_shaped_listings_are_accepted_too():
             lambda e: e["projects"][PROJECT]["us-central1"].update(models="x"),
             "models",
         ),
+        (
+            lambda e: e["projects"][PROJECT]["us-central1"]["endpoints"][0].update(
+                deployedModels=5
+            ),
+            "deployedModels",
+        ),
         (lambda e: e.update(owner_label_emails={"Claims Team": "x"}), "owner_label"),
     ],
 )
@@ -234,7 +240,7 @@ def test_export_with_a_credential_is_refused_without_echoing_it(inject, path):
 # ── The export script, against a fake `gcloud` ─────────────────────────
 
 
-def _fake_gcloud(tmp_path: Path) -> tuple[Path, Path]:
+def _fake_gcloud(tmp_path: Path, fixtures: Path = FIXTURES) -> tuple[Path, Path]:
     """A `gcloud` on PATH that replays the recorded output for
     `ai endpoints list` and `ai models list` only, and logs each call."""
     log = tmp_path / "calls.log"
@@ -253,7 +259,7 @@ for arg in "$@"; do
     --region=*) region="${{arg#--region=}}";;
   esac
 done
-f={FIXTURES}/"$project.$region.$2.json"
+f={fixtures}/"$project.$region.$2.json"
 if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
 """
     )
@@ -294,6 +300,34 @@ def test_export_script_builds_an_importable_export_with_lists_only(tmp_path):
     text = json.dumps(export)
     for dropped in ("containerSpec", "dedicatedResources", "trafficSplit", "etag"):
         assert dropped not in text
+
+
+@needs_shell
+def test_export_script_handles_listings_larger_than_an_argument(tmp_path):
+    """Listings go through files: one argv string is capped at 128 KiB."""
+    big = [
+        {
+            "name": f"projects/{PROJECT}/locations/us-central1/endpoints/{i}",
+            "displayName": "x" * 100,
+            "deployedModels": [],
+        }
+        for i in range(2000)
+    ]
+    data = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES, data)
+    (data / f"{PROJECT}.us-central1.endpoints.json").write_text(json.dumps(big))
+    bindir, _ = _fake_gcloud(tmp_path, data)
+    out = subprocess.run(
+        ["bash", str(SCRIPT), PROJECT, *REGIONS],
+        check=False,
+        env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert out.returncode == 0, out.stderr
+    export = json.loads(out.stdout)
+    assert len(export["projects"][PROJECT]["us-central1"]["endpoints"]) == 2000
 
 
 @needs_shell

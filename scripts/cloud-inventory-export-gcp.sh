@@ -40,18 +40,28 @@ done
 keep_endpoint='[.[] | {name, displayName, labels, deployedModels: [(.deployedModels // [])[] | {id, model, displayName}]}]'
 keep_model='[.[] | {name, displayName, labels, baseModelSource}]'
 
-out='{}'
+# Listings can be large: they go through files, never through argv (a
+# single argument is limited to 128 KiB on Linux).
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+# merge FILE KEY VALUE_FILE: add {KEY: <contents of VALUE_FILE>} to FILE.
+merge() {
+  jq --arg k "$2" --slurpfile v "$3" '. + {($k): $v[0]}' "$1" > "$1.new"
+  mv "$1.new" "$1"
+}
+
+echo '{}' > "$tmp/projects.json"
 for project in $projects; do
-  regions='{}'
+  echo '{}' > "$tmp/regions.json"
   for region in "$@"; do
-    endpoints="$(gcloud ai endpoints list --project="$project" --region="$region" \
-      --format=json --quiet | jq "$keep_endpoint")"
-    models="$(gcloud ai models list --project="$project" --region="$region" \
-      --format=json --quiet | jq "$keep_model")"
-    regions="$(jq -n --argjson all "$regions" --arg r "$region" \
-      --argjson e "$endpoints" --argjson m "$models" \
-      '$all + {($r): {endpoints: $e, models: $m}}')"
+    gcloud ai endpoints list --project="$project" --region="$region" \
+      --format=json --quiet | jq "$keep_endpoint" > "$tmp/endpoints.json"
+    gcloud ai models list --project="$project" --region="$region" \
+      --format=json --quiet | jq "$keep_model" > "$tmp/models.json"
+    jq -n --slurpfile e "$tmp/endpoints.json" --slurpfile m "$tmp/models.json" \
+      '{endpoints: $e[0], models: $m[0]}' > "$tmp/region.json"
+    merge "$tmp/regions.json" "$region" "$tmp/region.json"
   done
-  out="$(jq -n --argjson all "$out" --arg p "$project" --argjson r "$regions" '$all + {($p): $r}')"
+  merge "$tmp/projects.json" "$project" "$tmp/regions.json"
 done
-jq -n --argjson projects "$out" '{cloud: "gcp", projects: $projects}'
+jq '{cloud: "gcp", projects: .}' "$tmp/projects.json"

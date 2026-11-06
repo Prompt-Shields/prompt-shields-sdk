@@ -52,44 +52,69 @@ keep_serverless='[.[] | {id, name, location, tags, model_id, provisioning_state,
 keep_online='[.[] | {id, name, location, tags, provisioning_state}]'
 keep_online_deployment='[.[] | {id, name, location, tags, model, provisioning_state}]'
 
-# Resource group and name from an ARM id (.../resourceGroups/<rg>/.../<name>).
-rg_and_name='.[] | select(.id | type == "string") | (.id | split("/")) as $p | [.id, $p[4], $p[-1]] | @tsv'
+# Resource group and name from an ARM id
+# (/subscriptions/<sid>/resourceGroups/<rg>/providers/<ns>/<type>/<name>);
+# other ids are skipped. Names go to `az` as single quoted arguments.
+arm_id='^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[^/[:cntrl:]]{1,90}/providers/[A-Za-z0-9.]+/[A-Za-z0-9]+/[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$'
+rg_and_name='.[] | select(.id | type == "string" and test($arm_id)) | (.id | split("/")) as $p | [.id, $p[4], $p[-1]] | @tsv'
+arm_name='^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$'
 
-subs='{}'
+# Listings can be large: they go through files, never through argv (a
+# single argument is limited to 128 KiB on Linux).
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+# merge FILE KEY VALUE_FILE: add {KEY: <contents of VALUE_FILE>} to FILE.
+merge() {
+  jq --arg k "$2" --slurpfile v "$3" '. + {($k): $v[0]}' "$1" > "$1.new"
+  mv "$1.new" "$1"
+}
+
+echo '{}' > "$tmp/subs.json"
 for sid in $sub_list; do
-  accounts="$(az cognitiveservices account list --subscription "$sid" --output json | jq "$keep_account")"
-  deployments='{}'
+  az cognitiveservices account list --subscription "$sid" --output json \
+    | jq "$keep_account" > "$tmp/accounts.json"
+  echo '{}' > "$tmp/deployments.json"
   while IFS=$'\t' read -r id rg name; do
     [ -n "$id" ] || continue
-    d="$(az cognitiveservices account deployment list --subscription "$sid" \
-      --resource-group "$rg" --name "$name" --output json </dev/null | jq "$keep_deployment")"
-    deployments="$(jq -n --argjson all "$deployments" --arg id "$id" --argjson d "$d" '$all + {($id): $d}')"
-  done < <(jq -r '[.[] | select((.kind // "" | ascii_downcase) as $k | $k == "openai" or $k == "aiservices")] | '"$rg_and_name" <<< "$accounts")
+    az cognitiveservices account deployment list --subscription "$sid" \
+      --resource-group "$rg" --name "$name" --output json </dev/null \
+      | jq "$keep_deployment" > "$tmp/d.json"
+    merge "$tmp/deployments.json" "$id" "$tmp/d.json"
+  done < <(jq -r --arg arm_id "$arm_id" '[.[] | select((.kind // "" | ascii_downcase) as $k | $k == "openai" or $k == "aiservices")] | '"$rg_and_name" "$tmp/accounts.json")
 
-  sub="$(jq -n --argjson a "$accounts" --argjson d "$deployments" '{accounts: $a, deployments: $d}')"
+  jq -n --slurpfile a "$tmp/accounts.json" --slurpfile d "$tmp/deployments.json" \
+    '{accounts: $a[0], deployments: $d[0]}' > "$tmp/sub.json"
   if [ "$skip_ml" != 1 ]; then
-    workspaces="$(az resource list --subscription "$sid" \
-      --resource-type Microsoft.MachineLearningServices/workspaces --output json | jq "$keep_workspace")"
-    ml='{}'
+    az resource list --subscription "$sid" \
+      --resource-type Microsoft.MachineLearningServices/workspaces --output json \
+      | jq "$keep_workspace" > "$tmp/workspaces.json"
+    echo '{}' > "$tmp/ml.json"
     while IFS=$'\t' read -r id rg ws; do
       [ -n "$id" ] || continue
-      serverless="$(az ml serverless-endpoint list --subscription "$sid" \
-        --resource-group "$rg" --workspace-name "$ws" --output json </dev/null | jq "$keep_serverless")"
-      online="$(az ml online-endpoint list --subscription "$sid" \
-        --resource-group "$rg" --workspace-name "$ws" --output json </dev/null | jq "$keep_online")"
-      online_deployments='{}'
+      az ml serverless-endpoint list --subscription "$sid" \
+        --resource-group "$rg" --workspace-name "$ws" --output json </dev/null \
+        | jq "$keep_serverless" > "$tmp/serverless.json"
+      az ml online-endpoint list --subscription "$sid" \
+        --resource-group "$rg" --workspace-name "$ws" --output json </dev/null \
+        | jq "$keep_online" > "$tmp/online.json"
+      echo '{}' > "$tmp/online_deployments.json"
       while IFS= read -r ep; do
         [ -n "$ep" ] || continue
-        d="$(az ml online-deployment list --subscription "$sid" --resource-group "$rg" \
-          --workspace-name "$ws" --endpoint-name "$ep" --output json </dev/null | jq "$keep_online_deployment")"
-        online_deployments="$(jq -n --argjson all "$online_deployments" --arg ep "$ep" --argjson d "$d" '$all + {($ep): $d}')"
-      done < <(jq -r '.[].name // empty' <<< "$online")
-      ml="$(jq -n --argjson all "$ml" --arg id "$id" --argjson s "$serverless" \
-        --argjson o "$online" --argjson d "$online_deployments" \
-        '$all + {($id): {serverless_endpoints: $s, online_endpoints: $o, online_deployments: $d}}')"
-    done < <(jq -r '[.[] | select((.kind // "" | ascii_downcase) as $k | $k != "hub" and $k != "featurestore")] | '"$rg_and_name" <<< "$workspaces")
-    sub="$(jq -n --argjson s "$sub" --argjson w "$workspaces" --argjson m "$ml" '$s + {ml_workspaces: $w, ml_endpoints: $m}')"
+        az ml online-deployment list --subscription "$sid" --resource-group "$rg" \
+          --workspace-name "$ws" --endpoint-name "$ep" --output json </dev/null \
+          | jq "$keep_online_deployment" > "$tmp/d.json"
+        merge "$tmp/online_deployments.json" "$ep" "$tmp/d.json"
+      done < <(jq -r --arg n "$arm_name" '.[].name | select(type == "string" and test($n))' "$tmp/online.json")
+      jq -n --slurpfile s "$tmp/serverless.json" --slurpfile o "$tmp/online.json" \
+        --slurpfile d "$tmp/online_deployments.json" \
+        '{serverless_endpoints: $s[0], online_endpoints: $o[0], online_deployments: $d[0]}' \
+        > "$tmp/w.json"
+      merge "$tmp/ml.json" "$id" "$tmp/w.json"
+    done < <(jq -r --arg arm_id "$arm_id" '[.[] | select((.kind // "" | ascii_downcase) as $k | $k != "hub" and $k != "featurestore")] | '"$rg_and_name" "$tmp/workspaces.json")
+    jq --slurpfile w "$tmp/workspaces.json" --slurpfile m "$tmp/ml.json" \
+      '. + {ml_workspaces: $w[0], ml_endpoints: $m[0]}' "$tmp/sub.json" > "$tmp/sub.new"
+    mv "$tmp/sub.new" "$tmp/sub.json"
   fi
-  subs="$(jq -n --argjson all "$subs" --arg sid "$sid" --argjson s "$sub" '$all + {($sid): $s}')"
+  merge "$tmp/subs.json" "$sid" "$tmp/sub.json"
 done
-jq -n --argjson subs "$subs" '{cloud: "azure", subscriptions: $subs}'
+jq '{cloud: "azure", subscriptions: .}' "$tmp/subs.json"

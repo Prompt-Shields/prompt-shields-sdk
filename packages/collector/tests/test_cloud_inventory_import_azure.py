@@ -335,7 +335,7 @@ ALLOWED_AZ = (
 )
 
 
-def _fake_az(tmp_path: Path) -> tuple[Path, Path]:
+def _fake_az(tmp_path: Path, fixtures: Path = FIXTURES) -> tuple[Path, Path]:
     """An `az` on PATH that replays the recorded output for list commands
     only (anything else exits 9) and logs each call."""
     log = tmp_path / "calls.log"
@@ -365,14 +365,14 @@ case "$words" in
 esac
 [ "$sub" = {SUB} ] || exit 8
 case "$words" in
-  "cognitiveservices account list") cat {FIXTURES}/accounts.json;;
-  "cognitiveservices account deployment list") cat {FIXTURES}/deployments."$name".json;;
+  "cognitiveservices account list") cat {fixtures}/accounts.json;;
+  "cognitiveservices account deployment list") cat {fixtures}/deployments."$name".json;;
   "resource list")
     [ "$rtype" = Microsoft.MachineLearningServices/workspaces ] || exit 7
-    cat {FIXTURES}/ml-workspaces.json;;
-  "ml serverless-endpoint list") cat {FIXTURES}/ml."$ws".serverless-endpoints.json;;
-  "ml online-endpoint list") cat {FIXTURES}/ml."$ws".online-endpoints.json;;
-  "ml online-deployment list") cat {FIXTURES}/ml."$ws".online-deployments."$ep".json;;
+    cat {fixtures}/ml-workspaces.json;;
+  "ml serverless-endpoint list") cat {fixtures}/ml."$ws".serverless-endpoints.json;;
+  "ml online-endpoint list") cat {fixtures}/ml."$ws".online-endpoints.json;;
+  "ml online-deployment list") cat {fixtures}/ml."$ws".online-deployments."$ep".json;;
   *) exit 9;;
 esac
 """
@@ -452,6 +452,40 @@ def test_export_script_refuses_a_bad_subscription_id(tmp_path):
     )
     assert out.returncode == 2
     assert not log.exists() or "rm" not in log.read_text()
+
+
+@needs_shell
+def test_export_script_handles_listings_larger_than_an_argument(tmp_path):
+    """Listings go through files: one argv string is capped at 128 KiB."""
+    big = [
+        {
+            "id": f"{ACC_WEU}/deployments/d{i}",
+            "name": f"d{i}",
+            "tags": {"note": "x" * 100},
+            "properties": {
+                "provisioningState": "Succeeded",
+                "model": {"name": "gpt-4o", "format": "OpenAI"},
+            },
+        }
+        for i in range(2000)
+    ]
+    data = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES, data)
+    (data / "deployments.acme-openai-weu.json").write_text(json.dumps(big))
+    bindir, _ = _fake_az(tmp_path, data)
+    out = subprocess.run(
+        ["bash", str(SCRIPT)],
+        check=False,
+        env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert out.returncode == 0, out.stderr
+    export = json.loads(out.stdout)
+    assert len(export["subscriptions"][SUB]["deployments"][ACC_WEU]) == 2000
+    _, deployments = imp.parse_azure_export(export)
+    assert sum(d.resource_id.startswith(f"{ACC_WEU}/") for d in deployments) == 2000
 
 
 # ── Against PostgreSQL (PS_TEST_DATABASE_URL) ──────────────────────────
