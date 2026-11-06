@@ -28,4 +28,6 @@ export const integrationTests = [
   // (promptfoo's public API; Prompt Security via PROMPT_SECURITY_* env vars).
   '/plugins/promptfoo/promptfoo\\.test\\.ts$',
   '/plugins/promptsecurity/promptsecurity\\.test\\.ts$',
+  // Budget store against a real Redis (PS_TEST_REDIS_URL).
+  '/src/middlewares/psBudget/psBudget\\.redis\\.test\\.ts$',
 ];

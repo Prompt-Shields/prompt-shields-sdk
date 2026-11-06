@@ -266,6 +266,21 @@ lifecycle:
 {{- fail "gateway.oidc.enabled needs gateway.oidc.audience" -}}
 {{- end -}}
 {{- end -}}
+{{- $budgets := .Values.gateway.budgets -}}
+{{- if and .Values.gateway.enabled $budgets.enabled -}}
+{{- if not $budgets.budgets -}}
+{{- fail "gateway.budgets.enabled needs at least one entry in gateway.budgets.budgets" -}}
+{{- end -}}
+{{- if not (has $budgets.onStoreError (list "open" "closed")) -}}
+{{- fail "gateway.budgets.onStoreError must be open or closed" -}}
+{{- end -}}
+{{- if and $budgets.redis.url $budgets.redis.existingSecret -}}
+{{- fail "set one of gateway.budgets.redis.url and gateway.budgets.redis.existingSecret" -}}
+{{- end -}}
+{{- if regexMatch "://[^/]*@" (toString $budgets.redis.url) -}}
+{{- fail "gateway.budgets.redis.url must not hold credentials (it renders into a ConfigMap): use gateway.budgets.redis.existingSecret" -}}
+{{- end -}}
+{{- end -}}
 {{- $c := .Values.collector -}}
 {{- if and $c.enabled $c.probes.readiness.enabled (le (float64 $c.probes.readiness.timeoutSeconds) (float64 $c.readyzTimeoutSeconds)) -}}
 {{- fail "collector.probes.readiness.timeoutSeconds must be above collector.readyzTimeoutSeconds" -}}

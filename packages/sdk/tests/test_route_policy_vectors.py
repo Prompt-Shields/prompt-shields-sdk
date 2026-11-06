@@ -117,6 +117,7 @@ def test_example_cross_field_rules(path):
         levels = set(sensitivity["levels"])
         assert sensitivity["unclassified_default"] in levels
         assert set(sensitivity.get("pii_escalation", {}).values()) <= levels
+        assert set(sensitivity.get("anonymise_then_route", [])) <= levels
         assert set(policy.get("data_policy", {})) <= levels
 
 
