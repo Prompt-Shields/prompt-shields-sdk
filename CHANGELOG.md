@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **LeanIX connector: round-trip check** (refs #101): with `"verify": true` on `POST /api/v1/admin/connectors/leanix/sync`, `--verify` on `python -m collector.leanix`, or `verify` in the tenant's `PS_LEANIX` entry (default `false`), the sync reads every fact sheet it wrote back through the LeanIX GraphQL API (by type and external id, 100 per query) and reports `verification` (`checked`, `found`, `missing_count`, up to 20 `missing` ids; also kept as `last_verification` in the connector status). A run LeanIX reports as finished whose processor skipped items now fails the sync and leaves the cursor where it was. GraphQL error messages are never echoed; calls use the same guarded client (host allowlist, public-address pinning, no redirects, bounded retries) as the Integration API. OpenAPI: new `LeanIXSyncRequest` (adds `verify`). Still not run against a live LeanIX sandbox.
 - **Nordic/EU PII benchmark and recall gate (SDK and gateway)** (refs #35):
   - **Dataset:** `benchmarks/pii/` holds 716 labelled, fully synthetic examples across 11 locales. They include checksum-valid fake SE/NO/DK/FI/NL/PL/ES/FR IDs, IBANs in compact and grouped form, cards, reserved-domain emails, fiction-range phones, documentation-range IPs and hard negatives (dates, order and invoice numbers, EAN, VAT numbers, versions). The generator is deterministic and has a `--check` mode.
   - **Scorer:** per-category precision, recall and F1, plus recall by locale.

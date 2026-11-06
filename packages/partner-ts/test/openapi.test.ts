@@ -200,6 +200,7 @@ const UNMAPPED_SCHEMAS = new Set([
   'CreateTenantRequest',
   'UpdateTenantRequest',
   'ConnectorSyncRequest',
+  'LeanIXSyncRequest',
   // Risk mapping review history and review (#98): not wrapped yet; call
   // them with client.send().
   'RiskMappingReview',
