@@ -75,8 +75,9 @@ export const redactPiiDeep = (value: unknown, depth = 0): unknown => {
   // By tag, not prototype: a parsed body can come from another realm.
   if (Object.prototype.toString.call(value) !== '[object Object]') return value;
   return Object.fromEntries(
+    // Keys too: a body can key a map by email ("metadata": {"a@b.c": ...}).
     Object.entries(value as Record<string, unknown>).map(([key, item]) => [
-      key,
+      redactPii(key),
       redactPiiDeep(item, depth + 1),
     ])
   );
@@ -148,6 +149,22 @@ export const buildLogRequestOptions = (
     return sanitized;
   });
 
+/**
+ * PS fork (#337): the request path and query with PII replaced. Percent
+ * escapes are decoded first (`?u=jane%40example.com`), one run at a time so
+ * a malformed escape leaves only that run as it was.
+ */
+export const redactEndpoint = (endpoint: string): string =>
+  redactPii(
+    endpoint.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run;
+      }
+    })
+  );
+
 const broadcastLog = async (log: any) => {
   const message = {
     data: log,
@@ -205,7 +222,7 @@ async function processLog(c: Context, start: number) {
     JSON.stringify({
       time: new Date().toLocaleString(),
       method: c.req.method,
-      endpoint: endpoint === undefined ? endpoint : redactPii(endpoint),
+      endpoint: endpoint === undefined ? endpoint : redactEndpoint(endpoint),
       status: c.res.status,
       duration: ms,
       requestOptions: buildLogRequestOptions(requestOptionsArray, response),

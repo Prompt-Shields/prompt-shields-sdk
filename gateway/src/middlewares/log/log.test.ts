@@ -3,6 +3,7 @@ import { streamSSE } from 'hono/streaming';
 import {
   buildLogRequestOptions,
   logHandler,
+  redactEndpoint,
   redactPiiDeep,
   sanitizeRequestOption,
 } from '.';
@@ -107,6 +108,20 @@ describe('log stream PII redaction', () => {
       created: 1730894400,
       createdMs: 1730894400000,
     });
+  });
+
+  test('object keys are redacted too', () => {
+    const serialized = JSON.stringify(
+      redactPiiDeep({ metadata: { [EMAIL]: { note: 'vip' } } })
+    );
+    expect(serialized).not.toContain(EMAIL);
+    expect(serialized).toBe('{"metadata":{"[EMAIL]":{"note":"vip"}}}');
+  });
+
+  test('percent-encoded PII in the request path is redacted', () => {
+    expect(
+      redactEndpoint('/v1/chat/completions?u=jane.doe%40example.com&x=%E0%A4')
+    ).toBe('/v1/chat/completions?u=[EMAIL]&x=%E0%A4');
   });
 
   test('the response is redacted before the 100 KB cut', () => {
