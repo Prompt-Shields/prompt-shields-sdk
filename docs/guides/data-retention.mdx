@@ -33,7 +33,7 @@ The Partner API `usage-summary` endpoint already does this, so a `90d` summary f
 
 ## Running the purge
 
-Nothing is deleted until an operator runs the purge. The collector has no built-in scheduler, so run it from cron or a Kubernetes CronJob:
+Nothing is deleted until the purge runs. The collector has no built-in scheduler. The Helm chart (0.4.11 and later) runs it daily as the `retentionPurge` CronJob (`37 2 * * *`), **on by default**: after an upgrade from an earlier chart, its first run deletes everything already past each tenant's retention window (see "Upgrading" in the chart README; set `cronJobs.jobs.retentionPurge.enabled: false` to opt out). Elsewhere, run it from cron or a Kubernetes CronJob:
 
 ```bash
 python -m collector.retention purge                 # every tenant
