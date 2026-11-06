@@ -11,12 +11,10 @@ tokens were full admin and stay full admin. Narrower tokens are unchanged.
 Downgrade removes ``admin:privacy`` from every token.
 
 Revision ID: 038
-Revises: 035
+Revises: 037
 Create Date: 2026-11-06
 
-Numbered 038 by plan; 036 (#338) and 037 (#361) are taken by open PRs. It
-chains from 035 (main's head at merge); re-chain it onto the newest of
-036/037 that lands first.
+036 is taken by an open PR (#338); re-chain onto it if it lands later.
 """
 
 from collections.abc import Sequence
@@ -24,7 +22,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "038"
-down_revision: str | None = "035"
+down_revision: str | None = "037"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

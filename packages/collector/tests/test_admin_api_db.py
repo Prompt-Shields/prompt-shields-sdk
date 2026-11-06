@@ -1071,7 +1071,9 @@ async def test_migration_038_keeps_full_scope_tokens_full_admin(client, seeded_d
     await _token(client, ["admin:keys", "admin:read"], name="narrow")
     # Before the upgrade: an old full-scope token is short of admin:privacy.
     resp = await client.post(
-        "/api/v1/admin/api-keys", headers=H(full["token"]), json={"name": "k1"}
+        "/api/v1/admin/api-keys",
+        headers=H(full["token"]),
+        json={"name": "k1", "scopes": ALL_KEY_SCOPES},
     )
     assert resp.status_code == 403
     assert "admin:privacy" in resp.json()["detail"]["detail"]
@@ -1085,7 +1087,9 @@ async def test_migration_038_keeps_full_scope_tokens_full_admin(client, seeded_d
     assert set(scopes["full"]) == set(ADMIN_SCOPES)
     assert sorted(scopes["narrow"]) == ["admin:keys", "admin:read"]
     resp = await client.post(
-        "/api/v1/admin/api-keys", headers=H(full["token"]), json={"name": "k1"}
+        "/api/v1/admin/api-keys",
+        headers=H(full["token"]),
+        json={"name": "k1", "scopes": ALL_KEY_SCOPES},
     )
     assert resp.status_code == 201, resp.text
 
@@ -1098,3 +1102,8 @@ async def test_migration_038_keeps_full_scope_tokens_full_admin(client, seeded_d
             (await s.execute(select(AdminToken.name, AdminToken.scopes))).all()
         )
     assert sorted(scopes["full"]) == sorted(m.PREVIOUS_SCOPES)
+
+
+def test_migration_038_revision_chain():
+    m = _load_migration_038()
+    assert (m.revision, m.down_revision) == ("038", "037")
