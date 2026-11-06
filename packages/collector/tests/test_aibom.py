@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from collector import aibom
 from collector.partner_auth import PartnerPrincipal
-from db.models import AIAsset, DataFlow, PartnerAuditLog, RiskMapping
+from db.models import AIAsset, AssetAttestation, DataFlow, PartnerAuditLog, RiskMapping
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
@@ -326,6 +326,48 @@ class TestBuildBom:
         bom = aibom.build_bom(TENANT_A, [], now=now, serial=serial)
         assert bom["serialNumber"] == f"urn:uuid:{serial}"
         assert bom["metadata"]["timestamp"] == "2026-10-13T12:00:00+00:00"
+
+    def test_attestation_properties(self):
+        assets, flows, risks = _registry(TENANT_A)
+        a1, a2 = assets[0], assets[1]
+        at = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+
+        def row(asset, tenant, field, state, value):
+            return AssetAttestation(
+                id=uuid.uuid4(), tenant_id=tenant, asset_id=asset.id, field=field,
+                state=state, value=value, comment="free text", attested_by="ciso@example.com",
+                actor_type="tenant", created_at=at,
+            )
+
+        latest = {
+            a1.id: {
+                "owner": row(a1, TENANT_A, "owner", "attested", "owner@example.com"),
+                # Signed off when the classification was different.
+                "data_classification": row(a1, TENANT_A, "data_classification",
+                                           "disputed", "public"),
+            },
+            # A row from another tenant is ignored.
+            a2.id: {"owner": row(a2, TENANT_B, "owner", "attested", "owner@example.com")},
+        }
+        without = aibom.build_bom(TENANT_A, assets, flows, risks)
+        bom = aibom.build_bom(TENANT_A, assets, flows, risks, attestations=latest)
+        assert_valid(bom)
+        assert not any(
+            n.startswith("promptshields:attestation") for n, _ in _props(without["components"][0])
+        )
+        p1 = dict(_props(bom["components"][0]))
+        assert p1["promptshields:confidence"] == "high"
+        assert p1["promptshields:attestation:owner"] == "attested"
+        assert p1["promptshields:attestation:owner:attested_by"] == "ciso@example.com"
+        assert p1["promptshields:attestation:owner:attested_at"] == at.isoformat()
+        assert p1["promptshields:attestation:owner:value_changed"] == "false"
+        assert p1["promptshields:attestation:data_classification"] == "disputed"
+        assert p1["promptshields:attestation:data_classification:value_changed"] == "true"
+        assert p1["promptshields:attestation:asset"] == "unreviewed"
+        assert "promptshields:attestation:asset:attested_at" not in p1
+        p2 = dict(_props(bom["components"][1]))
+        assert p2["promptshields:attestation:owner"] == "unreviewed"
+        assert "free text" not in json.dumps(bom)
 
 
 # ──────────────────────────────────────────────────────────────────────
