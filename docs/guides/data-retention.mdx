@@ -66,7 +66,16 @@ Erasure runs in batches, child tables first. If it stops part-way, run it again:
 
 Every delete is filtered on `tenant_id`. The tests check that purging or erasing one tenant leaves every other tenant's rows untouched, and that any new table with a `tenant_id` column is included in erasure.
 
+## User ids
+
+Usage events can carry a `user_id`: the gateway's OIDC subject (see [Gateway OIDC](/guides/gateway-oidc)) or the SDK's `ps_metadata.user_id`. The collector does not store it as sent unless the tenant asks for that:
+
+- `user_id_hash` is always stored: HMAC-SHA-256 of the value, keyed with a salt per tenant. It is the key for per-user usage and erasure by user. The collector generates the salt on the first event that carries a `user_id` and keeps it in its own `tenant_secrets` table, written once and never changed (settings updates cannot touch it). No API, export or log returns it, and the operator tenants API refuses a `user_id_salt` setting. Without the salt a hash cannot be matched to a guessed user id, and one user's hashes differ between tenants. Erasing the tenant deletes the salt.
+- A tenant whose settings have `store_raw_user_ids: true` (set with `PATCH /api/v1/operator/tenants/{tenant_id}`, `{"settings": {"store_raw_user_ids": true}}`; a boolean, default `false`) also gets the value as sent in `user_id_raw`, next to the hash. Only enable it when you need the identifiers themselves, for example to answer an access request by user name.
+
+The setting applies to events ingested afterwards; stored events are not rewritten. Events also keep `user_group`, `trace_id`, `retry_count`, `attempts` (per-attempt provider, model, status, latency and error class, never content) and the `stream_truncated` / `stream_cancelled` flags.
+
 ## Not yet covered
 
-- **Erasure by end user.** Events do not store a user id today: the collector drops `user_external_id` at ingest. Delete-by-user can be added when user ids are stored.
+- **Erasure by end user.** Events store `user_id_hash` (and `user_id_raw` when enabled), but there is no delete-by-user endpoint yet.
 - Retention for `partner_audit_log`, which is kept until the tenant is erased.
