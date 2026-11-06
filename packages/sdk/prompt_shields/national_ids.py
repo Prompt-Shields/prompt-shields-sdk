@@ -181,6 +181,20 @@ _DETECTORS = (
 )
 
 
+def find_nordic_national_ids(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` of each checksum-valid Nordic national ID in ``text``.
+
+    For in-process pseudonymisation only (``prompt_shields.pseudonymise``):
+    callers must never log, store or send the matched text.
+    """
+    spans: list[tuple[int, int]] = []
+    for pattern, validate in _DETECTORS:
+        for m in pattern.finditer(text):
+            if validate(m):
+                spans.append(m.span())
+    return spans
+
+
 def contains_nordic_national_id(text: str) -> bool:
     """True when `text` contains a checksum-valid Nordic national ID."""
     for pattern, validate in _DETECTORS:
