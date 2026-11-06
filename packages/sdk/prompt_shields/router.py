@@ -19,6 +19,12 @@ gateway:
 When no allowed candidate is left, ``PolicyViolation`` is raised and nothing
 is sent: a call is never served by a non-compliant model.
 
+``pseudonymise=True`` (local mode only, off by default) replaces the PII the
+SDK detects with placeholders before the call and restores the answer
+(``prompt_shields.pseudonymise``). The call keeps the original prompt's
+sensitivity unless the policy's ``sensitivity.anonymise_then_route`` lists
+that level; then it is routed at the level of what is left.
+
 Only candidates whose provider is configured are considered: a policy tier
 whose provider has no entry in ``providers`` is removed before routing, the
 same as a tier the data policy does not allow.
@@ -36,17 +42,19 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from prompt_shields.baseline import Baseline, BaselineError, load_baseline
 from prompt_shields.pii import detect_pii_categories
+from prompt_shields.pseudonymise import Pseudonymisation, pseudonymise
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
     PolicyViolation,
     RouteDecision,
     RouteRequest,
+    anonymise_then_route_allowed,
     build_route_request,
     classify_sensitivity,
     data_policy_rule,
@@ -139,10 +147,33 @@ class Attempt:
 
 
 @dataclass(frozen=True)
+class PseudonymisationInfo:
+    """What pseudonymisation did on a call (``pseudonymise=True``). Counts
+    and levels only, never values.
+
+    ``entities`` is distinct values replaced per PII category; ``restored``
+    placeholders put back into the answer; ``unknown_placeholders``
+    placeholder-shaped tokens in the answer that were left as they are.
+    ``detected_level`` is the sensitivity of the original prompt;
+    ``anonymise_then_route`` is True when the policy let the call be routed
+    at the lower level of what was left after pseudonymisation
+    (``sensitivity.anonymise_then_route``); the route's ``sensitivity_level``
+    is then that lower level.
+    """
+
+    entities: Mapping[str, int]
+    restored: int
+    unknown_placeholders: int
+    detected_level: str | None
+    anonymise_then_route: bool
+
+
+@dataclass(frozen=True)
 class PSResult:
     route: RouteInfo
     cost: CostInfo
     attempts: tuple[Attempt, ...]
+    pseudonymisation: PseudonymisationInfo | None = None
 
 
 @dataclass
@@ -490,7 +521,12 @@ def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _P
 
 @dataclass(frozen=True)
 class _Plan:
-    """What one call will do: the decision, the tier and its provider."""
+    """What one call will do: the decision, the tier and its provider.
+
+    ``messages`` is what is sent: the caller's messages, or their
+    pseudonymised copy when ``pseudo`` is set (its mapping never leaves this
+    process and is cleared when the call is done).
+    """
 
     decision: RouteDecision
     tier: Mapping[str, Any]
@@ -498,6 +534,11 @@ class _Plan:
     requested_model: str
     data_classification: str | None
     use_case: str | None
+    messages: list = field(default_factory=list)
+    pseudo: Pseudonymisation | None = None
+    original_pii: tuple[str, ...] = ()
+    detected_level: str | None = None
+    anonymised_route: bool = False
 
 
 class _RouterCore:
@@ -530,10 +571,20 @@ class _RouterCore:
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
         baseline: Baseline | Mapping[str, Any] | str | os.PathLike | None = None,
+        pseudonymise: bool = False,
     ):
         if mode not in ("local", "gateway"):
             raise RouterError(f"mode must be 'local' or 'gateway', got {mode!r}")
+        if pseudonymise and mode != "local":
+            # The gateway classifies what it receives: it would see only the
+            # placeholders and route at a lower level than the policy allows.
+            raise RouterError(
+                "pseudonymise=True needs mode='local'; the gateway would "
+                "classify the placeholders, not the original prompt"
+            )
         self.mode: RouteMode = mode
+        self.pseudonymise = bool(pseudonymise)
+        self._scan_pii_events = scan_pii
         self._use_case = use_case
         self._data_classification = data_classification
         client_kwargs = {
@@ -647,6 +698,7 @@ class _RouterCore:
         data_classification: str | None,
         use_case: str | None,
         pii_detected: list[str] | None,
+        pii_categories: set[str] | None = None,
     ) -> RouteRequest:
         hints = parse_route_headers(route.to_headers() if route else {})
         req = build_route_request(
@@ -654,6 +706,9 @@ class _RouterCore:
         )
         req.data_classification = data_classification
         req.use_case = use_case
+        if pii_categories is not None:
+            req.pii_detected = sorted(pii_categories)
+            return req
         # Always scanned, also with scan_pii=False: escalation is a safety
         # control and nothing leaves the process here.
         found = set(_scan_pii(messages))
@@ -754,12 +809,16 @@ class _RouterCore:
 
         ``pii_detected`` adds categories found elsewhere (a DLP scan) to the
         ones the local scanner finds. Raises ``PolicyViolation`` when the call
-        would fail closed.
+        would fail closed. With ``pseudonymise=True`` the decision is the one
+        the pseudonymised call would get.
         """
-        return self._plan(
+        plan = self._plan(
             messages, model, route, max_tokens, data_classification, use_case,
             pii_detected,
-        ).decision
+        )
+        if plan.pseudo is not None:
+            plan.pseudo.clear()
+        return plan.decision
 
     def _plan(
         self,
@@ -775,13 +834,48 @@ class _RouterCore:
             raise RouterError("route() decides locally; this router delegates to the gateway")
         declared = data_classification or self._data_classification
         use_case = use_case or self._use_case
-        req = self._route_request(
-            messages, model, route, max_tokens, declared, use_case, pii_detected
+        if not self.pseudonymise:
+            req = self._route_request(
+                messages, model, route, max_tokens, declared, use_case, pii_detected
+            )
+            decision = self._decide(req)
+            tier = self._find_tier(decision, req)
+            provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
+            return _Plan(decision, tier, provider, model, declared, use_case,
+                         messages=messages)
+
+        pseudo = pseudonymise(messages)
+        try:
+            # Categories the caller supplied (a DLP scan) cannot be shown to
+            # be gone, so they always count.
+            extra = set(pii_detected or ())
+            original = set(_scan_pii(messages)) | extra
+            # What is still detected in what is sent: keyword topics
+            # (health_data, ...) and anything that was not replaced.
+            residual = set(_scan_pii(pseudo.messages)) | extra
+            detected_level, _ = classify_sensitivity(self._reachable, declared, original)
+            allowed = anonymise_then_route_allowed(self._reachable, detected_level)
+            req = self._route_request(
+                pseudo.messages, model, route, max_tokens, declared, use_case,
+                None, pii_categories=residual if allowed else original,
+            )
+            decision = self._decide(req)
+            anonymised = allowed and decision.sensitivity_level != detected_level
+            if anonymised:
+                decision = replace(
+                    decision, reason=decision.reason + "+anonymise-then-route"
+                )
+            tier = self._find_tier(decision, req)
+            provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
+        except BaseException:
+            pseudo.clear()
+            raise
+        return _Plan(
+            decision, tier, provider, model, declared, use_case,
+            messages=pseudo.messages, pseudo=pseudo,
+            original_pii=tuple(sorted(set(_scan_pii(messages)))),
+            detected_level=detected_level, anonymised_route=anonymised,
         )
-        decision = self._decide(req)
-        tier = self._find_tier(decision, req)
-        provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
-        return _Plan(decision, tier, provider, model, declared, use_case)
 
     # --- telemetry and response ----------------------------------------------
 
@@ -789,6 +883,7 @@ class _RouterCore:
         decision, tier = plan.decision, plan.tier
         policy_version = (self.policy or {}).get("policy_version")
         baseline = self.baseline
+        scan_pii = self._scan_pii_events
 
         def hook(event: dict) -> None:
             event["requested_model"] = plan.requested_model
@@ -808,6 +903,13 @@ class _RouterCore:
                 event["data_classification"] = plan.data_classification
             if plan.use_case is not None:
                 event["use_case_name"] = plan.use_case
+            # Pseudonymised: the client scanned the placeholders. Report the
+            # categories of the original prompt (labels only, never values).
+            if plan.pseudo is not None and scan_pii:
+                if plan.original_pii:
+                    event["detected_pii_types"] = list(plan.original_pii)
+                else:
+                    event.pop("detected_pii_types", None)
             # No provider-reported cost and no pricing-table entry (an
             # OpenAI-compatible provider's own model id): price the actual
             # tokens at the policy tier's rates.
@@ -874,6 +976,7 @@ class _RouterCore:
             from_anthropic(response) if plan.provider.vendor == "anthropic"
             else from_openai(response)
         )
+        pseudo_info = _restore_completion(out, plan) if plan.pseudo is not None else None
         d = plan.decision
         out.ps = PSResult(
             route=RouteInfo(
@@ -897,6 +1000,7 @@ class _RouterCore:
                 baseline_id=event.get("baseline_id"),
             ),
             attempts=(attempt,),
+            pseudonymisation=pseudo_info,
         )
         return out
 
@@ -918,6 +1022,29 @@ class _RouterCore:
     def telemetry_stats(self) -> dict:
         """Delivery counters of each provider client used so far, by name."""
         return {name: c.telemetry_stats() for name, c in self._clients.items()}
+
+
+def _restore_completion(out: RoutedChatCompletion, plan: _Plan) -> PseudonymisationInfo:
+    """Put the call's values back into ``out``: content, refusal and tool-call
+    arguments. ``out.raw`` stays as the provider returned it."""
+    pseudo = plan.pseudo
+    assert pseudo is not None
+    for choice in out.choices:
+        m = choice.message
+        m.content = pseudo.restore(m.content)
+        m.refusal = pseudo.restore(m.refusal)
+        for tc in m.tool_calls or ():
+            tc.function.arguments = pseudo.restore(
+                tc.function.arguments, json_escape=True
+            ) or ""
+    stats = pseudo.stats()
+    return PseudonymisationInfo(
+        entities=dict(stats.entities),
+        restored=stats.restored,
+        unknown_placeholders=stats.unknown,
+        detected_level=plan.detected_level,
+        anonymise_then_route=plan.anonymised_route,
+    )
 
 
 def _refuse_stream(kwargs: dict) -> None:
@@ -1021,21 +1148,26 @@ class _RouterCompletions:
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
         )
-        call_messages, call_max, call_kwargs = r._call_args(
-            plan, messages, max_tokens, kwargs
-        )
-        client = r._client(plan.provider.name)
-        start = time.monotonic()
-        # The seam for failover (#21): one attempt for now.
-        response = client.chat.completions._create(
-            model=plan.decision.model, messages=call_messages,
-            ps_metadata=ps_metadata, max_tokens=call_max,
-            _event_hook=r._event_hook(plan, captured), **call_kwargs,
-        )
-        attempt = Attempt(plan.provider.name, plan.decision.model, True,
-                          int((time.monotonic() - start) * 1000))
-        return r._local_result(plan, response, captured, attempt,
-                               (r.policy or {}).get("policy_version"))
+        try:
+            call_messages, call_max, call_kwargs = r._call_args(
+                plan, plan.messages, max_tokens, kwargs
+            )
+            client = r._client(plan.provider.name)
+            start = time.monotonic()
+            # The seam for failover (#21): one attempt for now.
+            response = client.chat.completions._create(
+                model=plan.decision.model, messages=call_messages,
+                ps_metadata=ps_metadata, max_tokens=call_max,
+                _event_hook=r._event_hook(plan, captured), **call_kwargs,
+            )
+            attempt = Attempt(plan.provider.name, plan.decision.model, True,
+                              int((time.monotonic() - start) * 1000))
+            return r._local_result(plan, response, captured, attempt,
+                                   (r.policy or {}).get("policy_version"))
+        finally:
+            # The mapping lives for this call only.
+            if plan.pseudo is not None:
+                plan.pseudo.clear()
 
 
 class _AsyncRouterCompletions:
@@ -1078,18 +1210,23 @@ class _AsyncRouterCompletions:
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
         )
-        call_messages, call_max, call_kwargs = r._call_args(
-            plan, messages, max_tokens, kwargs
-        )
-        client = r._client(plan.provider.name)
-        start = time.monotonic()
-        # The seam for failover (#21): one attempt for now.
-        response = await client.chat.completions._create(
-            model=plan.decision.model, messages=call_messages,
-            ps_metadata=ps_metadata, max_tokens=call_max,
-            _event_hook=r._event_hook(plan, captured), **call_kwargs,
-        )
-        attempt = Attempt(plan.provider.name, plan.decision.model, True,
-                          int((time.monotonic() - start) * 1000))
-        return r._local_result(plan, response, captured, attempt,
-                               (r.policy or {}).get("policy_version"))
+        try:
+            call_messages, call_max, call_kwargs = r._call_args(
+                plan, plan.messages, max_tokens, kwargs
+            )
+            client = r._client(plan.provider.name)
+            start = time.monotonic()
+            # The seam for failover (#21): one attempt for now.
+            response = await client.chat.completions._create(
+                model=plan.decision.model, messages=call_messages,
+                ps_metadata=ps_metadata, max_tokens=call_max,
+                _event_hook=r._event_hook(plan, captured), **call_kwargs,
+            )
+            attempt = Attempt(plan.provider.name, plan.decision.model, True,
+                              int((time.monotonic() - start) * 1000))
+            return r._local_result(plan, response, captured, attempt,
+                                   (r.policy or {}).get("policy_version"))
+        finally:
+            # The mapping lives for this call only.
+            if plan.pseudo is not None:
+                plan.pseudo.clear()

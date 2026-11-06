@@ -1,0 +1,175 @@
+---
+title: Pseudonymisation
+description: Replace detected PII with placeholders before a call, put the values back into the answer, and when a pseudonymised call may be routed at a lower sensitivity
+---
+
+# Pseudonymisation
+
+Pseudonymisation replaces the PII the SDK can detect with typed placeholders
+before a call, and puts the values back into the model's answer afterwards.
+The model sees `⟦EMAIL_1⟧`, and your code gets `kari@example.no` back.
+
+The mapping from placeholder to value stays in your process, for that one call:
+
+- It is never logged, never put on a telemetry event and never sent to the
+  provider, the gateway or the collector.
+- It cannot be pickled or copied, and its `repr` shows a count only.
+- It is cleared when the call returns or raises.
+
+<Warning>
+Pseudonymisation is off by default and only replaces what the detector finds.
+The detector does not find names, street addresses or most free-text
+identifiers, and its recall has not been measured yet (#35). Read
+[Limits](#limits) before you rely on it.
+</Warning>
+
+## With ShieldsRouter
+
+`ShieldsRouter(pseudonymise=True)` pseudonymises every call in local mode:
+
+```python
+from prompt_shields import ShieldsRouter
+
+router = ShieldsRouter(
+    ps_api_key="ps-...",
+    policy="nordic-sovereign.json",
+    providers={...},
+    pseudonymise=True,
+)
+resp = router.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Draft a reply to kari@example.no"}],
+)
+resp.choices[0].message.content  # the address is back in the answer
+resp.ps.pseudonymisation         # counts and levels, never values
+```
+
+The router pseudonymises string content, text content parts and assistant
+tool-call arguments (string values inside the JSON). It restores the answer's
+`content`, `refusal` and tool-call `arguments`. `resp.raw` is left as the
+provider returned it, with the placeholders.
+
+`resp.ps.pseudonymisation` has:
+
+| Field | Meaning |
+|---|---|
+| `entities` | Distinct values replaced, per PII category |
+| `restored` | Placeholders put back into the answer |
+| `unknown_placeholders` | Placeholder-shaped tokens in the answer that were left as they are |
+| `detected_level` | Sensitivity of the original prompt |
+| `anonymise_then_route` | `True` when the call was routed at the lower level of what was left |
+
+Telemetry is unchanged in shape. `detected_pii_types` lists the categories of
+the original prompt. With `send_prompt_text=True`, `prompt_text` holds the
+pseudonymised text.
+
+`pseudonymise=True` needs `mode="local"`. In gateway mode the router raises
+`RouterError`, because the gateway classifies what it receives and would see
+only the placeholders.
+
+## Routing a pseudonymised call: anonymise-then-route
+
+By default the sensitivity of a pseudonymised call is the sensitivity of the
+original prompt. A prompt with a national ID that escalates to `restricted` is
+routed as `restricted`, even though the model only sees `⟦NATIONAL_ID_1⟧`.
+
+A policy can allow a lower level per detected level with
+`sensitivity.anonymise_then_route`:
+
+```json
+"sensitivity": {
+  "levels": ["public", "internal", "confidential", "restricted"],
+  "unclassified_default": "confidential",
+  "pii_escalation": { "national_id": "restricted", "email": "internal" },
+  "anonymise_then_route": ["restricted"]
+}
+```
+
+When the original prompt's level is listed, the call is routed at the level of
+what is left after pseudonymisation:
+
+- the declared level (or `unclassified_default` when none is declared). It
+  never goes below that;
+- raised by every category still detected in the pseudonymised text, such as
+  keyword topics (`health_data`) that have no entity to replace, or a value the
+  detector found but could not replace;
+- raised by every category you pass in `pii_detected`, because the router
+  cannot tell whether those are gone.
+
+The route reason ends with `+anonymise-then-route` when the level went down.
+The field is empty by default, so no level is lowered unless the policy author
+lists it. The gateway does not pseudonymise and ignores the field.
+
+## Without the router
+
+`pseudonymise()` works with any client, including streams:
+
+```python
+from prompt_shields import ShieldsOpenAI, pseudonymise
+
+client = ShieldsOpenAI(api_key="sk-...", ps_api_key="ps-...")
+with pseudonymise(messages) as p:
+    stream = client.chat.completions.create(
+        model="gpt-4o-mini", messages=p.messages, stream=True
+    )
+    for chunk in p.restore_stream(stream):
+        print(chunk.choices[0].delta.content or "", end="")
+```
+
+`p.messages` is a new list; your `messages` are not changed. The mapping is
+cleared when the `with` block ends.
+
+`restore_stream` takes OpenAI chat-completions chunks or Anthropic Messages
+stream events, sync or async. A placeholder split across chunks is restored:
+the stream holds back at most 40 characters after a `⟦` until the placeholder
+is complete or clearly is not one. Text still held back when a choice
+finishes (or a content block stops) comes out before the finish. Tool-call
+argument fragments are restored with JSON escaping.
+
+`p.restore(text)` restores one string, `p.restore(text, json_escape=True)`
+a JSON string such as tool-call arguments.
+
+Here the client's telemetry is computed on what it sends: `detected_pii_types`
+lists only the categories left after pseudonymisation.
+
+## Placeholders the model changes or invents
+
+Only placeholders minted for this call are restored:
+
+- A placeholder the model invents (`⟦EMAIL_9⟧`) is left as it is and counted
+  in `unknown_placeholders`.
+- Placeholder-shaped text that was already in the prompt, such as a document
+  that contains `⟦EMAIL_1⟧`, is never minted. Echoing it gives nothing back.
+- Text that only looks like a placeholder (`[EMAIL_1]`, `EMAIL_1`) is left.
+- Small changes inside the brackets are tolerated: case (`⟦email_1⟧`) and
+  spaces (`⟦ EMAIL_1 ⟧`). Inside tool-call arguments, `⟦` / `⟧`
+  escapes of the brackets are also accepted.
+
+The same value gets the same placeholder everywhere in one call. Placeholders
+are numbered per call, so they do not identify a person across calls.
+
+## Limits
+
+- **Detection sets what is replaced.** Only email addresses, phone numbers,
+  US SSNs, card numbers, IPv4 addresses, IBANs (without spaces) and
+  checksummed Nordic national IDs are found, by regular expressions and
+  checksums. Names, street addresses, dates of birth, customer numbers and
+  most free-text identifiers are not, and short national phone formats (such
+  as 8-digit Norwegian numbers) are missed. Anything not found is sent as it
+  is. The detector's recall and precision have not been measured on a
+  labelled dataset yet; that benchmark and its recall gate are #35.
+- **Keyword topics are not removed.** `health_data` and `financial_data` mark
+  a topic, not an entity. They stay in the text and keep escalating the level.
+- **Only text is pseudonymised.** Images, audio, files and tool definitions
+  (`tools`) are sent as they are. Function names are not changed.
+- **The answer is restored for whoever reads it.** Restored output can hold
+  any value from the prompt. Do not pass it on to someone who should not see
+  the prompt.
+- **Not anonymisation.** The provider still sees the context around each
+  placeholder, which can identify a person. The mapping exists in your process
+  while the call runs.
+- **Local mode only, no router streaming.** `ShieldsRouter` local mode still
+  refuses `stream=True`; use `pseudonymise()` and `restore_stream` with a
+  `Shields*` client to stream. The gateway does not pseudonymise.
+- **Not yet per tenant.** It is a client setting. A per-tenant switch, gated on
+  the #35 recall benchmark, is not built yet.

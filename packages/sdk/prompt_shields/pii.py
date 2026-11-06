@@ -11,7 +11,10 @@ governance. Best-effort — designed as a signal, not a guarantee.
 import re
 from collections.abc import Iterable
 
-from prompt_shields.national_ids import contains_nordic_national_id
+from prompt_shields.national_ids import (
+    contains_nordic_national_id,
+    find_nordic_national_ids,
+)
 
 # Compiled patterns — order independent, all run in one pass
 _PATTERNS = {
@@ -76,6 +79,41 @@ def detect_pii_categories(text: str | None) -> list[str]:
             found.add(category)
 
     return sorted(found)
+
+
+#: Categories whose matches are entity spans (``find_pii_spans``), most
+#: specific first: when two matches overlap, the earlier category wins.
+#: Keyword categories (``health_data``, ``financial_data``) mark a topic, not
+#: an entity, and have no spans.
+SPAN_CATEGORIES: tuple[str, ...] = (
+    "national_id", "email", "iban", "ssn", "credit_card", "ip_address", "phone",
+)
+
+
+def find_pii_spans(text: str | None) -> list[tuple[int, int, str]]:
+    """Non-overlapping ``(start, end, category)`` entity spans in ``text``.
+
+    The same patterns and validators as ``detect_pii_categories``, for
+    in-process pseudonymisation (``prompt_shields.pseudonymise``) only:
+    callers must never log, store or send the matched text. Overlaps are
+    resolved by ``SPAN_CATEGORIES`` order; spans come back sorted by start.
+    """
+    if not text:
+        return []
+    taken: list[tuple[int, int, str]] = []
+
+    def free(start: int, end: int) -> bool:
+        return all(end <= s or start >= e for s, e, _ in taken)
+
+    for category in SPAN_CATEGORIES:
+        if category == "national_id":
+            found = find_nordic_national_ids(text)
+        else:
+            found = [m.span() for m in _PATTERNS[category].finditer(text)]
+        for start, end in found:
+            if end > start and free(start, end):
+                taken.append((start, end, category))
+    return sorted(taken)
 
 
 def _content_text(content: object) -> str:

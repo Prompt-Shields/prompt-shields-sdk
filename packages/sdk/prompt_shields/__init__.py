@@ -70,6 +70,7 @@ from prompt_shields.instrumentation import (
 )
 from prompt_shields.pii import detect_pii_categories, scan_messages
 from prompt_shields.pricing import estimate_cost, estimate_unit_cost
+from prompt_shields.pseudonymise import Pseudonymisation, pseudonymise
 from prompt_shields.route_policy import PolicyViolation
 from prompt_shields.router import (
     AsyncShieldsRouter,
@@ -103,6 +104,7 @@ __all__ = [
     "PSConfig",
     "PSMetadata",
     "PolicyViolation",
+    "Pseudonymisation",
     "Quality",
     "RouteHint",
     "RoutedChatCompletion",
@@ -119,6 +121,7 @@ __all__ = [
     "instrument",
     "last_call_id",
     "load_baseline",
+    "pseudonymise",
     "scan_messages",
     "send_feedback",
     "send_feedback_async",

@@ -279,6 +279,11 @@ against the code.
   makes one attempt. If that provider fails, the provider SDK's error is
   raised, even when another allowed model exists. The provider SDK's own
   retries (`max_retries`) still go to the same provider.
+- **Pseudonymisation does not change the level unless the policy says so.**
+  `ShieldsRouter(pseudonymise=True)` sends placeholders instead of the PII it
+  detects, but routes at the original prompt's level unless
+  `sensitivity.anonymise_then_route` lists that level. See
+  [Pseudonymisation](/guides/pseudonymisation).
 - **Local mode refuses streaming.** `stream=True` raises `RouterError` in
   local mode. Gateway mode streams.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
