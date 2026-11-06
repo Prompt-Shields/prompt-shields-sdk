@@ -19,6 +19,13 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from prompt_shields.budgets import (
+    BudgetStore,
+    budget_event_hook,
+    make_enforcer,
+    plain_client_model,
+    warn_unapplied_downgrade,
+)
 from prompt_shields.feedback import (
     attach_call_id,
     call_id_headers,
@@ -75,6 +82,16 @@ def _fingerprint(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()[:16]
 
 
+def _resolve_fingerprint(api_key: str | None, credential_fingerprint: str | None) -> str | None:
+    """The event's `api_key_fingerprint`: an explicit identity fingerprint
+    (argument, else `PS_CREDENTIAL_FINGERPRINT`), else the key hash, else
+    None (keyless client without one)."""
+    explicit = credential_fingerprint or os.environ.get("PS_CREDENTIAL_FINGERPRINT")
+    if explicit:
+        return explicit.strip()
+    return _fingerprint(api_key) if api_key else None
+
+
 class ShieldsClient:
     """Generic Prompt Shields wrapper. Specify `vendor` to pick the provider.
 
@@ -85,7 +102,7 @@ class ShieldsClient:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None,
         ps_api_key: str,
         vendor: str = "openai",
         ps_collector_url: str = "http://localhost:8000",
@@ -108,10 +125,27 @@ class ShieldsClient:
         # Env fallback: PS_ATLAS_URL / PS_ATLAS_API_KEY. Inactive unless BOTH set.
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
+        # Stable credential fingerprint for keyless auth (#76), e.g. from
+        # prompt_shields.credentials; replaces sha256(api_key)[:16].
+        # Env fallback: PS_CREDENTIAL_FINGERPRINT.
+        credential_fingerprint: str | None = None,
+        # Spend budgets (budget.v1, #29): a document (mapping or path) or a
+        # BudgetEnforcer. budget_store defaults to an in-process store,
+        # which is per-process; see prompt_shields.budgets.
+        budgets: Any = None,
+        budget_store: BudgetStore | None = None,
+        # Let an exhausted downgrade budget switch the call to its
+        # downgrade_model. Off by default: a plain client runs no data
+        # policy, so the switch is not policy-checked (see
+        # prompt_shields.budgets.plain_client_model).
+        allow_budget_downgrade: bool = False,
         **provider_kwargs,
     ):
         self._vendor = vendor
         self._adapter = get_adapter(vendor)
+        self._budgets = make_enforcer(budgets, budget_store)
+        self._allow_budget_downgrade = allow_budget_downgrade
+        warn_unapplied_downgrade(self._budgets, allow_budget_downgrade)
         self._ps_api_key = ps_api_key
         self._ps_collector_url = ps_collector_url
         self._telemetry = TelemetrySender(ps_collector_url, ps_api_key)
@@ -132,7 +166,7 @@ class ShieldsClient:
         self._send_prompt_text = send_prompt_text
         self._pricing_table = pricing_table
         self._on_prompt_features = on_prompt_features
-        self._api_key_fingerprint = _fingerprint(api_key)
+        self._api_key_fingerprint = _resolve_fingerprint(api_key, credential_fingerprint)
 
         # Build immutable per-client metadata (None values are filtered out)
         self._metadata = {
@@ -357,6 +391,22 @@ class _CompletionsNamespace:
             and upstream_accepts_stream_options(self._parent._upstream)
         ):
             hide_usage_chunk = request_openai_stream_usage(kwargs)
+
+        # Spend budgets (#29): refuse (block) or, with
+        # allow_budget_downgrade, switch to downgrade_model before anything
+        # is sent; the cost is recorded from the telemetry event.
+        budgets = self._parent._budgets
+        if budgets is not None:
+            attrs = {k: self._parent._metadata.get(k)
+                     for k in ("business_unit", "use_case", "owner")}
+            check = budgets.check(attrs)
+            budgets.raise_if_blocked(check)
+            model, requested, budget_action = plain_client_model(
+                check, model, self._parent._allow_budget_downgrade
+            )
+            _event_hook = budget_event_hook(
+                _event_hook, budgets, check, budget_action, requested
+            )
 
         notify_prompt_features(
             self._parent._on_prompt_features,

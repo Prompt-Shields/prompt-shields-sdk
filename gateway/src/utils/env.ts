@@ -131,8 +131,12 @@ const nodeEnv = {
   ),
   AZURE_TENANT_ID: getValueOrFileContents(process.env.AZURE_TENANT_ID),
   AZURE_CLIENT_ID: getValueOrFileContents(process.env.AZURE_CLIENT_ID),
+  // A path, read per request by the Azure providers: never replace it with
+  // the file's contents (a projected token rotates, and the providers
+  // readFileSync() this value).
   AZURE_FEDERATED_TOKEN_FILE: getValueOrFileContents(
-    process.env.AZURE_FEDERATED_TOKEN_FILE
+    process.env.AZURE_FEDERATED_TOKEN_FILE,
+    true
   ),
   AZURE_AMBIENT_CREDENTIALS_ENABLED: getValueOrFileContents(
     process.env.AZURE_AMBIENT_CREDENTIALS_ENABLED,
@@ -144,6 +148,60 @@ const nodeEnv = {
   ),
   OAUTH_TOKEN_URL_ALLOWED_HOSTS: getValueOrFileContents(
     process.env.OAUTH_TOKEN_URL_ALLOWED_HOSTS,
+    true
+  ),
+  // PS fork (#76): OpenAI / Anthropic workload identity federation
+  // (utils/vendorWorkloadIdentity.ts). Token file paths are not read here.
+  OPENAI_AMBIENT_CREDENTIALS_ENABLED: getValueOrFileContents(
+    process.env.OPENAI_AMBIENT_CREDENTIALS_ENABLED,
+    true
+  ),
+  OPENAI_IDENTITY_TOKEN_FILE: getValueOrFileContents(
+    process.env.OPENAI_IDENTITY_TOKEN_FILE,
+    true
+  ),
+  OPENAI_IDENTITY_PROVIDER_ID: getValueOrFileContents(
+    process.env.OPENAI_IDENTITY_PROVIDER_ID,
+    true
+  ),
+  OPENAI_SERVICE_ACCOUNT_ID: getValueOrFileContents(
+    process.env.OPENAI_SERVICE_ACCOUNT_ID,
+    true
+  ),
+  OPENAI_SUBJECT_TOKEN_TYPE: getValueOrFileContents(
+    process.env.OPENAI_SUBJECT_TOKEN_TYPE,
+    true
+  ),
+  OPENAI_WIF_TOKEN_URL: getValueOrFileContents(
+    process.env.OPENAI_WIF_TOKEN_URL,
+    true
+  ),
+  ANTHROPIC_AMBIENT_CREDENTIALS_ENABLED: getValueOrFileContents(
+    process.env.ANTHROPIC_AMBIENT_CREDENTIALS_ENABLED,
+    true
+  ),
+  ANTHROPIC_IDENTITY_TOKEN_FILE: getValueOrFileContents(
+    process.env.ANTHROPIC_IDENTITY_TOKEN_FILE,
+    true
+  ),
+  ANTHROPIC_FEDERATION_RULE_ID: getValueOrFileContents(
+    process.env.ANTHROPIC_FEDERATION_RULE_ID,
+    true
+  ),
+  ANTHROPIC_ORGANIZATION_ID: getValueOrFileContents(
+    process.env.ANTHROPIC_ORGANIZATION_ID,
+    true
+  ),
+  ANTHROPIC_SERVICE_ACCOUNT_ID: getValueOrFileContents(
+    process.env.ANTHROPIC_SERVICE_ACCOUNT_ID,
+    true
+  ),
+  ANTHROPIC_WORKSPACE_ID: getValueOrFileContents(
+    process.env.ANTHROPIC_WORKSPACE_ID,
+    true
+  ),
+  ANTHROPIC_WIF_TOKEN_URL: getValueOrFileContents(
+    process.env.ANTHROPIC_WIF_TOKEN_URL,
     true
   ),
 
