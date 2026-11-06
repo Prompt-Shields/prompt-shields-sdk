@@ -57,6 +57,10 @@ SCOPES: dict[str, str] = {
         "webhook events"
     ),
     "spend-alerts:acknowledge": "Acknowledge spend anomaly alerts",
+    "usage:export": (
+        "Bulk export AI usage cost in the FinOps FOCUS format "
+        "(CSV or JSON Lines, per asset, model and provider)"
+    ),
     "audit:read": (
         "Receive the tenant's admin audit trail as `audit.*` webhook events "
         "(credential, scope, webhook, retention and registry changes)"

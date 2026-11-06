@@ -209,6 +209,9 @@ const UNMAPPED_SCHEMAS = new Set([
   // client.send(). The thresholds are operator tenant settings.
   'SpendAlert',
   'SpendAnomalySettings',
+  // FOCUS cost export (#31): a streamed CSV / JSON Lines file, not wrapped;
+  // download it with fetch or curl.
+  'FocusCostRow',
 ]);
 
 interface Operation {
@@ -247,6 +250,7 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/business-units': { methods: ['businessUnits.list'] },
   'GET /partner/v1/changes': { methods: ['changes.list', 'changes.listPage'], params: 'ListChangesParams' },
   'GET /partner/v1/export': { methods: ['export.get'], params: 'ExportParams' },
+  'GET /partner/v1/usage/focus-export': NOT_WRAPPED, // streamed CSV / JSON Lines file
   'GET /partner/v1/health': { methods: ['health'] },
   'GET /partner/v1/provider-credentials': NOT_WRAPPED,
   'GET /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,

@@ -115,6 +115,7 @@
       "pages": [
         "api-reference/sync/get-changes",
         "api-reference/sync/export",
+        "api-reference/sync/focus-export",
         "api-reference/sync/webhooks"
       ]
     },

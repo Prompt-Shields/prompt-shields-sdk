@@ -1,0 +1,123 @@
+---
+title: Export AI Cost (FOCUS)
+openapi: get /partner/v1/usage/focus-export
+---
+
+Exports the tenant's AI usage cost in the [FinOps FOCUS](https://focus.finops.org)
+format, so FinOps tools can load it next to cloud bills. Rows follow the
+**Cost and Usage** dataset of **FOCUS v1.4** (announced June 2026). The
+response is streamed, so a long window does not have to fit in memory on either
+side. Read it without long pauses: if the client stops reading for 60 seconds,
+the export ends and the response is cut off.
+
+```bash
+curl -H "Authorization: Bearer $PS_PARTNER_KEY" \
+  "https://api.promptshields.io/partner/v1/usage/focus-export?start=2026-10-01&end=2026-11-01&format=csv" \
+  -o focus-cost-2026-10.csv
+```
+
+The credential needs the `usage:export` scope. It is never granted by default,
+and `registry:read` does not include it.
+
+## Rows
+
+One row is one charge: the cost of one asset's calls to one model at one
+provider in one UTC hour or day (`granularity`). Calls that did not report a
+cost are left out, because FOCUS cost columns cannot be null and a 0 would claim
+a cost that was never measured.
+
+The window `[start, end)` may span at most 366 days and is clamped to the
+tenant's retention period. The effective window is returned in
+`X-Export-Window-Start` and `X-Export-Window-End`. A day at the edge of the
+window covers only the part inside it, and its `ChargePeriodStart` and
+`ChargePeriodEnd` say so.
+
+## Costs: `cost_mode`
+
+The costs are Prompt Shields estimates in USD (from the pricing table or what
+the provider or framework reported), not invoiced amounts.
+
+| `cost_mode` | `BilledCost`, `EffectiveCost`, `ListCost`, `ContractedCost` | Use it when |
+|---|---|---|
+| `estimated` (default) | The estimated cost | You use this export on its own, for showback by business unit, use case, model and provider |
+| `merge_safe` | `0` | You merge it with your provider's own FOCUS export. FOCUS requires a data generator that does not issue the invoice to report 0, so the spend is not counted twice |
+
+Both modes carry the estimate in `x_EstimatedCost`. `estimated` deliberately
+departs from FOCUS, which wants `BilledCost` to be the invoiced amount.
+
+## Columns
+
+Every Mandatory and Recommended FOCUS column is present, plus the Conditional
+columns that apply, then the custom `x_` columns. CSV has a header row and an
+empty cell for null; JSON Lines has `null`.
+
+| Column | Value |
+|---|---|
+| `BilledCost`, `EffectiveCost`, `ListCost`, `ContractedCost` | See `cost_mode`. No unit prices are exported, so FOCUS requires List and Contracted cost to equal Billed cost |
+| `BillingCurrency` | `USD` |
+| `BillingAccountId`, `BillingAccountName`, `BillingAccountType` | The Prompt Shields tenant id and name, `Prompt Shields Tenant`. Telemetry does not know the provider billing account |
+| `BillingPeriodStart`, `BillingPeriodEnd` | The UTC calendar month of the charge |
+| `ChargePeriodStart`, `ChargePeriodEnd` | The UTC hour or day, cut to the window |
+| `ChargeCategory`, `ChargeFrequency` | `Usage`, `Usage-Based` |
+| `ChargeClass` | Always null (no corrections to closed periods) |
+| `ChargeDescription` | Model and request count, e.g. `gpt-4o usage (2 requests)` |
+| `ServiceProviderName`, `HostProviderName`, `InvoiceIssuerName` | The provider that served the calls (`served_provider`, else the asset's vendor). A reseller or marketplace in between is not known |
+| `ServiceName` | The asset's vendor |
+| `ServiceCategory`, `ServiceSubcategory` | `AI and Machine Learning`, `Generative AI` |
+| `ResourceId`, `ResourceName`, `ResourceType` | The registry asset id, its use case (null without one), `AI Asset` |
+| `RegionId`, `RegionName` | The asset's region, null when unknown |
+| `AvailabilityZone`, `AllocatedMethodDetails` | Always null (not reported; no split cost allocation) |
+| `SkuId` | The model that served the calls (served, else requested, else the asset's model) |
+| `PricingQuantity`, `ConsumedQuantity` with `PricingUnit`, `ConsumedUnit` | Input plus output tokens, in `Tokens`. All four null when no call reported tokens |
+| `Tags` | `ps:business_unit`, `ps:use_case` and `ps:environment` from the registry, keys without a value left out, null when none is set. The `ps:` prefix marks Prompt Shields registry tags |
+| `x_EstimatedCost` | The estimated cost in USD, in both modes |
+| `x_RequestCount`, `x_InputTokens`, `x_OutputTokens` | Calls, input tokens and output tokens in the row |
+| `x_ModelName`, `x_BusinessUnit`, `x_UseCaseName`, `x_Environment` | The model and the asset's business unit, use case and environment, as plain columns |
+
+`ProviderName` and `PublisherName` were removed in FOCUS v1.4; use
+`ServiceProviderName`, `HostProviderName` and `InvoiceIssuerName`.
+
+### Not exported
+
+These Conditional columns are left out because their condition does not apply
+or the collector does not have the data:
+
+- `SkuPriceId`, `SkuMeter`, `SkuPriceDetails`, `ListUnitPrice`,
+  `ContractedUnitPrice`, `PricingCategory`: there is no reference into a
+  provider price list, and per-token prices differ for input, output and cache
+  tokens.
+- `PricingCurrency` and the `PricingCurrency*` prices: pricing and billing
+  currency are both USD.
+- `InvoiceId`, `InvoiceDetailId`: Prompt Shields issues no invoices.
+- `Commitment*`, `CapacityReservation*`, `ContractApplied`,
+  `CommitmentProgramEligibilityDetails`: no commitment, reservation or
+  contract data.
+- `AllocatedMethodId`, `AllocatedResourceId`, `AllocatedResourceName`,
+  `AllocatedTags`: no split cost allocation.
+- `SubAccountId`, `SubAccountName`, `SubAccountType`: the business unit is in
+  `Tags` and `x_BusinessUnit`.
+
+<Warning>
+A strict FOCUS validator will flag Usage rows: FOCUS ties `SkuId` and
+`PricingQuantity` to a `SkuPriceId` and `ListUnitPrice` from the provider's
+price list, which only the provider can supply. The export gives token
+quantities and the model as the SKU without a price-list reference.
+</Warning>
+
+## CSV safety
+
+A CSV cell that is text starting with `=`, `+`, `-`, `@`, a tab or a carriage
+return gets a leading `'`, so a spreadsheet does not run it as a formula.
+Numbers are never changed, so a negative cost stays a number.
+Registry fields such as the use case come from telemetry and are not trusted.
+JSON Lines values are not changed.
+
+## Parquet
+
+Parquet is not served. To get Parquet, convert the CSV or JSON Lines, for
+example with DuckDB:
+
+```sql
+COPY (SELECT * FROM read_csv_auto('focus-cost-2026-10.csv'))
+  TO 'focus-cost-2026-10.parquet' (FORMAT parquet);
+```
