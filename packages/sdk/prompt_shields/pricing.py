@@ -129,58 +129,27 @@ USAGE_UNIT_TYPES = frozenset(
     {UNIT_SECONDS, UNIT_CHARACTERS, UNIT_PAGES, UNIT_SEARCH_UNITS, UNIT_IMAGES}
 )
 
-# USD per unit, keyed (vendor, model, usage_unit_type). List prices checked
-# 2026-10-18 against the vendor page named on each entry (as indexed by web
-# search; the pages themselves were not reachable from the build host) and
-# cross-checked with LiteLLM 1.105.1 `model_prices_and_context_window.json`;
-# every entry below matches it. Models billed by tokens rather than by unit
-# are left out on purpose (their unit counts cannot be priced exactly):
-# gpt-4o-transcribe, gpt-4o-mini-transcribe and gpt-4o-mini-tts. So are
-# prices that could not be confirmed: Mistral OCR 2505 and the moving
-# `mistral-ocr-latest` alias, Deepgram (Nova-3 and Aura-2 voice-specific
-# model ids), ElevenLabs text to speech (the vendor page and LiteLLM
-# disagree, $0.10 vs $0.18 / 1K characters for Multilingual v2 / v3, and
-# Flash / Turbo are not in LiteLLM), and DALL-E 2/3 (retired from the OpenAI
-# API on 2026-05-12).
-UNIT_PRICING: dict[tuple[str, str, str], float] = {
-    # OpenAI, https://platform.openai.com/docs/pricing (2026-10-18):
-    # Whisper $0.006 / minute; TTS $15 / 1M characters, TTS HD $30 / 1M.
-    ("openai", "whisper-1", UNIT_SECONDS): 0.006 / 60,
-    ("openai", "tts-1", UNIT_CHARACTERS): 15.0 / 1_000_000,
-    ("openai", "tts-1-hd", UNIT_CHARACTERS): 30.0 / 1_000_000,
-    # Mistral OCR 3, https://mistral.ai/news/mistral-ocr-3 and
-    # https://mistral.ai/pricing (2026-10-18): $2 / 1,000 pages (annotations
-    # are billed apart and not included).
-    ("mistral", "mistral-ocr-2512", UNIT_PAGES): 2.0 / 1000,
-    # ElevenLabs, https://elevenlabs.io/pricing/api (2026-10-18):
-    # Scribe v1 / v2 (batch speech to text) $0.22 / hour.
-    ("elevenlabs", "scribe_v1", UNIT_SECONDS): 0.22 / 3600,
-    ("elevenlabs", "scribe_v2", UNIT_SECONDS): 0.22 / 3600,
-    # Cohere Rerank 3.5, https://cohere.com/pricing (2026-10-18): $2 / 1,000
-    # searches (one search unit is a query over up to 100 documents). The
-    # Cohere page was not indexed; the rate is from LiteLLM and two price
-    # trackers that agree on it.
-    ("cohere", "rerank-v3.5", UNIT_SEARCH_UNITS): 2.0 / 1000,
-}
+# USD per unit, keyed (vendor, model, usage_unit_type), built from the
+# catalog's per-unit prices (`input_cost_per_second`,
+# `input_cost_per_character`, `ocr_cost_per_page`, `input_cost_per_query`).
+# Each catalog entry names the vendor page its list price was checked
+# against. Models billed by tokens rather than by unit are left out on
+# purpose (their unit counts cannot be priced exactly): gpt-4o-transcribe,
+# gpt-4o-mini-transcribe and gpt-4o-mini-tts. So are prices that could not
+# be confirmed: Mistral OCR 2505 and the moving `mistral-ocr-latest` alias,
+# Deepgram (Nova-3 and Aura-2 voice-specific model ids), ElevenLabs text to
+# speech (the vendor page and LiteLLM disagree, $0.10 vs $0.18 / 1K
+# characters for Multilingual v2 / v3, and Flash / Turbo are not in
+# LiteLLM), and DALL-E 2/3 (retired from the OpenAI API on 2026-05-12).
+UNIT_PRICING: dict[tuple[str, str, str], float] = _catalog.unit_pricing()
 
-# USD per generated image, keyed (vendor, model) then (quality, size).
-# OpenAI gpt-image-1, https://platform.openai.com/docs/pricing "Image
-# generation" (2026-10-18). gpt-image-1 bills image output tokens; these are
-# OpenAI's published per-image equivalents, used when only an image count is
-# known.
-IMAGE_PRICING: dict[tuple[str, str], dict[tuple[str, str], float]] = {
-    ("openai", "gpt-image-1"): {
-        ("low", "1024x1024"): 0.011,
-        ("low", "1024x1536"): 0.016,
-        ("low", "1536x1024"): 0.016,
-        ("medium", "1024x1024"): 0.042,
-        ("medium", "1024x1536"): 0.063,
-        ("medium", "1536x1024"): 0.063,
-        ("high", "1024x1024"): 0.167,
-        ("high", "1024x1536"): 0.25,
-        ("high", "1536x1024"): 0.25,
-    },
-}
+# USD per generated image, keyed (vendor, model) then (quality, size), from
+# the catalog's `output_cost_per_image_by_quality` (e.g. OpenAI gpt-image-1's
+# published per-image equivalents of its image output tokens, used when only
+# an image count is known).
+IMAGE_PRICING: dict[tuple[str, str], dict[tuple[str, str], float]] = (
+    _catalog.image_pricing()
+)
 
 # (input_per_1k, output_per_1k[, cached_input_per_1k[, cache_write_per_1k[,
 # cache_write_1h_per_1k]]]) in USD, built from the bundled catalog

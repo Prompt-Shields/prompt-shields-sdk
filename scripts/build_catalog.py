@@ -9,10 +9,11 @@ writes three generated files:
   names, plus the provider's sovereignty fields copied onto every model.
 - ``gateway/src/middlewares/router/defaultPolicy.json``: the gateway router's
   default ``RoutePolicy``, with per-1k prices taken from the catalog.
-- ``gateway/src/middlewares/psPricingTables.json``: the token rate tables
-  the gateway prices telemetry events with (psPricing.ts), built exactly as
-  the SDK's ``catalog.py`` builds ``pricing.DEFAULT_PRICING``,
-  ``LONG_CONTEXT_PRICING``, ``AUDIO_PRICING`` and ``SERVICE_TIER_PRICING``.
+- ``gateway/src/middlewares/psPricingTables.json``: the token and unit rate
+  tables the gateway prices telemetry events with (psPricing.ts), built
+  exactly as the SDK's ``catalog.py`` builds ``pricing.DEFAULT_PRICING``,
+  ``LONG_CONTEXT_PRICING``, ``AUDIO_PRICING``, ``SERVICE_TIER_PRICING``,
+  ``UNIT_PRICING`` and ``IMAGE_PRICING``.
 
 Usage::
 
@@ -85,6 +86,18 @@ PRICE_FIELDS = (
     "input_cost_per_audio_token",
     "output_cost_per_audio_token",
 )
+# Per-unit prices of models billed by non-token units (#71), LiteLLM names,
+# per unit in the entry's currency, and the `usage_unit_type` each prices
+# (as the gateway's ps-telemetry emits it and catalog.UNIT_PRICE_FIELDS).
+UNIT_PRICE_FIELDS = {
+    "input_cost_per_second": "seconds",
+    "input_cost_per_character": "characters",
+    "ocr_cost_per_page": "pages",
+    "input_cost_per_query": "search_units",
+}
+# Generated images, {quality: {size: price per image}}. Not a LiteLLM field
+# (LiteLLM keys image prices by "<quality>/<size>/<model>" entries).
+IMAGE_PRICE_FIELD = "output_cost_per_image_by_quality"
 # Capabilities and limits, LiteLLM names.
 CAPABILITY_FIELDS = (
     "supports_function_calling",
@@ -95,7 +108,15 @@ CAPABILITY_FIELDS = (
 )
 LIMIT_FIELDS = ("max_input_tokens", "max_output_tokens")
 OTHER_FIELDS = ("mode", "deprecation_date", "litellm_key", "currency", "source", "comment", "aliases")
-MODEL_FIELDS = (*OTHER_FIELDS, *LIMIT_FIELDS, *CAPABILITY_FIELDS, *PRICE_FIELDS, *SOVEREIGNTY_FIELDS)
+MODEL_FIELDS = (
+    *OTHER_FIELDS,
+    *LIMIT_FIELDS,
+    *CAPABILITY_FIELDS,
+    *PRICE_FIELDS,
+    *UNIT_PRICE_FIELDS,
+    IMAGE_PRICE_FIELD,
+    *SOVEREIGNTY_FIELDS,
+)
 
 # A later field of each chain needs the earlier ones (the SDK's rate tuple is
 # positional: input, output, cache read, cache write, 1h cache write).
@@ -146,6 +167,22 @@ class CatalogError(ValueError):
 
 def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_image_prices(value) -> bool:
+    """{quality: {size: price >= 0}}, both levels non-empty."""
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and all(
+            isinstance(quality, str)
+            and quality
+            and isinstance(sizes, dict)
+            and sizes
+            and all(isinstance(size, str) and size and _is_number(price) and price >= 0 for size, price in sizes.items())
+            for quality, sizes in value.items()
+        )
+    )
 
 
 def _check_sovereignty(where: str, record: dict, *, partial: bool) -> list[str]:
@@ -219,9 +256,11 @@ def validate(source: dict) -> None:
             errors.append(f"{where}: aliases must be a list of model names")
         if entry.get("currency", "USD") not in CURRENCIES:
             errors.append(f"{where}: currency must be one of {CURRENCIES}")
-        for field in PRICE_FIELDS:
+        for field in (*PRICE_FIELDS, *UNIT_PRICE_FIELDS):
             if field in entry and not (_is_number(entry[field]) and entry[field] >= 0):
                 errors.append(f"{where}: {field} must be a number >= 0")
+        if IMAGE_PRICE_FIELD in entry and not _is_image_prices(entry[IMAGE_PRICE_FIELD]):
+            errors.append(f"{where}: {IMAGE_PRICE_FIELD} must map quality to {{size: number >= 0}}")
         for field in LIMIT_FIELDS:
             if field in entry and not (isinstance(entry[field], int) and entry[field] > 0):
                 errors.append(f"{where}: {field} must be a positive integer")
@@ -332,13 +371,21 @@ def _rate_list(entry: dict, fields: tuple[str, ...]) -> list[float] | None:
 
 
 def build_gateway_pricing(source: dict) -> dict:
-    """USD token rates per 1k tokens, keyed "<provider>/<model id>", as the
-    SDK's catalog.py builds them (pricing_table, long_context_pricing,
-    audio_pricing, service_tier_pricing). Non-USD and unpriced entries are
-    left out."""
-    tokens, long_context, audio, tiers = {}, {}, {}, {}
+    """USD token rates per 1k tokens and unit rates per unit, keyed
+    "<provider>/<model id>", as the SDK's catalog.py builds them
+    (pricing_table, long_context_pricing, audio_pricing,
+    service_tier_pricing, unit_pricing, image_pricing). Non-USD and unpriced
+    entries are left out."""
+    tokens, long_context, audio, tiers, units, images = {}, {}, {}, {}, {}, {}
     for key, entry in source["models"].items():
-        if entry.get("currency", "USD") != "USD" or "input_cost_per_token" not in entry:
+        if entry.get("currency", "USD") != "USD":
+            continue
+        by_unit = {unit: entry[field] for field, unit in UNIT_PRICE_FIELDS.items() if field in entry}
+        if by_unit:
+            units[key] = by_unit
+        if IMAGE_PRICE_FIELD in entry:
+            images[key] = entry[IMAGE_PRICE_FIELD]
+        if "input_cost_per_token" not in entry:
             continue
         rates = _rate_list(entry, PRICE_CHAINS[0])
         if rates is not None:
@@ -365,6 +412,8 @@ def build_gateway_pricing(source: dict) -> dict:
         "longContextPricing": long_context,
         "audioPricing": audio,
         "serviceTierPricing": tiers,
+        "unitPricing": units,
+        "imagePricing": images,
     }
 
 
@@ -393,7 +442,7 @@ def litellm_report(source: dict, litellm_path: Path) -> list[str]:
         if ref is None:
             lines.append(f"{key}: LiteLLM has no {lkey!r}")
             continue
-        for field in PRICE_FIELDS:
+        for field in (*PRICE_FIELDS, *UNIT_PRICE_FIELDS):
             ours, theirs = entry.get(field), ref.get(field)
             if ours is None and theirs is None:
                 continue
