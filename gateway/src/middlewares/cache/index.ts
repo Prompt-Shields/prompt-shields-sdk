@@ -300,6 +300,28 @@ export const isCompleteResponseBody = (body: any): boolean => {
   return true;
 };
 
+const DEFAULT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * PS fork (#208): absolute expiry for a write-back. The config's
+ * `cache.max_age` is in seconds (Portkey's documented unit), but the fork base
+ * added it to `Date.now()` as milliseconds, so `max_age: 3600` expired after
+ * 3.6 s. Related to the Portkey enterprise changelog 2.30 fix "simple cache
+ * entries now expire at the configured max_age" (closed source; their bug was
+ * a fallback to the default TTL). A missing, zero, negative or non-numeric
+ * max_age keeps the default.
+ */
+export const cacheExpiresAt = (
+  maxAgeSeconds: unknown,
+  now: number = Date.now()
+): number => {
+  const seconds = Number(maxAgeSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return now + DEFAULT_CACHE_TTL_MS;
+  }
+  return now + seconds * 1000;
+};
+
 export const memoryCache = () => {
   return async (c: Context, next: any) => {
     c.set('getFromCache', getFromCache);
@@ -339,8 +361,7 @@ export const memoryCache = () => {
             requestOptions.providerOptions.rubeusURL,
             '',
             null,
-            new Date().getTime() +
-              (requestOptions.cacheMaxAge || 24 * 60 * 60 * 1000),
+            cacheExpiresAt(requestOptions.cacheMaxAge),
             cacheScope
           );
         } catch (error) {

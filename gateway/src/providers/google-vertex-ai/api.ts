@@ -8,6 +8,50 @@ import {
   getGcpHostAccessToken,
 } from '../../utils/gcpAmbientAuth';
 
+/**
+ * PS fork (#208): re-implemented from the Portkey enterprise changelog 2.31
+ * ("Hardened upstream URL construction for Vertex AI requests"; closed
+ * source, so written from the description). The region, project id and
+ * model come from the caller and were pasted into the upstream URL as is: a
+ * region such as `evil.example/#` rewrote the `<region>-aiplatform` host, and
+ * a `/`, `?`, `#` or `..` in the project or model moved the request to
+ * another Vertex path. Each is now checked against the shape Google uses
+ * (project ids may be legacy domain-scoped, `example.com:my-project`; models
+ * may carry a version, `claude-sonnet-4@20250514`). Unset values are left to
+ * fail upstream as before.
+ */
+const VERTEX_REGION_PATTERN = /^[a-z0-9-]{1,63}$/;
+const VERTEX_PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.:_-]{0,127}$/;
+const VERTEX_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,255}$/;
+
+export const assertVertexUrlParts = (parts: {
+  region?: unknown;
+  projectId?: unknown;
+  model?: unknown;
+}) => {
+  const { region, projectId, model } = parts;
+  if (
+    region !== undefined &&
+    !(typeof region === 'string' && VERTEX_REGION_PATTERN.test(region))
+  ) {
+    throw new GatewayError('Invalid vertexRegion', 400);
+  }
+  if (
+    projectId !== undefined &&
+    !(
+      typeof projectId === 'string' && VERTEX_PROJECT_ID_PATTERN.test(projectId)
+    )
+  ) {
+    throw new GatewayError('Invalid vertexProjectId', 400);
+  }
+  if (
+    model !== undefined &&
+    !(typeof model === 'string' && VERTEX_MODEL_PATTERN.test(model))
+  ) {
+    throw new GatewayError('Invalid model for vertex-ai', 400);
+  }
+};
+
 const getApiVersion = (provider: string) => {
   if (provider === 'meta') return 'v1beta1';
   return 'v1';
@@ -27,6 +71,7 @@ const getProjectRoute = (
     projectId = vertexServiceAccountJson.project_id;
   }
 
+  assertVertexUrlParts({ region: vertexRegion, projectId });
   const { provider } = getModelAndProvider(inputModel as string);
   const routeVersion = getApiVersion(provider);
   return `/${routeVersion}/projects/${projectId}/locations/${vertexRegion}`;
@@ -66,6 +111,8 @@ export const GoogleApiConfig: ProviderAPIConfig = {
     if (vertexRegion === 'global') {
       return 'https://aiplatform.googleapis.com';
     }
+
+    assertVertexUrlParts({ region: vertexRegion });
 
     return `https://${vertexRegion}-aiplatform.googleapis.com`;
   },
@@ -122,12 +169,15 @@ export const GoogleApiConfig: ProviderAPIConfig = {
 
       const url = new URL(gatewayRequestURL);
       const params = new URLSearchParams(url.search);
-      const pageSize = params.get('limit') ?? 20;
-      const after = params.get('after') ?? '';
+      const pageSize = encodeURIComponent(params.get('limit') ?? 20);
+      const after = encodeURIComponent(params.get('after') ?? '');
 
       let projectId = vertexProjectId;
       if (!projectId || vertexServiceAccountJson) {
         projectId = vertexServiceAccountJson?.project_id;
+      }
+      if (!FILE_ENDPOINTS.includes(fn)) {
+        assertVertexUrlParts({ region: vertexRegion, projectId });
       }
       switch (fn) {
         case 'retrieveBatch':
@@ -153,8 +203,8 @@ export const GoogleApiConfig: ProviderAPIConfig = {
         case 'createFinetune':
           return `/v1/projects/${projectId}/locations/${vertexRegion}/tuningJobs`;
         case 'listFinetunes': {
-          const pageSize = searchParams.get('limit') ?? 20;
-          const after = searchParams.get('after') ?? '';
+          const pageSize = encodeURIComponent(searchParams.get('limit') ?? 20);
+          const after = encodeURIComponent(searchParams.get('after') ?? '');
           return `/v1/projects/${projectId}/locations/${vertexRegion}/tuningJobs?pageSize=${pageSize}&pageToken=${after}`;
         }
         case 'retrieveFinetune':
@@ -172,6 +222,7 @@ export const GoogleApiConfig: ProviderAPIConfig = {
     }
 
     const { provider, model } = getModelAndProvider(inputModel as string);
+    assertVertexUrlParts({ model });
     const projectRoute = getProjectRoute(providerOptions, inputModel as string);
     const googleUrlMap = new Map<string, string>([
       [

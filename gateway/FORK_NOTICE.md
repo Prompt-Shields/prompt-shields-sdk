@@ -7,9 +7,9 @@ This directory is a fork of the [Portkey AI Gateway](https://github.com/Portkey-
 | | Commit | Date | Notes |
 |---|---|---|---|
 | Fork base | [`28ed85e`](https://github.com/Portkey-AI/gateway/commit/28ed85e) | 2026-02-19 | v1.15.2. Forked 2026-03-24. Confirmed by diffing `src/` and `plugins/` against every upstream `main` commit (`plugins/` identical; `src/` differs only by our changes). |
-| OSS `main` triaged to | [`669825c`](https://github.com/Portkey-AI/gateway/commit/669825c) | 2026-05-25 | No upstream commits since. |
+| OSS `main` triaged to | [`669825c`](https://github.com/Portkey-AI/gateway/commit/669825c) | 2026-05-25 | No upstream commits since (re-checked 2026-11-06, #208). |
 | OSS `2.0.0` triaged to | [`8febc1d`](https://github.com/Portkey-AI/gateway/commit/8febc1d) | 2026-03-14 | Pre-release; branches from our exact base. |
-| Enterprise changelog triaged to | 2.28.0 | 2026-10-08 | Closed source. Features are re-implemented from the public changelog, never copied. |
+| Enterprise changelog triaged to | 2.33.0 | 2026-11-04 | Closed source. Features are re-implemented from the public changelog, never copied. Per-entry record of 2.29.0-2.33.0: [`docs/upstream-triage-2026-11.md`](docs/upstream-triage-2026-11.md) (#208). |
 
 **Decision (#56, 2026-10-12): stay on `28ed85e` and port features from `2.0.0`; do not rebase.** Run standalone (`FETCH_SETTINGS_FROM_FILE=true`), `2.0.0` rejects every request with `401 Invalid API Key`: its `authNMiddleWare` always validates the caller's key against Portkey's control plane (`ALBUS_BASEPATH`). The branch also does not build on Linux without fixing two filename-case bugs. The features we want (rerank, Responses/Messages adapters, tokenizer, payload-size limit, OTel/metrics, new providers) do not depend on the control plane, so they are ported one at a time (milestone *U1*, #57–#62). Security fixes keep being cherry-picked from `main`.
 
@@ -58,6 +58,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `conf.example.json`
 - `deployment.yaml` (deleted; replaced by the Helm chart in `charts/prompt-shields`)
 - `jest.config.js`
+- `package-lock.json`
 - `package.json`
 - `plugins/acuvity/scan.ts`
 - `plugins/azure/contentSafety.ts`
@@ -207,6 +208,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/mistral-ai/index.ts`
 - `src/providers/ollama/chatComplete.ts`
 - `src/providers/ollama/embed.ts`
+- `src/providers/open-ai-base/createModelResponse.ts`
 - `src/providers/open-ai-base/index.ts`
 - `src/providers/openai/api.ts`
 - `src/providers/openai/chatComplete.ts`
@@ -214,6 +216,8 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/openai/imageGenerate.ts`
 - `src/providers/openai/index.ts`
 - `src/providers/sagemaker/api.ts`
+- `src/providers/together-ai/chatComplete.ts`
+- `src/providers/together-ai/complete.ts`
 - `src/providers/types.ts`
 - `src/providers/voyage/api.ts`
 - `src/providers/voyage/index.ts`
@@ -237,7 +241,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 
 ```bash
 # 1. What changed upstream (OSS) and in the enterprise changelog since the triage points above
-python3 scripts/upstream-watch.py --since-enterprise 2.28.0 --since-main 669825c --since-2-0 8febc1d
+python3 scripts/upstream-watch.py --since-enterprise 2.33.0 --since-main 669825c --since-2-0 8febc1d
 
 # 2. Re-confirm the base: an empty plugins/ diff and a src/ diff limited to PS files
 git clone --filter=blob:none https://github.com/Portkey-AI/gateway /tmp/portkey
@@ -324,3 +328,11 @@ The original Portkey AI Gateway is licensed under the MIT License. See [`LICENSE
 
 The `ps-telemetry.ts` middleware and the PS-specific configuration glue are wholly original code by Prompt Shields, also released under MIT.
 35. **Added** (PS failover between routed models, #21; fork behaviour): `src/handlers/chatCompletionsHandler.ts` and `src/handlers/messagesHandler.ts` call `tryTargetsWithRouteFailover` (`src/middlewares/router/failover.ts`) instead of `tryTargetsRecursively`. Without a router decision listing more than one candidate it is `tryTargetsRecursively` unchanged; with one, it calls `tryTargetsRecursively` once per compliant candidate through the `psFailover` engine (5xx, 429, timeout move on; any other answer is returned as is). A request whose `x-portkey-config` sets a `strategy` / `targets`, `retry` attempts or `override_params.model` is never failed over by the router.
+36. **Fixed** (#208, triage of the Portkey enterprise changelog 2.29.0-2.33.0, see [`docs/upstream-triage-2026-11.md`](docs/upstream-triage-2026-11.md); each item re-implemented from its one-line description, no enterprise code):
+   - (security) Runtime dependencies bumped past their advisories: `hono` 4.13.13, `@hono/node-server` 1.19.17, `ws` 8.22.0. `src/tests/dependencyFloors.test.ts` checks the lockfile against those floors.
+   - (security, 2.31) Vertex AI upstream URL parts are checked before use (`assertVertexUrlParts` in `src/providers/google-vertex-ai/api.ts`). The region is checked first, because it could rewrite the `<region>-aiplatform.googleapis.com` host; then the project id and the model, where `/`, `?`, `#` or `..` could change the path. Batch and finetune list query values are encoded.
+   - (security, 2.31) Fireworks AI: the account id must be a slug, and the image-generation model path may not hold empty or dot segments or URL metacharacters (`src/providers/fireworks-ai/api.ts`). List query values are encoded.
+   - (2.32) Together AI streams skip SSE keep-alive comments and empty events instead of throwing (`getTogetherAIStreamData`). `readStream` (`src/handlers/streamHandler.ts`) no longer yields an `undefined` final chunk.
+   - (2.31) The Messages adapter's `message_start.model` falls back to the requested model when the provider's chunks carry none.
+   - (related to 2.30) `cache.max_age` is seconds. The fork base added it to `Date.now()` as milliseconds, so entries expired almost at once (`cacheExpiresAt` in `src/middlewares/cache/index.ts`).
+   - (2.32, 2.33) OpenAI chat completions forward `moderation`, and `/v1/responses` forwards `prompt_cache_options`.
