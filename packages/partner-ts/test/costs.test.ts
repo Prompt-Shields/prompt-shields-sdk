@@ -447,6 +447,16 @@ describe('client.usage.focusExport', () => {
       expect(fs.readdirSync(dir)).toEqual([]);
     });
 
+    it('removes the partial file when the body fails before the file is open', async () => {
+      const exp = await client(
+        mockFetch(streamed(['a\n'], {}, { failAfter: 0 }).response).fetch,
+      ).usage.focusExport();
+      const file = path.join(dir, 'focus.csv');
+      const err = await exp.saveTo(file).catch((e) => e);
+      expect(err).toBeInstanceOf(APIConnectionError);
+      expect(fs.readdirSync(dir)).toEqual([]);
+    });
+
     it('leaves an existing file untouched when the download fails', async () => {
       const file = path.join(dir, 'focus.csv');
       fs.writeFileSync(file, 'previous\n');
