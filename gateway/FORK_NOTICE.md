@@ -316,6 +316,8 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 33. **Added** (PS frozen savings baseline, #24; fork behaviour): `src/start-server.ts` loads the `baseline.v1` document named by `PS_BASELINE_FILE` at startup (`src/middlewares/router/baselineLoader.ts`; an invalid file stops the gateway), and `ps-telemetry` adds `baseline_id` and `counterfactual_cost` to routed events (`src/middlewares/router/baseline.ts`).
 34. **Added** (PS call feedback, #43; fork behaviour): `src/index.ts` mounts `POST /v1/feedback` (`src/middlewares/psFeedback.ts`) after `/v1/models`, before the router, telemetry, hooks and cache. It checks the feedback (call id, score, reason label; no free text), rate-limits it per user (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`) and forwards it to the collector's `/ingest/feedback`. `ps-telemetry` puts a `call_id` (the caller's `X-PS-Call-Id`, else a new UUID) on each event and returns it as the `X-PS-Call-Id` response header.
 
+35. **Added** (PS implicit outcome signals, #44; fork behaviour): `ps-telemetry` adds `outcome_signals` / `outcome_signals_version` to events on text-generation surfaces (`src/middlewares/psOutcomeSignals.ts`): `fallback`, `max_tokens`, `refusal`, `stream_error`, `abandoned`, from the fallback chain, stop reasons, refusals and stream state. `src/middlewares/psStreamObserver.ts` also records a stream's stop reasons (at most 8) and whether it carried a refusal.
+
 ## Original License
 
 The original Portkey AI Gateway is licensed under the MIT License. See [`LICENSE`](./LICENSE).

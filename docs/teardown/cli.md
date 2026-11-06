@@ -43,6 +43,39 @@ in this teardown — pending #13 / #14."*; it is never estimated.
 | `--scan-prompts` | off | Full mode (needs `--policy`): keep `generic-jsonl` message text in memory to scan it locally for PII and run the policy heuristic on it. Only category names reach the report. |
 | `--eval-results FILE` | none | `ps-eval --out-json` results (needs `--policy`): add quality parity and savings at parity (#14) |
 
+## Invoice reconciliation (`ps-teardown reconcile`)
+
+M§3.1 / #24: compares the cost Prompt Shields recorded for each call (the event's own `cost`,
+as stored in `ai_usage_events.cost`) with what the provider says, per provider, model and
+UTC day, and flags every gap above ±2% (`--tolerance`).
+
+```
+ps-teardown reconcile ai_usage_events.csv --invoice invoice-openai.csv
+ps-teardown reconcile events.jsonl --usage usage-anthropic.json --format json --out r.json --fail-on-gap
+```
+
+- **Prompt Shields side** (positional): `ps-events` files, typically the tenant's
+  `ai_usage_events` rows exported as CSV or JSONL (for example with psql `\copy`), or SDK /
+  gateway event logs. The recorded cost is used as is, never re-priced. Events without a
+  cost are counted per provider, never taken as zero.
+- **Provider side**: `--invoice FILE` (CSV with `date`, `provider`, `model`, `amount_usd`;
+  `vendor`, `cost_usd`, `amount`, `cost` are accepted too; rows in a `currency` other than
+  USD are dropped) holds billed amounts. A row without a `model` is a provider total for the
+  day and a row without a `date` one for the whole window; that provider is then compared at
+  that grain. `--usage FILE` takes the OpenAI / Anthropic usage exports `run` reads, priced at
+  catalog list price: this finds traffic missing from telemetry and token mismatches, but
+  not discounts or credits, which only an invoice shows. Give one or the other per provider.
+- Only days inside the provider side's window are compared; Prompt Shields events outside
+  it are counted. A provider with no provider-side data is listed as not compared.
+- Each row is `reconciled`, `unreconciled` (gap above the tolerance), `missing_in_ps` or
+  `missing_in_provider`; anything but `reconciled` is flagged. The report (Markdown or JSON,
+  `schema_version: reconcile.v1`) also has a total per provider. `--fail-on-gap` exits 3
+  when anything is flagged.
+
+Reconciliation is a CLI, not a collector endpoint, on purpose: it reuses the usage-export
+parsers above, needs no migration, scope or API surface, and invoice amounts stay on the
+machine that runs it.
+
 ## Input formats
 
 | Format | Files | One record per | Notes |
@@ -77,6 +110,7 @@ are accepted as aliases of `provider` and `requested_model`).
 | `tokens_estimated` | Token counts were estimated, not reported |
 | `provider_cost` | Amount the provider billed (used as is) |
 | `framework_cost`, `framework_cost_source` | A cost from another price list (LiteLLM), used only when the catalog has no price |
+| `event_cost` | The cost a `ps-events` row itself reports (`ai_usage_events.cost`). Never summed into the baseline; read only by `ps-teardown reconcile` |
 | `business_unit`, `use_case`, `data_classification`, `detected_pii_types` | Attribution and declared sensitivity |
 | `project`, `api_key_id` | Opaque usage-export ids, used only for `--key-map` |
 | `route_group` | Gateway route group |
