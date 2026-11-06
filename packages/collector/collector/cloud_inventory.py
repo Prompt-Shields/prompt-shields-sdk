@@ -28,6 +28,10 @@ Each asset's ``calling_service`` is ``azure:<ARM deployment resource id>``,
 marks where it came from. Asset ids are UUIDv5 values derived from the
 tenant, the cloud and that resource id, so re-runs update the same rows.
 
+Without credentials in the collector, an export made with the cloud's own
+CLI can be imported instead (AWS so far): see
+``collector.cloud_inventory_import``.
+
 Run it with ``POST /api/v1/admin/cloud-inventory/pull`` (operator only:
 ``Authorization: Bearer $PS_ADMIN_TOKEN``, ``{"tenant_id": ...}``; 404 when
 the token is unset) or ``python -m collector.cloud_inventory --tenant <uuid>``.
@@ -1281,6 +1285,19 @@ async def _bedrock_list(
     raise CloudInventoryError(f"aws: {what} ({region}): more than {MAX_PAGES} pages")
 
 
+def bedrock_tag_map(body) -> dict[str, str]:
+    """Tags from a ``ListTagsForResource`` response (``{"tags": [{"key",
+    "value"}]}``)."""
+    tags = body.get("tags") if isinstance(body, dict) else None
+    if not isinstance(tags, list):
+        return {}
+    return {
+        str(t["key"]): str(t["value"])
+        for t in tags
+        if isinstance(t, dict) and t.get("key") and t.get("value") is not None
+    }
+
+
 async def _bedrock_tags(
     client: httpx.AsyncClient,
     region: str,
@@ -1304,11 +1321,7 @@ async def _bedrock_tags(
         body=json.dumps({"resourceARN": arn}).encode(),
         content_type="application/json",
     )
-    return {
-        str(t["key"]): str(t["value"])
-        for t in body.get("tags") or []
-        if isinstance(t, dict) and t.get("key") and t.get("value") is not None
-    }
+    return bedrock_tag_map(body)
 
 
 def _bedrock_arn(value, region: str, kind: str) -> str | None:
@@ -1334,49 +1347,39 @@ def _active(item: dict, status_key: str) -> bool:
     return str(item.get(status_key) or "").lower() not in AWS_INACTIVE_STATES
 
 
-async def _bedrock_region(
-    client: httpx.AsyncClient,
+# (ARN, model, kind, parent ARN whose tags it inherits)
+BedrockResource = tuple[str, str | None, str, str | None]
+
+
+def bedrock_resources(
     region: str,
-    keys: AwsKeys | _AwsAuth,
-    sleep: Sleep,
-    clock: Clock,
-) -> list[CloudDeployment]:
-    """Bedrock resources in one region that represent AI in use."""
-    # (arn, model, kind, parent arn whose tags it inherits)
-    found: list[tuple[str, str | None, str, str | None]] = []
+    custom_models: list[dict],
+    imported_models: list[dict],
+    provisioned: list[dict],
+    inference_profiles: list[dict],
+) -> list[BedrockResource]:
+    """The Bedrock resources in one region that represent AI in use, from
+    the ``ListCustomModels``, ``ListImportedModels``,
+    ``ListProvisionedModelThroughputs`` and ``ListInferenceProfiles``
+    (application profiles) items. Shared by the live pull and the offline
+    import (``collector.cloud_inventory_import``)."""
+    found: list[BedrockResource] = []
 
     # Custom (fine-tuned, continued pre-training, distilled) models.
-    custom_models: dict[str, str | None] = {}
-    async for m in _bedrock_list(
-        client,
-        region,
-        "/custom-models",
-        "modelSummaries",
-        keys,
-        "custom model list",
-        sleep,
-        clock,
-    ):
+    custom: dict[str, str | None] = {}
+    for m in custom_models:
         arn = _bedrock_arn(m.get("modelArn"), region, "custom-model")
         # Still training ("Creating") or failed: not (yet) an asset.
         status = str(m.get("modelStatus") or "").lower()
         if arn is None or status in AWS_CUSTOM_MODEL_UNUSABLE:
             continue
         model = _model_id(m.get("baseModelArn")) or m.get("baseModelName")
-        custom_models[arn] = model
+        model = model if isinstance(model, str) and model else None
+        custom[arn] = model
         found.append((arn, model, "custom", None))
 
     # Imported (bring-your-own-weights) models.
-    async for m in _bedrock_list(
-        client,
-        region,
-        "/imported-models",
-        "modelSummaries",
-        keys,
-        "imported model list",
-        sleep,
-        clock,
-    ):
+    for m in imported_models:
         arn = _bedrock_arn(m.get("modelArn"), region, "imported-model")
         if arn is None:
             continue
@@ -1384,49 +1387,38 @@ async def _bedrock_region(
         found.append((arn, name if isinstance(name, str) else None, "imported", None))
 
     # Provisioned throughput: dedicated, paid serving capacity.
-    async for p in _bedrock_list(
-        client,
-        region,
-        "/provisioned-model-throughputs",
-        "provisionedModelSummaries",
-        keys,
-        "provisioned throughput list",
-        sleep,
-        clock,
-    ):
+    for p in provisioned:
         arn = _bedrock_arn(p.get("provisionedModelArn"), region, "provisioned-model")
         if arn is None or not _active(p, "status"):
             continue
-        parent = p.get("modelArn") if p.get("modelArn") in custom_models else None
-        model = _model_id(p.get("foundationModelArn")) or custom_models.get(parent)
+        parent = p.get("modelArn")
+        parent = parent if isinstance(parent, str) and parent in custom else None
+        model = _model_id(p.get("foundationModelArn")) or custom.get(parent)
         found.append((arn, model, "provisioned", parent))
 
     # Application inference profiles: created to route and meter usage.
-    async for p in _bedrock_list(
-        client,
-        region,
-        "/inference-profiles",
-        "inferenceProfileSummaries",
-        keys,
-        "inference profile list",
-        sleep,
-        clock,
-        params={"type": "APPLICATION"},
-    ):
+    for p in inference_profiles:
         arn = _bedrock_arn(
             p.get("inferenceProfileArn"), region, "application-inference-profile"
         )
         if arn is None or not _active(p, "status"):
             continue
+        listed = p.get("models")
         models = [
-            m.get("modelArn") for m in p.get("models") or [] if isinstance(m, dict)
+            m.get("modelArn")
+            for m in (listed if isinstance(listed, list) else [])
+            if isinstance(m, dict)
         ]
         model = next((i for i in map(_model_id, models) if i), None)
         found.append((arn, model, "inference_profile", None))
+    return found
 
-    tags_by_arn: dict[str, dict[str, str]] = {}
-    for arn, *_ in found:
-        tags_by_arn[arn] = await _bedrock_tags(client, region, arn, keys, sleep, clock)
+
+def bedrock_deployments(
+    region: str,
+    found: list[BedrockResource],
+    tags_by_arn: dict[str, dict[str, str]],
+) -> list[CloudDeployment]:
     return [
         CloudDeployment(
             cloud="aws",
@@ -1435,10 +1427,49 @@ async def _bedrock_region(
             model=model,
             model_format=kind,
             # A provisioned custom model's own tags override the model's.
-            tags={**tags_by_arn.get(parent or "", {}), **tags_by_arn[arn]},
+            tags={**tags_by_arn.get(parent or "", {}), **tags_by_arn.get(arn, {})},
         )
         for arn, model, kind, parent in found
     ]
+
+
+async def _bedrock_region(
+    client: httpx.AsyncClient,
+    region: str,
+    keys: AwsKeys | _AwsAuth,
+    sleep: Sleep,
+    clock: Clock,
+) -> list[CloudDeployment]:
+    """Bedrock resources in one region that represent AI in use."""
+
+    async def listing(path: str, items_key: str, what: str, params=None):
+        return [
+            item
+            async for item in _bedrock_list(
+                client, region, path, items_key, keys, what, sleep, clock, params
+            )
+        ]
+
+    found = bedrock_resources(
+        region,
+        await listing("/custom-models", "modelSummaries", "custom model list"),
+        await listing("/imported-models", "modelSummaries", "imported model list"),
+        await listing(
+            "/provisioned-model-throughputs",
+            "provisionedModelSummaries",
+            "provisioned throughput list",
+        ),
+        await listing(
+            "/inference-profiles",
+            "inferenceProfileSummaries",
+            "inference profile list",
+            {"type": "APPLICATION"},
+        ),
+    )
+    tags_by_arn: dict[str, dict[str, str]] = {}
+    for arn, *_ in found:
+        tags_by_arn[arn] = await _bedrock_tags(client, region, arn, keys, sleep, clock)
+    return bedrock_deployments(region, found, tags_by_arn)
 
 
 async def _bedrock_logging_enabled(

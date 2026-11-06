@@ -44,9 +44,10 @@ CACHE_HIT = {
     "cache_saved_cost": 0.0021,
 }
 
-# The cache-only event the gateway sends for every cache lookup
+# The cache-only event older gateways sent for every cache lookup
 # (buildCacheEvent): no cost and no cost_source; est_tokens_saved is its
-# estimate of the prompt tokens the lookup saved (0 on a miss).
+# estimate of the prompt tokens the lookup saved (0 on a miss). Current
+# gateways put the lookup, and its estimate, on the call's own event instead.
 CACHE_LOOKUP = {
     "vendor": "openai",
     "model": "gpt-4o-mini",
@@ -211,20 +212,36 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
     events = [
         BUDGET_EVENT,
         {**BUDGET_EVENT, "budget_state": "warn", "budget_action": "none"},
-        {**BUDGET_EVENT, "budget_action": "blocked"},
-        # The gateway sends a cache-only event for every lookup and, on a
-        # hit, the call's own event (cost_source cache) with the same status.
+        # A call the gateway refused for a budget: no usage, no cost.
+        {
+            "vendor": "openai",
+            "model": "gpt-4o-mini",
+            "source": "gateway",
+            "budget_state": "exceeded",
+            "budget_id": "mkt-monthly",
+            "budget_action": "blocked",
+        },
+        # A released gateway (up to sdk v0.4.0): a cache-only event for
+        # every lookup; the call's own event has no cache status.
         CACHE_LOOKUP,
-        CACHE_HIT,
-        {**CACHE_LOOKUP, "cache_status": "HIT"},
-        {**CACHE_HIT, "cache_status": "HIT", "cache_saved_cost": 0.0009},
-        # A hit whose cached response had no priced usage: counted, saves 0.
-        CACHE_LOOKUP,
-        {**CACHE_HIT, "cache_saved_cost": None},
-        # A miss: the call's own event carries no cache status.
+        {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"},
         {**CACHE_LOOKUP, "cache_status": "MISS", "est_tokens_saved": 0},
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway", "cost": 0.003},
         {**CACHE_LOOKUP, "cache_status": "SEMANTIC BYPASS", "est_tokens_saved": 0},
+        # A current gateway: one event per call, carrying its lookup.
+        {**CACHE_HIT, "est_tokens_saved": 120},
+        {**CACHE_HIT, "cache_status": "HIT", "cache_saved_cost": 0.0009, "est_tokens_saved": 120},
+        # A hit whose cached response had no priced usage: counted, saves 0.
+        {**CACHE_HIT, "cache_saved_cost": None, "est_tokens_saved": 120},
+        {
+            "vendor": "openai",
+            "model": "gpt-4o-mini",
+            "source": "gateway",
+            "cost": 0.003,
+            "cost_source": "pricing_table",
+            "cache_status": "MISS",
+            "est_tokens_saved": 0,
+        },
         # Reports neither: left out of every rate.
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"},
     ]
@@ -234,12 +251,67 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
     body = await _summary(seeded_db)
     assert body["budget_downgraded_requests"] == 1
     assert body["budget_blocked_requests"] == 1
-    # Three hits among five lookups; the calls' own hit events are not
-    # counted a second time.
-    assert body["cache_hit_rate"] == 0.6
+    # Four hits among seven lookups, each counted once for either gateway.
+    assert body["cache_hit_rate"] == round(4 / 7, 4)
     assert body["cache_saved_usd"] == 0.003
-    # Summed over the lookup events (three hits at 120, two misses at 0).
-    assert body["cache_tokens_saved"] == 360
+    # The blocked call is a request with no cost.
+    assert body["total_requests"] == len(events)
+    assert body["estimated_cost_usd"] == round(0.0004 * 2 + 0.003 * 2, 6)
+    # Summed over the events that carry a lookup: four hits at 120, three
+    # misses at 0, from either gateway.
+    assert body["cache_tokens_saved"] == 480
+
+
+def _released_gateway(hit: bool) -> list[dict]:
+    """A call through a released gateway (sdk v0.3.0, v0.4.0): a cache-only
+    event per lookup, and the call's event without a cache status (a hit is
+    not priced)."""
+    call = {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"}
+    if not hit:
+        call |= {"cost": 0.003, "cost_source": "pricing_table"}
+    return [{**CACHE_LOOKUP, "cache_status": "HIT" if hit else "MISS"}, call]
+
+
+def _current_gateway(hit: bool) -> list[dict]:
+    """A call through a current gateway: its own event carries the lookup."""
+    if hit:
+        return [{**CACHE_HIT, "cache_status": "HIT"}]
+    return [
+        {
+            "vendor": "openai",
+            "model": "gpt-4o-mini",
+            "source": "gateway",
+            "cost": 0.003,
+            "cost_source": "pricing_table",
+            "cache_status": "MISS",
+        }
+    ]
+
+
+# (released gateway hits, misses), (current gateway hits, misses)
+HIT_RATE_MIXES = [
+    pytest.param((1, 3), (0, 0), id="released-only"),
+    pytest.param((0, 0), (1, 3), id="current-only"),
+    pytest.param((2, 2), (1, 3), id="rollout-mix"),
+    pytest.param((0, 2), (0, 2), id="no-hits"),
+    pytest.param((2, 0), (2, 0), id="all-hits"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("released", "current"), HIT_RATE_MIXES)
+async def test_cache_hit_rate_counts_each_lookup_once(seeded_db, released, current):
+    events = []
+    for build, (hits, misses) in ((_released_gateway, released), (_current_gateway, current)):
+        for hit in [True] * hits + [False] * misses:
+            events += build(hit)
+    resp, _ = await _ingest(events)
+    assert resp.status_code == 200, resp.text
+
+    body = await _summary(seeded_db)
+    hits = released[0] + current[0]
+    lookups = hits + released[1] + current[1]
+    assert body["cache_hit_rate"] == round(hits / lookups, 4)
 
 
 @pytest.mark.asyncio

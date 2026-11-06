@@ -638,7 +638,8 @@ async def test_budget_and_cache_fields_under_rls(rls_db):
         "vendor": "openai", "model": "gpt-4o-mini", "source": "gateway",
         "budget_state": "exceeded", "budget_id": "mkt-monthly",
         "budget_action": "downgraded", "cache_status": "SEMANTIC HIT",
-        "cache_saved_cost": 0.002, "est_tokens_saved": 75,
+        "cost": 0, "cost_source": "cache", "cache_saved_cost": 0.002,
+        "est_tokens_saved": 75,
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
@@ -1153,6 +1154,40 @@ async def test_vertex_inventory_pull_runs_as_the_target_tenant_under_rls(rls_db)
         await rls.set_tenant(s, a)
         hidden = await s.execute(
             select(AIAsset.id).where(AIAsset.calling_service == calling)
+        )
+        assert hidden.first() is None
+
+
+async def test_cloud_inventory_import_route_runs_as_the_target_tenant_under_rls(
+    rls_db, monkeypatch
+):
+    """The offline import (#94) is scoped to its target tenant (no bypass):
+    tenant B's import writes B's assets, which tenant A cannot see."""
+    from tests.test_cloud_inventory_import import EXPECTED, fixture_export
+
+    a, b = rls_db["a"], rls_db["b"]
+    monkeypatch.setenv("PS_ADMIN_TOKEN", TOKEN)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/admin/cloud-inventory/import",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"tenant_id": str(b), "export": fixture_export()},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["assets_created"] == len(EXPECTED)
+    services = [f"aws:{arn}" for arn in EXPECTED]
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        rows = (
+            await s.execute(
+                select(AIAsset.tenant_id).where(AIAsset.calling_service.in_(services))
+            )
+        ).scalars().all()
+        assert rows == [b] * len(EXPECTED)
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        hidden = await s.execute(
+            select(AIAsset.id).where(AIAsset.calling_service.in_(services))
         )
         assert hidden.first() is None
 
