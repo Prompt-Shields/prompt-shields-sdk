@@ -14,6 +14,13 @@ Each model entry is keyed ``"<provider>/<model id>"`` and uses LiteLLM
 ``supports_prompt_caching``). Prices are in the entry's ``currency``: USD,
 or EUR for EU providers that list in euros. Only USD entries price events.
 
+Models billed by non-token units (speech, OCR, rerank, image generation)
+carry per-unit prices instead (``UNIT_PRICE_FIELDS``: LiteLLM's
+``input_cost_per_second``, ``input_cost_per_character``,
+``ocr_cost_per_page`` and ``input_cost_per_query``) or per-image prices by
+quality and size (``output_cost_per_image_by_quality``, a catalog field
+LiteLLM does not have).
+
 Every model also carries its provider's sovereignty fields:
 ``jurisdiction``, ``hosting_countries``, ``provider_hq_country``,
 ``us_cloud_act_exposure``, ``zdr``, ``trains_on_data`` and
@@ -79,6 +86,15 @@ SERVICE_TIER_RATES = {
     )
     for tier, suffix in (("batch", "batches"), ("flex", "flex"), ("priority", "priority"))
 }
+# Per-unit price fields (USD per unit) and the `usage_unit_type` each prices.
+UNIT_PRICE_FIELDS = {
+    "input_cost_per_second": "seconds",
+    "input_cost_per_character": "characters",
+    "ocr_cost_per_page": "pages",
+    "input_cost_per_query": "search_units",
+}
+# {quality: {size: USD per image}} for image generation models.
+IMAGE_PRICE_FIELD = "output_cost_per_image_by_quality"
 
 
 def load_catalog(path: str | Path | None = None) -> dict[str, Any]:
@@ -207,4 +223,38 @@ def audio_pricing(catalog: dict | None = None) -> dict[tuple[str, str], tuple[fl
                 _per_1k(entry["input_cost_per_audio_token"]),
                 _per_1k(entry["output_cost_per_audio_token"]),
             )
+    return rates
+
+
+def _usd_models(catalog: dict | None):
+    for entry in (catalog or load_catalog())["models"].values():
+        if entry.get("currency", "USD") == "USD":
+            yield entry
+
+
+def unit_pricing(catalog: dict | None = None) -> dict[tuple[str, str, str], float]:
+    """USD per unit as ``pricing.UNIT_PRICING``, keyed ``(provider, model,
+    usage_unit_type)``, for USD models with a ``UNIT_PRICE_FIELDS`` price."""
+    rates = {}
+    for entry in _usd_models(catalog):
+        for field, unit in UNIT_PRICE_FIELDS.items():
+            if field in entry:
+                rates[(entry["provider"], entry["model"], unit)] = float(entry[field])
+    return rates
+
+
+def image_pricing(
+    catalog: dict | None = None,
+) -> dict[tuple[str, str], dict[tuple[str, str], float]]:
+    """USD per generated image as ``pricing.IMAGE_PRICING``, keyed
+    ``(provider, model)`` then ``(quality, size)``."""
+    rates = {}
+    for entry in _usd_models(catalog):
+        by_quality = entry.get(IMAGE_PRICE_FIELD)
+        if by_quality:
+            rates[(entry["provider"], entry["model"])] = {
+                (quality, size): float(price)
+                for quality, sizes in by_quality.items()
+                for size, price in sizes.items()
+            }
     return rates
