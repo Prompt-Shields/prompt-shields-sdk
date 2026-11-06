@@ -623,6 +623,43 @@ async def test_call_feedback_under_rls(rls_db):
         await s.rollback()
 
 
+async def test_budget_and_cache_fields_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    event = {
+        "vendor": "openai", "model": "gpt-4o-mini", "source": "gateway",
+        "budget_state": "exceeded", "budget_id": "mkt-monthly",
+        "budget_action": "downgraded", "cache_status": "SEMANTIC HIT",
+        "cache_saved_cost": 0.002,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
+                            json={"events": [event]})
+        assert resp.status_code == 200, resp.text
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, a)
+            ev = (await s.execute(
+                select(AIUsageEvent).where(AIUsageEvent.budget_id.is_not(None))
+            )).scalar_one()
+        assert (ev.budget_state, ev.budget_action, ev.cache_status) == (
+            "exceeded", "downgraded", "semantic hit")
+        url = f"/partner/v1/assets/{ev.asset_id}/usage-summary"
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_A}"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["budget_downgraded_requests"] == 1
+        assert body["cache_hit_rate"] == 1.0 and body["cache_saved_usd"] == 0.002
+        # Tenant b neither sees the asset nor its aggregates.
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
+        assert resp.status_code == 404
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        n = (await s.execute(
+            text("SELECT count(*) FROM ai_usage_events WHERE budget_id IS NOT NULL")
+        )).scalar_one()
+    assert n == 0
+
+
 def _learner_snapshot() -> dict:
     snap = {
         "schema": "ps-learner-snapshot.v1",

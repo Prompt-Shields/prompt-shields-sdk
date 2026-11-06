@@ -48,21 +48,26 @@ async def _seed(engine):
                counterfactual_cost=Decimal("0.030000"), fallback_chain=["server_error"]),
             ev(ta, asset_a, timedelta(days=2), tokens_in=50, tokens_out=25,
                cost=Decimal("0.005000"), latency_ms=300, session_id="s1",
-               fallback_chain=[]),
+               fallback_chain=[], budget_state="exceeded", budget_id="b1",
+               budget_action="downgraded", cache_status="miss"),
             # Tenant A, nulls are ignored by SUM/AVG; NULL session not counted
             # (an explicit None is SQL NULL, so not counted as reported)
             ev(ta, asset_a, timedelta(days=3), fallback_chain=None),
             # Tenant A, 7d..30d
             ev(ta, asset_a, timedelta(days=10), tokens_in=1000, tokens_out=1000,
                cost=Decimal("1.000000"), latency_ms=500, session_id="s2",
-               tokens_cache_write=400, counterfactual_cost=Decimal("0.500000")),
+               tokens_cache_write=400, counterfactual_cost=Decimal("0.500000"),
+               budget_state="ok", budget_action="none", cache_status="hit",
+               cache_saved_cost=Decimal("0.250000")),
             # Tenant A, 30d..90d
             ev(ta, asset_a, timedelta(days=60), tokens_in=7, tokens_out=7, session_id="s3"),
             # Tenant A, older than 90d
             ev(ta, asset_a, timedelta(days=91), tokens_in=99999, tokens_out=99999),
             # Tenant B — must never show up in tenant A's numbers
             ev(tb, asset_b, timedelta(hours=1), tokens_in=5000, tokens_out=5000,
-               cost=Decimal("9.000000"), latency_ms=9000, session_id="sb"),
+               cost=Decimal("9.000000"), latency_ms=9000, session_id="sb",
+               budget_action="blocked", cache_status="hit",
+               cache_saved_cost=Decimal("5.000000")),
         ])
 
         pa = PartnerCredential(tenant_id=ta.id, partner_name="pa", client_id="pa-client",
@@ -106,6 +111,10 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "savings_usd": 0.02,
         "fallback_rate": 0.5,
         "sovereign_share": None,
+        "budget_downgraded_requests": 1,
+        "budget_blocked_requests": 0,
+        "cache_hit_rate": 0.0,
+        "cache_saved_usd": None,
         "outcome_signals_reported": 0,
         "outcome_signal_counts": None,
         "period": "7d",
@@ -124,6 +133,10 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "savings_usd": -0.48,
         "fallback_rate": 0.5,
         "sovereign_share": None,
+        "budget_downgraded_requests": 1,
+        "budget_blocked_requests": 0,
+        "cache_hit_rate": 0.5,
+        "cache_saved_usd": 0.25,
         "outcome_signals_reported": 0,
         "outcome_signal_counts": None,
         "period": "30d",
@@ -138,6 +151,8 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
 
     assert rb.json()["total_requests"] == 1
     assert rb.json()["total_tokens_in"] == 5000
+    assert rb.json()["budget_blocked_requests"] == 1
+    assert rb.json()["cache_saved_usd"] == 5.0
 
     async with async_sessionmaker(seeded_db, class_=AsyncSession)() as s:
         audits = (await s.execute(

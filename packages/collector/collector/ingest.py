@@ -81,6 +81,14 @@ class IngestEvent(BaseModel):
     # Per-call id (#43) that /ingest/feedback names. Anything that is not a
     # short token is dropped (counted as call_id:invalid).
     call_id: str | None = None
+    # Spend budgets (#28 gateway, #29 SDK; schemas/budget/README.md) and the
+    # gateway cache (#33). Lenient like the route fields: an invalid value is
+    # stored as null and counted as "<field>:invalid".
+    budget_state: str | None = None
+    budget_id: str | None = None
+    budget_action: str | None = None
+    cache_status: str | None = None
+    cache_saved_cost: float | None = None
     # Implicit outcome signals (#44): the SDK's (and gateway's) outcome
     # classes for the call. Known class names only, see _outcome_signals.
     outcome_signals: list[str] | None = None
@@ -194,7 +202,28 @@ class IngestEvent(BaseModel):
             return None
         return value
 
-    @field_validator("route_est_cost", "counterfactual_cost", mode="before")
+    @field_validator("budget_state", mode="before")
+    @classmethod
+    def _budget_state(cls, value: Any) -> str | None:
+        return _lenient_choice(value, BUDGET_STATES)
+
+    @field_validator("budget_action", mode="before")
+    @classmethod
+    def _budget_action(cls, value: Any) -> str | None:
+        return _lenient_choice(value, BUDGET_ACTIONS)
+
+    @field_validator("budget_id", mode="before")
+    @classmethod
+    def _budget_id(cls, value: Any) -> str | None:
+        value = _lenient_str(value, MAX_IDENTIFIER_LENGTH)
+        return value if value is not None and BUDGET_ID_RE.fullmatch(value) else None
+
+    @field_validator("cache_status", mode="before")
+    @classmethod
+    def _cache_status(cls, value: Any) -> str | None:
+        return _lenient_choice(value, CACHE_STATUSES)
+
+    @field_validator("route_est_cost", "counterfactual_cost", "cache_saved_cost", mode="before")
     @classmethod
     def _route_cost(cls, value: Any) -> float | None:
         return _lenient_amount(value, MAX_COST)
@@ -270,6 +299,21 @@ MAX_OUTCOME_SIGNALS_VERSION = 1000  # SmallInteger column, generous headroom
 # PRD 0001 §7.12. Matched case-insensitively, stored lower-case.
 ROUTE_MODES = frozenset({"gateway", "local", "none"})
 SENSITIVITY_SOURCES = frozenset({"declared", "pii_escalated", "default"})
+# schemas/budget/README.md (budget.v1). Matched case-insensitively, stored
+# lower-case. budget_action "blocked" is accepted for an emitter that reports
+# refused calls; the SDK and gateway send no event for those today.
+BUDGET_STATES = frozenset({"ok", "warn", "unknown", "exceeded"})
+BUDGET_ACTIONS = frozenset({"none", "downgraded", "blocked"})
+# budget.v1 ids are tokens: ^[a-z0-9][a-z0-9._-]*$
+BUDGET_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+# The gateway's cache status header values (exact and semantic cache).
+# Matched case-insensitively, stored lower-case ("semantic hit").
+CACHE_STATUSES = frozenset(
+    {"hit", "miss", "semantic hit", "semantic miss", "semantic bypass", "refresh", "disabled"}
+)
+CACHE_HIT_STATUSES = ("hit", "semantic hit")
+# cost_source of a response served from the gateway cache (psPricing.ts).
+COST_SOURCE_CACHE = "cache"
 
 # The modalities telemetry reports, as the gateway's modalityOf() sets them
 # from the endpoint: chat, completions, messages, responses, embeddings and
@@ -292,6 +336,15 @@ ROUTE_FIELDS = (
     "fallback_chain",
     "counterfactual_cost",
     "baseline_id",
+)
+
+# Budget and cache fields (#28, #29, #33), stored as sent once validated.
+BUDGET_CACHE_FIELDS = (
+    "budget_state",
+    "budget_id",
+    "budget_action",
+    "cache_status",
+    "cache_saved_cost",
 )
 
 # Lenient fields whose dropped values are reported in ignored_fields as
@@ -318,7 +371,7 @@ LENIENT_FIELDS = (
     "call_id",
     "outcome_signals",
     "outcome_signals_version",
-) + ROUTE_FIELDS
+) + ROUTE_FIELDS + BUDGET_CACHE_FIELDS
 
 
 def _lenient_str(value: Any, max_length: int) -> str | None:
@@ -584,7 +637,7 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             call_id=event.call_id,
             outcome_signals=event.outcome_signals,
             outcome_signals_version=event.outcome_signals_version,
-            **{name: getattr(event, name) for name in ROUTE_FIELDS},
+            **{name: getattr(event, name) for name in ROUTE_FIELDS + BUDGET_CACHE_FIELDS},
         )
         db.add(usage_event)
         await record_event_flows(
