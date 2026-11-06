@@ -10,7 +10,9 @@
  * with the native Responses API. Reasoning streams as a `reasoning` item
  * with `reasoning_summary_*` events, each item is closed with its `.done`
  * events and `response.output_item.done`, and a mid-stream provider error
- * ends the stream with `response.failed`.
+ * ends the stream with `response.failed`. Every response snapshot echoes
+ * the client's request fields (`echoRequestFields`), as the JSON response
+ * and the native API do.
  */
 
 import { randomUUID } from 'crypto';
@@ -19,7 +21,11 @@ import {
   plainReasoningText,
   toResponsesUsage,
 } from '../shared';
-import { toResponsesStatus } from './responseTransform';
+import {
+  echoRequestFields,
+  responseModel,
+  toResponsesStatus,
+} from './responseTransform';
 
 type OutputKind = 'message' | 'reasoning' | 'function_call';
 
@@ -64,6 +70,10 @@ interface StreamState {
   toolCallByIndex: Record<number, OutputItem>;
   /** PS fork (#73): a mid-stream provider error */
   error: { code: string; message: string } | null;
+  /** PS fork (#73): model named in the request, for chunks without one */
+  requestedModel: string;
+  /** PS fork (#73): request fields every snapshot echoes */
+  requestEcho: ReturnType<typeof echoRequestFields>;
 }
 
 function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
@@ -279,21 +289,8 @@ function buildResponseSnapshot(
           }
         : null,
     model: state.model,
-    previous_response_id: null,
-    instructions: null,
     output,
     error: status === 'failed' ? state.error : null,
-    tools: [],
-    tool_choice: 'auto',
-    truncation: 'disabled',
-    parallel_tool_calls: true,
-    text: { format: { type: 'text' } },
-    top_p: 1,
-    presence_penalty: 0,
-    frequency_penalty: 0,
-    top_logprobs: 0,
-    temperature: 1,
-    reasoning: null,
     usage: {
       input_tokens: state.inputTokens,
       input_tokens_details: {
@@ -308,14 +305,9 @@ function buildResponseSnapshot(
       // PS fork (#73): always input + output, as the Responses API reports
       total_tokens: state.inputTokens + state.outputTokens,
     },
-    max_output_tokens: null,
-    max_tool_calls: null,
-    store: false,
-    background: false,
-    service_tier: 'default',
-    metadata: {},
-    safety_identifier: null,
-    prompt_cache_key: null,
+    // PS fork (#73): echo the request (tools, instructions, sampling,
+    // text.format, reasoning, metadata, ...) as the JSON response does
+    ...state.requestEcho,
   };
 }
 
@@ -376,7 +368,9 @@ export function transformStreamChunk(
     state.hasStarted = true;
     state.responseId = `resp_${randomUUID()}`;
     state.contentPartIndex = 0;
-    state.model = parsed.model || '';
+    // PS fork (#73): chunks without a model (e.g. Gemini) fall back to the
+    // requested one, as the JSON response does
+    state.model = parsed.model || state.requestedModel;
     state.createdAt = Math.floor(Date.now() / 1000);
 
     events.push(
@@ -473,9 +467,10 @@ export function transformStreamChunk(
 }
 
 /**
- * Create initial stream state
+ * Create initial stream state. PS fork (#73): `originalRequest` is the
+ * client's Responses request, echoed in every response snapshot.
  */
-export function createStreamState(): StreamState {
+export function createStreamState(originalRequest?: any): StreamState {
   return {
     responseId: '',
     outputItemId: '',
@@ -497,5 +492,7 @@ export function createStreamState(): StreamState {
     openItem: null,
     toolCallByIndex: {},
     error: null,
+    requestedModel: responseModel(originalRequest),
+    requestEcho: echoRequestFields(originalRequest),
   };
 }

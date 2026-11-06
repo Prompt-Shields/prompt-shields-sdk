@@ -209,23 +209,6 @@ export function transformChatCompletionsToResponses(
 
   const createdAt = response.created || Math.floor(Date.now() / 1000);
 
-  // Extract values from original request, falling back to defaults
-  const req = originalRequest || {};
-
-  // Transform tools back to Responses API format if present in original request
-  const tools = (req.tools || []).map((t: any) => ({
-    type: t.type || 'function',
-    name: t.name,
-    description: t.description ?? null,
-    parameters: t.parameters ?? null,
-    strict: t.strict ?? null,
-  }));
-
-  // Transform text format if present
-  const textFormat = req.text?.format
-    ? { format: req.text.format }
-    : { format: { type: 'text' as const } };
-
   return {
     id: response.id || `resp_${randomUUID()}`,
     object: 'response',
@@ -235,17 +218,62 @@ export function transformChatCompletionsToResponses(
     status: overallStatus,
     incomplete_details:
       overallStatus === 'incomplete' ? { reason: incompleteReason } : null,
-    model: response.model,
-    previous_response_id: req.previous_response_id ?? null,
-    instructions: req.instructions ?? null,
+    // PS fork (#73): the requested model when the provider reports none
+    model: response.model || responseModel(originalRequest),
     output,
     error: null,
+    usage,
+    // PS fork (#73): shared with the streamed snapshots
+    ...echoRequestFields(originalRequest),
+  } as OpenAIResponse;
+}
+
+/** PS fork (#73): the model named in the request, or ''. */
+export function responseModel(originalRequest?: any): string {
+  return typeof originalRequest?.model === 'string'
+    ? originalRequest.model
+    : '';
+}
+
+/**
+ * PS fork (#73): the Response fields that echo the request, with the
+ * Responses API defaults for fields the request leaves out. Used by the
+ * JSON response and by every streamed snapshot (`response.created`,
+ * `response.in_progress` and the terminal event), so a client reads the
+ * same request config back from either, as from the native API.
+ */
+export function echoRequestFields(originalRequest?: any) {
+  const req =
+    originalRequest && typeof originalRequest === 'object'
+      ? originalRequest
+      : {};
+  // Function tools take the Response object's full shape; other tool types
+  // (web_search, mcp, custom, ...) are echoed as sent.
+  const tools = (Array.isArray(req.tools) ? req.tools : []).map((t: any) =>
+    !t?.type || t.type === 'function'
+      ? {
+          type: 'function',
+          name: t?.name,
+          description: t?.description ?? null,
+          parameters: t?.parameters ?? null,
+          strict: t?.strict ?? null,
+        }
+      : t
+  );
+  // `text` keeps any other config sent with it (e.g. verbosity)
+  const text = {
+    ...(req.text && typeof req.text === 'object' ? req.text : {}),
+    format: req.text?.format ?? { type: 'text' as const },
+  };
+  return {
+    previous_response_id: req.previous_response_id ?? null,
+    instructions: req.instructions ?? null,
     tools,
     tool_choice: req.tool_choice ?? RESPONSE_DEFAULTS.tool_choice,
     truncation: req.truncation ?? RESPONSE_DEFAULTS.truncation,
     parallel_tool_calls:
       req.parallel_tool_calls ?? RESPONSE_DEFAULTS.parallel_tool_calls,
-    text: textFormat,
+    text,
     top_p: req.top_p ?? RESPONSE_DEFAULTS.top_p,
     presence_penalty:
       req.presence_penalty ?? RESPONSE_DEFAULTS.presence_penalty,
@@ -254,7 +282,6 @@ export function transformChatCompletionsToResponses(
     top_logprobs: req.top_logprobs ?? RESPONSE_DEFAULTS.top_logprobs,
     temperature: req.temperature ?? RESPONSE_DEFAULTS.temperature,
     reasoning: req.reasoning ?? null,
-    usage,
     max_output_tokens: req.max_output_tokens ?? null,
     max_tool_calls: req.max_tool_calls ?? null,
     store: req.store ?? RESPONSE_DEFAULTS.store,
@@ -263,7 +290,7 @@ export function transformChatCompletionsToResponses(
     metadata: req.metadata ?? {},
     safety_identifier: req.safety_identifier ?? null,
     prompt_cache_key: req.prompt_cache_key ?? null,
-  } as OpenAIResponse;
+  };
 }
 
 /**
