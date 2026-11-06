@@ -11,11 +11,12 @@ export function snakeKey(key: string): string {
 /**
  * Response keys whose value is a map keyed by data, not by schema field names:
  * `asset.attestation` and the attestations `meta.current` are keyed by the
- * attested field (`asset`, `owner`, `data_classification`). Their own keys are
- * kept as sent so they match `Attestation.field`; their values are still
- * camelCased.
+ * attested field (`asset`, `owner`, `data_classification`), and the usage
+ * summary's `outcome_signal_counts` by outcome class (`max_tokens`, ...).
+ * Their own keys are kept as sent (so they match `Attestation.field` and the
+ * class names); their values are still camelCased.
  */
-const MAP_KEYS = new Set(['attestation', 'current']);
+const MAP_KEYS = new Set(['attestation', 'current', 'outcome_signal_counts']);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);

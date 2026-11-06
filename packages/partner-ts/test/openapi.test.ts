@@ -205,6 +205,13 @@ const UNMAPPED_SCHEMAS = new Set([
   'RiskMappingReview',
   'RiskReviewRequest',
   'RiskReviewHistory',
+  // Spend anomaly alerts (#30): not wrapped yet; call them with
+  // client.send(). The thresholds are operator tenant settings.
+  'SpendAlert',
+  'SpendAnomalySettings',
+  // FOCUS cost export (#31): a streamed CSV / JSON Lines file, not wrapped;
+  // download it with fetch or curl.
+  'FocusCostRow',
 ]);
 
 interface Operation {
@@ -243,6 +250,7 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/business-units': { methods: ['businessUnits.list'] },
   'GET /partner/v1/changes': { methods: ['changes.list', 'changes.listPage'], params: 'ListChangesParams' },
   'GET /partner/v1/export': { methods: ['export.get'], params: 'ExportParams' },
+  'GET /partner/v1/usage/focus-export': NOT_WRAPPED, // streamed CSV / JSON Lines file
   'GET /partner/v1/health': { methods: ['health'] },
   'GET /partner/v1/provider-credentials': NOT_WRAPPED,
   'GET /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
@@ -307,6 +315,9 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /api/v1/admin/risk-mappings/{risk_id}/reviews': NOT_WRAPPED,
   'GET /partner/v1/assets/{asset_id}/risks/{risk_id}/reviews': NOT_WRAPPED,
   'POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review': NOT_WRAPPED,
+  'GET /partner/v1/spend-alerts': NOT_WRAPPED,
+  'GET /partner/v1/spend-alerts/{alert_id}': NOT_WRAPPED,
+  'POST /partner/v1/spend-alerts/{alert_id}/acknowledge': NOT_WRAPPED,
   'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,
   'POST /api/v1/admin/cloud-inventory/pull': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/leanix/sync': NOT_WRAPPED,

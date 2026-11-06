@@ -183,6 +183,11 @@ from collector.risk_reviews import partner_router as risk_reviews_partner_router
 app.include_router(risk_reviews_admin_router)
 app.include_router(risk_reviews_partner_router)
 
+# Spend anomaly alerts: Partner API list and acknowledge (#30)
+from collector.spend_anomalies import partner_router as spend_alerts_partner_router
+
+app.include_router(spend_alerts_partner_router)
+
 # Platform signal: provider org usage pull (admin trigger)
 from collector.provider_usage_admin import router as provider_usage_router
 

@@ -55,7 +55,7 @@ DEFAULT_EQUIVALENTS: tuple[tuple[tuple[str, str], ...], ...] = (
 LONG_PROMPT_TOKENS = min(b[0] for b in pricing.LONG_CONTEXT_PRICING.values())
 
 _DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
-_BEDROCK_PROFILE = re.compile(r"^(?:us|eu|apac|us-gov|global|jp|au|ca)\.")
+_BEDROCK_PROFILE = re.compile(r"^(?:us|eu|apac|us-gov|global|jp|au|ca|in)\.")
 
 
 class PriceSource(Protocol):

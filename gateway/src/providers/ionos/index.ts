@@ -1,20 +1,11 @@
 import { IONOS } from '../../globals';
-import {
-  chatCompleteParams,
-  embedParams,
-  responseTransformers,
-} from '../open-ai-base';
-import { ProviderConfigs } from '../types';
-import IONOSAPIConfig from './api';
+import { openAICompatibleProvider } from '../openAICompatible';
+import { IONOS_BASE_URL } from './api';
 
-const IONOSConfig: ProviderConfigs = {
-  chatComplete: chatCompleteParams([]),
-  embed: embedParams([]),
-  api: IONOSAPIConfig,
-  responseTransforms: responseTransformers(IONOS, {
-    chatComplete: true,
-    embed: true,
-  }),
-};
+const IONOSConfig = openAICompatibleProvider({
+  provider: IONOS,
+  baseURL: IONOS_BASE_URL,
+  embed: true,
+});
 
 export default IONOSConfig;
