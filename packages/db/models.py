@@ -431,6 +431,81 @@ class CallFeedback(Base):
     )
 
 
+class LearnerSnapshot(Base):
+    """One versioned snapshot of a tenant's routing learner (#47, #48).
+
+    Uploaded by the SDK's offline learner (``ps-learn``, recommend mode) to
+    ``POST /ingest/learner-snapshots``. ``learner_version`` is derived from
+    the content (SHA-256), so a snapshot is reproducible and checked on
+    upload; one row per (tenant, learner_version). ``snapshot`` keeps the
+    whole document: config, per-arm statistics over local prompt features
+    (aggregates only, never prompt text or embeddings) and recommendations.
+    See collector/learner.py.
+    """
+
+    __tablename__ = "learner_snapshots"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    learner_version = Column(Text, nullable=False)
+    parent_version = Column(Text)
+    mode = Column(Text, nullable=False)  # recommend
+    algorithm = Column(Text, nullable=False)
+    feature_schema = Column(Text)
+    policy_version = Column(Text)
+    data_fingerprint = Column(Text, nullable=False)
+    training_rows = Column(Integer, nullable=False)
+    scored_rows = Column(Integer, nullable=False)
+    snapshot = Column(JSONB, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "learner_version", name="ux_learner_snapshots_version"),
+        Index("ix_learner_snapshots_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class LearnerRecommendation(Base):
+    """A route change the learner proposes for one (use case, sensitivity),
+    with its off-policy projection, and the human decision on it (#48).
+
+    ``status``: pending -> accepted | rejected (by a person, with their name
+    and an optional comment), or superseded when a newer snapshot proposes
+    something for the same group before anyone decided. Accepting never
+    changes routing: the reviewer edits the route policy. Realised savings
+    after acceptance are computed on read from ``ai_usage_events``.
+    """
+
+    __tablename__ = "learner_recommendations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    snapshot_id = Column(
+        UUID(as_uuid=True), ForeignKey("learner_snapshots.id"), nullable=False
+    )
+    learner_version = Column(Text, nullable=False)
+    use_case = Column(Text)
+    sensitivity_level = Column(Text, nullable=False)
+    current_model = Column(Text, nullable=False)
+    recommended_model = Column(Text, nullable=False)
+    candidates = Column(JSONB, nullable=False)
+    projection = Column(JSONB, nullable=False)
+    status = Column(Text, nullable=False, default="pending", server_default="pending")
+    reviewed_by = Column(Text)
+    reviewed_at = Column(TIMESTAMP(timezone=True))
+    review_comment = Column(Text)
+    reviewer_actor_type = Column(Text)
+    reviewer_partner_id = Column(
+        UUID(as_uuid=True), ForeignKey("partner_credentials.id"), nullable=True
+    )
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_learner_recommendations_tenant_status", "tenant_id", "status"),
+        Index("ix_learner_recommendations_snapshot", "snapshot_id"),
+    )
+
+
 class SpendAlert(Base):
     """A spend anomaly (#30): one day's spend for a use case (or asset) far
     above its EWMA baseline. Written by ``python -m collector.spend_anomalies``.

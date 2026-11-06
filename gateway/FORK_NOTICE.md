@@ -336,6 +336,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
    - (related to 2.30) `cache.max_age` is seconds. The fork base added it to `Date.now()` as milliseconds, so entries expired almost at once (`cacheExpiresAt` in `src/middlewares/cache/index.ts`).
    - (2.32, 2.33) OpenAI chat completions forward `moderation`, and `/v1/responses` forwards `prompt_cache_options`.
 41. **Added** (PS spend budgets, #28; fork behaviour): `src/index.ts` mounts `psBudget` (`src/middlewares/psBudget/`) between the router and telemetry when `PS_BUDGETS` or `PS_BUDGETS_FILE` is set, and `src/start-server.ts` loads the budgets and the shared Redis store at startup (an invalid config stops the gateway). Refused calls get HTTP 429 `budget_exceeded`.
+42. **Added** (unified `/v1/models`, #79; re-implemented from the Portkey enterprise changelog 2.14/2.22, not in OSS): `src/index.ts` mounts `GET /v1/models` and `GET /v1/models/:id{.+}` on `src/handlers/unifiedModelsHandler.ts` (a PS file) ahead of the `GET /v1/*` proxy catch-all. Both proxy to the configured provider, then return Anthropic's list or model object to callers that send `anthropic-version` (Claude Code, Anthropic SDKs) and OpenAI's shape to everyone else; errors and unrecognised bodies pass through. The upstream control-plane `modelsHandler` mounted earlier on `/v1/models` is unchanged.
 
 ## Original License
 

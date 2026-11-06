@@ -38,11 +38,13 @@ from prompt_shields.teardown import (
     SdkPriceSource,
     TeardownRecord,
     build_report,
+    learning_tuples,
     load_records,
     price_records,
     render_report,
 )
 from prompt_shields.teardown.cli import main as teardown_main
+from prompt_shields.teardown.policy import read_eval_results, replay_priced
 from prompt_shields.teardown_replay import UsageRecord, replay, replay_call
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -477,3 +479,88 @@ def test_ps_eval_cli_route_policy(tmp_path, capsys):
     plan = json.loads(capsys.readouterr().out)
     levels = {s["sensitivity"]: s["population"] for s in plan["strata"]}
     assert levels == {"public": 2, "internal": 1}  # email escalates to internal
+
+
+# --- learning tuples with replay and eval quality (#42) ---------------------------------
+
+
+def _tuples(eval_results=EVAL_RESULTS, with_replay=True):
+    loaded = load_records([FIXTURES / f for f in INPUTS], key_map=KEY_MAP)
+    source = SdkPriceSource(version="test-catalog")
+    priced = price_records(loaded.records, source)
+    replays = replay_priced(priced, POLICY, source) if with_replay else None
+    ev = read_eval_results(eval_results) if eval_results is not None else None
+    return list(learning_tuples(priced, eval_results=ev, policy=POLICY, replays=replays))
+
+
+def test_learning_tuples_carry_eval_quality_and_the_replayed_route():
+    tuples = _tuples()
+    # The logged model was evaluated for its use case: its measured parity.
+    faq = next(t for t in tuples if t["use_case"] == "faq")
+    assert faq["model"] == "gpt-4o-mini"
+    assert (faq["quality_score"], faq["quality_source"], faq["quality_samples"]) == (
+        1.0, "eval_parity", 80)
+    assert faq["replay"]["outcome"] == "unchanged"
+    # Not evaluated: never estimated...
+    bot = next(t for t in tuples if t["use_case"] == "support-bot" and t["model"] == "gpt-4o")
+    assert bot["quality_score"] is None and bot["quality_source"] == "not_measured"
+    # ...but the replayed arm was: the policy routes the call to mini, at 0.975 parity.
+    rp = bot["replay"]
+    assert (rp["provider"], rp["model"], rp["group"], rp["outcome"]) == (
+        "openai", "gpt-4o-mini", "cheap", "routed")
+    assert rp["quality_score"] == 0.975 and rp["quality_source"] == "eval_parity"
+    assert rp["cost_usd"] is not None and rp["cost_usd"] < bot["cost_usd"]
+    assert bot["sensitivity_level"] == "internal"
+    # One tuple per logged call: the replayed arm is not a second row.
+    assert len(tuples) == 24
+    assert SECRET_TEXT not in json.dumps(tuples)
+
+
+def test_learning_tuples_without_eval_or_policy_stay_unscored():
+    for t in _tuples(eval_results=None):
+        assert t["quality_score"] is None and t["replay"]["quality_score"] is None
+    assert all("replay" not in t for t in _tuples(eval_results=None, with_replay=False))
+
+
+def test_eval_cell_for_another_vendor_does_not_score_the_call():
+    doc = json.loads(json.dumps(EVAL_RESULTS))
+    for c in doc["cells"]:
+        c["candidate"] = c["candidate"].replace("openai:", "azure:")
+    faq = next(t for t in _tuples(eval_results=doc) if t["use_case"] == "faq")
+    assert faq["quality_score"] is None
+
+
+def test_eval_candidate_label_splits_at_the_first_colon():
+    from prompt_shields.teardown.tuples import _Quality
+
+    ev = read_eval_results({"cells": [{
+        "use_case": "faq", "candidate": "bedrock:anthropic.claude-3-haiku-20240307-v1:0",
+        "n": 10, "passed": 10, "parity": 1.0}]})
+    q = _Quality(ev)
+    assert q.score("faq", "bedrock", "anthropic.claude-3-haiku-20240307-v1:0")[
+        "quality_score"] == 1.0
+    assert q.score("faq", "openai", "anthropic.claude-3-haiku-20240307-v1:0")[
+        "quality_score"] is None
+
+
+def test_learning_tuples_need_matching_replays():
+    with pytest.raises(ValueError):
+        list(learning_tuples([], replays=[object()], policy=POLICY))
+
+
+def test_cli_learning_tuples_with_policy_and_eval(tmp_path, no_network, capsys):
+    path = tmp_path / "tuples.jsonl"
+    code = teardown_main([
+        "run", *(str(FIXTURES / f) for f in INPUTS), "--key-map", str(FIXTURES / "key_map.json"),
+        "--policy", str(POLICY_PATH), "--scan-prompts", "--eval-results", str(EVAL_RESULTS_PATH),
+        "--stdout", "json", "--learning-tuples", str(path),
+    ])
+    assert code == 0
+    capsys.readouterr()
+    text = path.read_text()
+    tuples = [json.loads(line) for line in text.splitlines()]
+    assert len(tuples) == 24 and all("replay" in t for t in tuples)
+    assert any(t["quality_source"] == "eval_parity" for t in tuples)
+    assert SECRET_TEXT not in text and "owner@example.com" not in text
+    assert {"messages", "prompt_hash", "session_id", "user_id"}.isdisjoint(
+        k for t in tuples for k in t)
