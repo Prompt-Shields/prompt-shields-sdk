@@ -115,6 +115,29 @@ describe('providerCredentials', () => {
     expect(JSON.stringify(err)).not.toContain(ADMIN_KEY);
   });
 
+  it('scrubs the admin key from an error response that echoes it', async () => {
+    const echo = {
+      detail: [{ type: 'string_too_long', loc: ['body', 'admin_key'], msg: `bad value ${ADMIN_KEY}`, input: ADMIN_KEY }],
+    };
+    const m = mockFetch(
+      json(echo, 422),
+      new Response(`upstream rejected ${ADMIN_KEY}`, { status: 502, headers: { 'x-echo': ADMIN_KEY } }),
+    );
+    const c = client(m.fetch);
+    for (const call of [
+      () => c.providerCredentials.create('openai', { adminKey: ADMIN_KEY }),
+      () => c.providerCredentials.rotate('openai', { adminKey: ADMIN_KEY }),
+    ]) {
+      const err = await call().catch((e) => e);
+      expect(err).toBeInstanceOf(APIError);
+      expect(err.message).toContain('[redacted]');
+      for (const text of [err.message, String(err), JSON.stringify(err.body), JSON.stringify(err.headers), JSON.stringify(err)]) {
+        expect(text).not.toContain(ADMIN_KEY);
+      }
+    }
+    expect(m.calls).toHaveLength(2);
+  });
+
   it('rotates a key', async () => {
     const m = mockFetch(json({ ...CREDENTIAL_WIRE, rotated_at: '2026-11-05T12:00:00Z' }));
     const res = await client(m.fetch).providerCredentials.rotate('openai', { adminKey: ADMIN_KEY });

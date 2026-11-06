@@ -911,19 +911,25 @@ export class ProviderCredentialsResource {
    * Not retried on network errors or 5xx, since a retry would then be a 409.
    */
   create(provider: CredentialProvider, request: AdminKeyRequest): Promise<ProviderCredential> {
-    return this.client.send<ProviderCredential>(
-      'POST',
-      `/partner/v1/provider-credentials/${requireId(provider, 'provider')}`,
-      { body: adminKeyBody(request) },
+    const body = adminKeyBody(request);
+    return withoutKey(
+      this.client.send<ProviderCredential>('POST', `/partner/v1/provider-credentials/${requireId(provider, 'provider')}`, {
+        body,
+      }),
+      body.adminKey,
     );
   }
 
   /** Replace a stored key. Throws `NotFoundError` if none is stored. Not retried on network errors or 5xx. */
   rotate(provider: CredentialProvider, request: AdminKeyRequest): Promise<ProviderCredential> {
-    return this.client.send<ProviderCredential>(
-      'POST',
-      `/partner/v1/provider-credentials/${requireId(provider, 'provider')}/rotate`,
-      { body: adminKeyBody(request) },
+    const body = adminKeyBody(request);
+    return withoutKey(
+      this.client.send<ProviderCredential>(
+        'POST',
+        `/partner/v1/provider-credentials/${requireId(provider, 'provider')}/rotate`,
+        { body },
+      ),
+      body.adminKey,
     );
   }
 
@@ -939,6 +945,47 @@ function adminKeyBody(request: AdminKeyRequest): AdminKeyRequest {
     throw new PartnerError('adminKey must be a non-empty string');
   }
   return { adminKey };
+}
+
+/** `value` with every occurrence of `secret` in its strings (keys included) replaced. */
+function scrubSecret(value: unknown, secret: string): unknown {
+  if (typeof value === 'string') return value.split(secret).join('[redacted]');
+  if (Array.isArray(value)) return value.map((v) => scrubSecret(v, secret));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [scrubSecret(k, secret) as string, scrubSecret(v, secret)]),
+    );
+  }
+  return value;
+}
+
+/**
+ * Defence in depth: the collector never echoes the admin key, but should a
+ * server or proxy in between put it in an error response, it is scrubbed
+ * from the error (message, `body`, `headers`) before the caller sees it.
+ */
+async function withoutKey<T>(pending: Promise<T>, adminKey: string): Promise<T> {
+  try {
+    return await pending;
+  } catch (err) {
+    if (err instanceof APIError) {
+      const leaked =
+        err.message.includes(adminKey) ||
+        JSON.stringify(scrubSecret(err.body, adminKey)) !== JSON.stringify(err.body) ||
+        JSON.stringify(scrubSecret(err.headers, adminKey)) !== JSON.stringify(err.headers);
+      if (leaked) {
+        throw makeAPIError(
+          err.status,
+          scrubSecret(err.body, adminKey),
+          scrubSecret(err.headers, adminKey) as Record<string, string>,
+        );
+      }
+    } else if (err instanceof PartnerError && err.message.includes(adminKey)) {
+      const Ctor = err.constructor as new (message: string) => PartnerError;
+      throw new Ctor(err.message.split(adminKey).join('[redacted]'));
+    }
+    throw err;
+  }
 }
 
 /**
