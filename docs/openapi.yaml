@@ -2675,6 +2675,28 @@ components:
                 fail the sync, keeping the cursor, if any is missing. Null
                 uses the tenant's `verify` setting.
 
+    ServiceNowSyncRequest:
+      allOf:
+        - $ref: '#/components/schemas/ConnectorSyncRequest'
+        - type: object
+          properties:
+            dry_run:
+              type: boolean
+              default: false
+              description: >-
+                Read the Partner API and build the IRE payloads, but send
+                nothing to ServiceNow and leave the connector state (cursor
+                included) unchanged. The result counts what would be sent
+                per class and relation type.
+            verify:
+              type: [boolean, 'null']
+              default: null
+              description: >-
+                Read the written CIs and relations back through the Table
+                API (read only) and fail the sync, keeping the cursor, if
+                any is missing. Null uses the tenant's `verify` setting.
+                Ignored with `dry_run`.
+
   responses:
     AdminForbidden:
       description: >-
@@ -5999,7 +6021,8 @@ paths:
       summary: Import a cloud AI inventory export for a tenant, with no cloud credentials (operator)
       description: >-
         Stores the AI model deployments in an export made with the cloud's own
-        read-only CLI (AWS Bedrock so far; see the discovery sources guide).
+        read-only CLI (AWS Bedrock, Azure OpenAI / AI Foundry and Azure ML,
+        Google Cloud Vertex AI; see the discovery sources guide).
         The collector makes no cloud call. An export that contains a
         credential field is refused with 400, naming the field but not its
         value.
@@ -6017,7 +6040,10 @@ paths:
                   format: uuid
                 export:
                   type: object
-                  description: '{"cloud": "aws", "account_id"?: "...", "regions": {"<region>": {...}}}'
+                  description: >-
+                    {"cloud": "aws", "account_id"?: "...", "regions": {"<region>": {...}}},
+                    {"cloud": "azure", "subscriptions": {"<subscription id>": {...}}} or
+                    {"cloud": "gcp", "projects": {"<project id>": {"<region>": {...}}}}
               required: [tenant_id, export]
       responses:
         '200':
@@ -6093,7 +6119,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ConnectorSyncRequest'
+              $ref: '#/components/schemas/ServiceNowSyncRequest'
       responses:
         '200':
           description: Sync result

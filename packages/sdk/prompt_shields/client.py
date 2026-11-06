@@ -373,6 +373,7 @@ class _CompletionsNamespace:
         route: RouteHint | None = None,
         max_tokens: int | None = None,
         _event_hook: Callable[[dict], None] | None = None,
+        _stream_lazy_start: bool = False,
         **kwargs,
     ):
         """`create`, plus `_event_hook(event)` called on the telemetry event
@@ -401,7 +402,8 @@ class _CompletionsNamespace:
             return self._send_call(
                 model=model, messages=messages, ps_metadata=ps_metadata,
                 max_tokens=max_tokens, call_id=call_id, pseudo=pseudo,
-                _event_hook=_event_hook, **kwargs,
+                _event_hook=_event_hook, _stream_lazy_start=_stream_lazy_start,
+                **kwargs,
             )
         except BaseException:
             if pseudo is not None:
@@ -418,6 +420,7 @@ class _CompletionsNamespace:
         call_id: str,
         pseudo: ClientCall | None,
         _event_hook: Callable[[dict], None] | None,
+        _stream_lazy_start: bool = False,
         **kwargs,
     ):
         streaming = kwargs.get("stream") is True
@@ -466,7 +469,7 @@ class _CompletionsNamespace:
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
                 hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
-                call_id=call_id,
+                call_id=call_id, lazy_start=_stream_lazy_start,
             ), call_id)
             if pseudo is not None:
                 stream = attach_call_id(pseudo.stream(stream), call_id)
@@ -506,8 +509,18 @@ class _CompletionsNamespace:
                      ps_metadata: PSMetadata | None, start: float,
                      hide_usage_chunk: bool,
                      event_hook: Callable[[dict], None] | None = None,
-                     call_id: str | None = None) -> Any:
-        """Wrap a stream so one event is emitted when it ends. Fail-open."""
+                     call_id: str | None = None,
+                     lazy_start: bool = False) -> Any:
+        """Wrap a stream so one event is emitted when it ends. Fail-open.
+
+        ``lazy_start`` (ShieldsRouter): an error before the first chunk is a
+        failed request, as if ``create()`` had raised, so no event is
+        emitted for it; the router may then fail over.
+        """
+        failed_start = None
+        if lazy_start:
+            def failed_start() -> None:
+                record_failure(model, messages, (ps_metadata or {}).get("session_id"))
 
         def on_finish(adapter_fields: dict, stream_fields: dict,
                       latency_ms: int, flush: bool = True) -> None:
@@ -533,6 +546,7 @@ class _CompletionsNamespace:
                 on_finish,
                 start,
                 hide_usage_chunk=hide_usage_chunk,
+                on_failed_start=failed_start,
                 # Garbage-collected unfinished: enqueued, sent by a later
                 # flush (no I/O inside the garbage collector).
                 on_abandon=lambda *args: on_finish(*args, flush=False),

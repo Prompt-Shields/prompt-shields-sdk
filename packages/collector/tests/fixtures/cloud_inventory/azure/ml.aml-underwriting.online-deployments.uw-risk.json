@@ -1,0 +1,13 @@
+[
+  {
+    "endpoint_name": "uw-risk",
+    "id": "/subscriptions/3f2a8c1e-5b7d-4e2a-9c61-0d4e8f1a2b3c/resourceGroups/rg-uw/providers/Microsoft.MachineLearningServices/workspaces/aml-underwriting/onlineEndpoints/uw-risk/deployments/main",
+    "instance_count": 2,
+    "instance_type": "Standard_F4s_v2",
+    "model": "azureml:uw-risk-score:7",
+    "name": "main",
+    "provisioning_state": "Succeeded",
+    "tags": {"owner": "uw-risk@acme.com"},
+    "type": "Managed"
+  }
+]
