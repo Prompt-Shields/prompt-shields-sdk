@@ -17,6 +17,8 @@ dependencies = [
     "prometheus-client>=0.20",
     # OTLP/HTTP protobuf decoding for /ingest/otel (depends only on protobuf).
     "opentelemetry-proto>=1.27",
+    # Shared rate limit counters when PS_COLLECTOR_REDIS_URL is set.
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]

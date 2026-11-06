@@ -118,7 +118,7 @@ async def _enforce_rate_limit(
         )
         limit = (await db.execute(stmt)).scalar() or DEFAULT_RATE_LIMIT
 
-    result = get_rate_limiter().check(principal.partner_id, limit)
+    result = await get_rate_limiter().acheck(principal.partner_id, limit)
     response.headers["X-RateLimit-Limit"] = str(result.limit)
     response.headers["X-RateLimit-Remaining"] = str(result.remaining)
     response.headers["X-RateLimit-Reset"] = str(result.reset_at)

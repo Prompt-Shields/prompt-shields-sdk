@@ -36,9 +36,8 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import ValidationError
 
-from collector import loss_accounting
+from collector import loss_accounting, tenant_limits
 from collector.auth import resolve_tenant
-from collector.config import settings
 from collector.ingest import (
     LENIENT_FIELDS,
     IngestEvent,
@@ -46,7 +45,7 @@ from collector.ingest import (
     _store_events,
 )
 from collector.otel_ingest import _problem, _read_bounded_body
-from collector.partner_rate_limit import FixedWindowRateLimiter, get_kong_rate_limiter
+from collector.partner_rate_limit import RateLimiter, get_kong_rate_limiter
 from collector.sanitize import (
     BodyTooDeep,
     loads_bounded,
@@ -266,15 +265,17 @@ def map_payload(payload: Any) -> MappedEntry:
 async def ingest_kong(
     request: Request,
     response: Response,
-    limiter: Annotated[FixedWindowRateLimiter, Depends(get_kong_rate_limiter)],
+    limiter: Annotated[RateLimiter, Depends(get_kong_rate_limiter)],
 ):
     # Kong's own per-tenant limit (PS_KONG_RATE_LIMIT_PER_MINUTE), not the
     # /ingest/events one: http-log sends one request per proxied call unless
     # batching is on, so Kong traffic would use up the SDK's budget. Checked
     # before the body is read; Kong retries a 429.
     tenant_id = await resolve_tenant(request)
-    _enforce_rate_limit(limiter, tenant_id, response, settings.kong_rate_limit_per_minute)
     db = request.state.db
+    await _enforce_rate_limit(
+        limiter, tenant_id, response, await tenant_limits.limit_for(db, tenant_id, "kong")
+    )
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if content_type != "application/json":
         raise _problem(

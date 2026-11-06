@@ -178,6 +178,19 @@ class Settings(BaseSettings):
     # the endpoint requires `Authorization: Bearer <token>`.
     collector_metrics_enabled: bool = False
     collector_metrics_token: str = ""
+    # Shared store for the Partner API and ingest rate limiters
+    # (collector/partner_rate_limit.py), e.g. redis://redis:6379/0. Set it
+    # whenever the collector runs more than one worker or replica: without
+    # it each process counts on its own, so limits multiply. When Redis is
+    # unreachable a request is counted in-process instead (fail open).
+    collector_redis_url: str = ""
+    # Seconds one Redis call may take before the in-process fallback is used.
+    collector_redis_timeout_seconds: float = 0.5
+    # Counter key prefix in Redis, so several collectors can share one Redis.
+    collector_redis_key_prefix: str = "ps:collector:rl"
+    # Seconds a tenant's ingest limit overrides (tenants.settings
+    # ["ingest_rate_limits"]) are cached per process.
+    tenant_limits_cache_ttl_seconds: float = 30.0
 
     model_config = {"env_prefix": "PS_"}
 

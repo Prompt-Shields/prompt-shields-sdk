@@ -242,9 +242,21 @@ lifecycle sweep and connector CronJobs do not change it. `"true"` or
 `"false"` forces it, e.g. for a custom CronJob that runs a loop. `collector.workers` ignores it, so the worker and
 the API share one ConfigMap and Secret.
 
-The partner and ingest rate limits are kept per process, so with N collector
-replicas a tenant can reach N times `PS_RATE_LIMIT_PER_MINUTE`. Divide the
-limit by the replica count if it must hold globally.
+The partner and ingest rate limits are kept per process unless
+`PS_COLLECTOR_REDIS_URL` is set: without it, N collector replicas (or uvicorn
+workers) let a tenant reach N times `PS_RATE_LIMIT_PER_MINUTE`. With it every
+replica counts in the same Redis (atomic INCR + EXPIRE per key and minute;
+keys are hashed), so the limits hold globally. Set it in `collector.config`,
+or in the collector Secret when the URL holds a password. If Redis is
+unreachable a request is counted per process instead (fail open), logged,
+and counted in `ps_collector_rate_limit_store_errors`.
+
+Operators can override a tenant's ingest limits in
+`settings.ingest_rate_limits` with `PATCH /api/v1/operator/tenants/{id}`,
+e.g. `{"settings": {"ingest_rate_limits": {"events": 1000}}}` (keys
+`events`, `kong`, `mcp`, `feedback`, `feedback_user`; `null` removes the
+override). Each process caches overrides for
+`PS_TENANT_LIMITS_CACHE_TTL_SECONDS` (default 30).
 
 Tenant key auth keeps two more per-process structures. A key that passed its
 bcrypt check is remembered for `PS_INGEST_KEY_CACHE_TTL_SECONDS` (by an HMAC
@@ -550,9 +562,13 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_COLLECTOR_METRICS_TOKEN` (secret, or *chart* from `collector.metrics.tokenSecret`) | empty (no token) | Bearer token for `/metrics` |
 | `PS_READYZ_TIMEOUT_SECONDS` (*chart*) | `2` | `/readyz` database check deadline |
 | `PS_COLLECTOR_API_DOCS_ENABLED` (*chart*) | `false` | `/docs`, `/redoc`, `/openapi.json` |
-| `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process) |
-| `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart (per process) |
-| `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE` | `600`, `30` | `/ingest/feedback` limits per tenant and per `user_id` (per process) |
+| `PS_RATE_LIMIT_PER_MINUTE` | `100` | Per-tenant ingest limit (per process without Redis; per-tenant override in `settings.ingest_rate_limits`) |
+| `PS_KONG_RATE_LIMIT_PER_MINUTE` | `6000` | Per-tenant `/ingest/kong` limit, counted apart |
+| `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart |
+| `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE` | `600`, `30` | `/ingest/feedback` limits per tenant and per `user_id` |
+| `PS_COLLECTOR_REDIS_URL` (*config* or secret) | empty (per process) | Redis shared by the partner and ingest rate limiters, e.g. `redis://redis:6379/0` |
+| `PS_COLLECTOR_REDIS_TIMEOUT_SECONDS`, `PS_COLLECTOR_REDIS_KEY_PREFIX` | `0.5`, `ps:collector:rl` | Redis call deadline before the per-process fallback; key prefix |
+| `PS_TENANT_LIMITS_CACHE_TTL_SECONDS` | `30` | Per-process cache of tenant ingest limit overrides |
 | `PS_INGEST_KEY_CACHE_TTL_SECONDS`, `PS_INGEST_KEY_CACHE_MAX_ENTRIES` | `30`, `10000` | Verified tenant key cache (skips bcrypt; `0` TTL turns it off; per process) |
 | `PS_AUTH_FAILURE_LIMIT_PER_MINUTE`, `PS_AUTH_FAILURE_TRACKED_CLIENTS` | `60`, `10000` | Failed tenant key / admin token checks per client address per minute before `429` (`0` turns it off; per process) |
 | `FORWARDED_ALLOW_IPS` (uvicorn) | `127.0.0.1` | Proxies whose `X-Forwarded-For` sets the client address (failed-auth limiter, audit) |
