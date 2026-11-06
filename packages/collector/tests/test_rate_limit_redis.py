@@ -216,6 +216,40 @@ async def test_unreachable_redis_falls_back_to_in_process(pinned_clock, caplog):
     assert sum("Rate limit store unavailable" in r.message for r in caplog.records) == 1
 
 
+async def test_store_failure_skips_redis_for_a_while(pinned_clock, monkeypatch):
+    """After one failure the limiter counts in-process without calling Redis
+    until the retry interval passes, so a blackholed Redis does not add the
+    timeout to every request."""
+    clock = [1000.0]
+    monkeypatch.setattr(partner_rate_limit, "monotonic", lambda: clock[0])
+    calls = []
+
+    class _Script:
+        def __init__(self, fail):
+            self.fail = fail
+
+        async def __call__(self, keys, args):
+            calls.append(keys[0])
+            if self.fail[0]:
+                raise ConnectionError("down")
+            return 1
+
+    fail = [True]
+    client = SimpleNamespace(register_script=lambda _src: _Script(fail))
+    lim = RedisRateLimiter("ingest", client=client, timeout=0.2)
+    before = metrics.rate_limit_store_errors_total.labels(limiter="ingest")._value.get()
+    results = [await lim.acheck("t", 2) for _ in range(3)]
+    assert [r.allowed for r in results] == [True, True, False]
+    assert len(calls) == 1
+    after = metrics.rate_limit_store_errors_total.labels(limiter="ingest")._value.get()
+    assert after - before == 3
+    # Once the interval has passed, Redis is tried again.
+    fail[0] = False
+    clock[0] += partner_rate_limit._STORE_RETRY_SECONDS + 0.1
+    assert (await lim.acheck("t", 2)).allowed
+    assert len(calls) == 2
+
+
 def test_backend_follows_settings(monkeypatch, redis_url):
     monkeypatch.setattr(settings, "collector_redis_url", "")
     assert isinstance(partner_rate_limit._make("partner"), FixedWindowRateLimiter)

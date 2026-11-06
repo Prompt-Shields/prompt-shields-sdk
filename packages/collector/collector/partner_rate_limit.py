@@ -15,7 +15,10 @@ limit)``):
   ``PS_COLLECTOR_REDIS_TIMEOUT_SECONDS`` the request is counted by an
   in-process fallback instead (fail open, logged, and counted in the
   ``ps_collector_rate_limit_store_errors`` metric), so a Redis outage never
-  blocks ingest.
+  blocks ingest. After a failure the limiter skips Redis for
+  ``_STORE_RETRY_SECONDS`` and counts in-process, so an unreachable or
+  blackholed Redis costs one timeout per limiter per interval, not one per
+  request.
 
 Each limiter has a namespace (``partner``, ``ingest``, ``kong``, ``mcp``,
 ``feedback``) so counters for different endpoints never share a bucket. Keys
@@ -46,6 +49,10 @@ logger = logging.getLogger(__name__)
 
 # Seconds a Redis bucket lives: the current minute plus slack for clock skew.
 _BUCKET_TTL_SECONDS = 120
+
+# After a store failure, count in-process for this long before trying Redis
+# again, so requests do not each wait out the timeout during an outage.
+_STORE_RETRY_SECONDS = 5.0
 
 # INCR, and set the expiry on the first hit, atomically.
 _INCR_SCRIPT = """
@@ -162,6 +169,7 @@ class RedisRateLimiter:
         self._timeout = timeout
         self.fallback = fallback or FixedWindowRateLimiter()
         self._last_error_log = 0.0
+        self._skip_until = 0.0
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -179,6 +187,11 @@ class RedisRateLimiter:
 
     async def acheck(self, key: Hashable, limit: int) -> RateLimitResult:
         now = int(time.time())
+        if monotonic() < self._skip_until:
+            from collector import metrics
+
+            metrics.record_rate_limit_store_error(self.namespace)
+            return self.fallback.check(key, limit)
         try:
             client = self._get_client()
             if self._script is None:
@@ -202,6 +215,7 @@ class RedisRateLimiter:
 
         metrics.record_rate_limit_store_error(self.namespace)
         now = monotonic()
+        self._skip_until = now + _STORE_RETRY_SECONDS
         if now - self._last_error_log >= 60:
             self._last_error_log = now
             logger.warning(
