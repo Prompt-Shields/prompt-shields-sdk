@@ -244,7 +244,7 @@ This is a discovery and inventory tool. It is not a control, and the statements 
 - `ShieldsRouter`'s spend budget counters are in-process unless you pass a `budget_store` (Redis), so N processes can together spend N times a limit. The gateway's are per replica unless Redis is configured.
 - Pseudonymisation (`pseudonymise=True`) and learner auto mode (`learner=`) run only in the SDK, never in the gateway, and both are off by default. Pseudonymisation works in `ShieldsRouter`'s local mode and on the instrumented clients, which refuse it for calls bound for the gateway; auto mode works only in `ShieldsRouter`'s local mode. If the learner raises an error, the call keeps the policy's pick (fail open).
 - Budgets, the savings baseline and the gateway's exact and semantic response caches are off until configured. The semantic cache skips calls above `internal` sensitivity (with the default levels) and calls where PII is found, unless an operator changes that.
-- In local mode, `ShieldsRouter` refuses `stream=True`, and tool calls cannot be routed to Anthropic. Both raise `RouterError` rather than degrading silently.
+- In local mode, tool calls cannot be routed to Anthropic: they raise `RouterError` rather than degrading silently. `ShieldsRouter` streams in local mode (`stream=True`), but fails over only before the first chunk, and the chunks keep the serving provider's shape (Anthropic events are not translated to chat-completion chunks).
 - The gateway runs its built-in default policy, which has no sensitivity or data rules. Its data-policy stages only run when a route policy is passed to `psRouter()` in code; there is no setting for a policy file yet.
 - Calls that do not go through the router are neither routed nor checked.
 
