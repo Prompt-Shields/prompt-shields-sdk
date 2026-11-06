@@ -7,16 +7,17 @@
 # - works with a read-only root filesystem. Nothing is written at runtime
 #   unless you opt into the file cache backend; mount an emptyDir at /tmp if
 #   a dependency needs scratch space.
+#
+# Base image: Node 24 LTS, pinned to an exact patch and Alpine release. Node 20
+# is end of life and its bundled root store still trusts the distrusted emSign
+# ECC roots. The pinned tag also fixes the npm version (11.x) used to build.
 
-FROM node:20-alpine AS build
+FROM node:24.22.2-alpine3.24 AS build
 
 WORKDIR /app
 
 # Upgrade system packages
 RUN apk upgrade --no-cache
-
-# Upgrade npm to version 10.9.2
-RUN npm install -g npm@10.9.2
 
 # husky (the `prepare` script) is a git hook installer: not needed in an image.
 ENV HUSKY=0
@@ -34,7 +35,7 @@ RUN npm run build \
 && npm ci --omit=dev \
 && npm cache clean --force
 
-FROM node:20-alpine
+FROM node:24.22.2-alpine3.24
 
 # Upgrade system packages. npm, npx, corepack and yarn are not needed to run
 # the gateway (and their bundled dependencies only add CVEs to scan).
