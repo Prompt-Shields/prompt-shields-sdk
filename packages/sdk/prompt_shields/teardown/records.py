@@ -656,13 +656,32 @@ def _ps_event_record(e: Mapping[str, Any], file: str) -> TeardownRecord:
     )
 
 
+# Fields every gateway call event carries (latency since the first telemetry
+# release; api_surface and call_id on current gateways) and that the
+# cache-only event of released gateways (buildCacheEvent before #295: vendor,
+# model, source, cache_status, est_tokens_saved) never has.
+_CALL_EVENT_FIELDS = ("latency_ms", "api_surface", "call_id")
+
+
+def _is_gateway_cache_event(e: Mapping[str, Any]) -> bool:
+    """A released gateway's separate cache-lookup event, not a call.
+
+    Current gateways put ``cache_status`` on the call's own event, which can
+    lack ``tokens_in`` (an upstream error, a stream without usage), so
+    ``cache_status`` without usage alone does not mark a cache-only event.
+    """
+    if e.get("cache_status") is None or e.get("tokens_in") not in (None, ""):
+        return False
+    return all(e.get(k) in (None, "") for k in _CALL_EVENT_FIELDS)
+
+
 def _ps_events(rows: Iterable[Any], stats: SourceStats) -> Iterator[TeardownRecord]:
     for e in rows:
         stats.rows_read += 1
         if not isinstance(e, Mapping):
             stats.drop("not_an_object")
             continue
-        if e.get("cache_status") is not None and e.get("tokens_in") in (None, ""):
+        if _is_gateway_cache_event(e):
             stats.drop("gateway_cache_event")
             continue
         rec = _ps_event_record(e, stats.file)
