@@ -160,6 +160,33 @@ async def test_round_trip_through_partner_api(app_sessions, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dry_run_reads_the_partner_api_and_writes_nothing(app_sessions):
+    factory = app_sessions
+    async with factory() as db:
+        tid = (await db.execute(select(Tenant))).scalar_one().id
+        db.add(
+            AIAsset(
+                tenant_id=tid, vendor="openai", model="gpt-4o", discovery_source=["sdk"]
+            )
+        )
+        await db.commit()
+        before = dict((await db.get(Tenant, tid)).settings or {})
+
+    key = await _partner_key(["export:read", "changes:read"])
+    fake = FakeServiceNow()
+    async with factory() as db:
+        out = await sn.sync_servicenow(db, tid, dry_run=True, **_kw(tid, key, fake))
+    assert out["status"] == "ok" and out["dry_run"] is True, out
+    assert out["assets"] == 1 and out["ci_items"] == 2 and out["relations"] == 1
+    assert out["item_classes"] == {"cmdb_ci_function_ai": 1, "cmdb_ci_service": 1}
+    assert fake.requests == []
+    async with factory() as db:
+        t = await db.get(Tenant, tid)
+        await db.refresh(t)
+        assert (t.settings or {}) == before
+
+
+@pytest.mark.asyncio
 async def test_partner_key_of_another_tenant_is_refused(app_sessions):
     """The operator pairs tenant B with tenant A's partner key: both
     connectors refuse before writing anything or moving B's cursor."""
