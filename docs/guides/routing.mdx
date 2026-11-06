@@ -33,7 +33,7 @@ rely on routing for compliance.
 | Circuit breakers | Per process, shared by the routers in it unless you pass `breakers=` or `breaker_config=` | Per gateway replica |
 | [Spend budgets](#spend-budgets) | `budgets=` (`budget.v1`). Counters are in-process unless you pass `budget_store=` | `PS_BUDGETS` or `PS_BUDGETS_FILE`. Counters are per replica unless Redis is configured |
 | [Savings baseline](#savings) | `baseline=` (`baseline.v1`) | `PS_BASELINE_FILE` |
-| [Pseudonymisation](/guides/pseudonymisation) | `pseudonymise=True`, off by default | No |
+| [Pseudonymisation](/guides/pseudonymisation) | `pseudonymise=True`, off by default (the instrumented clients take it too) | No |
 | [Learner auto mode](/guides/routing-learner#auto-mode) | `learner=AutoLearner(...)`, off by default | No |
 | Semantic response cache | No | Opt-in, see [Response cache](#response-cache) |
 

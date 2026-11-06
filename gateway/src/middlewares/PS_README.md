@@ -101,8 +101,9 @@ yet:
   credentials (`x-portkey-provider` + `Authorization`, or a single-target
   config).
 - **Run the routing learner in auto mode, or pseudonymise.** Both run only
-  in the SDK's `ShieldsRouter` (local mode), which refuses them with
-  `mode="gateway"`. The gateway classifies and routes what it receives.
+  in the SDK: auto mode in `ShieldsRouter` (local mode), pseudonymisation
+  there and in the instrumented clients. Both refuse them for calls sent to
+  the gateway. The gateway classifies and routes what it receives.
 
 The SDK's ordinary clients never pick a model (`ShieldsRouter` is the opt-in
 exception). They express *intent*; the gateway owns the
