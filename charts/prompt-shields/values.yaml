@@ -564,9 +564,13 @@ worker:
   tolerations: []
   affinity: {}
 
-# Scheduled jobs (collector image, collector Secret and config). All off by
-# default: retention and audit purges delete data. `schedule` is cron
-# syntax in the controller's time zone unless `timeZone` is set.
+# Scheduled jobs (collector image, collector Secret and config). On by
+# default: auditPurge, retentionPurge and spendAnomaly. The purges DELETE
+# data past each retention window (PS_AUDIT_RETENTION_DAYS, each tenant's
+# retention_days / PS_RETENTION_DAYS_DEFAULT; 365 days by default) on their
+# first run after an upgrade: set `enabled: false` to keep everything.
+# `schedule` is cron syntax in the controller's time zone unless `timeZone`
+# is set.
 cronJobs:
   defaults:
     concurrencyPolicy: Forbid
@@ -585,13 +589,19 @@ cronJobs:
         memory: 1Gi
   jobs:
     auditPurge:
-      enabled: false
+      enabled: true
       schedule: "17 2 * * *"
       args: ["python", "-m", "collector.audit", "purge"]
     retentionPurge:
-      enabled: false
+      enabled: true
       schedule: "37 2 * * *"
       args: ["python", "-m", "collector.retention", "purge"]
+    # Spend anomaly alerts for yesterday (UTC), every tenant. Run it after
+    # the UTC day has ended; re-running a day is safe.
+    spendAnomaly:
+      enabled: true
+      schedule: "57 3 * * *"
+      args: ["python", "-m", "collector.spend_anomalies", "--all-tenants"]
     lifecycleSweep:
       enabled: false
       schedule: "7 3 * * *"

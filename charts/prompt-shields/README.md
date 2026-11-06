@@ -202,16 +202,19 @@ both 0 by default). Run each in exactly one place, not in every API replica:
   `worker.providerUsagePullIntervalSeconds` (default 0, off; at least 3600,
   usually 86400). At least one must be above 0, since the process exits
   with status 2 when no loop is on; the chart refuses to render otherwise.
-- `cronJobs.jobs.*`: one CronJob each, all off by default:
+- `cronJobs.jobs.*`: one CronJob each. `auditPurge`, `retentionPurge` and
+  `spendAnomaly` are on by default (since chart 0.4.11; see
+  [Upgrading](#upgrading)), the others are off:
 
-| Job | Command | Default schedule |
-|---|---|---|
-| `auditPurge` | `python -m collector.audit purge` (partner audit rows older than `PS_AUDIT_RETENTION_DAYS`) | `17 2 * * *` |
-| `retentionPurge` | `python -m collector.retention purge` (usage events past retention) | `37 2 * * *` |
-| `lifecycleSweep` | `python -m collector.lifecycle` (mark assets stale / retired) | `7 3 * * *` |
-| `webhooksDeliver` | `python -m collector.webhooks deliver` (alternative to the worker) | every minute |
-| `webhooksPurge` | `python -m collector.webhooks purge` | `47 3 * * *` |
-| `providerUsage` | `python -m collector.provider_usage_admin --all-tenants` | `27 4 * * *` |
+| Job | Command | Default | Default schedule |
+|---|---|---|---|
+| `auditPurge` | `python -m collector.audit purge` (partner audit rows older than `PS_AUDIT_RETENTION_DAYS`) | on | `17 2 * * *` |
+| `retentionPurge` | `python -m collector.retention purge` (usage events past retention) | on | `37 2 * * *` |
+| `spendAnomaly` | `python -m collector.spend_anomalies --all-tenants` (spend anomaly alerts for yesterday, UTC) | on | `57 3 * * *` |
+| `lifecycleSweep` | `python -m collector.lifecycle` (mark assets stale / retired) | off | `7 3 * * *` |
+| `webhooksDeliver` | `python -m collector.webhooks deliver` (alternative to the worker) | off | every minute |
+| `webhooksPurge` | `python -m collector.webhooks purge` | off | `47 3 * * *` |
+| `providerUsage` | `python -m collector.provider_usage_admin --all-tenants` | off | `27 4 * * *` |
 
 Add per-tenant connector syncs as extra entries, e.g.
 `args: ["python", "-m", "collector.leanix", "--tenant", "<uuid>"]` (also
@@ -261,6 +264,39 @@ is never held back. The address is the one uvicorn reports, which follows
 `FORWARDED_ALLOW_IPS` in `collector.config` to its addresses, or every client
 shares one failure count and one bad client can make other clients' wrong
 keys get `429` instead of `401`.
+
+## Upgrading
+
+### To 0.4.11: purge CronJobs on by default
+
+`cronJobs.jobs.auditPurge` and `cronJobs.jobs.retentionPurge` are now
+enabled by default, so retention settings take effect without extra values.
+**On their first run after the upgrade they delete data older than each
+retention window:** partner audit rows older than `PS_AUDIT_RETENTION_DAYS`
+(default 365 days), and each tenant's usage events (with the MCP usage,
+call feedback and spend alert rows that `collector.retention` purges with
+them) older than the tenant's `retention_days` setting, else
+`PS_RETENTION_DAYS_DEFAULT` (default 365 days). Purge runs are recorded on
+the audit trail (counts only).
+
+Before upgrading, check the retention settings, and preview the usage event
+purge with `python -m collector.retention purge --dry-run` (for example in a
+temporary pod with the collector image and Secret). To keep the old
+behaviour, disable the jobs:
+
+```yaml
+cronJobs:
+  jobs:
+    auditPurge:
+      enabled: false
+    retentionPurge:
+      enabled: false
+```
+
+The new `spendAnomaly` CronJob (daily, `57 3 * * *`) is also on by default.
+It writes spend alerts and queues `spend.anomaly` webhook events only;
+it deletes nothing. Disable it with `cronJobs.jobs.spendAnomaly.enabled: false`,
+or per tenant with `tenants.settings["spend_anomaly"] = {"enabled": false}`.
 
 ## Security defaults
 
@@ -457,7 +493,7 @@ can follow the images if those change.
 | `worker.enabled` / `.command` | `false` / `python -m collector.workers` | Singleton worker Deployment |
 | `worker.webhookIntervalSeconds` / `.providerUsagePullIntervalSeconds` | `5` / `0` | Loop intervals; at least one above 0 |
 | `cronJobs.defaults` | see values | Applied to every CronJob (`timeZone`, history, deadlines, resources) |
-| `cronJobs.jobs.<name>` | all off | `enabled`, `schedule`, `args`, and any default override |
+| `cronJobs.jobs.<name>` | `auditPurge`, `retentionPurge`, `spendAnomaly` on; the rest off | `enabled`, `schedule`, `args`, and any default override |
 | `networkPolicy.enabled` | `true` | NetworkPolicies |
 | `networkPolicy.gateway.ingressFrom` / `.collector.extraIngressFrom` | `[]` | Ingress peers |
 | `networkPolicy.egress.dns` / `.database.cidrs` / `.database.port` / `.allowExternal` / `.extra` | `true` / `[]` / `5432` / `true` / `[]` | Egress |
