@@ -187,6 +187,12 @@ const SCHEMAS: Record<string, string> = {
   LearnerRecommendation: 'LearnerRecommendation',
   LearnerReviewRequest: 'LearnerReviewRequest',
   LearnerSnapshotUploadResult: 'LearnerSnapshotUploadResult',
+  // Provider admin credentials (client.providerCredentials,
+  // client.providerKeyFingerprints).
+  ProviderCredential: 'ProviderCredential',
+  AdminKeyRequest: 'AdminKeyRequest',
+  ProviderKeyFingerprintLink: 'ProviderKeyFingerprintLink',
+  FingerprintRequest: 'FingerprintRequest',
 };
 /**
  * Schemas whose property names the SDK keeps as sent (not camelCased):
@@ -202,12 +208,6 @@ const UNMAPPED_SCHEMAS = new Set([
   // Call feedback (#43): ingest-key route, not wrapped by the partner SDK.
   'CallFeedbackRequest',
   'CallFeedbackResult',
-  // Provider credentials (#93) are not wrapped by the SDK: a tenant stores
-  // its own provider admin keys. Call them with client.send() if needed.
-  'ProviderCredential',
-  'AdminKeyRequest',
-  'ProviderKeyFingerprintLink',
-  'FingerprintRequest',
   // Tenant admin automation (admin tokens, ingest keys, partner
   // credentials) and operator tenant routes: documented for Terraform and
   // other automation, not wrapped by the partner SDK.
@@ -243,8 +243,9 @@ interface Operation {
 }
 
 /**
- * In the spec, not wrapped by the client: provider credentials, the rest of
- * the tenant admin API and the operator routes.
+ * In the spec, not wrapped by the client: the tenant admin API (other than
+ * webhooks), the operator routes and the ingest-key routes. Every
+ * `/partner/v1` route is wrapped.
  */
 const NOT_WRAPPED: Operation = { methods: [] };
 
@@ -271,14 +272,28 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/export': { methods: ['export.get'], params: 'ExportParams' },
   'GET /partner/v1/usage/focus-export': { methods: ['usage.focusExport'], params: 'FocusExportParams' },
   'GET /partner/v1/health': { methods: ['health'] },
-  'GET /partner/v1/provider-credentials': NOT_WRAPPED,
-  'GET /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
-  'POST /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
-  'DELETE /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
-  'POST /partner/v1/provider-credentials/{provider}/rotate': NOT_WRAPPED,
-  'GET /partner/v1/provider-key-fingerprints': NOT_WRAPPED,
-  'PUT /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}': NOT_WRAPPED,
-  'DELETE /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}': NOT_WRAPPED,
+  // Provider admin credentials (#93): client.providerCredentials and
+  // client.providerKeyFingerprints. The /api/v1/admin copies take the tenant
+  // API key and are not wrapped.
+  'GET /partner/v1/provider-credentials': { methods: ['providerCredentials.list'] },
+  'GET /partner/v1/provider-credentials/{provider}': { methods: ['providerCredentials.get'] },
+  'POST /partner/v1/provider-credentials/{provider}': {
+    methods: ['providerCredentials.create'],
+    body: 'AdminKeyRequest',
+  },
+  'DELETE /partner/v1/provider-credentials/{provider}': { methods: ['providerCredentials.delete'] },
+  'POST /partner/v1/provider-credentials/{provider}/rotate': {
+    methods: ['providerCredentials.rotate'],
+    body: 'AdminKeyRequest',
+  },
+  'GET /partner/v1/provider-key-fingerprints': { methods: ['providerKeyFingerprints.list'] },
+  'PUT /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}': {
+    methods: ['providerKeyFingerprints.put'],
+    body: 'FingerprintRequest',
+  },
+  'DELETE /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}': {
+    methods: ['providerKeyFingerprints.delete'],
+  },
   'GET /api/v1/admin/provider-credentials': NOT_WRAPPED,
   'GET /api/v1/admin/provider-credentials/{provider}': NOT_WRAPPED,
   'POST /api/v1/admin/provider-credentials/{provider}': NOT_WRAPPED,
@@ -345,6 +360,7 @@ const OPERATIONS: Record<string, Operation> = {
   'POST /partner/v1/spend-alerts/{alert_id}/acknowledge': { methods: ['spendAlerts.acknowledge'] },
   'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,
   'POST /api/v1/admin/cloud-inventory/pull': NOT_WRAPPED,
+  'POST /api/v1/admin/cloud-inventory/import': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/leanix/sync': NOT_WRAPPED,
   'GET /api/v1/admin/connectors/leanix/status': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/servicenow/sync': NOT_WRAPPED,
@@ -402,7 +418,7 @@ function specOperations(): Map<string, Json> {
 
 function responseSchema(key: string, status = '200'): Json {
   const op = specOperations().get(key);
-  return deref(op.responses[status].content['application/json'].schema);
+  return deref(deref(op.responses[status]).content['application/json'].schema);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -441,6 +457,14 @@ describe('docs/openapi.yaml drift check', () => {
     expect(
       compareSchema(spec.components.schemas.LearnerRecommendation.properties.projection, 'LearnerProjection'),
     ).toEqual([]);
+    expect(
+      compareSchema(responseSchema('GET /partner/v1/provider-credentials').properties.meta, 'ProviderCredentialListMeta'),
+    ).toEqual([]);
+    for (const status of ['200', '201']) {
+      const link = responseSchema('PUT /partner/v1/provider-key-fingerprints/{provider}/{api_key_id}', status);
+      expect(compareSchema(link, 'FingerprintLinkResult')).toEqual([]);
+      expect(compareSchema(link.properties.meta, 'FingerprintLinkMeta')).toEqual([]);
+    }
     for (const [key, iface] of [
       ['GET /partner/v1/learner/snapshots', 'LearnerSnapshotList'],
       ['GET /partner/v1/learner/recommendations', 'LearnerRecommendationList'],
@@ -462,6 +486,13 @@ describe('docs/openapi.yaml drift check', () => {
     const content = specOperations().get('GET /partner/v1/usage/focus-export').responses['200'].content;
     expect(Object.keys(content).sort()).toEqual(['application/x-ndjson', 'text/csv']);
     expect(deref(content['application/x-ndjson'].schema)).toBe(spec.components.schemas.FocusCostRow);
+  });
+
+  it('wraps every /partner/v1 operation', () => {
+    const unwrapped = Object.entries(OPERATIONS)
+      .filter(([key, op]) => key.split(' ')[1].startsWith('/partner/v1/') && op.methods.length === 0)
+      .map(([key]) => key);
+    expect(unwrapped).toEqual([]);
   });
 
   it('lists exactly the documented operations', () => {

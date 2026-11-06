@@ -37,6 +37,7 @@ import {
   hasAnthropicWebSearch,
   wantsWebSearchSources,
 } from './webSearchOutput';
+import { outputTextLogprobs } from './requestFields';
 
 type ResponseStatus = 'completed' | 'incomplete' | 'in_progress';
 
@@ -229,7 +230,15 @@ export function transformChatCompletionsToResponses(
     );
     // Only add message if there's actual text content
     if (text) {
-      messageItems.push(outputMessage(text, status, grounding.annotations));
+      messageItems.push(
+        outputMessage(
+          text,
+          status,
+          grounding.annotations,
+          // PS fork (#73): when include lists them (requestFields.ts)
+          outputTextLogprobs(choice, originalRequest)
+        )
+      );
     }
     messageItems.push(...(grounding.calls as any[]));
   }
@@ -269,7 +278,8 @@ export function transformChatCompletionsToResponses(
 function outputMessage(
   text: string,
   status: ResponseStatus,
-  annotations: UrlCitation[] = []
+  annotations: UrlCitation[] = [],
+  logprobs: any[] = []
 ): ResponseOutputMessage {
   return {
     id: `msg_${randomUUID()}`,
@@ -281,7 +291,7 @@ function outputMessage(
         type: 'output_text',
         text,
         annotations,
-        logprobs: [],
+        logprobs,
       } as ResponseOutputText,
     ],
   } as ResponseOutputMessage;

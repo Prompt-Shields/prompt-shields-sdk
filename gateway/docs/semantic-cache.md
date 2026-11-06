@@ -105,6 +105,10 @@ response's usage priced as a normal call: what the hit avoided). Routed hits
 keep their `counterfactual_cost`, so savings reports count cache hits as
 savings against the baseline.
 
+Each request sends one event. Every lookup (hit, miss, bypass, refresh; not
+`DISABLED`) is reported as `cache_status` on that event, with the call's
+`X-PS-*` attribution and call id; there is no separate cache-only event.
+
 Prometheus (`PS_METRICS_ENABLED=true`):
 
 - `ps_gateway_cache_responses_total{status}`: `hit`, `miss`, `semantic_hit`, `semantic_miss`, `semantic_bypass`, `refresh`

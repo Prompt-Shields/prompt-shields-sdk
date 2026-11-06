@@ -129,6 +129,48 @@ def test_drop_reasons_are_counted():
         assert s.rows_read == s.rows_used + sum(s.dropped.values())
 
 
+def test_gateway_cache_events_old_and_new_shapes(tmp_path):
+    # Released gateways (before #295): a call event plus a separate cache-only
+    # event per lookup. Current gateways: cache_status on the call's own event.
+    legacy_call = {"vendor": "openai", "model": "gpt-4o", "source": "gateway",
+                   "tokens_in": 100, "tokens_out": 10, "latency_ms": 120}
+    legacy_cache = [
+        {"vendor": "openai", "model": "gpt-4o", "source": "gateway",
+         "cache_status": "MISS", "est_tokens_saved": 0},
+        {"vendor": "openai", "model": "gpt-4o", "source": "gateway",
+         "cache_status": "HIT", "est_tokens_saved": 300},
+        # The same event as stored and exported with empty columns.
+        {"vendor": "openai", "model": "gpt-4o", "source": "gateway",
+         "cache_status": "HIT", "est_tokens_saved": 300, "tokens_in": None,
+         "latency_ms": None, "api_surface": None, "call_id": None},
+    ]
+    current = {"vendor": "openai", "model": "gpt-4o", "source": "gateway",
+               "api_surface": "chat", "latency_ms": 80}
+    current_rows = [
+        # Upstream error: a miss with no usage.
+        {**current, "call_id": "c-err", "business_unit": "c-err", "cache_status": "MISS", "est_tokens_saved": 0},
+        # Streamed call whose stream reported no usage.
+        {**current, "call_id": "c-stream", "business_unit": "c-stream", "cache_status": "MISS", "stream": True},
+        # Cache hit: no upstream usage, but it is still the call.
+        {**current, "call_id": "c-hit", "business_unit": "c-hit", "cache_status": "HIT", "est_tokens_saved": 300,
+         "cost": 0, "cost_source": "cache"},
+        # A hit that carries usage.
+        {**current, "call_id": "c-hit2", "business_unit": "c-hit2", "cache_status": "HIT", "est_tokens_saved": 50,
+         "tokens_in": 50, "tokens_out": 5},
+    ]
+    path = tmp_path / "events.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n"
+                            for r in [legacy_call, *legacy_cache, *current_rows]))
+    loaded = load_records([path])
+    (stats,) = loaded.sources
+    assert dict(stats.dropped) == {"gateway_cache_event": 3}
+    assert stats.rows_used == 5
+    assert len(loaded.records) == 5
+    ids = [r.business_unit for r in loaded.records]
+    assert ids.count("c-hit") == 1 and ids.count("c-err") == 1
+    assert ids.count("c-stream") == 1 and ids.count("c-hit2") == 1
+
+
 def test_generic_record_keeps_no_text():
     loaded = load_records([FIXTURES / "generic.jsonl"])
     rec = loaded.records[0]
