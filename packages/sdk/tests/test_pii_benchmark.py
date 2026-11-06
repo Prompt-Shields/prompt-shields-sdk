@@ -145,27 +145,55 @@ def test_phone_lookalikes_rejected(text):
     assert "phone" not in detect_pii_categories(text)
 
 
+# name -> (build an input from a repeat count, repeat count for ~100 KB)
 _ADVERSARIAL = {
-    "letters": "a" * 100_000,
-    "local part then @": "a" * 100_000 + "@",
-    "dotted": "a." * 50_000,
-    "many @": "a@" * 50_000,
-    "digits": "1" * 100_000,
-    "digit-dash": "1-" * 50_000,
-    "plus groups": "+1 " * 33_000,
-    "zero groups": "0 " * 50_000,
-    "iban heads": "SE45 " * 20_000,
+    "letters": (lambda n: "a" * n, 100_000),
+    "local part then @": (lambda n: "a" * n + "@", 100_000),
+    "dotted": (lambda n: "a." * n, 50_000),
+    "many @": (lambda n: "a@" * n, 50_000),
+    "digits": (lambda n: "1" * n, 100_000),
+    "digit-dash": (lambda n: "1-" * n, 50_000),
+    "plus groups": (lambda n: "+1 " * n, 33_000),
+    "zero groups": (lambda n: "0 " * n, 50_000),
+    "iban heads": (lambda n: "SE45 " * n, 20_000),
 }
+
+
+def _cpu_seconds(text: str, times: int) -> float:
+    start = time.thread_time()
+    for _ in range(times):
+        detect_pii_categories(text)
+    return time.thread_time() - start
+
+
+def _growth(small: str, large: str) -> float:
+    """Cost of `large` over cost of `small` (a quarter of its size).
+
+    Measured in this thread's CPU time, which other processes (parallel test
+    workers) don't inflate. Each sample does the same work (the small input
+    four times vs the large one once), and the best of several interleaved
+    samples is kept.
+    """
+    best_small = best_large = float("inf")
+    deadline = time.perf_counter() + 1.0
+    for i in range(5):
+        if i and time.perf_counter() > deadline:
+            break
+        best_small = min(best_small, _cpu_seconds(small, 4))
+        best_large = min(best_large, _cpu_seconds(large, 1))
+    return 4 * best_large / max(best_small, 1e-5)
 
 
 @pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
 def test_detection_stays_linear_on_100kb(name):
-    # The unanchored email pattern took ~0.5 s on 20 KB of letters (quadratic).
-    text = _ADVERSARIAL[name]
-    assert len(text) >= 99_000
-    t = time.perf_counter()
-    detect_pii_categories(text)
-    assert time.perf_counter() - t < 1.0
+    # Checked by how the cost grows, not by a wall-clock limit, so a busy
+    # machine can't fail it: 4x the input must cost under 8x as much. Linear
+    # scanning gives ~4x; the unanchored email pattern this guards against was
+    # quadratic (~16x; ~0.5 s on 20 KB of letters, ~10 s on 100 KB).
+    make, n = _ADVERSARIAL[name]
+    large = make(n)
+    assert len(large) >= 99_000
+    assert _growth(make(n // 4), large) < 8
 
 
 def test_anchored_email_still_matches_mid_run():
