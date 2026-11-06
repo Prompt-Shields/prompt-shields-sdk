@@ -36,6 +36,7 @@ from prompt_shields.pricing import (
 )
 from prompt_shields.prompt_features import PromptFeatures, notify_prompt_features
 from prompt_shields.providers import get_adapter
+from prompt_shields.pseudonymise import ClientCall
 from prompt_shields.streaming import (
     AsyncShieldsStream,
     StreamAccumulator,
@@ -88,12 +89,17 @@ class AsyncShieldsClient:
         # policy, so the switch is not policy-checked (see
         # prompt_shields.budgets.plain_client_model).
         allow_budget_downgrade: bool = False,
+        # Reversible pseudonymisation (#36, off by default): replace the PII
+        # the SDK detects with placeholders before each call and restore the
+        # answer (prompt_shields.pseudonymise). Not for calls to the gateway.
+        pseudonymise: bool = False,
         **provider_kwargs,
     ):
         self._vendor = vendor
         self._adapter = get_adapter(vendor)
         self._budgets = make_enforcer(budgets, budget_store)
         self._allow_budget_downgrade = allow_budget_downgrade
+        self._pseudonymise = bool(pseudonymise)
         warn_unapplied_downgrade(self._budgets, allow_budget_downgrade)
         self._ps_api_key = ps_api_key
         self._ps_collector_url = ps_collector_url
@@ -283,6 +289,37 @@ class _AsyncCompletionsNamespace:
         call_id = new_call_id(ps_metadata)
         call_id_headers(kwargs, call_id)
 
+        # Pseudonymisation (#36): from here on only the placeholders are
+        # sent, put on telemetry or handed to callbacks; the mapping stays
+        # on `pseudo` and is dropped when the call (or its stream) is done.
+        pseudo = None
+        if self._parent._pseudonymise:
+            pseudo = ClientCall(messages, kwargs, scan_pii=self._parent._scan_pii)
+            messages = pseudo.messages
+            _event_hook = pseudo.event_hook(_event_hook)
+        try:
+            return await self._send_call(
+                model=model, messages=messages, ps_metadata=ps_metadata,
+                max_tokens=max_tokens, call_id=call_id, pseudo=pseudo,
+                _event_hook=_event_hook, **kwargs,
+            )
+        except BaseException:
+            if pseudo is not None:
+                pseudo.clear()
+            raise
+
+    async def _send_call(
+        self,
+        *,
+        model: str,
+        messages: list,
+        ps_metadata: PSMetadata | None,
+        max_tokens: int | None,
+        call_id: str,
+        pseudo: ClientCall | None,
+        _event_hook: Callable[[dict], None] | None,
+        **kwargs,
+    ):
         streaming = kwargs.get("stream") is True
         hide_usage_chunk = False
         if (
@@ -326,12 +363,15 @@ class _AsyncCompletionsNamespace:
                 raise
 
         if streaming:
-            return attach_call_id(self._wrap_stream(
+            stream = attach_call_id(self._wrap_stream(
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
                 hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
                 call_id=call_id,
             ), call_id)
+            if pseudo is not None:
+                stream = attach_call_id(pseudo.stream(stream), call_id)
+            return stream
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -344,6 +384,9 @@ class _AsyncCompletionsNamespace:
         attach_outcome_signals(event, model=model, messages=messages,
                                response=response, request=kwargs)
         await self._send(event, messages)
+        if pseudo is not None:
+            # After telemetry: the event and outcome signals saw placeholders.
+            response = pseudo.response(response)
         return attach_call_id(response, call_id)
 
     async def _send(self, event: dict, messages: list,
