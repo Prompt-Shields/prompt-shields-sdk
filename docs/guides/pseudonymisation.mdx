@@ -19,7 +19,7 @@ The mapping from placeholder to value stays in your process, for that one call:
 <Warning>
 Pseudonymisation is off by default and only replaces what the detector finds.
 The detector does not find names, street addresses or most free-text
-identifiers, and its recall has not been measured yet (#35). Read
+identifiers, and its recall is only measured on a synthetic benchmark (#35). Read
 [Limits](#limits) before you rely on it.
 </Warning>
 
@@ -151,13 +151,15 @@ are numbered per call, so they do not identify a person across calls.
 ## Limits
 
 - **Detection sets what is replaced.** Only email addresses, phone numbers,
-  US SSNs, card numbers, IPv4 addresses, IBANs (without spaces) and
-  checksummed Nordic national IDs are found, by regular expressions and
-  checksums. Names, street addresses, dates of birth, customer numbers and
-  most free-text identifiers are not, and short national phone formats (such
-  as 8-digit Norwegian numbers) are missed. Anything not found is sent as it
-  is. The detector's recall and precision have not been measured on a
-  labelled dataset yet; that benchmark and its recall gate are #35.
+  US SSNs, Luhn-valid card numbers, IPv4 addresses, mod-97-valid IBANs
+  (compact or grouped) and checksummed Nordic national IDs are found, by
+  regular expressions and checksums. The pseudonymiser uses the same matches
+  as the PII scanner. Names, street addresses, dates of birth, customer
+  numbers and most free-text identifiers are not found, and short national
+  phone formats without a `+CC` or trunk 0 (such as 8-digit Norwegian
+  numbers) are missed. Anything not found is sent as it is. Recall is
+  measured on the synthetic benchmark in `benchmarks/pii/` (#35), not on
+  real traffic.
 - **Keyword topics are not removed.** `health_data` and `financial_data` mark
   a topic, not an entity. They stay in the text and keep escalating the level.
 - **Only text is pseudonymised.** Images, audio, files and tool definitions

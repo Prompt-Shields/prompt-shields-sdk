@@ -74,6 +74,28 @@ def test_spans_do_not_overlap_and_prefer_specific_categories():
         assert e1 <= s2
 
 
+def test_validated_ibans_and_cards_become_one_placeholder_each():
+    # The checksums the scanner applies (#270) decide what is replaced: a
+    # spaced IBAN is one IBAN (not a card or phone inside it), a Luhn-valid
+    # card is one card, and a 16-digit number that fails Luhn is left alone.
+    spaced_iban = "SE45 5000 0000 0583 9825 7466"
+    card = "4111 1111 1111 1111"
+    not_a_card = "4111111111111112"
+    text = f"iban {spaced_iban}, card {card}, ref {not_a_card}"
+    assert set(detect_pii_categories(text)) >= {"iban", "credit_card"}
+    spans = find_pii_spans(text)
+    assert [(text[s:e], c) for s, e, c in spans] == [
+        (spaced_iban, "iban"), (card, "credit_card"),
+    ]
+    p = pseudonymise([{"role": "user", "content": text}])
+    assert p.messages[0]["content"] == (
+        f"iban {OPEN}IBAN_1{CLOSE}, card {OPEN}CREDIT_CARD_1{CLOSE}, ref {not_a_card}"
+    )
+    assert p.stats().entities == {"iban": 1, "credit_card": 1}
+    assert find_pii_spans(f"ref {not_a_card}") == []
+    assert detect_pii_categories(f"ref {not_a_card}") == []
+
+
 def test_keyword_categories_have_no_spans():
     assert find_pii_spans("the diagnosis and the prescription") == []
     assert find_pii_spans("") == [] and find_pii_spans(None) == []
