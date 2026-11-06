@@ -76,7 +76,8 @@
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",
-        "guides/pseudonymisation"
+        "guides/pseudonymisation",
+        "guides/spend-anomaly-alerts"
       ]
     },
     {
