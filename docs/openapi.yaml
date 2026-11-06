@@ -485,6 +485,34 @@ components:
             policy marks it `EEA`. It says nothing about US CLOUD Act
             exposure. See `GET /partner/v1/usage/sovereign-share`.
           example: 0.62
+        outcome_signals_reported:
+          type: integer
+          description: >
+            Events in the period that reported `outcome_signals` (implicit
+            outcome signals from the SDK or gateway), including events that
+            reported an empty list (measured, nothing happened).
+          example: 15000
+        outcome_signal_counts:
+          type: object
+          nullable: true
+          description: >
+            Per outcome class, the number of events that carried it. Every
+            class is listed (0 when none carried it): `abandoned`, `fallback`,
+            `max_tokens`, `refusal`, `regenerate`, `retry`, `schema_invalid`,
+            `stream_error`, `tool_call_invalid`. An event can carry several
+            classes. Null when no event in the period reported outcome signals.
+          additionalProperties:
+            type: integer
+          example:
+            abandoned: 3
+            fallback: 12
+            max_tokens: 40
+            refusal: 2
+            regenerate: 25
+            retry: 6
+            schema_invalid: 4
+            stream_error: 1
+            tool_call_invalid: 0
         period:
           type: string
           description: Time period for this summary
@@ -502,6 +530,8 @@ components:
         - savings_usd
         - fallback_rate
         - sovereign_share
+        - outcome_signals_reported
+        - outcome_signal_counts
         - period
 
     SavingsTotals:

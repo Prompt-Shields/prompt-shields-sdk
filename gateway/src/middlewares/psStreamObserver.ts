@@ -7,6 +7,12 @@
  * `observeStream(c)` wraps the response, later callers get the same summary.
  */
 
+import {
+  MAX_STOP_REASONS,
+  hasRefusal,
+  stopReasonsOf,
+} from './psOutcomeSignals';
+
 export interface StreamSummary {
   tokens_in?: number;
   tokens_out?: number;
@@ -20,6 +26,10 @@ export interface StreamSummary {
   truncated: boolean;
   /** The client went away before the stream ended. */
   cancelled: boolean;
+  /** Stop reasons the stream reported (finish_reason, stop_reason, ...). */
+  stopReasons?: string[];
+  /** The stream carried an explicit refusal (#44). */
+  refusal?: boolean;
 }
 
 // A single SSE line larger than this is not parsed (usage lines are tiny).
@@ -211,6 +221,14 @@ export class SSEUsageTracker {
     // Chat chunks and Responses events report the tier outside `usage`.
     const tier = obj.service_tier ?? obj.response?.service_tier;
     if (typeof tier === 'string' && tier) this.details({ service_tier: tier });
+
+    // Outcome signals (#44): stop reasons and refusals, never the text.
+    for (const r of stopReasonsOf(obj)) {
+      const reasons = (this.summary.stopReasons ??= []);
+      if (!reasons.includes(r) && reasons.length < MAX_STOP_REASONS)
+        reasons.push(r);
+    }
+    if (!this.summary.refusal && hasRefusal(obj)) this.summary.refusal = true;
 
     const model = obj.model ?? obj.message?.model ?? obj.response?.model;
     if (typeof model === 'string' && model) this.summary.model = model;

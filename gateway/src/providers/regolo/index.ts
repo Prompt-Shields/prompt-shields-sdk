@@ -1,20 +1,11 @@
 import { REGOLO } from '../../globals';
-import {
-  chatCompleteParams,
-  embedParams,
-  responseTransformers,
-} from '../open-ai-base';
-import { ProviderConfigs } from '../types';
-import RegoloAPIConfig from './api';
+import { openAICompatibleProvider } from '../openAICompatible';
+import { REGOLO_BASE_URL } from './api';
 
-const RegoloConfig: ProviderConfigs = {
-  chatComplete: chatCompleteParams([]),
-  embed: embedParams([]),
-  api: RegoloAPIConfig,
-  responseTransforms: responseTransformers(REGOLO, {
-    chatComplete: true,
-    embed: true,
-  }),
-};
+const RegoloConfig = openAICompatibleProvider({
+  provider: REGOLO,
+  baseURL: REGOLO_BASE_URL,
+  embed: true,
+});
 
 export default RegoloConfig;

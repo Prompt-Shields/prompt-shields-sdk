@@ -15,6 +15,9 @@
  *   (provider, credentials and upstream host, see routeBreakerScope): one
  *   caller's failing key or custom host never opens another caller's. Any other 4xx, a content-filter refusal, a guardrail denial or
  *   a data-policy 403 is returned as is: no fallback.
+ * - Under a data policy, a candidate whose tier names another provider than
+ *   the request's (or whose provider's facts do not cover the request's
+ *   custom host) is skipped by `allow`, never attempted (#20).
  * - Only already-compliant candidates are listed. Each attempt still goes
  *   through tryPost, so the data-policy gate checks the model the attempt
  *   actually runs, and the engine's `allow` re-checks each candidate before
@@ -47,6 +50,8 @@ import {
   runFailover,
   UpstreamError,
 } from '../psFailover';
+import { HEADER_KEYS } from '../../globals';
+import { tierServesTarget } from '../psServedTarget';
 import { modelComplies } from './constraints';
 import {
   DATA_POLICY_GATE_KEY,
@@ -211,6 +216,14 @@ export async function tryTargetsWithRouteFailover(
   }));
   const gate = gateOf(c);
   const servedRoute = route;
+  const target = {
+    provider: gatewayProvider || undefined,
+    customHost:
+      requestHeaders[HEADER_KEYS.CUSTOM_HOST] ||
+      (typeof targetGroup?.customHost === 'string'
+        ? targetGroup.customHost
+        : undefined),
+  };
 
   try {
     const result = await runFailover(
@@ -232,8 +245,16 @@ export async function tryTargetsWithRouteFailover(
       {
         ...opts,
         breakers,
+        // As the gate in tryPost (#20): a tier naming a provider vouches
+        // only for the request's provider at its own base URL. A candidate
+        // at another provider is skipped, never attempted (the router
+        // rewrites only the model, so it would run at the request's
+        // provider); with no candidate left, a 403 policy_violation.
         allow: gate?.rule
-          ? (cand) => modelComplies(gate.policy, cand.model, gate.rule)
+          ? (cand) =>
+              modelComplies(gate.policy, cand.model, gate.rule, (tier) =>
+                tierServesTarget(tier, target)
+              )
           : undefined,
       }
     );
