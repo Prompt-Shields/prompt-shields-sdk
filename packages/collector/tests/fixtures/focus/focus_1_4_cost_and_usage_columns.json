@@ -1,0 +1,399 @@
+{
+  "focus_version": "1.4",
+  "dataset": "CostAndUsage",
+  "source": "https://github.com/FinOps-Open-Cost-and-Usage-Spec/FOCUS_Spec/tree/v1.4/specification/datasets/cost_and_usage/columns",
+  "source_commit": "f1eeb30a78f7c141ef1237d589355296a2761c1c",
+  "note": "Column ID, Feature level, Allows nulls and Data type of every Cost and Usage column, copied from the Content Constraints table of each column page at the v1.4 tag.",
+  "columns": [
+    {
+      "column_id": "AllocatedMethodDetails",
+      "feature_level": "Recommended",
+      "allows_nulls": true,
+      "data_type": "JSON"
+    },
+    {
+      "column_id": "AllocatedMethodId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "AllocatedResourceId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "AllocatedResourceName",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "AllocatedTags",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "JSON"
+    },
+    {
+      "column_id": "AvailabilityZone",
+      "feature_level": "Recommended",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "BilledCost",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "BillingAccountId",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "BillingAccountName",
+      "feature_level": "Mandatory",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "BillingAccountType",
+      "feature_level": "Conditional",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "BillingCurrency",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "BillingPeriodEnd",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Date/Time"
+    },
+    {
+      "column_id": "BillingPeriodStart",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Date/Time"
+    },
+    {
+      "column_id": "CapacityReservationId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "CapacityReservationStatus",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ChargeCategory",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ChargeClass",
+      "feature_level": "Mandatory",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ChargeDescription",
+      "feature_level": "Mandatory",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ChargeFrequency",
+      "feature_level": "Recommended",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ChargePeriodEnd",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Date/Time"
+    },
+    {
+      "column_id": "ChargePeriodStart",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Date/Time"
+    },
+    {
+      "column_id": "CommitmentDiscountCategory",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "CommitmentDiscountId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "CommitmentDiscountName",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "CommitmentDiscountQuantity",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "CommitmentDiscountStatus",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "CommitmentDiscountType",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "CommitmentDiscountUnit",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "CommitmentProgramEligibilityDetails",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "JSON"
+    },
+    {
+      "column_id": "ConsumedQuantity",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "ConsumedUnit",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ContractApplied",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "JSON"
+    },
+    {
+      "column_id": "ContractedCost",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "ContractedUnitPrice",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "EffectiveCost",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "HostProviderName",
+      "feature_level": "Mandatory",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "InvoiceDetailId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "InvoiceId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "InvoiceIssuerName",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ListCost",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "ListUnitPrice",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "PricingCategory",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "PricingCurrency",
+      "feature_level": "Conditional",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "PricingCurrencyContractedUnitPrice",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "PricingCurrencyEffectiveCost",
+      "feature_level": "Conditional",
+      "allows_nulls": false,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "PricingCurrencyListUnitPrice",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "PricingQuantity",
+      "feature_level": "Mandatory",
+      "allows_nulls": true,
+      "data_type": "Decimal"
+    },
+    {
+      "column_id": "PricingUnit",
+      "feature_level": "Mandatory",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "RegionId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "RegionName",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ResourceId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ResourceName",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ResourceType",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ServiceCategory",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ServiceName",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ServiceProviderName",
+      "feature_level": "Mandatory",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "ServiceSubcategory",
+      "feature_level": "Recommended",
+      "allows_nulls": false,
+      "data_type": "String"
+    },
+    {
+      "column_id": "SkuId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "SkuMeter",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "SkuPriceDetails",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "JSON"
+    },
+    {
+      "column_id": "SkuPriceId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "SubAccountId",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "SubAccountName",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "SubAccountType",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "String"
+    },
+    {
+      "column_id": "Tags",
+      "feature_level": "Conditional",
+      "allows_nulls": true,
+      "data_type": "JSON"
+    }
+  ]
+}
