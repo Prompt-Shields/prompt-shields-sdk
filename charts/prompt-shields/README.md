@@ -209,12 +209,20 @@ both 0 by default). Run each in exactly one place, not in every API replica:
 | Job | Command | Default | Default schedule |
 |---|---|---|---|
 | `auditPurge` | `python -m collector.audit purge` (partner audit rows older than `PS_AUDIT_RETENTION_DAYS`) | on | `17 2 * * *` |
-| `retentionPurge` | `python -m collector.retention purge` (usage events past retention) | on | `37 2 * * *` |
+| `retentionPurge` | `python -m collector.retention purge` (usage events past retention, and usage rollups past `PS_USAGE_ROLLUP_RETENTION_DAYS`) | on | `37 2 * * *` |
 | `spendAnomaly` | `python -m collector.spend_anomalies --all-tenants` (spend anomaly alerts for yesterday, UTC) | on | `57 3 * * *` |
 | `lifecycleSweep` | `python -m collector.lifecycle` (mark assets stale / retired) | off | `7 3 * * *` |
 | `webhooksDeliver` | `python -m collector.webhooks deliver` (alternative to the worker) | off | every minute |
 | `webhooksPurge` | `python -m collector.webhooks purge` | off | `47 3 * * *` |
 | `providerUsage` | `python -m collector.provider_usage_admin --all-tenants` | off | `27 4 * * *` |
+
+The usage rollups (hourly and daily aggregates behind
+`/partner/v1/usage/series`) are refreshed by a third loop that is on by
+default, `PS_USAGE_ROLLUP_INTERVAL_SECONDS=30`. It is safe in every API
+replica (a run skips a tenant another run is refreshing); set it to `0` in
+`collector.extraEnv` and add an entry running
+`python -m collector.usage_rollups refresh --all-tenants` to run it as a
+CronJob instead.
 
 Add per-tenant connector syncs as extra entries, e.g.
 `args: ["python", "-m", "collector.leanix", "--tenant", "<uuid>"]` (also
@@ -559,6 +567,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` (*chart* on the worker) | `0` | Webhook delivery loop (set by `worker.webhookIntervalSeconds`) |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | Development only |
 | `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS` (*chart* on the worker), `PS_PROVIDER_USAGE_PULL_DAYS` | `0`, `3` | Provider usage pull loop (set by `worker.providerUsagePullIntervalSeconds`) |
+| `PS_USAGE_ROLLUP_INTERVAL_SECONDS`, `PS_USAGE_ROLLUP_RETENTION_DAYS` | `30`, `760` | Usage rollup loop (in the worker set: the worker Deployment, else every API replica; overlapping runs skip a tenant another run holds) and how long hourly/daily usage rollups are kept, never less than raw retention |
 | `PS_PROVIDER_ADMIN_KEYS` (secret) | — | Operator-held provider admin keys per tenant (JSON) |
 | `PS_LEANIX`, `PS_LEANIX_ALLOWED_HOST_SUFFIXES` | — | LeanIX connector (JSON config is secret) |
 | `PS_SERVICENOW`, `PS_SERVICENOW_ALLOWED_HOST_SUFFIXES` | — | ServiceNow connector |

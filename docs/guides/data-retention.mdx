@@ -31,6 +31,10 @@ cutoff = await get_retention_cutoff(db, tenant_id)     # looks the tenant up; No
 
 The Partner API `usage-summary` endpoint already does this, so a `90d` summary for a tenant with 30-day retention covers only the last 30 days, even before the purge has run.
 
+## Usage rollups
+
+Hourly and daily usage aggregates (`usage_rollup_hourly`, `usage_rollup_daily`, read by `GET /partner/v1/usage/series`) have their own, longer retention: `PS_USAGE_ROLLUP_RETENTION_DAYS` (default `760`, about 25 months), never less than the tenant's raw retention. They hold counts, sums and user id hashes only, never raw user ids or content, and they are not shrunk when the raw events they were computed from are purged. The retention purge deletes rollup rows whose bucket starts before `now - PS_USAGE_ROLLUP_RETENTION_DAYS` (counted as `usage_rollups_deleted`), and erasing a tenant deletes them.
+
 ## Running the purge
 
 Nothing is deleted until the purge runs. The collector has no built-in scheduler. The Helm chart (0.4.11 and later) runs it daily as the `retentionPurge` CronJob (`37 2 * * *`), **on by default**: after an upgrade from an earlier chart, its first run deletes everything already past each tenant's retention window (see "Upgrading" in the chart README; set `cronJobs.jobs.retentionPurge.enabled: false` to opt out). Elsewhere, run it from cron or a Kubernetes CronJob:
@@ -77,5 +81,5 @@ The setting applies to events ingested afterwards; stored events are not rewritt
 
 ## Not yet covered
 
-- **Erasure by end user.** Events store `user_id_hash` (and `user_id_raw` when enabled), but there is no delete-by-user endpoint yet.
+- **Erasure by end user.** Events store `user_id_hash` (and `user_id_raw` when enabled), but there is no delete-by-user endpoint yet. Usage rollups also carry `user_id_hash`; a delete-by-user must clear it there too (or run `python -m collector.usage_rollups rebuild`, which only recomputes buckets still in raw retention).
 - Retention for `partner_audit_log`, which is kept until the tenant is erased.

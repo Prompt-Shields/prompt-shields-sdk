@@ -36,6 +36,7 @@ CI (`.github/workflows/observability.yml`) runs `promtool check rules`, the rule
 | `ps_gateway_requests_total` | counter | `route`, `method`, `status`, `provider`, `business_unit`, `environment` |
 | `ps_gateway_request_duration_seconds` | histogram | `route`, `status`, `provider` |
 | `ps_gateway_tokens_total` | counter | `provider`, `model`, `direction` (`input`/`output`), `business_unit` |
+| `ps_gateway_cost_usd_total` | counter | `provider` (served), `model` (served), `team` (`none` until principals ship) |
 | `ps_gateway_streams_total` | counter | `route`, `provider`, `outcome` (`complete`/`truncated`/`cancelled`) |
 | `ps_gateway_guardrail_verdicts_total` | counter | `hook`, `check`, `verdict` (`allow`/`deny`/`flag`/`error`), `stage` |
 | `ps_gateway_pii_detections_total` | counter | `category` |
@@ -57,13 +58,15 @@ Readiness has no metric of its own: the `/readyz` probe is an ordinary request, 
 
 ### Cost
 
-There is no cost metric. The gateway counts **tokens**; spend per business unit and model is computed by the collector from ingested usage. The traffic dashboard shows tokens by business unit, provider and model, and says so.
+`ps_gateway_cost_usd_total` adds the estimated cost of each gateway call, as its telemetry event to the collector prices it: the provider-reported cost, else the pricing table. A cache hit adds 0 (its avoided cost is `ps_gateway_cache_saved_cost_usd_total`), and a call with no price adds nothing. These are estimates, not invoiced amounts. `team` is `none` until principals and virtual keys ship. The traffic dashboard's Cost row shows spend per hour by provider, spend in range by provider and model, and by team.
+
+For long-term and per-user, per-project or per-API-surface spend, use the collector's usage time series (`GET /partner/v1/usage/series`), which is kept about 25 months.
 
 ## Grafana dashboards
 
 | File | UID | Panels |
 |---|---|---|
-| `prompt-shields-gateway-traffic.json` | `ps-gateway-traffic` | Request rate, 5xx and 446 ratios, latency percentiles by provider, requests by status / provider / route / business unit, tokens by direction / model / business unit, stream outcomes |
+| `prompt-shields-gateway-traffic.json` | `ps-gateway-traffic` | Request rate, 5xx and 446 ratios, latency percentiles by provider, requests by status / provider / route / business unit, tokens by direction / model / business unit, cost by provider / model / team, stream outcomes |
 | `prompt-shields-guardrails-security.json` | `ps-guardrails-security` | Deny ratio, verdicts by outcome / check / stage, top denying hooks, 446s by business unit, PII entities by category, 429s by source and provider, telemetry drops by sink |
 | `prompt-shields-collector-health.json` | `ps-collector-health` | Scrape targets up, `/readyz` success, ingest by endpoint and outcome, assets created, readiness by instance, request rate, latency percentiles, 5xx by route |
 

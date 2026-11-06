@@ -30,6 +30,7 @@ import {
 } from './psFeedback';
 import { applyBaseline, getBaseline } from './router/baseline';
 import { RESPONSE_HEADER_KEYS } from '../globals';
+import { recordCost } from './psMetrics/cost';
 import {
   OUTCOME_SIGNALS_VERSION,
   OutcomeInputs,
@@ -497,8 +498,11 @@ function extractPSHeaders(
  * and loss accounting are in psTelemetrySender; this never rejects.
  */
 async function sendTelemetry(event: TelemetryEvent): Promise<void> {
+  const priced = withBaseline(event);
+  // ps_gateway_cost_usd_total (#346): the same cost the collector receives.
+  recordCost(priced);
   // Fail-open: never block LLM requests due to telemetry issues
-  await psTelemetrySender.send(withBaseline(event));
+  await psTelemetrySender.send(priced);
 }
 
 /**
