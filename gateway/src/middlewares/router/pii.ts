@@ -30,13 +30,104 @@ const PATTERNS: [string, RegExp][] = [
   ],
   [
     'phone',
-    re(String.raw`(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}`),
+    // Not inside a longer word or digit run (card numbers, IBANs).
+    re(
+      String.raw`(?<!${W})(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}(?!${W})`
+    ),
   ],
   ['ssn', re(String.raw`\b\d{3}-\d{2}-\d{4}\b`)],
-  ['credit_card', re(String.raw`\b(?:\d[ -]*?){13,19}\b`)],
   ['ip_address', re(String.raw`\b(?:\d{1,3}\.){3}\d{1,3}\b`)],
-  ['iban', re(String.raw`\b[A-Z]{2}\d{2}[A-Z0-9]{4,30}\b`)],
 ];
+
+// Shape regex + validator: the category is found when any match validates.
+
+// Card numbers: 13-19 digits with optional separators, Luhn checked.
+const CARD_RE = new RegExp(
+  String.raw`\b(?:\d[ -]*?){13,19}\b`.replace(/\\b/g, B),
+  'gu'
+);
+// IBAN, compact or in groups of four, mod-97 checked.
+const IBAN_RE = new RegExp(
+  String.raw`\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b`.replace(
+    /\\b/g,
+    B
+  ),
+  'gu'
+);
+// Grouped phone numbers the US-shaped pattern misses: international
+// ("+46 70 174 06 12") and national with a trunk 0 ("070-174 06 12").
+const INTL_PHONE_RE = new RegExp(
+  String.raw`(?<![\p{L}\p{N}_+])\+\d[\d ()./-]{6,20}\d(?!${W})`,
+  'gu'
+);
+const TRUNK_PHONE_RE = new RegExp(
+  String.raw`(?<![\p{L}\p{N}_+.,/-])\(?0\d[\d ()./-]{6,16}\d(?!${W})`,
+  'gu'
+);
+
+function validCard(m: RegExpExecArray): boolean {
+  return luhnOk(m[0].replace(/\D/g, ''));
+}
+
+function ibanOk(compact: string): boolean {
+  if (compact.length < 15 || compact.length > 34) return false;
+  const rearranged = compact.slice(4) + compact.slice(0, 4);
+  // Piecewise mod 97, so no BigInt is needed.
+  let rest = 0;
+  for (const c of rearranged) {
+    const v = parseInt(c, 36).toString();
+    for (const d of v) rest = (rest * 10 + Number(d)) % 97;
+  }
+  return rest === 1;
+}
+
+function validIban(match: string): boolean {
+  // A following upper-case word ("... 7466 BIC") can join the last group:
+  // drop trailing space-separated groups until the checksum holds.
+  const groups = match.split(' ');
+  while (groups.length) {
+    if (ibanOk(groups.join(''))) return true;
+    groups.pop();
+  }
+  return false;
+}
+
+function phoneShapeOk(s: string, min: number, max: number): boolean {
+  const digits = (s.match(/\d/g) || []).length;
+  if (digits < min || digits > max) return false;
+  const seps = s.replace(/[()]/g, '').match(/[ ./-]+/g) || [];
+  // One separator between groups, the same one after the first group.
+  if (seps.some((sep) => sep.length > 1)) return false;
+  return new Set(seps.slice(1)).size <= 1;
+}
+
+const VALIDATED: [string, RegExp, (m: RegExpExecArray) => boolean][] = [
+  ['credit_card', CARD_RE, validCard],
+  ['phone', INTL_PHONE_RE, (m) => phoneShapeOk(m[0], 8, 15)],
+  [
+    'phone',
+    TRUNK_PHONE_RE,
+    // A bare digit run is left to the pattern above.
+    (m) => /[ ./-]/.test(m[0]) && phoneShapeOk(m[0], 9, 12),
+  ],
+];
+
+function anyValid(
+  pattern: RegExp,
+  text: string,
+  validate: (m: RegExpExecArray) => boolean
+): boolean {
+  pattern.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(text)) !== null) {
+    if (validate(m)) {
+      pattern.lastIndex = 0;
+      return true;
+    }
+    if (m[0] === '') pattern.lastIndex++;
+  }
+  return false;
+}
 
 const KEYWORD_CATEGORIES: [string, string[]][] = [
   [
@@ -207,11 +298,22 @@ export function containsNordicNationalId(text: string): boolean {
 export function detectPiiCategories(text: string | undefined | null): string[] {
   if (!text) return [];
   const found = new Set<string>();
+  // IBANs first: a checksum-valid IBAN is blanked out before the other
+  // patterns run, so its digits never also count as a card or phone number.
+  const original = text;
+  const masked = text.replace(IBAN_RE, (m) =>
+    validIban(m) ? ' '.repeat(m.length) : m
+  );
+  if (masked !== original) found.add('iban');
   for (const [name, pattern] of PATTERNS) {
-    if (pattern.test(text)) found.add(name);
+    if (pattern.test(masked)) found.add(name);
   }
-  if (containsNordicNationalId(text)) found.add('national_id');
-  const lower = text.toLowerCase();
+  for (const [name, pattern, validate] of VALIDATED) {
+    if (!found.has(name) && anyValid(pattern, masked, validate))
+      found.add(name);
+  }
+  if (containsNordicNationalId(masked)) found.add('national_id');
+  const lower = original.toLowerCase();
   for (const [category, keywords] of KEYWORD_CATEGORIES) {
     if (keywords.some((kw) => lower.includes(kw))) found.add(category);
   }
