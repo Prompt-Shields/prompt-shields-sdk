@@ -242,6 +242,42 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"aws": {
 
 `role_arn` and `external_id` are optional; `session_token` is accepted for temporary keys. The collector never uses its own AWS environment, profiles or instance metadata. It signs requests itself (SigV4, no AWS SDK) and calls only `bedrock.<region>.amazonaws.com` and, to assume the role, `sts.<first region>.amazonaws.com`. Region names are validated strictly (commercial and GovCloud regions only). A region that fails is reported under `region_errors` and does not stop the others.
 
+#### Offline import (no credentials in the collector)
+
+If the collector may not hold any cloud credential, even a read-only one, someone who already has read access can export the inventory with the AWS CLI and import the file. The collector then makes no AWS call and never sees a credential. The export needs the same five `bedrock:List*` actions as the policy above (plus `sts:GetCallerIdentity`, which every principal has, unless `AWS_ACCOUNT_ID` is set):
+
+```bash
+# Read-only: runs only `aws bedrock list-*` with the credentials in your shell.
+scripts/cloud-inventory-export-aws.sh eu-central-1 us-east-1 > bedrock-export.json
+
+# Then, on the collector host:
+python -m collector.cloud_inventory_import --tenant <tenant uuid> --file bedrock-export.json
+# or
+curl -X POST "$COLLECTOR/api/v1/admin/cloud-inventory/import" \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"tenant_id\": \"<tenant uuid>\", \"export\": $(cat bedrock-export.json)}"
+```
+
+The export is the CLI's JSON output, unchanged, per region:
+
+```json
+{
+  "cloud": "aws",
+  "account_id": "123456789012",
+  "regions": {
+    "eu-central-1": {
+      "custom_models":           {"modelSummaries": [...]},
+      "imported_models":         {"modelSummaries": [...]},
+      "provisioned_throughputs": {"provisionedModelSummaries": [...]},
+      "inference_profiles":      {"inferenceProfileSummaries": [...]},
+      "tags": {"<resource ARN>": {"tags": [{"key": "owner", "value": "..."}]}}
+    }
+  }
+}
+```
+
+Any listing may be left out, or given as its bare list of items. The same rules as the pull decide what becomes an asset, and the asset ids are the same, so an import and a later pull update the same rows. With `account_id`, resources whose ARN names another account are skipped and counted under `skipped_other_account`. Resources without a `tags` entry are counted under `resources_without_tags`; their owner stays empty. An export that contains a field named like a credential (`SecretAccessKey`, `SessionToken`, `aws_secret_access_key`, `Credentials`, `password`, …), for example pasted `aws sts assume-role` output, is refused with a 400. The error names the field but never its value. The export is never logged.
+
 ### Google Cloud: Vertex AI
 
 Vertex AI is regional, so list every region to inventory, per project. In each project and region the collector records, each as its own asset with vendor `google`:

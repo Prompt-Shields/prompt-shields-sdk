@@ -19,6 +19,7 @@ import pytest
 from collector import (
     admin_api,
     cloud_inventory,
+    cloud_inventory_import,
     leanix,
     learner,
     lifecycle,
@@ -317,6 +318,7 @@ ADMIN_ROUTERS = (
     risk_reviews.admin_router,
     provider_usage_admin.router,
     cloud_inventory.router,
+    cloud_inventory_import.router,
     leanix.router,
     servicenow.router,
     sentinel_export.router,
