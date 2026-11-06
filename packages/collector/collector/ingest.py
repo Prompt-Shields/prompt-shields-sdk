@@ -89,6 +89,7 @@ class IngestEvent(BaseModel):
     budget_action: str | None = None
     cache_status: str | None = None
     cache_saved_cost: float | None = None
+    est_tokens_saved: int | None = None
     # Routing learner auto mode (#34): set by the SDK router when the learner
     # decided the call. Lenient like the route fields.
     route_learner_mode: str | None = None
@@ -278,6 +279,7 @@ class IngestEvent(BaseModel):
         "tokens_cache_write",
         "tokens_cache_write_1h",
         "tokens_reasoning",
+        "est_tokens_saved",
         mode="before",
     )
     @classmethod
@@ -382,6 +384,7 @@ BUDGET_CACHE_FIELDS = (
     "budget_action",
     "cache_status",
     "cache_saved_cost",
+    "est_tokens_saved",
 )
 
 # Routing learner auto-mode fields (#34), stored as sent once validated.

@@ -245,7 +245,7 @@ client.chat.completions.create(
 | `quality` | `"draft" \| "balanced" \| "critical"` | `X-PS-Quality` | Intent, **not** a model name. The gateway maps it to a model group. |
 | `max_cost` | float | `X-PS-Max-Cost` | Per-call USD ceiling. The gateway downgrades to stay under it. |
 | `model_group` | str | `X-PS-Route` | Explicit override — bypasses the router and pins a group. |
-| `allow_cache` | bool (default `True`) | `X-PS-Cache: off` when `False` | Opt a creative/non-deterministic call out of the gateway's semantic cache. |
+| `allow_cache` | bool (default `True`) | `X-PS-Cache: off` when `False` | Opt a creative/non-deterministic call out of the gateway's response caches (exact and semantic). Both are off unless the gateway is configured for them. |
 
 An empty `RouteHint()` emits no headers — behavior is identical to today.
 
@@ -336,7 +336,8 @@ Events carry `budget_state` (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` a
 
 ### What routing does not do yet
 
-- **Failover stays in the group, and breakers are per process.** On a 5xx, timeout, connection error or 429, `ShieldsRouter` moves to the next model in the chosen group that the data policy allows for the call (for a pinned model, only the same model on another provider). It never tries a non-compliant model, never retries a 4xx or a content-filter refusal, and raises `NoCompliantCandidate` (a `PolicyViolation`) when no candidate is left. `resp.ps.attempts` and `resp.ps.fallback_chain` record what happened, and the telemetry event carries `fallback_chain`. Tune it with `failover=`, `breaker_config=` / `breakers=`, `max_attempts=`, `retry_after_max_wait=` and `rate_limit_retries=` (see the [routing guide](docs/guides/routing.mdx#failover)).
+- **Failover stays in the group, and breakers are per process.** On a 5xx, timeout, connection error or 429, `ShieldsRouter` moves to the next model in the chosen group that the data policy allows for the call (for a pinned model, only the same model on another provider). It never tries a non-compliant model, never retries a 4xx or a content-filter refusal, and raises `NoCompliantCandidate` (a `PolicyViolation`) when no candidate is left. `resp.ps.attempts` and `resp.ps.fallback_chain` record what happened, and the telemetry event carries `fallback_chain`. Tune it with `failover=`, `breaker_config=` / `breakers=`, `max_attempts=`, `retry_after_max_wait=` and `rate_limit_retries=` (see the [routing guide](docs/guides/routing.mdx#failover)). The gateway router fails over the same way within the routed group, with the request's own provider credentials; it never retries once a stream has started, and leaves retries to an `x-portkey-config` that has its own fallback or retry settings.
+- **Pseudonymisation and learner auto mode run only in the SDK, and are off by default.** `pseudonymise=True` ([guide](docs/guides/pseudonymisation.mdx)) and `learner=AutoLearner(...)` ([guide](docs/guides/routing-learner.mdx#auto-mode)) raise `RouterError` with `mode="gateway"`, as do `budgets=`, `budget_store=` and `baseline=` (the gateway takes those from its own settings). If the learner raises an error, the call keeps the policy's pick and is served. The instrumented clients also take `pseudonymise=True`, and refuse (`ValueError`) a call that would go to the gateway.
 - **No streaming in local mode.** `stream=True` raises `RouterError`. Gateway mode streams.
 - **No tool translation for Anthropic.** Tool messages and OpenAI-only parameters raise `RouterError` when the call is routed to Anthropic.
 - **The policy's facts are trusted.** Nothing verifies a tier's `jurisdiction`, `zdr` or `us_cloud_act_exposure`. A missing fact fails closed, so leave out any fact the model catalog has as `null` (unverified).

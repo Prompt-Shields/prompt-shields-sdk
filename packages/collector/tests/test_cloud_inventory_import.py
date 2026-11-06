@@ -260,6 +260,55 @@ def test_validation_errors_do_not_quote_the_input():
     assert SECRET not in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    "region",
+    [
+        # Values of the wrong type are skipped, not a crash (500).
+        {
+            "provisioned_throughputs": [
+                {"provisionedModelArn": PT_US, "status": "InService", "modelArn": []}
+            ]
+        },
+        {
+            "inference_profiles": [
+                {
+                    "inferenceProfileArn": PROFILE.replace("eu-central-1", "us-east-1"),
+                    "status": "ACTIVE",
+                    "models": 5,
+                }
+            ]
+        },
+        {
+            "provisioned_throughputs": [
+                {"provisionedModelArn": PT_US, "status": "InService"}
+            ],
+            "tags": {PT_US: {"tags": 5}},
+        },
+    ],
+)
+def test_wrongly_typed_values_are_skipped(region):
+    export = {"cloud": "aws", "regions": {"us-east-1": region}}
+    imp.check_export(export)
+    _, deployments = imp.parse_aws_export(export)
+    assert len(deployments) == 1
+    assert deployments[0].model is None
+    assert deployments[0].tags == {}
+
+
+@pytest.mark.parametrize("text", ["a\u0000b", "\ud800"])
+def test_text_the_database_cannot_store_is_refused(text):
+    export = fixture_export()
+    export["regions"]["us-east-1"]["tags"] = {
+        PT_US: {"tags": [{"key": "owner", "value": text}]}
+    }
+    with pytest.raises(imp.ExportError, match="NUL"):
+        imp.check_export(export)
+    export = fixture_export()
+    export[text] = {"Password": SECRET}
+    with pytest.raises(imp.ExportError, match="NUL"):
+        imp.check_export(export)
+
+
 def _fake_aws(tmp_path: Path) -> tuple[Path, Path]:
     """An `aws` on PATH that replays the recorded output and logs each call."""
     log = tmp_path / "calls.log"
@@ -403,6 +452,42 @@ async def test_operator_route_imports_assets_for_the_target_tenant_only(
             .where(AIAsset.tenant_id == other_id)
         )
         assert n_other == 0
+
+
+async def test_operator_route_refuses_oversized_and_malformed_bodies(
+    seeded_db, monkeypatch
+):
+    monkeypatch.setenv("PS_ADMIN_TOKEN", OP_TOKEN)
+    monkeypatch.setattr(imp, "MAX_BODY_BYTES", 1000)
+    factory = async_sessionmaker(seeded_db, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as db:
+        tenant_id = (await db.execute(select(Tenant.id))).scalar_one()
+    url = "/api/v1/admin/cloud-inventory/import"
+    op = {"Authorization": f"Bearer {OP_TOKEN}", "Content-Type": "application/json"}
+    big = json.dumps({"tenant_id": str(tenant_id), "export": fixture_export()})
+    assert len(big) > 1000
+
+    async def chunks():
+        yield big.encode()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Declared too large, and too large with no Content-Length.
+        resp = await c.post(url, content=big, headers=op)
+        assert resp.status_code == 413
+        resp = await c.post(url, content=chunks(), headers=op)
+        assert resp.status_code == 413
+        # Unauthenticated: still bounded.
+        resp = await c.post(
+            url, content=big, headers={"Content-Type": "application/json"}
+        )
+        assert resp.status_code == 413
+        resp = await c.post(url, content=b"{not json", headers=op)
+        assert resp.status_code == 422
+        resp = await c.post(url, content=b"[]", headers=op)
+        assert resp.status_code == 422
+        bad = {"tenant_id": str(tenant_id), "export": {"cloud": "aws", "x\u0000": 1}}
+        resp = await c.post(url, json=bad, headers=op)
+        assert resp.status_code == 400
 
 
 async def test_import_then_pull_update_the_same_assets(seeded_db):

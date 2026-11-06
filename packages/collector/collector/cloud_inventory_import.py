@@ -101,7 +101,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from collector import cloud_inventory as ci
 from collector import rls
 from collector.provider_usage_admin import require_operator
-from collector.sanitize import BoundedJsonRoute, loads_bounded
+from collector.sanitize import (
+    UNSTORABLE_MESSAGE,
+    BoundedJsonRoute,
+    is_storable,
+    loads_bounded,
+)
 
 logger = logging.getLogger("prompt_shields.cloud_inventory")
 
@@ -112,6 +117,9 @@ MAX_GCP_PROJECTS = 50
 MAX_LISTINGS = 20000
 MAX_ITEMS_PER_LISTING = 5000
 MAX_TAGGED_RESOURCES = 20000
+# Request body limit for the route, checked before the body is parsed (and
+# before the operator token is, as for every JSON route).
+MAX_BODY_BYTES = 32 * 1024 * 1024
 _AWS_ACCOUNT = re.compile(r"^\d{12}$")
 
 # Field names (lower case, letters and digits only) that hold credentials in
@@ -527,6 +535,9 @@ def check_export(export: Any) -> str:
     """The export's cloud, after refusing credentials and unknown clouds."""
     if not isinstance(export, dict):
         raise ExportError("export must be a JSON object")
+    if not is_storable(export):
+        # Before the credential check: its message quotes key names.
+        raise ExportError(f"export {UNSTORABLE_MESSAGE}")
     leaked = credential_fields(export)
     if leaked:
         raise ExportError(
@@ -566,7 +577,38 @@ async def import_cloud_inventory(
     }
 
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"], route_class=BoundedJsonRoute)
+class _SizeBoundedJsonRoute(BoundedJsonRoute):
+    """``BoundedJsonRoute`` that first refuses a body over ``MAX_BODY_BYTES``
+    with a 413, without reading more than that."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def size_bounded_handler(request: Request):
+            declared = request.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+                raise _too_large()
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_BODY_BYTES:
+                    raise _too_large()
+                chunks.append(chunk)
+            # Starlette's body cache: request.body() returns it.
+            request._body = b"".join(chunks)
+            return await handler(request)
+
+        return size_bounded_handler
+
+
+def _too_large() -> HTTPException:
+    return _problem(413, "Payload Too Large", f"Body exceeds {MAX_BODY_BYTES} bytes")
+
+
+router = APIRouter(
+    prefix="/api/v1/admin", tags=["Admin"], route_class=_SizeBoundedJsonRoute
+)
 
 
 class CloudInventoryImportBody(BaseModel):

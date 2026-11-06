@@ -21,29 +21,37 @@ command -v aws >/dev/null || { echo "aws CLI not found" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq not found" >&2; exit 2; }
 
 account="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
-regions='{}'
+# Listings go through files, not command-line arguments: Linux caps one
+# argument at 128 KiB, which a large account's listings exceed.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+n=0
 for region in "$@"; do
-  custom="$(aws bedrock list-custom-models --region "$region" --output json)"
-  imported="$(aws bedrock list-imported-models --region "$region" --output json)"
-  provisioned="$(aws bedrock list-provisioned-model-throughputs --region "$region" --output json)"
-  profiles="$(aws bedrock list-inference-profiles --type-equals APPLICATION --region "$region" --output json)"
-  arns="$(jq -rn \
-    --argjson c "$custom" --argjson i "$imported" \
-    --argjson p "$provisioned" --argjson a "$profiles" \
-    '[$c.modelSummaries[]?.modelArn, $i.modelSummaries[]?.modelArn,
-      $p.provisionedModelSummaries[]?.provisionedModelArn,
-      $a.inferenceProfileSummaries[]?.inferenceProfileArn] | .[] | select(. != null)')"
-  tags='{}'
-  while IFS= read -r arn; do
+  n=$((n + 1))
+  d="$tmp/r$n"
+  mkdir "$d"
+  aws bedrock list-custom-models --region "$region" --output json > "$d/c.json"
+  aws bedrock list-imported-models --region "$region" --output json > "$d/i.json"
+  aws bedrock list-provisioned-model-throughputs --region "$region" --output json > "$d/p.json"
+  aws bedrock list-inference-profiles --type-equals APPLICATION --region "$region" --output json > "$d/a.json"
+  jq -r '.modelSummaries[]?.modelArn // empty' "$d/c.json" "$d/i.json" > "$d/arns"
+  jq -r '.provisionedModelSummaries[]?.provisionedModelArn // empty' "$d/p.json" >> "$d/arns"
+  jq -r '.inferenceProfileSummaries[]?.inferenceProfileArn // empty' "$d/a.json" >> "$d/arns"
+  echo '{}' > "$d/tags.json"
+  # fd 3, so the aws CLI cannot read the ARN list from stdin.
+  while IFS= read -r arn <&3; do
     [ -n "$arn" ] || continue
-    t="$(aws bedrock list-tags-for-resource --resource-arn "$arn" --region "$region" --output json)"
-    tags="$(jq -n --argjson all "$tags" --arg arn "$arn" --argjson t "$t" '$all + {($arn): $t}')"
-  done <<< "$arns"
-  regions="$(jq -n --argjson r "$regions" --arg region "$region" \
-    --argjson c "$custom" --argjson i "$imported" \
-    --argjson p "$provisioned" --argjson a "$profiles" --argjson t "$tags" \
-    '$r + {($region): {custom_models: $c, imported_models: $i,
-      provisioned_throughputs: $p, inference_profiles: $a, tags: $t}}')"
+    aws bedrock list-tags-for-resource --resource-arn "$arn" --region "$region" --output json < /dev/null > "$d/t.json"
+    jq --arg arn "$arn" --slurpfile t "$d/t.json" '. + {($arn): $t[0]}' "$d/tags.json" > "$d/tags.new"
+    mv "$d/tags.new" "$d/tags.json"
+  done 3< "$d/arns"
+  jq -n --arg region "$region" \
+    --slurpfile c "$d/c.json" --slurpfile i "$d/i.json" \
+    --slurpfile p "$d/p.json" --slurpfile a "$d/a.json" --slurpfile t "$d/tags.json" \
+    '{($region): {custom_models: $c[0], imported_models: $i[0],
+      provisioned_throughputs: $p[0], inference_profiles: $a[0], tags: $t[0]}}' \
+    > "$d/region.json"
 done
-jq -n --arg account "$account" --argjson regions "$regions" \
-  '{cloud: "aws", account_id: $account, regions: $regions}'
+jq -n --arg account "$account" \
+  '{cloud: "aws", account_id: $account, regions: ([inputs] | add)}' \
+  "$tmp"/r*/region.json

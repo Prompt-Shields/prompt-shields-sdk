@@ -309,7 +309,7 @@ The export is the CLI's JSON output, unchanged, per region:
 }
 ```
 
-Any listing may be left out, or given as its bare list of items. The same rules as the pull decide what becomes an asset, and the asset ids are the same, so an import and a later pull update the same rows. With `account_id`, resources whose ARN names another account are skipped and counted under `skipped_other_account`. Resources without a `tags` entry are counted under `resources_without_tags`; their owner stays empty. An export that contains a field named like a credential (`SecretAccessKey`, `SessionToken`, `aws_secret_access_key`, `Credentials`, `password`, …), for example pasted `aws sts assume-role` output, is refused with a 400. The error names the field but never its value. The export is never logged.
+Any listing may be left out, or given as its bare list of items. The same rules as the pull decide what becomes an asset, and the asset ids are the same, so an import and a later pull update the same rows. With `account_id`, resources whose ARN names another account are skipped and counted under `skipped_other_account`. Resources without a `tags` entry are counted under `resources_without_tags`; their owner stays empty. An export that contains a field named like a credential (`SecretAccessKey`, `SessionToken`, `aws_secret_access_key`, `Credentials`, `password`, …), for example pasted `aws sts assume-role` output, is refused with a 400. The error names the field but never its value. The export is never logged. The route accepts a request body of up to 32 MiB (413 above that); the CLI has no limit.
 
 ### Google Cloud: Vertex AI
 

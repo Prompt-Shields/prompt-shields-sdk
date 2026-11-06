@@ -49,7 +49,6 @@ import { PreRequestValidatorService } from './services/preRequestValidatorServic
 import { ProviderContext } from './services/providerContext';
 import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
-import { emitCacheTelemetry } from '../middlewares/ps-telemetry';
 import { recordAttempt } from '../middlewares/psAttempts';
 import { recordServedTarget } from '../middlewares/psServedTarget';
 import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
@@ -67,6 +66,7 @@ import {
   messagesViaResponsesOverride,
   stripIssuedReasoning,
 } from '../adapters/messagesViaResponses';
+import { stripIssuedThinking } from '../adapters/responses';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
@@ -472,10 +472,16 @@ export async function tryPost(
       c,
       providerOption,
       // PS fork (#73): thinking signed by the Messages → Responses route
-      // means nothing to a native Messages target; drop it there.
-      !isRawBody && (fn === 'messages' || fn === 'messagesCountTokens')
-        ? stripIssuedReasoning(requestBody)
-        : requestBody,
+      // means nothing to a native Messages target; drop it there. Likewise
+      // the thinking the Responses adapter carries in reasoning items means
+      // nothing to a native Responses target.
+      isRawBody
+        ? requestBody
+        : fn === 'messages' || fn === 'messagesCountTokens'
+          ? stripIssuedReasoning(requestBody)
+          : fn === 'createModelResponse' || fn === 'countResponseInputTokens'
+            ? stripIssuedThinking(requestBody)
+            : requestBody,
       requestHeaders,
       fn,
       currentIndex,
@@ -646,11 +652,6 @@ async function tryPostToProvider(
   logObject.addCache(
     cacheResponseObject.cacheStatus,
     cacheResponseObject.cacheKey
-  );
-  emitCacheTelemetry(
-    cacheResponseObject.cacheStatus,
-    requestContext.transformedRequestBody,
-    requestContext.provider || 'unknown'
   );
   if (cacheResponseObject.cacheResponse) {
     const { response, originalResponseJson } = await responseService.create({

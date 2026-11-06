@@ -62,6 +62,56 @@ export const transformGeminiFinishReason = (
     : mapped;
 };
 
+export interface GeminiPromptFeedback {
+  blockReason?: string;
+  blockReasonMessage?: string;
+  safetyRatings?: Record<string, any>[];
+}
+
+/**
+ * PS fork (#208, re-implemented from the Portkey enterprise 2.32 changelog):
+ * when Gemini (Gemini API or Vertex AI) blocks the prompt it answers 200 with
+ * `promptFeedback.blockReason` and no candidates. Callers then got an empty
+ * `choices` array (Vertex) or an invalid-response error (Gemini API). Return
+ * one choice that carries the reason instead. It finishes with
+ * `content_filter` under strict OpenAI compliance and with the native block
+ * reason otherwise, where `promptFeedback` is passed through as well.
+ * Returns undefined when the prompt was not blocked.
+ */
+export const geminiBlockedPromptChoice = (
+  promptFeedback: GeminiPromptFeedback | undefined,
+  strictOpenAiCompliance: boolean,
+  stream: boolean
+): Record<string, any> | undefined => {
+  const blockReason = promptFeedback?.blockReason;
+  if (!blockReason) return undefined;
+  const message = {
+    role: MESSAGE_ROLES.ASSISTANT,
+    content:
+      promptFeedback.blockReasonMessage ||
+      `The prompt was blocked by the provider (${blockReason}).`,
+  };
+  return {
+    index: 0,
+    ...(stream ? { delta: message } : { message }),
+    finish_reason: strictOpenAiCompliance
+      ? FINISH_REASON.content_filter
+      : blockReason,
+    ...(!strictOpenAiCompliance && { promptFeedback }),
+  };
+};
+
+/** The candidates' choices, or the blocked-prompt choice when there are none. */
+export const geminiChoicesOrBlocked = <T>(
+  choices: T[] | undefined,
+  blockedPromptChoice: Record<string, any> | undefined
+): T[] =>
+  choices?.length
+    ? choices
+    : blockedPromptChoice
+      ? [blockedPromptChoice as T]
+      : choices ?? [];
+
 /**
  * Streams: whether an earlier chunk of this candidate carried tool calls, so
  * the chunk that brings the finish reason can report `tool_calls`.
@@ -776,12 +826,7 @@ interface GoogleResponseCandidate {
 interface GoogleGenerateContentResponse {
   modelVersion: string;
   candidates: GoogleResponseCandidate[];
-  promptFeedback: {
-    safetyRatings: {
-      category: string;
-      probability: string;
-    }[];
-  };
+  promptFeedback?: GeminiPromptFeedback;
   usageMetadata: {
     promptTokenCount: number;
     candidatesTokenCount: number;
@@ -828,14 +873,20 @@ export const GoogleChatCompleteResponseTransform: (
     if (errorResponse) return errorResponse;
   }
 
-  if ('candidates' in response) {
+  const blockedPromptChoice = geminiBlockedPromptChoice(
+    (response as GoogleGenerateContentResponse).promptFeedback,
+    strictOpenAiCompliance,
+    false
+  );
+  if ('candidates' in response || blockedPromptChoice) {
+    response = response as GoogleGenerateContentResponse;
     const {
       promptTokenCount = 0,
       cachedContentTokenCount = 0,
       candidatesTokenCount = 0,
       totalTokenCount = 0,
       thoughtsTokenCount = 0,
-    } = response.usageMetadata;
+    } = response.usageMetadata ?? {};
 
     const completionTokens = candidatesTokenCount + thoughtsTokenCount;
 
@@ -845,7 +896,7 @@ export const GoogleChatCompleteResponseTransform: (
       created: Math.floor(Date.now() / 1000),
       model: response.modelVersion,
       provider: 'google',
-      choices:
+      choices: geminiChoicesOrBlocked(
         response.candidates?.map((generation, idx) => {
           // transform tool calls and content by iterating over the content parts
           const toolCalls: ToolCall[] = [];
@@ -920,7 +971,9 @@ export const GoogleChatCompleteResponseTransform: (
               ? { groundingMetadata: generation.groundingMetadata }
               : {}),
           };
-        }) ?? [],
+        }),
+        blockedPromptChoice
+      ),
       usage: {
         prompt_tokens: promptTokenCount,
         completion_tokens: completionTokens,
@@ -969,6 +1022,11 @@ export const GoogleChatCompleteStreamChunkTransform: (
   }
 
   const parsedChunk: GoogleGenerateContentResponse = JSON.parse(chunk);
+  const blockedPromptChoice = geminiBlockedPromptChoice(
+    parsedChunk.promptFeedback,
+    strictOpenAiCompliance,
+    true
+  );
 
   let usageMetadata;
   if (parsedChunk.usageMetadata) {
@@ -1001,7 +1059,7 @@ export const GoogleChatCompleteStreamChunkTransform: (
       created: Math.floor(Date.now() / 1000),
       model: parsedChunk.modelVersion,
       provider: 'google',
-      choices:
+      choices: geminiChoicesOrBlocked(
         parsedChunk.candidates?.map((generation, index) => {
           let message: any = { role: 'assistant', content: '' };
           const partsMessage = transformGeminiStreamParts(
@@ -1040,8 +1098,11 @@ export const GoogleChatCompleteStreamChunkTransform: (
               ? { groundingMetadata: generation.groundingMetadata }
               : {}),
           };
-        }) ?? [],
-      ...(parsedChunk.usageMetadata?.candidatesTokenCount && {
+        }),
+        blockedPromptChoice
+      ),
+      ...((parsedChunk.usageMetadata?.candidatesTokenCount ||
+        blockedPromptChoice) && {
         usage: usageMetadata,
       }),
     })}` + '\n\n'
