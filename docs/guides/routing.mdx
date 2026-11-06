@@ -412,6 +412,11 @@ against the code.
   Circuit breakers live in each process, so every replica learns about an
   outage from its own failures. The provider SDK's own retries (`max_retries`)
   go to the same provider before failover moves on.
+- **Pseudonymisation does not change the level unless the policy says so.**
+  `ShieldsRouter(pseudonymise=True)` sends placeholders instead of the PII it
+  detects, but routes at the original prompt's level unless
+  `sensitivity.anonymise_then_route` lists that level. See
+  [Pseudonymisation](/guides/pseudonymisation).
 - **Local mode refuses streaming.** `stream=True` raises `RouterError` in
   local mode. Gateway mode streams.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
