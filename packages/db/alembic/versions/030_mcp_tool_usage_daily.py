@@ -10,10 +10,10 @@ period are purged.
 The new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Chained from main's head (027) on the branch; renumbered at merge.
+Chained from main's head (028) on the branch; renumbered at merge.
 
 Revision ID: 030
-Revises: 027
+Revises: 028
 Create Date: 2026-11-06
 """
 
@@ -24,7 +24,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "030"
-down_revision: str | None = "027"
+down_revision: str | None = "028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
