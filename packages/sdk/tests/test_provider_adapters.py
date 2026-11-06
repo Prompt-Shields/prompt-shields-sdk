@@ -147,6 +147,8 @@ def test_bedrock_response_without_usage_is_unmetered():
     "us.anthropic.claude-3-5-haiku-20241022-v1:0",
     "eu.anthropic.claude-3-5-haiku-20241022-v1:0",
     "apac.anthropic.claude-3-5-haiku-20241022-v1:0",
+    "in.anthropic.claude-3-5-haiku-20241022-v1:0",
+    "us-gov.anthropic.claude-3-5-haiku-20241022-v1:0",
 ])
 def test_bedrock_inference_profiles_price_as_base_model(model):
     priced = BedrockAdapter().pricing_model(model, None)
