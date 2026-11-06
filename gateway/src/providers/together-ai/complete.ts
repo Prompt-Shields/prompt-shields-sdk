@@ -4,6 +4,7 @@ import { generateInvalidProviderResponseError } from '../utils';
 import {
   TogetherAIErrorResponse,
   TogetherAIErrorResponseTransform,
+  getTogetherAIStreamData,
   TogetherAIOpenAICompatibleErrorResponse,
 } from './chatComplete';
 
@@ -105,10 +106,10 @@ export const TogetherAICompleteResponseTransform: (
 
 export const TogetherAICompleteStreamChunkTransform: (
   response: string
-) => string = (responseChunk) => {
-  let chunk = responseChunk.trim();
-  chunk = chunk.replace(/^data: /, '');
-  chunk = chunk.trim();
+) => string | undefined = (responseChunk) => {
+  // PS fork (#208): skip keep-alive comments, see getTogetherAIStreamData.
+  const chunk = getTogetherAIStreamData(responseChunk);
+  if (chunk === undefined) return undefined;
   if (chunk === '[DONE]') {
     return `data: ${chunk}\n\n`;
   }

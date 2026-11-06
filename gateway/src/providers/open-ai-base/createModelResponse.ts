@@ -94,6 +94,11 @@ export const OpenAICreateModelResponseConfig: ProviderConfig = {
     param: 'prompt_cache_key',
     required: false,
   },
+  // PS fork (#208, Portkey enterprise changelog 2.33): passed through.
+  prompt_cache_options: {
+    param: 'prompt_cache_options',
+    required: false,
+  },
   reasoning: {
     param: 'reasoning',
     required: false,
