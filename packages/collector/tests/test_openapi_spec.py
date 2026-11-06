@@ -288,6 +288,13 @@ def test_mcp_schemas_match_serializers():
         latency_count=0, request_bytes=0, response_bytes=0, bytes_count=0,
     )
     assert _props("McpUsageDay") == set(mcp_usage._with_asset(mcp_usage._daily_dict(daily), asset))
+    # The serializers always emit every key (null when unknown), so the
+    # spec lists them all as required; the TypeScript SDK relies on it.
+    for name in ("McpTool", "McpUsageDay"):
+        assert set(SCHEMAS[name]["required"]) == _props(name), name
+    for name in ("McpToolPage", "McpUsagePage"):
+        assert set(SCHEMAS[name]["required"]) == {"data", "meta"}, name
+    assert set(SCHEMAS["McpUsagePage"]["properties"]["meta"]["allOf"][1]["required"]) == {"since", "until"}
     for path in ("/partner/v1/mcp/tools", "/partner/v1/mcp/usage"):
         assert SPEC["paths"][path]["get"]["security"][0] == {"OAuth2": ["mcp:read"]}
     assert "/api/v1/registry/mcp-tools" in SPEC["paths"]

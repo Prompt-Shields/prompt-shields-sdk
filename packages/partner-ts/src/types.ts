@@ -796,3 +796,319 @@ export interface DownloadOptions {
    */
   signal?: AbortSignal;
 }
+
+// MCP observability (/partner/v1/mcp). Needs `mcp:read`.
+
+/** Where an MCP tool call was reported from. */
+export type McpSource = OpenString<'sdk' | 'gateway' | 'otel' | 'scan'>;
+
+/**
+ * One observed (source, server, tool, calling service, environment, user)
+ * combination, with lifetime counts. Names are reported by MCP servers and
+ * apps: escape them when rendering.
+ */
+export interface McpTool {
+  serverName: string;
+  toolName: string;
+  source: McpSource;
+  callingService: string | null;
+  environment: string | null;
+  transport: string | null;
+  callCount: number;
+  errorCount: number;
+  /** Calls a guardrail blocked at the gateway (not errors). */
+  blockedCount: number;
+  /** Pseudonymous caller (the gateway's OIDC subject hash). */
+  userHash: string | null;
+  userGroup: string | null;
+  avgLatencyMs: number | null;
+  /** ISO 8601 timestamp. */
+  firstSeen: string | null;
+  /** ISO 8601 timestamp. */
+  lastSeen: string | null;
+  /** The server's registry asset (vendor `mcp`); `null` for server `unknown`. */
+  assetId: string | null;
+  /** The server asset's owner, from the registry or the gateway's server config. */
+  ownerEmail: string | null;
+}
+
+/** Tool-call metering for one MCP tool on one server on one UTC day, per source. */
+export interface McpUsageDay {
+  /** UTC day, `YYYY-MM-DD`. */
+  day: string;
+  source: McpSource;
+  serverName: string;
+  toolName: string;
+  callCount: number;
+  errorCount: number;
+  blockedCount: number;
+  latencyMsTotal: number;
+  /** Calls that reported a latency. */
+  latencyCount: number;
+  avgLatencyMs: number | null;
+  /** Request body bytes, summed over the calls that reported bytes. */
+  requestBytes: number;
+  /** Response message bytes, summed over the calls that reported bytes. */
+  responseBytes: number;
+  /** Calls that reported bytes. */
+  bytesCount: number;
+  assetId: string | null;
+  ownerEmail: string | null;
+}
+
+/** Cursor meta of the MCP pages (no `total`). */
+export interface McpPageMeta {
+  hasMore: boolean;
+  /** Opaque; pass as `cursor` for the next page. */
+  nextCursor: string | null;
+}
+
+export interface McpToolPage {
+  data: McpTool[];
+  meta: McpPageMeta;
+}
+
+export interface McpUsagePageMeta extends McpPageMeta {
+  /** First UTC day of the window, `YYYY-MM-DD`. */
+  since: string;
+  /** Last UTC day, inclusive, or `null` for up to today. */
+  until: string | null;
+}
+
+export interface McpUsagePage {
+  data: McpUsageDay[];
+  meta: McpUsagePageMeta;
+}
+
+export interface ListMcpToolsParams {
+  serverName?: string;
+  source?: McpSource;
+  /** Rows per page, 1 to 1000. Server default is 200. */
+  limit?: number;
+  /** `meta.nextCursor` of the previous page. */
+  cursor?: string | null;
+}
+
+export interface ListMcpUsageParams {
+  /** First UTC day, `YYYY-MM-DD`. Server default is 30 days ago. */
+  since?: string;
+  /** Last UTC day, inclusive, `YYYY-MM-DD`. */
+  until?: string;
+  toolName?: string;
+  serverName?: string;
+  source?: McpSource;
+  /** Rows per page, 1 to 1000. Server default is 200. */
+  limit?: number;
+  /** `meta.nextCursor` of the previous page. */
+  cursor?: string | null;
+}
+
+// Routing learner snapshots and recommendations (/partner/v1/learner).
+
+export type LearnerMode = OpenString<'recommend'>;
+export type LearnerRecommendationStatus = OpenString<'pending' | 'accepted' | 'rejected' | 'superseded'>;
+export type LearnerDecision = OpenString<'accepted' | 'rejected'>;
+
+/**
+ * One routing learner snapshot, without its state. The learner runs in
+ * the customer's environment in `recommend` mode and never routes traffic.
+ */
+export interface LearnerSnapshotSummary {
+  id: string;
+  /** Content hash of the snapshot, `lv1-` and 16 hex digits. */
+  learnerVersion: string;
+  /** The snapshot this one was warm-started from. */
+  parentVersion: string | null;
+  mode: LearnerMode;
+  /** E.g. `linear-thompson.v1`. */
+  algorithm: string;
+  /** E.g. `ps-prompt-features.v1`. */
+  featureSchema: string | null;
+  /** The route policy whose candidates constrained the learner. */
+  policyVersion: string | null;
+  /** SHA-256 of the training rows. */
+  dataFingerprint: string;
+  trainingRows: number;
+  /** Rows with a quality signal. */
+  scoredRows: number;
+  /** Number of recommendations in the snapshot. */
+  recommendations: number;
+  /** ISO 8601 timestamp. */
+  createdAt: string;
+}
+
+/** `client.learner.getSnapshot()`: a snapshot with its full state. */
+export interface LearnerSnapshot extends LearnerSnapshotSummary {
+  /**
+   * The whole document as uploaded (`ps-learner-snapshot.v1`), keys kept
+   * exactly as sent (not camelCased): config, reward weights, per-group
+   * candidates and status, per-arm statistics and the recommendations.
+   */
+  snapshot: Record<string, unknown>;
+}
+
+/** Off-policy estimate of routing a group's logged traffic to one model. */
+export interface LearnerArmProjection {
+  model?: string;
+  quality?: number;
+  costPerCall?: number;
+  latencyMs?: number;
+  /** quality − λ·cost − μ·latency(s). */
+  reward?: number;
+  /** Direct method (`dm`), or doubly robust (`dr`) when logged propensities exist. */
+  qualityMethod?: OpenString<'dm' | 'dr'>;
+  /** Counterfactual price of the logged tokens, or the cost regression. */
+  costMethod?: OpenString<'priced' | 'regression'>;
+}
+
+/** Off-policy projection over a group's logged traffic. */
+export interface LearnerProjection {
+  calls?: number;
+  current?: LearnerArmProjection;
+  recommended?: LearnerArmProjection;
+  qualityDelta?: number;
+  rewardDelta?: number;
+  savingsPerCall?: number;
+  /** `savingsPerCall` × `calls` over the logged window. */
+  savingsTotal?: number;
+  savingsPct?: number;
+  /** Share of Thompson-sampling draws in which the recommended model was best. */
+  probBest?: number;
+  /** Samples per model; keys are model names, kept as sent. */
+  armSamples?: Record<string, number>;
+}
+
+/** Realised vs. projected, for an accepted recommendation. */
+export interface LearnerRealised {
+  /** ISO 8601 timestamp of the decision. */
+  since: string;
+  calls: number;
+  callsOnRecommended: number;
+  /** Share of calls served by the recommended model. */
+  adoption: number | null;
+  costPerCall: number | null;
+  /** Projected current cost per call minus realised cost per call. */
+  savingsPerCall: number | null;
+  savingsPct: number | null;
+  projectedSavingsPct: number | null;
+  /** (realised − projected savings share) × 100. */
+  deltaPoints: number | null;
+  /** Explicit feedback on calls served by the recommended model. */
+  feedbackCount: number;
+  feedbackQuality: number | null;
+  projectedQuality: number | null;
+}
+
+/**
+ * A route change the learner proposes for one (use case, sensitivity),
+ * always one of that group's policy-compliant candidates. Accepting it
+ * changes no routing: the reviewer edits the route policy.
+ */
+export interface LearnerRecommendation {
+  id: string;
+  snapshotId: string;
+  learnerVersion: string;
+  useCase: string | null;
+  sensitivityLevel: string;
+  /** The model most of the group's logged traffic used. */
+  currentModel: string;
+  recommendedModel: string;
+  /** The models the route policy allows for the group (`provider:model`). */
+  candidates: string[];
+  projection: LearnerProjection;
+  status: LearnerRecommendationStatus;
+  reviewedBy: string | null;
+  /** ISO 8601 timestamp. */
+  reviewedAt: string | null;
+  reviewComment: string | null;
+  reviewerActorType: OpenString<'partner'> | null;
+  /** ISO 8601 timestamp. */
+  createdAt: string;
+  /** `null` unless accepted. */
+  realised: LearnerRealised | null;
+}
+
+/** Body for `client.learner.reviewRecommendation()`. Needs the `learner:review` scope. */
+export interface LearnerReviewRequest {
+  decision: LearnerDecision;
+  /** The person deciding, e.g. an email (1 to 320 characters). */
+  reviewedBy: string;
+  /** Why it was accepted or rejected (up to 4000 characters). */
+  comment?: string | null;
+}
+
+/** Result of `POST /ingest/learner-snapshots` (the Python SDK's `ps-learn`); not called by this SDK. */
+export interface LearnerSnapshotUploadResult {
+  learnerVersion: string;
+  snapshotId: string;
+  /** False when this snapshot was already stored. */
+  created: boolean;
+  recommendations: number;
+  superseded: number;
+}
+
+export interface LearnerListMeta {
+  total: number;
+}
+
+export interface LearnerSnapshotList {
+  data: LearnerSnapshotSummary[];
+  meta: LearnerListMeta;
+}
+
+export interface LearnerRecommendationList {
+  data: LearnerRecommendation[];
+  meta: LearnerListMeta;
+}
+
+export interface ListLearnerSnapshotsParams {
+  /** 1 to 200. Server default is 50. */
+  limit?: number;
+}
+
+export interface ListLearnerRecommendationsParams {
+  status?: LearnerRecommendationStatus;
+  useCase?: string;
+  learnerVersion?: string;
+  /** 1 to 200. Server default is 50. */
+  limit?: number;
+}
+
+// SIEM pull (/partner/v1/siem): NDJSON in the Sentinel table schema.
+
+/** `AICall` (routing evidence of one model call) or `Audit` (one audit trail row). */
+export type SiemRecordType = OpenString<'AICall' | 'Audit'>;
+
+/**
+ * One NDJSON record in the Microsoft Sentinel table schema
+ * `PromptShieldsAudit_CL`. Column names are kept exactly as sent
+ * (`TimeGenerated`, `PsServedModel`, `PsAuditRowHash`, ...); columns
+ * without a value are left out.
+ */
+export interface SiemRecord {
+  TimeGenerated: string;
+  EventUid: string;
+  EventType: SiemRecordType;
+  PsTenantId: string;
+  [column: string]: unknown;
+}
+
+export interface SiemCallsParams {
+  /** `cursor` of the previous batch. */
+  cursor?: string | null;
+  /** Start time when there is no cursor. */
+  since?: Timestamp;
+  /** 1 to 5000. Server default is 1000. */
+  limit?: number;
+  /** Leave out calls newer than this (0 to 86400, server default 300), so late events are not skipped. */
+  settleSeconds?: number;
+}
+
+export interface SiemAuditParams {
+  /** `cursor` of the previous batch (the `seq` of its last row). */
+  cursor?: string | number | null;
+  /** Start time when there is no cursor. */
+  since?: Timestamp;
+  /** 1 to 5000. Server default is 1000. */
+  limit?: number;
+}
