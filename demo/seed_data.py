@@ -26,11 +26,14 @@ async def seed():
         db.add(tenant)
         await db.flush()
         # In tenant_api_keys (not on the tenant row), so the key API lists it
-        # without moving it first.
+        # without moving it first. Every scope: the demo ingests, reads the
+        # registry and attests with this one key.
         db.add(TenantApiKey(tenant_id=tenant.id, name="demo-ingest-key",
                             key_prefix=api_key_lookup_prefix(DEMO_API_KEY),
                             key_hash=hash_api_key(DEMO_API_KEY),
-                            key_hint=DEMO_API_KEY[-4:]))
+                            key_hint=DEMO_API_KEY[-4:],
+                            scopes=["ingest:write", "registry:read",
+                                    "registry:attest"]))
         await db.flush()
 
         now = datetime.now(timezone.utc)

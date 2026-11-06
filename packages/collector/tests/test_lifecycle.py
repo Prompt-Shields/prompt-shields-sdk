@@ -263,7 +263,7 @@ TENANT_AUTH = {"Authorization": "Bearer ps-test-key"}
 async def test_admin_sweep_endpoint(monkeypatch):
     tenant_id = uuid.uuid4()
 
-    async def fake_resolve_tenant(request):
+    async def fake_resolve_tenant(request, *scopes):
         return tenant_id
 
     # Admin routes authenticate through collector.admin_auth.
@@ -288,7 +288,7 @@ async def test_admin_sweep_endpoint(monkeypatch):
 
 
 async def test_admin_sweep_rejects_bad_thresholds(monkeypatch):
-    async def fake_resolve_tenant(request):
+    async def fake_resolve_tenant(request, *scopes):
         return uuid.uuid4()
 
     # Admin routes authenticate through collector.admin_auth.

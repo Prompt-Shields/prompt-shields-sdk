@@ -201,13 +201,13 @@ def test_migration_revision_chain():
         / "db"
         / "alembic"
         / "versions"
-        / "036_rbac_principals.py"
+        / "038_rbac_principals.py"
     )
-    spec = importlib.util.spec_from_file_location("migration_036", path)
+    spec = importlib.util.spec_from_file_location("migration_038", path)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    assert m.revision == "036"
-    assert m.down_revision == "035"
+    assert m.revision == "038"
+    assert m.down_revision == "037"
     assert set(m.TABLES) == {"principals", "teams", "projects", "memberships"}
 
 

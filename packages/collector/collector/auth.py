@@ -58,6 +58,18 @@ def record_failed_auth(client: str) -> None:
     auth_cache.get_failed_auth_limiter().record_failure(client)
 
 
+def insufficient_scope(missing: list[str]) -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail={
+            "type": "about:blank",
+            "title": "Forbidden",
+            "status": 403,
+            "detail": "API key lacks required scope: " + ", ".join(missing),
+        },
+    )
+
+
 def tenant_disabled() -> HTTPException:
     return HTTPException(
         status_code=403,
@@ -91,8 +103,9 @@ async def bearer_token(request: Request) -> str:
     return auth.removeprefix("Bearer ").strip()
 
 
-async def resolve_tenant(request: Request) -> UUID:
-    """Extract Bearer token, resolve to tenant_id.
+async def resolve_tenant(request: Request, *scopes: str) -> UUID:
+    """Extract Bearer token, resolve to tenant_id. The key must hold every
+    scope in ``scopes`` (tenant_keys.KEY_SCOPES, #341), else 403.
 
     The key is found by its SHA-256 lookup prefix (in tenant_api_keys, then
     the legacy key on the tenant row; see collector/tenant_keys.py) and
@@ -153,4 +166,18 @@ async def resolve_tenant(request: Request) -> UUID:
     if client is not None:
         cache.put(api_key, candidate.tenant_id, key_id, candidate.stored_hash)
     await rls.set_tenant(db, candidate.tenant_id)
+    missing = tenant_keys.ordered_scopes(set(scopes) - candidate.scopes)
+    if missing:
+        # The key is genuine, so the refusal goes on the tenant's own chain.
+        path = getattr(getattr(request, "url", None), "path", "")
+        await audit_trail.record_auth_failure(
+            request,
+            realm="tenant_admin" if path.startswith(ADMIN_PATH_PREFIX) else "ingest_key",
+            reason="insufficient_scope",
+            status_code=403,
+            tenant_id=candidate.tenant_id,
+            actor=audit_trail.tenant_key_actor(request),
+            db=db,
+        )
+        raise insufficient_scope(missing)
     return candidate.tenant_id

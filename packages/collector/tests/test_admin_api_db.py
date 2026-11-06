@@ -106,6 +106,10 @@ async def _works(c, key: str) -> int:
     return (await c.get("/api/v1/registry/assets", headers=H(key))).status_code
 
 
+# Every ingest key scope: what keys from before #341 hold.
+ALL_KEY_SCOPES = ["ingest:write", "registry:read", "registry:attest"]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Backwards-compatible default and the scoped-only setting
 # ──────────────────────────────────────────────────────────────────────
@@ -251,17 +255,21 @@ async def test_a_token_cannot_grant_scopes_it_lacks(client):
 async def test_admin_keys_token_cannot_mint_a_full_admin_ingest_key(
     client, seeded_db, monkeypatch
 ):
-    """While PS_ADMIN_REQUIRE_SCOPED_TOKENS is off an ingest key is full
-    admin, so an admin:keys token may not issue or rotate one."""
+    """While PS_ADMIN_REQUIRE_SCOPED_TOKENS is off a full-scope ingest key
+    is full admin, so an admin:keys token may not issue or rotate one."""
     keys = await _token(client, ["admin:keys"])
     existing = (
         await client.post(
-            "/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": "sdk"}
+            "/api/v1/admin/api-keys",
+            headers=H(TENANT_KEY),
+            json={"name": "sdk", "scopes": ALL_KEY_SCOPES},
         )
     ).json()
 
     resp = await client.post(
-        "/api/v1/admin/api-keys", headers=H(keys["token"]), json={"name": "mine"}
+        "/api/v1/admin/api-keys",
+        headers=H(keys["token"]),
+        json={"name": "mine", "scopes": ALL_KEY_SCOPES},
     )
     assert resp.status_code == 403
     assert "every admin scope" in resp.json()["detail"]["detail"]
@@ -285,7 +293,9 @@ async def test_admin_keys_token_cannot_mint_a_full_admin_ingest_key(
     # admin:keys is enough.
     monkeypatch.setattr(settings, "admin_require_scoped_tokens", True)
     resp = await client.post(
-        "/api/v1/admin/api-keys", headers=H(keys["token"]), json={"name": "mine"}
+        "/api/v1/admin/api-keys",
+        headers=H(keys["token"]),
+        json={"name": "mine", "scopes": ALL_KEY_SCOPES},
     )
     assert resp.status_code == 201, resp.text
     minted = resp.json()["key"]
@@ -523,7 +533,9 @@ async def test_legacy_key_is_adopted_and_keeps_working(client, seeded_db):
 
 async def test_api_key_lifecycle(client, seeded_db):
     resp = await client.post(
-        "/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": "gateway-prod"}
+        "/api/v1/admin/api-keys",
+        headers=H(TENANT_KEY),
+        json={"name": "gateway-prod", "scopes": ALL_KEY_SCOPES},
     )
     assert resp.status_code == 201, resp.text
     created = resp.json()
@@ -623,7 +635,7 @@ async def test_api_key_expiry(client, seeded_db):
         await client.post(
             "/api/v1/admin/api-keys",
             headers=H(TENANT_KEY),
-            json={"name": "temp", "expires_at": soon},
+            json={"name": "temp", "expires_at": soon, "scopes": ALL_KEY_SCOPES},
         )
     ).json()
     assert await _works(client, created["key"]) == 200
@@ -651,7 +663,9 @@ async def test_tenant_isolation_under_rls(client, seeded_db):
     tok_b = await _token(client, sorted(TENANT_KEY_SCOPES), key=KEY_B)
     key_a = (
         await client.post(
-            "/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": "a"}
+            "/api/v1/admin/api-keys",
+            headers=H(TENANT_KEY),
+            json={"name": "a", "scopes": ALL_KEY_SCOPES},
         )
     ).json()
     async with seeded_db.begin() as conn:
@@ -714,6 +728,7 @@ async def test_tenant_crud(client, seeded_db):
             "name": "Nordbank",
             "domain": "nordbank.example",
             "settings": {"retention_days": 90},
+            "api_key_scopes": ["ingest:write", "registry:read"],
         },
     )
     assert resp.status_code == 201, resp.text
@@ -948,16 +963,16 @@ async def test_partner_credential_consistency(client, seeded_db):
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _load_migration():
+def _load_migration(name: str = "022_admin_tokens_keys"):
     pytest.importorskip("alembic")
     path = (
         Path(__file__).resolve().parents[2]
         / "db"
         / "alembic"
         / "versions"
-        / "022_admin_tokens_keys.py"
+        / f"{name}.py"
     )
-    spec = importlib.util.spec_from_file_location("migration_022", path)
+    spec = importlib.util.spec_from_file_location(f"migration_{name[:3]}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -974,6 +989,9 @@ async def test_migration_moves_legacy_keys_and_downgrades(client, seeded_db):
     from alembic.operations import Operations
 
     m = _load_migration()
+    # 037 (ingest key scopes, #341) adds a column to 022's table: step it
+    # down first and back up after.
+    m037 = _load_migration("037_ingest_key_scopes_operator_tokens")
 
     def run(sync_conn, step):
         ctx = MigrationContext.configure(sync_conn)
@@ -982,11 +1000,14 @@ async def test_migration_moves_legacy_keys_and_downgrades(client, seeded_db):
 
     issued = (
         await client.post(
-            "/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": "n"}
+            "/api/v1/admin/api-keys",
+            headers=H(TENANT_KEY),
+            json={"name": "n", "scopes": ALL_KEY_SCOPES},
         )
     ).json()
     # The tenant's legacy key is now in the table; downgrade puts it back.
     async with seeded_db.begin() as conn:
+        await conn.run_sync(run, m037.downgrade)
         await conn.run_sync(run, m.downgrade)
     async with _admin(seeded_db)() as s:
         tenant = (await s.execute(select(Tenant.api_key_prefix))).scalar_one()
@@ -994,11 +1015,14 @@ async def test_migration_moves_legacy_keys_and_downgrades(client, seeded_db):
 
     async with seeded_db.begin() as conn:
         await conn.run_sync(run, m.upgrade)
+        await conn.run_sync(run, m037.upgrade)
     async with _admin(seeded_db)() as s:
         tenant = (await s.execute(select(Tenant))).scalar_one()
         keys = (await s.execute(select(TenantApiKey))).scalars().all()
     assert tenant.api_key_hash is None
     assert [(k.name, k.origin) for k in keys] == [("legacy-ingest-key", "legacy")]
+    # 037 gives every existing key all three scopes.
+    assert sorted(keys[0].scopes) == sorted(ALL_KEY_SCOPES)
     assert await _works(client, TENANT_KEY) == 200
     # Keys other than the one restored do not survive a downgrade.
     assert await _works(client, issued["key"]) == 401

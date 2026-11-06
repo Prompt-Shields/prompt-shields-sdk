@@ -4,6 +4,7 @@ and their recall gate on the benchmark (``benchmarks/pii``)."""
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import sys
 import time
@@ -211,19 +212,28 @@ def test_spacy_backend_adds_model_names():
 # --- linear time ------------------------------------------------------------------
 
 def _cpu_seconds(text: str, times: int) -> float:
-    start = time.thread_time()
-    for _ in range(times):
-        detect_pii_categories_extended(text)
-    return time.thread_time() - start
+    # A garbage collection pass inside one sample (likelier in the large,
+    # allocation-heavy run) can double it on a busy CI runner; keep it out.
+    enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        start = time.thread_time()
+        for _ in range(times):
+            detect_pii_categories_extended(text)
+        return time.thread_time() - start
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def _growth(small: str, large: str) -> float:
     """CPU cost of `large` over `small` (a quarter of its size), best of a
-    few interleaved samples, as in test_pii_benchmark."""
+    few interleaved samples (at least three), as in test_pii_benchmark."""
     best_small = best_large = float("inf")
     deadline = time.perf_counter() + 1.0
     for i in range(5):
-        if i and time.perf_counter() > deadline:
+        if i >= 3 and time.perf_counter() > deadline:
             break
         best_small = min(best_small, _cpu_seconds(small, 4))
         best_large = min(best_large, _cpu_seconds(large, 1))

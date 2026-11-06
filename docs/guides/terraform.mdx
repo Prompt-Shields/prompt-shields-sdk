@@ -58,13 +58,24 @@ The chart's README covers database roles, row-level security and air-gapped inst
 
 ## 2. Credentials: which token goes where
 
-The collector has three kinds of credential. Terraform should only ever hold the last one.
+The collector has four kinds of credential. Tenant Terraform should only ever hold the last one.
 
 | Credential | Reaches | Use in Terraform |
 |------------|---------|------------------|
-| `PS_ADMIN_TOKEN` (operator) | `/api/v1/operator/*` and operator pulls, across every tenant, bypassing row-level security | Only in a separate platform workspace that creates tenants, or not at all |
-| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | Ingest and the registry; `/api/v1/admin` only with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` | No: it is what SDKs and gateways send |
+| `PS_ADMIN_TOKEN` (operator, break-glass) | `/api/v1/operator/*` and operator pulls, across every tenant, bypassing row-level security. Every use is audited as `operator.break_glass` | No: use it to issue named operator tokens, then keep it for emergencies (or unset it) |
+| Named operator token (`ps-ot-...`) | The operator routes its scopes allow, across every tenant; every action is attributed to the token's name in the audit trail | Only in a separate platform workspace that creates tenants |
+| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | What its scopes allow: `ingest:write`, `registry:read`, `registry:attest`. A key holding all three (every key from before scopes existed) also reaches the pre-roles `/api/v1/admin` routes, but only with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` (default `true`) | No: it is what SDKs and gateways send |
 | Admin token (`ps-at-...`) | `/api/v1/admin` routes allowed by its scopes, for one tenant | Yes |
+
+### Ingest key scopes
+
+| Scope | Grants |
+|-------|--------|
+| `ingest:write` | `/ingest/events`, OTLP, Kong, MCP, learner snapshot and feedback ingest |
+| `registry:read` | `/api/v1/registry/*` reads and `/telemetry/loss` |
+| `registry:attest` | `POST /api/v1/registry/assets/{id}/attestations` |
+
+A key issued since migration 037 holds `ingest:write` only, unless `scopes` (or `api_key_scopes` on `POST /api/v1/operator/tenants`) asks for more; a request outside its scopes gets 403 (audited). Keys that existed before keep all three, so nothing breaks on upgrade. Only a key holding all three can call `/api/v1/admin`.
 
 Admin token scopes:
 
@@ -85,19 +96,42 @@ Each operation in the OpenAPI spec names its scope in `x-admin-scope`.
 
 By default (`true`, since roles shipped) the collector refuses ingest keys on every `/api/v1/admin` route (403, audited), and only admin tokens with the right scope get in. Ingest and registry routes are unchanged. Before, the default was `false`: any ingest key, including one deployed with an SDK or gateway, could rotate provider admin keys, issue partner credentials and mint more keys. **Upgrading:** move automation that calls `/api/v1/admin` with an ingest key to an admin token first, or set `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` to keep the old behaviour for now.
 
-With it set to `false`, an ingest key reaches every admin route except member management (`admin:members`), so issuing or rotating one (`POST /api/v1/admin/api-keys`, `.../rotate`) needs a token with all of those scopes; `admin:keys` alone can list, read and revoke keys. With the setting on, `admin:keys` is enough.
+With it set to `false`, a full-scope ingest key reaches every admin route except member management (`admin:members`), so issuing or rotating one (`POST /api/v1/admin/api-keys` with all three scopes, `.../rotate` on such a key) needs a token with all of those admin scopes. A narrower key (the default, `ingest:write`) cannot reach admin routes, so `admin:keys` is enough to issue or rotate it, and to list, read and revoke any key. With the setting on, `admin:keys` is enough for every key.
 
 ### Roles
 
 Principals (users and service accounts), teams, projects and memberships are managed under `/api/v1/admin/principals`, `/teams`, `/projects` and `/memberships` (`admin:members`). A membership gives a principal one built-in role (`owner`, `admin`, `developer`, `viewer`, `auditor`, `billing`; `GET /api/v1/admin/roles` lists their scopes) tenant-wide, in a team, or in a project. Pass `principal_id` when issuing an admin token or partner credential to issue it for a principal: it keeps the requested scopes the principal's tenant-wide roles grant, and on every request reaches no more than those roles grant then, so demoting or disabling the principal takes effect at once. Tokens issued without `principal_id` (Terraform's own) work as before. Only an owner can grant, change or remove the owner role.
 
+### Named operator tokens
+
+`PS_ADMIN_TOKEN` is a single static secret with every operator power. Use it once to issue named operator tokens, each with only the scopes it needs, then keep it as break-glass:
+
+```bash
+curl -sS -X POST "$PS_COLLECTOR/api/v1/operator/tokens" \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "platform-terraform", "scopes": ["operator:tenants", "operator:read"],
+       "expires_at": "2027-06-30T00:00:00Z"}'
+```
+
+| Scope | Grants |
+|-------|--------|
+| `operator:read` | Every GET on the operator routes |
+| `operator:tenants` | Create, change, disable and enable tenants; bootstrap tenant admin tokens |
+| `operator:retention` | Tenant retention and the usage-event purge |
+| `operator:erase` | Tenant erasure |
+| `operator:audit` | `GET /api/v1/operator/audit/verify` |
+| `operator:integrations` | Provider usage pulls, cloud inventory, LeanIX, ServiceNow and Sentinel operator routes |
+| `operator:tokens` | Issue, rotate and revoke operator tokens, only with scopes the caller holds |
+
+The token (`ps-ot-...`) is shown once. Rotate it with `POST /api/v1/operator/tokens/{id}/rotate` (the old secret stops at once) and revoke it with `DELETE /api/v1/operator/tokens/{id}`. Names are never reused, so an audit row's actor names one token for good. Issue, rotate and revoke are audited as `operator_token.issue|rotate|revoke`. Named tokens keep working with `PS_ADMIN_TOKEN` unset. Each operator operation in the OpenAPI spec names its scope in `x-operator-scope`.
+
 ### Bootstrap the first admin token
 
-Create the tenant's first admin token once, outside Terraform, with the operator token, and store it in your secret manager:
+Create the tenant's first admin token once, outside Terraform, with an operator token holding `operator:tenants` (or `PS_ADMIN_TOKEN`), and store it in your secret manager:
 
 ```bash
 curl -sS -X POST "$PS_COLLECTOR/api/v1/operator/tenants/$TENANT_ID/admin-tokens" \
-  -H "Authorization: Bearer $PS_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PS_OPERATOR_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name": "terraform", "scopes": ["admin:read", "admin:keys", "admin:partners",
        "admin:webhooks", "admin:provider-credentials"],
        "expires_at": "2027-06-30T00:00:00Z"}'
@@ -148,9 +182,10 @@ Conventions every admin resource follows, so `restapi_object` can drive it:
 ```hcl
 resource "restapi_object" "gateway_key" {
   path = "/api/v1/admin/api-keys"
+  # scopes defaults to ["ingest:write"]: all a gateway needs.
   data = jsonencode({ name = "gateway-prod" })
-  # Keys have no update: a changed name or expiry makes a new key.
-  force_new = ["name", "expires_at"]
+  # Keys have no update: a changed name, expiry or scopes makes a new key.
+  force_new = ["name", "expires_at", "scopes"]
 }
 
 # The plaintext key, only in the create response.
@@ -257,7 +292,7 @@ resource "restapi_object" "tenant" {
 }
 ```
 
-`POST` also issues a first ingest key (in `create_response`, `api_key.key`); send `"issue_api_key": false` to skip it. `PATCH` with `"disabled": true` stops the tenant's keys, admin tokens and partner credentials and keeps its data. Terraform `destroy` does **not** erase a tenant: erasure is `DELETE /api/v1/operator/tenants/{id}?confirm={id}`, irreversible, and deliberately left out of this recipe. Set `destroy_path` to something harmless, or protect the resource with `lifecycle { prevent_destroy = true }`.
+`POST` also issues a first ingest key (in `create_response`, `api_key.key`); send `"issue_api_key": false` to skip it. That key holds `ingest:write` only (since migration 037): it cannot read the registry, attest or call `/api/v1/admin`. Send `"api_key_scopes"` to give it more, and use an admin token for `/api/v1/admin`. `PATCH` with `"disabled": true` stops the tenant's keys, admin tokens and partner credentials and keeps its data. Terraform `destroy` does **not** erase a tenant: erasure is `DELETE /api/v1/operator/tenants/{id}?confirm={id}`, irreversible, and deliberately left out of this recipe. Set `destroy_path` to something harmless, or protect the resource with `lifecycle { prevent_destroy = true }`.
 
 ## 5. State and secrets
 

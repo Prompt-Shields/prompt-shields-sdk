@@ -3,7 +3,8 @@
 Ways to run it:
 
   - ``POST /api/v1/admin/provider-usage/pull`` with
-    ``Authorization: Bearer $PS_ADMIN_TOKEN`` and ``{"tenant_id": ...}``
+    ``Authorization: Bearer $PS_ADMIN_TOKEN`` (or a named operator token
+    with ``operator:integrations``, #341) and ``{"tenant_id": ...}``
   - ``python -m collector.provider_usage_admin --tenant <uuid> [--days 7]``,
     one tenant
   - ``python -m collector.provider_usage_admin --all-tenants [--days 3]``,
@@ -24,7 +25,8 @@ vendor API calls; enable the in-process schedule on one replica.
 The HTTP route makes outbound calls with the tenant's admin keys (stored, or
 operator-held in PS_PROVIDER_ADMIN_KEYS), so it is
 an operator surface, not a tenant one: a tenant ingest key cannot trigger it.
-With ``PS_ADMIN_TOKEN`` unset the route answers 404, as if absent.
+With ``PS_ADMIN_TOKEN`` unset and no operator token presented the route
+answers 404, as if absent.
 
 Both call ``collector.provider_usage.pull_provider_usage``.
 """
@@ -33,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -47,7 +48,8 @@ from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings
 from sqlalchemy import select, text
 
-from collector import audit_trail, rls
+from collector import rls
+from collector.operator_auth import require_operator_scope
 from collector.provider_usage import (
     SUPPORTED_PROVIDERS,
     ProviderUsageSettings,
@@ -86,33 +88,17 @@ def _problem(status: int, title: str, detail: str) -> HTTPException:
     )
 
 
-async def require_operator(request: Request) -> None:
-    """Constant-time check of ``Authorization: Bearer $PS_ADMIN_TOKEN``.
+def _break_glass_token() -> str:
+    return _OperatorSettings().admin_token.get_secret_value()
 
-    Audit trail (system chain): ``operator.access`` for every authorised
-    call (route and method), ``auth.failure`` (rate-limited) otherwise.
-    """
-    token = _OperatorSettings().admin_token.get_secret_value()
-    if not token:
-        raise _problem(404, "Not Found", "Not Found")
-    auth = request.headers.get("Authorization", "")
-    presented = auth[len("Bearer ") :].strip() if auth.startswith("Bearer ") else ""
-    if not presented or not hmac.compare_digest(presented.encode(), token.encode()):
-        await audit_trail.record_auth_failure(
-            request,
-            realm="operator",
-            reason="invalid_credentials" if presented else "missing_credentials",
-            status_code=401,
-        )
-        raise _problem(401, "Unauthorized", "Invalid operator token")
-    await audit_trail.record_system_event(
-        action="operator.access",
-        actor=audit_trail.OPERATOR,
-        details={
-            "route": audit_trail.route_template(request),
-            "method": request.method,
-        },
-    )
+
+# A named operator token with ``operator:integrations``, or PS_ADMIN_TOKEN
+# as break-glass (collector.operator_auth, #341). Audit trail (system
+# chain): ``operator.access`` (named token) or ``operator.break_glass``
+# (PS_ADMIN_TOKEN) for every authorised call, with route and method;
+# ``auth.failure`` (rate-limited) otherwise. Shared by the cloud inventory,
+# LeanIX, ServiceNow and Sentinel operator routes.
+require_operator = require_operator_scope("operator:integrations", _break_glass_token)
 
 
 class ProviderUsagePullBody(BaseModel):

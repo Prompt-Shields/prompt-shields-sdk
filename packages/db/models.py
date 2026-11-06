@@ -305,6 +305,17 @@ class TenantApiKey(Base):
     previous_expires_at = Column(TIMESTAMP(timezone=True))
     # 'api' (issued here) or 'legacy' (moved from tenants.api_key_*).
     origin = Column(Text, nullable=False, default="api", server_default="api")
+    # ingest:write | registry:read | registry:attest (collector/tenant_keys.py).
+    # Keys from before migration 037 hold all three; a new row defaults to
+    # ingest:write only.
+    scopes = Column(
+        ARRAY(Text),
+        nullable=False,
+        default=lambda: ["ingest:write"],
+        # A plain literal (Postgres casts it to text[]), so SQLite test
+        # schemas can be built from the models too.
+        server_default="{ingest:write}",
+    )
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     rotated_at = Column(TIMESTAMP(timezone=True))
     expires_at = Column(TIMESTAMP(timezone=True))
@@ -327,6 +338,39 @@ class TenantApiKey(Base):
             postgresql_where=text("revoked_at IS NULL"),
         ),
         Index("ix_tenant_api_keys_tenant", "tenant_id", "created_at"),
+    )
+
+
+class OperatorToken(Base):
+    """A named operator token for /api/v1/operator and the operator-only
+    admin routes (#341). Not tied to a tenant: it acts across tenants like
+    ``PS_ADMIN_TOKEN``, but with a name, explicit scopes
+    (collector/operator_auth.py OPERATOR_SCOPES), an optional expiry and
+    revocation, so every action is attributed to it in the audit trail.
+    Hashed like the ingest keys and shown once. Names are never reused
+    (unique even after revocation), so an audit row's actor id names one
+    token for good. Not a tenant table: no row-level security policy.
+    """
+
+    __tablename__ = "operator_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    name = Column(Text, nullable=False)
+    scopes = Column(ARRAY(Text), nullable=False)
+    token_prefix = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False)
+    token_hint = Column(Text, nullable=False)
+    # Who issued it: "operator" (PS_ADMIN_TOKEN, break-glass) or
+    # "operator_token:<name>". Never a secret.
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    rotated_at = Column(TIMESTAMP(timezone=True))
+    expires_at = Column(TIMESTAMP(timezone=True))
+    revoked_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        Index("ux_operator_tokens_prefix", "token_prefix", unique=True),
+        Index("ux_operator_tokens_name", "name", unique=True),
     )
 
 
@@ -356,7 +400,7 @@ class AdminToken(Base):
     revoked_at = Column(TIMESTAMP(timezone=True))
     # Issued for a principal (#338): the token then reaches at most what the
     # principal's tenant-wide roles grant now (collector/rbac.py). NULL for
-    # automation tokens that belong to no one (every token before 036).
+    # automation tokens that belong to no one (every token before 038).
     principal_id = Column(
         UUID(as_uuid=True), ForeignKey("principals.id", ondelete="SET NULL")
     )
