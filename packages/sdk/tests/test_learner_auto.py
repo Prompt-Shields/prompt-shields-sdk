@@ -544,3 +544,166 @@ def test_tampered_or_foreign_snapshots_are_refused():
         _learner(snapshot=bad)
     with pytest.raises(AutoModeError, match="recommend-mode"):
         _learner(snapshot=_snapshot(mode="auto"))
+
+
+# --- robustness: learner errors, per-group promotion, gate dedupe, fetch URL -------------
+
+
+def _route_fields(resp):
+    r = resp.ps.route
+    return (r.provider, r.model, r.group, r.reason, r.learner)
+
+
+def test_a_learner_that_raises_in_choose_never_fails_the_call(caplog):
+    al = _learner(snapshot=_snapshot([_recommend()]), guard=GUARD)
+    router, events = _router(learner=al)
+    plain, _ = _router()
+
+    def boom(*a, **kw):
+        raise RuntimeError("secret prompt text")
+
+    al.choose = boom
+    with caplog.at_level("WARNING", logger="prompt_shields.router"):
+        resp = router.chat.completions.create(messages=_msg(), use_case="support",
+                                              data_classification="confidential")
+    # The policy's own pick, exactly as without a learner.
+    base = plain.chat.completions.create(messages=_msg(), use_case="support",
+                                         data_classification="confidential")
+    assert _route_fields(resp) == _route_fields(base)
+    assert resp.ps.route.learner is None and resp.ps.route.model == "scaleway-small"
+    assert "route_learner_mode" not in events[-1]
+    assert al.fallbacks == {"choose": 1}
+    (ev,) = [e for e in al.events if e["event"] == "learner_error"]
+    assert ev == {"event": "learner_error", "stage": "choose", "error": "RuntimeError"}
+    # Only the error type is logged, never its message.
+    assert "RuntimeError" in caplog.text and "secret prompt text" not in caplog.text
+
+
+def test_a_learner_that_raises_in_observe_never_fails_the_call(caplog):
+    al = _learner(snapshot=_snapshot([_recommend()]), guard=GUARD)
+    router, _ = _router(learner=al)
+
+    def boom(*a, **kw):
+        raise ValueError("secret prompt text")
+
+    al.observe = boom
+    with caplog.at_level("WARNING", logger="prompt_shields.router"):
+        resp = router.chat.completions.create(messages=_msg(), use_case="support",
+                                              data_classification="confidential")
+    assert resp.ps.route.model == "mistral-small-eu"  # the learner's pick was served
+    assert al.fallbacks == {"observe": 1}
+    assert "ValueError" in caplog.text and "secret prompt text" not in caplog.text
+
+    # A call that fails outright still raises its own error, not the learner's.
+    def down(**kw):
+        raise ConnectionError("upstream down")
+
+    router_nf, _ = _router(learner=al, failover=False)
+    router_nf._client("mistral-eu")._upstream.chat.completions.create = down
+    with pytest.raises(ConnectionError, match="upstream down"):
+        router_nf.chat.completions.create(messages=_msg(), use_case="support",
+                                          data_classification="confidential")
+    assert al.fallbacks == {"observe": 2}
+
+
+def test_a_learner_pick_outside_the_options_falls_back_to_the_policy():
+    from dataclasses import replace
+
+    al = _learner(snapshot=_snapshot([_recommend()]), guard=GUARD)
+    router, _ = _router(learner=al)
+    real = al.choose
+    al.choose = lambda *a, **kw: replace(real(*a, **kw), model="openai:gpt-4o")
+    resp = router.chat.completions.create(messages=_msg(), use_case="support",
+                                          data_classification="confidential")
+    assert resp.ps.route.model == "scaleway-small" and resp.ps.route.learner is None
+    assert al.fallbacks == {"choose": 1}
+
+
+def test_promotion_needs_evidence_from_every_group_on_its_own():
+    snap = _snapshot([_recommend(), _recommend(sensitivity="internal")])
+    al = _learner(snapshot=snap, guard=GUARD)
+    cands = sorted(CONFIDENTIAL_SAFE)
+
+    def call(level, i):
+        c = al.choose("support", level, cands, SCALEWAY, NORDIC)
+        assert c.mode == "exploit"
+        al.observe(f"{level}{i}", c, [])
+        al.record_outcome(f"{level}{i}", quality=0.9)
+
+    call("internal", 0)
+    for i in range(GUARD.promote_after):
+        call("confidential", i)
+    # One busy group does not promote the snapshot for the other.
+    assert al.good_versions == []
+    for i in range(1, GUARD.promote_after):
+        call("internal", i)
+    assert al.good_versions == [snap["learner_version"]]
+    (ev,) = [e for e in al.events if e["event"] == "promoted"]
+    assert ev["groups"] == {"support/confidential": 10, "support/internal": 10}
+    assert ev["treated"] == 20
+
+
+def _noid(**fields):
+    rec = _rec("unused")
+    del rec["id"]
+    rec.update(fields)
+    return rec
+
+
+def test_gate_counts_duplicate_records_without_an_id_once():
+    one = _noid(snapshot_id="s1", sensitivity_level="confidential",
+                current_model=SCALEWAY, recommended_model=MISTRAL_SMALL)
+    tr = track_record([one, dict(one), copy.deepcopy(one)], "support")
+    assert (tr.accepted, tr.evaluated, tr.eligible) == (1, 1, False)
+    with pytest.raises(AutoGateError, match="1 accepted"):
+        AutoLearner({"support": {"data": [one, copy.deepcopy(one)]}})
+    # Distinct recommendations without ids still count apart.
+    other = {**one, "snapshot_id": "s2"}
+    tr = track_record([one, other], "support")
+    assert (tr.accepted, tr.evaluated, tr.eligible) == (2, 2, True)
+    # Records with ids are keyed by id, apart from id-less ones.
+    tr = track_record([_rec("r1"), _rec("r1"), one], "support")
+    assert tr.accepted == 2
+
+
+@pytest.mark.parametrize("url, why", [
+    (None, "no default"),
+    ("", "no default"),
+    ("http://collector.example", "must use https"),
+    ("http://10.0.0.5:8000", "must use https"),
+    ("ftp://collector.example", "with a host"),
+    ("https://", "with a host"),
+    ("collector.example", "with a host"),
+])
+def test_fetch_recommendations_fails_closed_without_an_https_base_url(monkeypatch, url, why):
+    from prompt_shields import learner_auto
+
+    def no_network(*a, **kw):
+        raise AssertionError("no request may be sent")
+
+    monkeypatch.setattr(learner_auto.httpx, "get", no_network)
+    kwargs = {} if url is None else {"ps_collector_url": url}
+    with pytest.raises(AutoModeError, match=why):
+        learner_auto.fetch_recommendations("support", partner_token="pt", **kwargs)
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://collector.example/", "https://collector.example"),
+    ("http://localhost:8000", "http://localhost:8000"),
+    ("http://127.0.0.1:8000/", "http://127.0.0.1:8000"),
+])
+def test_fetch_recommendations_calls_the_given_base_url(monkeypatch, url, expected):
+    from prompt_shields import learner_auto
+
+    seen = {}
+
+    def fake_get(u, **kw):
+        seen["url"], seen["kw"] = u, kw
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"data": []})
+
+    monkeypatch.setattr(learner_auto.httpx, "get", fake_get)
+    out = learner_auto.fetch_recommendations("support", partner_token="pt",
+                                             ps_collector_url=url)
+    assert out == {"data": []}
+    assert seen["url"] == expected + "/partner/v1/learner/recommendations"
+    assert seen["kw"]["headers"] == {"Authorization": "Bearer pt"}

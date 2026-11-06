@@ -58,7 +58,9 @@ projection whose feedback quality, when known, is no more than
 use case is eligible with at least :data:`GATE_MIN_EVALUATED` evaluated and
 an accurate share of at least :data:`GATE_MIN_ACCURACY`. The counts are
 recomputed here from the records; an ``eligible`` flag in the input is not
-trusted. The thresholds are constants, not options. The gate guards against
+trusted. Duplicate records count once: by ``id``, or for a record without
+one by its snapshot, use case, sensitivity and models. The thresholds are
+constants, not options. The gate guards against
 enabling auto mode by mistake; it is not an access control (whoever runs the
 router controls its code).
 
@@ -81,10 +83,16 @@ least ``min_samples`` treated calls the snapshot is rolled back when:
   below the control mean, or, with too few control calls, below the
   recommendation's projected quality for the current route.
 
-Rollback restores the last good snapshot (one that served
-``promote_after`` treated calls without a breach), or no snapshot, which is
-the route policy's own decision. A rolled-back version is never loaded
-again.
+Rollback restores the last good snapshot, or no snapshot, which is the
+route policy's own decision. A snapshot is good once *every* group that it
+moved calls in has served at least ``promote_after`` (and ``min_samples``)
+treated calls of its own without a breach: the evidence is counted per
+(use case, sensitivity), so one busy group cannot vouch for another. A
+rolled-back version is never loaded again.
+
+If the learner itself raises while choosing or observing, the router keeps
+the policy's pick and serves the call; it logs the error type only and
+counts the fallback in :attr:`AutoLearner.fallbacks`.
 
 Freezing
 --------
@@ -109,6 +117,7 @@ storing the propensity in the collector.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import random
@@ -117,6 +126,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -200,24 +210,38 @@ def _finite(v: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
+def _record_key(r: Mapping[str, Any]) -> Any:
+    """A stable identity for one recommendation record: its ``id``, else
+    what identifies a recommendation (snapshot, use case, sensitivity and
+    models; the learner makes one per group and snapshot). Records without
+    any of those collapse together, which only makes the gate stricter."""
+    rid = r.get("id")
+    if isinstance(rid, str) and rid:
+        return ("id", rid)
+    fields = [
+        r.get(k) for k in ("snapshot_id", "learner_version", "use_case",
+                           "sensitivity_level", "current_model", "recommended_model")
+    ]
+    return ("fields", json.dumps(fields, sort_keys=True, default=str))
+
+
 def track_record(recommendations: Any, use_case: str) -> TrackRecord:
     """Count ``use_case``'s reviewed recommendations and decide the gate.
 
     ``recommendations`` is the Partner API's list answer (``{"data": [...]}``)
     or its ``data`` list, as ``GET /partner/v1/learner/recommendations``
-    returns it (each accepted one with ``realised``). Duplicates (same
-    ``id``) count once.
+    returns it (each accepted one with ``realised``). Duplicates count once
+    (:func:`_record_key`).
     """
-    seen: set[str] = set()
+    seen: set[Any] = set()
     accepted = rejected = evaluated = accurate = 0
     for r in _items(recommendations):
         if r.get("use_case") != use_case:
             continue
-        rid = r.get("id")
-        if isinstance(rid, str):
-            if rid in seen:
-                continue
-            seen.add(rid)
+        key = _record_key(r)
+        if key in seen:
+            continue
+        seen.add(key)
         status = r.get("status")
         if status == "rejected":
             rejected += 1
@@ -252,14 +276,50 @@ def track_record(recommendations: Any, use_case: str) -> TrackRecord:
                        not reasons, tuple(reasons))
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _collector_base_url(url: Any) -> str:
+    """The collector base URL for :func:`fetch_recommendations`, or
+    :class:`AutoModeError`. It must be given, and be ``https://`` (plain
+    ``http://`` only to a loopback host): the request carries the partner
+    token."""
+    if not isinstance(url, str) or not url.strip():
+        raise AutoModeError(
+            "fetch_recommendations needs ps_collector_url, the collector's "
+            "base URL (https://...); there is no default"
+        )
+    url = url.strip()
+    parts = urlsplit(url)
+    try:
+        host = parts.hostname
+    except ValueError:
+        host = None
+    if parts.scheme not in ("https", "http") or not host:
+        raise AutoModeError(
+            f"ps_collector_url must be an https:// URL with a host, got {url!r}"
+        )
+    if parts.scheme == "http" and host not in _LOOPBACK_HOSTS:
+        raise AutoModeError(
+            "ps_collector_url must use https:// (plain http:// is allowed only "
+            "for localhost): the request carries the partner token"
+        )
+    return url.rstrip("/")
+
+
 def fetch_recommendations(
     use_case: str, *, partner_token: str,
-    ps_collector_url: str = "http://localhost:8000", timeout: float = 30.0,
+    ps_collector_url: str | None = None, timeout: float = 30.0,
 ) -> dict:
     """The Partner API's recommendations for ``use_case`` (scope
-    ``learner:read``), to pass to :class:`AutoLearner` as its track record."""
+    ``learner:read``), to pass to :class:`AutoLearner` as its track record.
+
+    ``ps_collector_url`` is required and must be ``https://`` (``http://``
+    only to localhost); anything else raises :class:`AutoModeError` before
+    any request is sent."""
+    base = _collector_base_url(ps_collector_url)
     resp = httpx.get(
-        f"{ps_collector_url.rstrip('/')}{RECOMMENDATIONS_PATH}",
+        f"{base}{RECOMMENDATIONS_PATH}",
         params={"use_case": use_case, "limit": 200},
         headers={"Authorization": f"Bearer {partner_token}"},
         timeout=timeout,
@@ -326,6 +386,9 @@ class _Obs:
 class _Group:
     obs: OrderedDict = field(default_factory=OrderedDict)  # call_id -> _Obs
     contexts: deque = field(default_factory=deque)
+    #: Treated calls this group served under the active snapshot (all of
+    #: them, not just the window): its promotion evidence.
+    treated: int = 0
 
 
 def _level(sensitivity: str | None) -> str:
@@ -386,8 +449,10 @@ class AutoLearner:
         self._train_means: dict[tuple[str | None, str], list[float] | None] = {}
         self._groups: dict[tuple[str, str], _Group] = {}
         self._pending: OrderedDict = OrderedDict()  # call_id -> (key, _Obs)
-        self._treated: int = 0
         self.freeze_reasons: list[str] = []
+        #: Calls routed by the policy because the learner raised, by stage
+        #: (``choose`` / ``observe``); the router reports them here.
+        self.fallbacks: dict[str, int] = {}
         if snapshot is not None:
             self.load_snapshot(snapshot)
 
@@ -469,7 +534,6 @@ class AutoLearner:
         self._train_means = {}
         self._groups.clear()
         self._pending.clear()
-        self._treated = 0
         if snapshot is None:
             return
         for r in snapshot.get("recommendations") or ():
@@ -589,6 +653,14 @@ class AutoLearner:
                 sensitivity=level,
             )
 
+    def note_fallback(self, stage: str, error: BaseException | None = None) -> None:
+        """Count a call the router served on the policy's pick because the
+        learner raised in ``stage``. Only the error's type is kept."""
+        with self._lock:
+            self.fallbacks[stage] = self.fallbacks.get(stage, 0) + 1
+            self._event("learner_error", stage=stage,
+                        error=type(error).__name__ if error is not None else None)
+
     # --- observations --------------------------------------------------
 
     def observe(
@@ -611,7 +683,7 @@ class AutoLearner:
             while len(self._pending) > _MAX_PENDING:
                 self._pending.popitem(last=False)
             if obs.changed and obs.mode == "exploit":
-                self._treated += 1
+                g.treated += 1
             self._apply(key, obs, None, outcome_signals)
 
     def record_outcome(
@@ -682,10 +754,16 @@ class AutoLearner:
             self.rollback("parity", quality=round(q_t, 4), reference=round(ref_q, 4),
                           **details)
             return
-        if (self._treated >= cfg.promote_after and self._active is not None
-                and version not in self.good_versions):
+        if self._active is None or version in self.good_versions:
+            return
+        # Promotion needs evidence from every group the snapshot moved calls
+        # in, each on its own: one busy group cannot promote it for others.
+        need = max(cfg.promote_after, cfg.min_samples)
+        moved = {k: grp.treated for k, grp in self._groups.items() if grp.treated}
+        if moved and all(n >= need for n in moved.values()):
             self._good.append(self._active)
-            self._event("promoted", version=version, treated=self._treated)
+            self._event("promoted", version=version, treated=sum(moved.values()),
+                        groups={f"{k[0]}/{k[1]}": n for k, n in sorted(moved.items())})
 
     def _observe_context(self, use_case: str, level: str, x: Sequence[float]) -> None:
         g = self._groups.setdefault((use_case, level), _Group())
