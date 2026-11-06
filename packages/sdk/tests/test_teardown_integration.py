@@ -530,6 +530,19 @@ def test_eval_cell_for_another_vendor_does_not_score_the_call():
     assert faq["quality_score"] is None
 
 
+def test_eval_candidate_label_splits_at_the_first_colon():
+    from prompt_shields.teardown.tuples import _Quality
+
+    ev = read_eval_results({"cells": [{
+        "use_case": "faq", "candidate": "bedrock:anthropic.claude-3-haiku-20240307-v1:0",
+        "n": 10, "passed": 10, "parity": 1.0}]})
+    q = _Quality(ev)
+    assert q.score("faq", "bedrock", "anthropic.claude-3-haiku-20240307-v1:0")[
+        "quality_score"] == 1.0
+    assert q.score("faq", "openai", "anthropic.claude-3-haiku-20240307-v1:0")[
+        "quality_score"] is None
+
+
 def test_learning_tuples_need_matching_replays():
     with pytest.raises(ValueError):
         list(learning_tuples([], replays=[object()], policy=POLICY))

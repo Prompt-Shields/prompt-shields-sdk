@@ -71,7 +71,11 @@ class _Quality:
         for c in (eval_results or {}).get("cells", ()):
             if c.parity is None or c.n <= 0:
                 continue
-            vendor, _, model = c.candidate.rpartition(":")
+            # ps-eval labels are ``vendor:model`` split at the first colon
+            # (``Candidate.parse``): Bedrock ids such as ``...-v1:0`` hold one.
+            vendor, sep, model = c.candidate.partition(":")
+            if not sep:
+                vendor, model = "", vendor
             self.cells.setdefault(c.use_case, []).append(
                 (vendor or None, model, c.parity, c.n))
 
