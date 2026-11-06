@@ -409,3 +409,137 @@ describe('client.siem', () => {
     expect(m.calls).toHaveLength(2);
   });
 });
+
+describe('SiemFeed.batches() cursor', () => {
+  const page = (ids: number[], cursor: string, more: boolean, tail = '\n') =>
+    ndjson(ids.map(CALL), { 'X-PS-Cursor': cursor, 'X-PS-Has-More': String(more) }, tail);
+  const read = async (batch: SiemBatch) => {
+    const out: string[] = [];
+    for await (const r of batch.records()) out.push(String(r.EventUid));
+    return out;
+  };
+
+  it('moves the cursor past each batch read to the end', async () => {
+    const m = mockFetch(page([1, 2], 'c2', true), page([3, 4], 'c4', true), page([5], 'c5', false));
+    const feed = client(m.fetch).siem.callsFeed({ cursor: 'c0' });
+    const ids: string[] = [];
+    const cursors: Array<string | null> = [];
+    let n = 0;
+    for await (const batch of feed.batches()) {
+      cursors.push(feed.cursor);
+      // records() and text() both count as reading the batch to the end.
+      if (n++ === 1) {
+        const lines = (await batch.text()).trim().split('\n');
+        ids.push(...lines.map((l) => String((JSON.parse(l) as SiemRecord).EventUid)));
+      } else {
+        ids.push(...(await read(batch)));
+      }
+      expect(batch.fullyRead).toBe(true);
+    }
+    expect(ids).toEqual(['e1', 'e2', 'e3', 'e4', 'e5']);
+    expect(cursors).toEqual(['c0', 'c2', 'c4']);
+    expect(feed.cursor).toBe('c5');
+    expect(query(m.calls[1].url)).toEqual({ cursor: 'c2' });
+  });
+
+  it('asking for the next batch early throws and skips no record', async () => {
+    const m = mockFetch(
+      page([1, 2], 'c2', true),
+      page([1, 2], 'c2', true), // the same cursor, asked for again
+      page([3], 'c3', false),
+    );
+    const feed = client(m.fetch).siem.callsFeed({ cursor: 'c0' });
+    let partRead: SiemBatch | undefined;
+    // Part read: one record, then on to the next batch.
+    await expect(async () => {
+      for await (const batch of feed.batches()) {
+        partRead = batch;
+        const it = batch.records();
+        await it.next();
+        await it.return(undefined);
+      }
+    }).rejects.toThrow(/not read to the end.*no record was skipped/);
+    expect(partRead?.fullyRead).toBe(false);
+    expect(feed.cursor).toBe('c0');
+    expect(m.calls).toHaveLength(1);
+
+    // Starting again re-requests the same cursor and gets every record.
+    const ids = (await feed.toArray()).map((r) => r.EventUid);
+    expect(ids).toEqual(['e1', 'e2', 'e3']);
+    expect(query(m.calls[1].url)).toEqual({ cursor: 'c0' });
+    expect(feed.cursor).toBe('c3');
+  });
+
+  it('a batch never read is cancelled and the cursor stays put', async () => {
+    const m = mockFetch(page([1], 'c1', true));
+    const feed = client(m.fetch).siem.auditFeed({ cursor: 'c0' });
+    let seen: SiemBatch | undefined;
+    await expect(async () => {
+      for await (const batch of feed.batches()) seen = batch;
+    }).rejects.toBeInstanceOf(PartnerError);
+    expect(seen?.bodyUsed).toBe(true); // cancelled
+    expect(seen?.consumed).toBe(false);
+    expect(feed.cursor).toBe('c0');
+    expect(m.remaining()).toBe(0);
+  });
+
+  it('markConsumed() lets the cursor move past a batch read from body or skipped', async () => {
+    const m = mockFetch(page([1], 'c1', true), page([2], 'c2', false));
+    const feed = client(m.fetch).siem.callsFeed();
+    for await (const batch of feed.batches()) {
+      if (batch.cursor === 'c1') {
+        await new Response(batch.body).text();
+        expect(batch.fullyRead).toBe(false);
+      }
+      batch.markConsumed();
+      expect(batch.consumed).toBe(true);
+    }
+    expect(feed.cursor).toBe('c2');
+  });
+
+  it('breaking out of the loop leaves the cursor unchanged', async () => {
+    const m = mockFetch(page([1, 2], 'c2', true), page([3, 4], 'c4', true));
+    const feed = client(m.fetch).siem.callsFeed({ cursor: 'c0' });
+    for await (const batch of feed.batches()) {
+      await read(batch);
+      // Break with the second batch read in full: its cursor applies only
+      // once the next batch is asked for, so a failure after reading (while
+      // forwarding, say) still replays it.
+      if (batch.cursor === 'c4') break;
+    }
+    expect(feed.cursor).toBe('c2');
+
+    const m2 = mockFetch(page([1, 2], 'c2', true));
+    const feed2 = client(m2.fetch).siem.callsFeed({ cursor: 'c0' });
+    for await (const batch of feed2.batches()) {
+      expect(batch.cursor).toBe('c2');
+      break;
+    }
+    expect(feed2.cursor).toBe('c0');
+  });
+
+  it('an error part way through a batch leaves the cursor unchanged', async () => {
+    // A truncated body, thrown out of the loop.
+    const m = mockFetch(page([1], 'c1', true), page([2, 3], 'c3', true, ''));
+    const feed = client(m.fetch).siem.callsFeed();
+    await expect(async () => {
+      for await (const batch of feed.batches()) await read(batch);
+    }).rejects.toBeInstanceOf(APIConnectionError);
+    expect(feed.cursor).toBe('c1');
+
+    // A malformed line caught inside the loop: the batch was not read to the
+    // end, so asking for the next one throws instead of moving past it.
+    const bad = mockFetch(
+      new Response(`${JSON.stringify(CALL(1))}\nnot json\n${JSON.stringify(CALL(2))}\n`, {
+        headers: { 'X-PS-Cursor': 'c2', 'X-PS-Has-More': 'true' },
+      }),
+    );
+    const feed2 = client(bad.fetch).siem.callsFeed({ cursor: 'c0' });
+    await expect(async () => {
+      for await (const batch of feed2.batches()) {
+        await read(batch).catch(() => undefined);
+      }
+    }).rejects.toThrow(/not read to the end/);
+    expect(feed2.cursor).toBe('c0');
+  });
+});
