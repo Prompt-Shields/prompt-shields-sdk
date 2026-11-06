@@ -103,6 +103,8 @@ Every tenant row is also queued in the existing webhook outbox as an event of ty
 1. Issue a partner credential for the SIEM integration with the `audit:read` scope. This scope is never granted by default, and `registry:read` does not include it.
 2. Create a subscription for that partner with `"event_types": ["audit.*"]`. A subscription that names no event types still gets asset events only.
 
+For Microsoft Sentinel and Defender XDR, the collector can push the rows to a Log Analytics custom table through the Logs Ingestion API. With the same `audit:read` scope, a partner can also pull them as NDJSON from `GET /partner/v1/siem/audit`. See [Microsoft Sentinel and Defender XDR](/integrations/microsoft-sentinel).
+
 ```json
 {
   "id": "5d2f…",

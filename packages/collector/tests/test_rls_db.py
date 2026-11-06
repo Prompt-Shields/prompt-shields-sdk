@@ -36,6 +36,7 @@ from db.models import (
     LearnerRecommendation,
     LearnerSnapshot,
     McpToolUsage,
+    McpToolUsageDaily,
     PartnerAuditLog,
     PartnerCredential,
     ProviderCredential,
@@ -160,6 +161,14 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 ),
                 McpToolUsage(
                     tenant_id=tenant_id,
+                    source="sdk",
+                    server_name=f"server-{name}",
+                    tool_name="search",
+                    call_count=1,
+                ),
+                McpToolUsageDaily(
+                    tenant_id=tenant_id,
+                    day=date(2026, 11, 1),
                     source="sdk",
                     server_name=f"server-{name}",
                     tool_name="search",
@@ -621,6 +630,43 @@ async def test_call_feedback_under_rls(rls_db):
         hit = await s.execute(text("UPDATE call_feedback SET score = 0.5"))
         assert hit.rowcount == 2  # the seed row and call-a1, tenant a only
         await s.rollback()
+
+
+async def test_budget_and_cache_fields_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    event = {
+        "vendor": "openai", "model": "gpt-4o-mini", "source": "gateway",
+        "budget_state": "exceeded", "budget_id": "mkt-monthly",
+        "budget_action": "downgraded", "cache_status": "SEMANTIC HIT",
+        "cache_saved_cost": 0.002,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
+                            json={"events": [event]})
+        assert resp.status_code == 200, resp.text
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, a)
+            ev = (await s.execute(
+                select(AIUsageEvent).where(AIUsageEvent.budget_id.is_not(None))
+            )).scalar_one()
+        assert (ev.budget_state, ev.budget_action, ev.cache_status) == (
+            "exceeded", "downgraded", "semantic hit")
+        url = f"/partner/v1/assets/{ev.asset_id}/usage-summary"
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_A}"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["budget_downgraded_requests"] == 1
+        assert body["cache_hit_rate"] == 1.0 and body["cache_saved_usd"] == 0.002
+        # Tenant b neither sees the asset nor its aggregates.
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
+        assert resp.status_code == 404
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        n = (await s.execute(
+            text("SELECT count(*) FROM ai_usage_events WHERE budget_id IS NOT NULL")
+        )).scalar_one()
+    assert n == 0
 
 
 def _learner_snapshot() -> dict:
@@ -1558,3 +1604,122 @@ async def test_audit_trail_under_rls(rls_db, monkeypatch):
         await rls.set_tenant(s, a)
         actions = (await s.execute(select(AuditEvent.action))).scalars().all()
     assert "auth.failure" not in actions  # on the system chain, not tenant a's
+
+
+async def test_sentinel_export_runs_per_tenant_under_rls(rls_db):
+    """`--all-tenants` exports each configured tenant in a session scoped
+    to it (no bypass): each upload holds only that tenant's calls and
+    audit rows, and each tenant's cursor lands in its own settings."""
+    from collector import sentinel_export as se
+
+    a, b = rls_db["a"], rls_db["b"]
+    uploads: list[list[dict]] = []
+
+    def azure(r: httpx.Request) -> httpx.Response:
+        if r.headers["host"] == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        uploads.append(json.loads(r.content))
+        return httpx.Response(204)
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    def conn(dcr: str) -> dict:
+        return {
+            "entra_tenant_id": "22222222-2222-2222-2222-222222222222",
+            "client_id": "33333333-3333-3333-3333-333333333333",
+            "client_secret": "s",
+            "ingestion_endpoint": "https://x.westeurope-1.ingest.monitor.azure.com",
+            "dcr_immutable_id": "dcr-" + dcr * 32,
+        }
+
+    results = await se.export_all_tenants(
+        rls_db["plain"],
+        settings=se.SentinelSettings(sentinel_export={str(a): conn("a"), str(b): conn("b")}),
+        transport=httpx.MockTransport(azure),
+        resolver=public,
+        # Past the settle time of the seeded call made "now".
+        now=datetime.now(UTC) + timedelta(hours=1),
+    )
+    assert [r["status"] for r in results] == ["ok", "ok"], results
+    for r in results:
+        assert r["calls"] == 2 and r["audit"] == 1, r
+    for batch in uploads:
+        assert len({row["PsTenantId"] for row in batch}) == 1
+    assert {row["PsTenantId"] for batch in uploads for row in batch} == {str(a), str(b)}
+    async with rls_db["admin"]() as s:
+        for t in (a, b):
+            state = (await s.get(Tenant, t)).settings["connectors"]["sentinel"]
+            assert state["audit_seq"] == 1 and state["calls_cursor"]
+
+
+async def test_sentinel_export_tenant_failure_does_not_stop_the_others(rls_db, caplog):
+    """An unexpected exception in one tenant's export (B) is recorded in
+    B's own status without its message, and A and C are still exported,
+    each under its own RLS context."""
+    from collector import sentinel_export as se
+
+    async with rls_db["admin"]() as s:
+        c = Tenant(name="Third Corp", settings={})
+        s.add(c)
+        await s.commit()
+        c = c.id
+    await _seed(rls_db["admin"], c, "c", "ps-pk-ardoq-tenant-c-key")
+    # Sorted the way the job walks them; the middle one fails.
+    first, failing, last = sorted((rls_db["a"], rls_db["b"], c), key=str)
+    dcr = {first: "a", failing: "b", last: "c"}
+    leak = "upstream-body client_secret=hunter2"
+    uploads: dict[str, list[dict]] = {}
+
+    def azure(r: httpx.Request) -> httpx.Response:
+        if r.headers["host"] == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        if "/dcr-" + "b" * 32 + "/" in r.url.path:
+            raise RuntimeError(leak)
+        rows = json.loads(r.content)
+        uploads.setdefault(rows[0]["PsTenantId"], []).extend(rows)
+        return httpx.Response(204)
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    def conn(tid) -> dict:
+        return {
+            "entra_tenant_id": "22222222-2222-2222-2222-222222222222",
+            "client_id": "33333333-3333-3333-3333-333333333333",
+            "client_secret": "s",
+            "ingestion_endpoint": "https://x.westeurope-1.ingest.monitor.azure.com",
+            "dcr_immutable_id": "dcr-" + dcr[tid] * 32,
+        }
+
+    with caplog.at_level(logging.INFO):
+        results = await se.export_all_tenants(
+            rls_db["plain"],
+            settings=se.SentinelSettings(sentinel_export={str(t): conn(t) for t in dcr}),
+            transport=httpx.MockTransport(azure),
+            resolver=public,
+            now=datetime.now(UTC) + timedelta(hours=1),
+        )
+    by_tenant = {r["tenant_id"]: r for r in results}
+    assert [r["tenant_id"] for r in results] == [str(first), str(failing), str(last)]
+    assert by_tenant[str(failing)] == {
+        "tenant_id": str(failing),
+        "status": "error",
+        "error": "unexpected error (RuntimeError)",
+    }
+    for t in (first, last):
+        assert by_tenant[str(t)]["status"] == "ok", results
+        assert by_tenant[str(t)]["calls"] == 2 and by_tenant[str(t)]["audit"] == 1
+    assert set(uploads) == {str(first), str(last)}
+    assert leak not in caplog.text and leak not in json.dumps(results)
+
+    async with rls_db["admin"]() as s:
+        for t in (first, last):
+            state = (await s.get(Tenant, t)).settings["connectors"]["sentinel"]
+            assert state["last_status"] == "ok" and state["calls_cursor"]
+        state = (await s.get(Tenant, failing)).settings["connectors"]["sentinel"]
+    assert state["last_status"] == "error"
+    assert state["last_error"] == "unexpected error (RuntimeError)"
+    assert "calls_cursor" not in state  # nothing accepted, nothing skipped
+    assert leak not in json.dumps(state)
+    assert "3 tenants, 2 ok, 1 failed: " + str(failing) in se.summarize(results)

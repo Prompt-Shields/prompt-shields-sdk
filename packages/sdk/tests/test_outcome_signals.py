@@ -259,7 +259,10 @@ def _client(response=None, error=None):
 
 def _no_text(events):
     blob = json.dumps(events, default=str)
-    assert "4111" not in blob and "contract" not in blob
+    # Look for the secret's own text, not a short fragment: a random id or
+    # latency in the event can contain "4111" by chance.
+    assert "4111 1111 1111 1111" not in blob
+    assert "summarise the contract" not in blob
     for event in events:
         assert set(event["outcome_signals"]) <= SIGNAL_CLASSES
 

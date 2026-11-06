@@ -643,6 +643,17 @@ paths:
       operationId: countMessageTokens
       tags: [Messages]
       summary: Count tokens for a Messages request
+      description: |
+        Anthropic's count_tokens for any provider the Messages endpoint can
+        reach. Anthropic, Claude Platform on AWS, Bedrock (CountTokens) and
+        Vertex AI Claude models use their own count_tokens; Gemini on
+        `google` and `vertex-ai` uses `countTokens`; `openai` (without a
+        custom host) uses `POST /v1/responses/input_tokens` after the
+        Messages → Responses translation. Every other provider with a chat
+        or Messages API gets a local estimate (about 4 characters per token,
+        1,600 per image or non-text document, 3 per message and tool
+        definition) marked with `x-ps-token-count: estimated`; nothing is
+        sent upstream. A provider without a chat or Messages API is a 400.
       security:
         - ProviderApiKey: []
         - ProviderBearer: []
@@ -657,6 +668,12 @@ paths:
       responses:
         '200':
           description: Token count
+          headers:
+            x-ps-token-count:
+              description: '`estimated` when the count is the gateway''s local estimate; absent when the provider counted'
+              schema:
+                type: string
+                enum: [estimated]
           content:
             application/json:
               schema:

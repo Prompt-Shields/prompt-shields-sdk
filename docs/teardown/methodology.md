@@ -147,7 +147,7 @@ priced at the served model like the SDK). Every case below has a worked example 
 | Output | `tokens_out` at the output rate. Reasoning / thinking tokens are already inside `tokens_out` and are charged at the output rate. They are reported separately (`tokens_reasoning`) for information only. |
 | Cache read | `tokens_cached` at the model's cached rate, or the vendor multiplier on the input rate (OpenAI 0.5, Anthropic 0.1, Google 0.25; o3 / o4-mini and Gemini 2.5 have their own rates). |
 | Cache write | `tokens_cache_write` at the 5-minute write rate (Anthropic 1.25× input). `tokens_cache_write_1h`, which is a subset, is charged at the 1-hour rate (Anthropic 2× input). |
-| Service tier | `batch` and `flex` multiply every token rate, cache rates included (OpenAI batch/flex, Anthropic batch, Gemini batch: 0.5). Standard tiers are 1.0. Any other tier (e.g. OpenAI `priority`, `scale`) has no known price and gives a null cost. |
+| Service tier | When the catalog lists the model's own rates for the tier (`*_batches`, `*_flex`, `*_priority`: OpenAI batch, flex and priority input, output and cached input), those rates replace the standard ones; rates the tier does not list (cache read or write, audio) are the standard ones scaled by tier input / standard input. Otherwise `batch` and `flex` multiply every token rate, cache rates included (OpenAI batch/flex, Anthropic batch, Gemini batch: 0.5). Per-model tier rates apply at standard context only (above a long-context threshold the multiplier applies), to the default table only, and not to a vendor priced through another's list (Azure OpenAI priority is unpriced). Standard tiers are 1.0. Any other tier (e.g. OpenAI `priority` on a model without catalogued priority rates, `scale`) has no known price and gives a null cost. |
 | Long context | When `tokens_in` is above a model's band threshold (Gemini 2.5 Pro and Claude Sonnet 4: 200k), the **whole** request is priced at the band rates. This applies to the default table only, not to a custom `pricing_table`. |
 | Audio | `tokens_audio_in` / `tokens_audio_out` (subsets of input and output) at the model's audio rates. Audio tokens on a model with no audio rate give a null cost. |
 | Tool fees | Per-request fees (Anthropic web search, $0.01 each). Not discounted by service tier. |
@@ -208,7 +208,7 @@ A call's cost is null ("unmetered"), never zero, when:
 - the model is unknown to the catalog (custom fine-tunes, self-hosted, unlisted providers);
 - the model name is null, or is `auto` with no served model ([§4.2](#42-served-model-vs-requested-model));
 - input or output token counts are missing;
-- the service tier has no known price (e.g. OpenAI `priority`, `scale`);
+- the service tier has no known price for the model (e.g. OpenAI `scale`, or `priority` on a model without catalogued priority rates);
 - the call has audio tokens on a model with no audio rate.
 
 The report gives the null-cost calls as a count, a share of all calls and a share of

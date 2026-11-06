@@ -6,9 +6,10 @@ Retention
     ``PS_RETENTION_DAYS_DEFAULT`` (365). Assets and their aggregates are kept.
     ``mcp_tool_usage`` rows (MCP tool-call aggregates) not seen within the
     same period are purged with the events: such a row only summarises calls
-    older than the cutoff. So are ``call_feedback`` rows (explicit feedback
-    on a call, #43) last updated before the cutoff, and ``spend_alerts``
-    (spend anomaly alerts, #30) for days before the cutoff.
+    older than the cutoff. So are ``mcp_tool_usage_daily`` rows (MCP
+    metering, #77) for days before the cutoff's day, ``call_feedback`` rows
+    (explicit feedback on a call, #43) last updated before the cutoff, and
+    ``spend_alerts`` (spend anomaly alerts, #30) for days before the cutoff.
     :func:`purge_expired_events` deletes older events in batches, committing
     after each batch so no lock is held for long. Running it twice deletes
     nothing the second time.
@@ -59,6 +60,7 @@ from db.models import (
     LearnerRecommendation,
     LearnerSnapshot,
     McpToolUsage,
+    McpToolUsageDaily,
     PartnerAuditLog,
     PartnerCredential,
     ProviderCredential,
@@ -113,6 +115,7 @@ ERASE_ORDER: tuple[type, ...] = (
     ProviderKeyFingerprint,
     ProviderCredential,
     McpToolUsage,
+    McpToolUsageDaily,
     CallFeedback,
     SpendAlert,
     TenantApiKey,
@@ -363,6 +366,9 @@ async def purge_tenant_events(
     mcp = McpToolUsage.__table__
     mcp_conditions = [mcp.c.tenant_id == tenant_id, mcp.c.last_seen < cutoff]
 
+    daily = McpToolUsageDaily.__table__
+    daily_conditions = [daily.c.tenant_id == tenant_id, daily.c.day < cutoff.date()]
+
     fb = CallFeedback.__table__
     fb_conditions = [fb.c.tenant_id == tenant_id, fb.c.updated_at < cutoff]
 
@@ -372,17 +378,21 @@ async def purge_tenant_events(
     if dry_run:
         deleted = await _count(db, table, conditions)
         mcp_deleted = await _count(db, mcp, mcp_conditions)
+        daily_deleted = await _count(db, daily, daily_conditions)
         fb_deleted = await _count(db, fb, fb_conditions)
         sa_deleted = await _count(db, sa, sa_conditions)
     else:
         deleted = await _delete_in_batches(db, table, conditions, size)
         mcp_deleted = await _delete_in_batches(db, mcp, mcp_conditions, size)
+        daily_deleted = await _delete_in_batches(db, daily, daily_conditions, size)
         fb_deleted = await _delete_in_batches(db, fb, fb_conditions, size)
         sa_deleted = await _delete_in_batches(db, sa, sa_conditions, size)
-        if deleted or mcp_deleted or fb_deleted or sa_deleted:
+        if deleted or mcp_deleted or daily_deleted or fb_deleted or sa_deleted:
             details = {AIUsageEvent.__tablename__: deleted}
             if mcp_deleted:
                 details[McpToolUsage.__tablename__] = mcp_deleted
+            if daily_deleted:
+                details[McpToolUsageDaily.__tablename__] = daily_deleted
             if fb_deleted:
                 details[CallFeedback.__tablename__] = fb_deleted
             if sa_deleted:
