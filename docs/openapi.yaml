@@ -107,7 +107,7 @@ components:
             attestations:write: Record human attestations, including retiring and un-retiring assets (never granted by default)
             risks:review: Confirm or reject risk mappings, with reviewer and comment (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
-            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events, or pull it from `/siem/audit` (never granted by default)
+            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events, list it from `/audit`, or pull it from `/siem/audit` (never granted by default)
             evidence:read: Pull per-call routing evidence as NDJSON from `/siem/calls` (never granted by default)
             mcp:read: Read observed MCP servers and tools, with each server's asset and owner, and their daily tool-call metering (never granted by default)
             learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
@@ -1390,6 +1390,73 @@ components:
                  latency_ms_total, latency_count, avg_latency_ms, request_bytes, response_bytes,
                  bytes_count, asset_id, owner_email]
 
+    AuditTrailActor:
+      type: object
+      properties:
+        type:
+          type: string
+          description: tenant_key, partner, operator or system
+        id:
+          type: string
+          nullable: true
+          description: Key prefix, partner credential id or job name; never a secret
+      required: [type, id]
+
+    AuditTrailTarget:
+      type: object
+      properties:
+        type: {type: string, nullable: true}
+        id: {type: string, nullable: true}
+      required: [type, id]
+
+    AuditTrailEvent:
+      type: object
+      description: One row of the tenant's hash-chained audit trail.
+      properties:
+        schema_version: {type: string}
+        id: {type: string, format: uuid}
+        tenant_id: {type: string, format: uuid}
+        seq: {type: integer}
+        created_at: {type: string, format: date-time}
+        action:
+          type: string
+          example: user.erase
+        outcome:
+          type: string
+          enum: [success, failure]
+        actor: {$ref: '#/components/schemas/AuditTrailActor'}
+        target: {$ref: '#/components/schemas/AuditTrailTarget'}
+        request_id: {type: string, nullable: true}
+        status_code: {type: integer, nullable: true}
+        details:
+          type: object
+          additionalProperties: true
+          description: Ids and counts, as chained (kept exactly as stored)
+        prev_hash: {type: string}
+        row_hash: {type: string}
+        hash_version: {type: integer}
+      required: [schema_version, id, tenant_id, seq, created_at, action, outcome, actor,
+                 target, request_id, status_code, details, prev_hash, row_hash, hash_version]
+
+    AuditTrailPageMeta:
+      type: object
+      properties:
+        has_more: {type: boolean}
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` for the next page
+      required: [has_more, next_cursor]
+
+    AuditTrailPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/AuditTrailEvent'}
+        meta: {$ref: '#/components/schemas/AuditTrailPageMeta'}
+      required: [data, meta]
+
     McpPageMeta:
       type: object
       properties:
@@ -2112,6 +2179,43 @@ components:
         - admin:webhooks
         - admin:partners
         - admin:registry
+        - admin:privacy
+
+    EraseUserRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        user_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: The end user's id as the gateway or SDK sent it
+      required: [user_id]
+
+    UserErasureResult:
+      type: object
+      properties:
+        user_id_hash:
+          type: string
+          nullable: true
+          description: |
+            The user's salted hash in this tenant (null when the tenant has
+            never stored a user id, so nothing can match)
+        input:
+          type: string
+          enum: [user_id, user_id_hash]
+        rows_erased:
+          type: object
+          additionalProperties: {type: integer}
+          description: |
+            Rows changed per table (`ai_usage_events`, and for a `user_id`
+            also `call_feedback` and `mcp_tool_usage`); zeros on a repeat
+        audit_event_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The `user.erase` audit trail row (null only if writing it failed)
+      required: [user_id_hash, input, rows_erased, audit_event_id]
 
     CredentialStatus:
       type: string
@@ -4508,6 +4612,65 @@ paths:
                   next_cursor: null
                   sync_token: "2026-03-25T15:01:00Z"
 
+  /partner/v1/audit:
+    get:
+      operationId: listAuditTrail
+      tags: [Sync]
+      summary: List the tenant's audit trail
+      description: |
+        The tenant's hash-chained admin audit trail as JSON pages, in chain
+        order (`seq` ascending). Each row has the form of an `audit.*`
+        webhook event's `data.audit`, with `prev_hash` and `row_hash` so the
+        chain can be re-verified (see the Audit trail guide). Includes
+        credential, scope, webhook, retention, erasure (`user.erase`,
+        `tenant.erase`) and registry changes. `meta.next_cursor` is the
+        `seq` of the last row. For log forwarders, `/partner/v1/siem/audit`
+        returns the same rows as NDJSON. Requires `audit:read`.
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: '`meta.next_cursor` of the previous page'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: First `created_at` to include; ignored with a cursor
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: '`created_at` before which to stop (exclusive)'
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Only rows with this action, e.g. `user.erase`
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      security:
+        - OAuth2: [audit:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: One page of audit trail rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditTrailPage'
+        '400':
+          description: Invalid `cursor`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /partner/v1/siem/calls:
     get:
       operationId: pullSiemCalls
@@ -5799,6 +5962,85 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   # ── Registry jobs (tenant admin) ──────────────────────────────────────
+
+  /api/v1/admin/users/erase:
+    post:
+      operationId: eraseUserById
+      tags: [Admin]
+      summary: Erase an end user's data by the user id as sent
+      description: |
+        Erasure by end user (GDPR right to erasure) in the caller's tenant.
+        `user_id` is the id as the gateway or SDK sent it (in the body, so it
+        never reaches an access log); the collector hashes it with the
+        tenant's salt. On the user's usage events `user_id_hash`,
+        `user_id_raw`, `session_id` and `prompt_hash` are set to null (usage,
+        cost and routing metadata are kept); call feedback with this
+        `user_id` loses it; MCP tool usage rows for it are merged into the
+        no-user row of the same tool. Synchronous and idempotent: a repeat
+        reports zero rows. Every call writes a `user.erase` row to the
+        tenant's audit trail (target: the user's salted hash) and to the
+        retention audit log. Rows are only counted in the caller's tenant.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:privacy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EraseUserRequest'
+      responses:
+        '200':
+          description: Erased
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserErasureResult'
+        '400':
+          description: '`user_id` is not valid UTF-8 or contains NUL'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '422':
+          description: Missing or invalid `user_id`
+
+  /api/v1/admin/users/{user_id_hash}/data:
+    delete:
+      operationId: eraseUserByHash
+      tags: [Admin]
+      summary: Erase an end user's data by the stored user id hash
+      description: |
+        As `POST /api/v1/admin/users/erase`, by the stored
+        `user_id_hash` (64 hex characters, the `user_id_hash` returned by
+        that call or the target of a `user.erase` audit row). Reaches the
+        usage events only: call feedback and MCP usage store the id as sent,
+        which the hash cannot be turned back into.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:privacy
+      parameters:
+        - name: user_id_hash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: Erased
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserErasureResult'
+        '400':
+          description: '`user_id_hash` is not 64 lowercase hex characters'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
 
   /api/v1/admin/asset-lifecycle/sweep:
     post:

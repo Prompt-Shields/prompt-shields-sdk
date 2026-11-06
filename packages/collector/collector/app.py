@@ -237,6 +237,14 @@ from collector.admin_api import router as admin_api_router
 
 app.include_router(admin_api_router)
 
+# Erasure by end user (#353, admin:privacy) and the tenant audit trail read
+# API (/partner/v1/audit, audit:read)
+from collector.audit_api import partner_router as audit_partner_router
+from collector.user_erasure import router as user_erasure_router
+
+app.include_router(user_erasure_router)
+app.include_router(audit_partner_router)
+
 # Operator surface: tenants, retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router
 

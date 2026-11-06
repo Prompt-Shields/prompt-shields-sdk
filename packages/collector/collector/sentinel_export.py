@@ -461,14 +461,21 @@ async def load_audit(
     after_seq: int | None,
     since: datetime | None = None,
     limit: int,
+    until: datetime | None = None,
+    action: str | None = None,
 ) -> list[AuditEvent]:
-    """Audit rows after ``after_seq`` (or from ``since``) in chain order.
+    """Audit rows after ``after_seq`` (or from ``since``) in chain order,
+    optionally before ``until`` and of one ``action``.
     The chain lock makes seq order commit order, so no settle time."""
     conds = [AuditEvent.tenant_id == tenant_id]
     if after_seq is not None:
         conds.append(AuditEvent.seq > after_seq)
     elif since is not None:
         conds.append(AuditEvent.created_at >= since)
+    if until is not None:
+        conds.append(AuditEvent.created_at < until)
+    if action is not None:
+        conds.append(AuditEvent.action == action)
     return list(
         (
             await db.execute(
