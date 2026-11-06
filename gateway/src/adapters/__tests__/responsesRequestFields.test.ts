@@ -383,6 +383,37 @@ describe('applyAdapterRequestTransform', () => {
     });
     expect(json.error.message).toContain(`'file_search'`);
   });
+
+  test('native Responses targets are untouched (no mapping, no refusal)', () => {
+    const body: any = {
+      model: 'any-model',
+      input: 'hi',
+      tools: [
+        {
+          type: 'mcp',
+          server_label: 's',
+          server_url: 'https://mcp.example',
+          headers: { Authorization: 'Bearer secret' },
+        },
+        { type: 'web_search', filters: { allowed_domains: ['a.example'] } },
+        { type: 'function', name: 'f', parameters: {} },
+      ],
+      tool_choice: { type: 'allowed_tools', mode: 'auto', tools: [] },
+      safety_identifier: 'sid',
+      service_tier: 'flex',
+    };
+    const before = JSON.stringify(body);
+    const out = applyAdapterRequestTransform(
+      'createModelResponse',
+      'openai',
+      body,
+      body,
+      false,
+      'POST'
+    );
+    expect(out).toBeNull();
+    expect(JSON.stringify(body)).toBe(before);
+  });
 });
 
 describe('Anthropic stream: server tool input is not a client tool call', () => {
