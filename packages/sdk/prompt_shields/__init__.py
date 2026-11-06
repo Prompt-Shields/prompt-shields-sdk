@@ -16,6 +16,12 @@ Public surface:
         AsyncShieldsRouter   — async variant
         PolicyViolation      — raised when no allowed model is left (fail closed)
 
+    Spend budgets (budget.v1; ShieldsRouter and the clients take budgets=):
+        BudgetEnforcer       — checks budgets before a call, records cost after
+        InProcessBudgetStore — default store; per-process counters
+        RedisBudgetStore     — shared counters (pip install 'prompt-shields[optimizer-redis]')
+        BudgetExceeded       — raised when a block budget is exhausted
+
     Types:
         PSMetadata           — per-request metadata TypedDict
         PSConfig             — client config TypedDict
@@ -50,6 +56,14 @@ from prompt_shields.baseline import (
     BaselineError,
     freeze_baseline,
     load_baseline,
+)
+from prompt_shields.budgets import (
+    BudgetEnforcer,
+    BudgetError,
+    BudgetExceeded,
+    BudgetStore,
+    InProcessBudgetStore,
+    RedisBudgetStore,
 )
 from prompt_shields.client import (
     ShieldsAnthropic,
@@ -97,13 +111,19 @@ __all__ = [
     "AsyncShieldsRouter",
     "Baseline",
     "BaselineError",
+    "BudgetEnforcer",
+    "BudgetError",
+    "BudgetExceeded",
+    "BudgetStore",
     "DataClassification",
     "DiscoverySource",
     "FeedbackError",
+    "InProcessBudgetStore",
     "PSConfig",
     "PSMetadata",
     "PolicyViolation",
     "Quality",
+    "RedisBudgetStore",
     "RouteHint",
     "RoutedChatCompletion",
     "RouterError",

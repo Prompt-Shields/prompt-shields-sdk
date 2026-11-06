@@ -6,6 +6,8 @@ import {
   TRITON,
   AZURE_OPEN_AI,
   HEADER_KEYS,
+  OPEN_AI,
+  ANTHROPIC,
 } from '../../../globals';
 import { isValidCustomHost } from '..';
 
@@ -131,6 +133,9 @@ export const configSchema: any = z
     oauth_token_url: z.string().optional(),
     oauth_client_id: z.string().optional(),
     oauth_client_secret: z.string().optional(),
+    // PS fork (#76): `workload` = the operator's workload identity federation
+    openai_auth_type: z.string().optional(),
+    anthropic_auth_type: z.string().optional(),
   })
   .refine(
     (value) => {
@@ -153,6 +158,9 @@ export const configSchema: any = z
         value.oauth_token_url &&
         value.oauth_client_id &&
         value.oauth_client_secret;
+      const hasWorkloadIdentity =
+        (value.provider === OPEN_AI && value.openai_auth_type) ||
+        (value.provider === ANTHROPIC && value.anthropic_auth_type);
 
       return (
         hasProviderApiKey ||
@@ -169,7 +177,8 @@ export const configSchema: any = z
         value.input_guardrails ||
         value.output_guardrails ||
         hasAzureAuth ||
-        hasOAuthClientCredentials
+        hasOAuthClientCredentials ||
+        hasWorkloadIdentity
       );
     },
     {
