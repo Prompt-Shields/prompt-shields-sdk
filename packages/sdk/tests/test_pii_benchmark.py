@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
-from prompt_shields.pii import detect_pii_categories
+from prompt_shields.pii import detect_pii_categories, find_pii_spans
 
 BENCH = Path(__file__).resolve().parents[3] / "benchmarks" / "pii"
 
@@ -159,14 +159,14 @@ _ADVERSARIAL = {
 }
 
 
-def _cpu_seconds(text: str, times: int) -> float:
+def _cpu_seconds(text: str, times: int, fn=detect_pii_categories) -> float:
     start = time.thread_time()
     for _ in range(times):
-        detect_pii_categories(text)
+        fn(text)
     return time.thread_time() - start
 
 
-def _growth(small: str, large: str) -> float:
+def _growth(small: str, large: str, fn=detect_pii_categories) -> float:
     """Cost of `large` over cost of `small` (a quarter of its size).
 
     Measured in this thread's CPU time, which other processes (parallel test
@@ -179,8 +179,8 @@ def _growth(small: str, large: str) -> float:
     for i in range(5):
         if i and time.perf_counter() > deadline:
             break
-        best_small = min(best_small, _cpu_seconds(small, 4))
-        best_large = min(best_large, _cpu_seconds(large, 1))
+        best_small = min(best_small, _cpu_seconds(small, 4, fn))
+        best_large = min(best_large, _cpu_seconds(large, 1, fn))
     return 4 * best_large / max(best_small, 1e-5)
 
 
@@ -194,6 +194,27 @@ def test_detection_stays_linear_on_100kb(name):
     large = make(n)
     assert len(large) >= 99_000
     assert _growth(make(n // 4), large) < 8
+
+
+# Inputs with very many entity matches: overlap resolution in find_pii_spans
+# (pseudonymisation) checked each candidate against every kept span, ~1.3 s
+# (zeros) to ~12 s (IPs) on 200 KB, ~16x per 4x input (#36).
+_MANY_MATCHES = {
+    "zero groups": (lambda n: "0 " * n, 100_000),
+    "valid cards": (lambda n: "4111 1111 1111 1111 " * n, 10_000),
+    "ips": (lambda n: "1.2.3.4 " * n, 25_000),
+    "phones": (lambda n: "+46 70 174 06 12 " * n, 12_000),
+    "mixed": (lambda n: "a@b.co 19900101-0017 123-45-6789 " * n, 6_000),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_MANY_MATCHES))
+def test_span_resolution_stays_linear(name):
+    make, n = _MANY_MATCHES[name]
+    large = make(n)
+    assert len(large) >= 99_000
+    assert len(find_pii_spans(large)) > 5_000  # many kept spans to check against
+    assert _growth(make(n // 4), large, find_pii_spans) < 8
 
 
 def test_anchored_email_still_matches_mid_run():

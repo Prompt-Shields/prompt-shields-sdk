@@ -9,6 +9,7 @@ governance. Best-effort — designed as a signal, not a guarantee.
 """
 
 import re
+from bisect import bisect_left
 from collections.abc import Iterable
 
 from prompt_shields.national_ids import find_nordic_national_ids
@@ -206,17 +207,39 @@ def find_pii_spans(text: str | None) -> list[tuple[int, int, str]]:
     """
     if not text:
         return []
+    # Greedy, in priority order: a span is kept when it overlaps no span kept
+    # before it (earlier category, or earlier in the same category). Scanning
+    # every kept span per candidate was quadratic (seconds on 200 KB of
+    # matches), so kept spans live in ``taken``, sorted and disjoint, and are
+    # checked by bisection. Candidates are taken in runs ascending by start
+    # (each pattern yields matches in order); within a run only the last span
+    # kept in that run can overlap, and the run is merged into ``taken`` when
+    # it ends. A merge is linear (two sorted runs), and there is a handful of
+    # runs per category, so the whole pass is O(n log n).
+    by_category: dict[str, list[tuple[int, int, str]]] = {}
+    for span in _entity_spans(text):
+        by_category.setdefault(span[2], []).append(span)
     taken: list[tuple[int, int, str]] = []
-
-    def free(start: int, end: int) -> bool:
-        return all(end <= s or start >= e for s, e, _ in taken)
-
-    spans = _entity_spans(text)
+    run: list[tuple[int, int, str]] = []
+    run_start = -1
     for category in SPAN_CATEGORIES:
-        for start, end, cat in spans:
-            if cat == category and end > start and free(start, end):
-                taken.append((start, end, category))
-    return sorted(taken)
+        for start, end, _ in by_category.get(category, ()):
+            if end <= start:
+                continue
+            if start < run_start:
+                taken = sorted(taken + run)
+                run = []
+            run_start = start
+            if run and run[-1][1] > start:
+                continue
+            i = bisect_left(taken, (end,))  # first kept span starting at or after `end`
+            if i and taken[i - 1][1] > start:
+                continue
+            run.append((start, end, category))
+        taken = sorted(taken + run)
+        run = []
+        run_start = -1
+    return taken
 
 
 def _content_text(content: object) -> str:
