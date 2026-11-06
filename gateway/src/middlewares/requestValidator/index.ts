@@ -5,7 +5,7 @@ import {
   POWERED_BY,
   VALID_PROVIDERS,
 } from '../../globals';
-import { configSchema } from './schema/config';
+import { configErrorMap, configSchema } from './schema/config';
 import { Environment } from '../../utils/env';
 
 // Regex patterns for validation (defined once for reusability)
@@ -195,7 +195,9 @@ export const requestValidator = (c: Context, next: any) => {
         );
       }
 
-      const validatedConfig = configSchema.safeParse(parsedConfig);
+      const validatedConfig = configSchema.safeParse(parsedConfig, {
+        error: configErrorMap,
+      });
 
       if (!validatedConfig.success && validatedConfig.error?.issues?.length) {
         return new Response(
