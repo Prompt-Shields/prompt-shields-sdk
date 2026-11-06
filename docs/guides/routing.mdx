@@ -28,7 +28,7 @@ rely on routing for compliance.
 | Provider keys | Yours, kept in your process (BYOK) | Forwarded by the gateway |
 | Policy | Any `route-policy.v1` document you pass | The built-in default policy. A custom policy needs code (see [Limits](#limits)) |
 | Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
-| Failover between models | No, one attempt per call | Not from the router. Fallback targets in a gateway config still work, and are checked against the data policy |
+| Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Not from the router. Fallback targets in a gateway config still work, and are checked against the data policy |
 | Streaming | Refused (`RouterError`) | Yes |
 
 `ShieldsRouter(mode="gateway", ...)` sends the call to the gateway with your
@@ -207,14 +207,87 @@ resp.choices[0].message.content
 resp.ps.route      # model, provider, group, reason, jurisdiction,
                    # policy_version, sensitivity_level, sensitivity_source
 resp.ps.cost       # usd, source, estimated_usd
-resp.ps.attempts   # always one Attempt today
+resp.ps.attempts   # one Attempt per provider call, failed ones first
+resp.ps.fallback_chain  # error classes of the failed attempts, e.g. ("server_error",)
 ```
 
 The telemetry event carries `requested_model` (`auto`), `served_model`,
 `route_mode` (`local` or `gateway`), `route_group`, `route_reason`,
 `route_est_cost`, `served_provider`, `served_jurisdiction`, `policy_version`,
-`sensitivity_level` and `sensitivity_source`. The collector stores these
-fields on `ai_usage_events`.
+`sensitivity_level`, `sensitivity_source` and `fallback_chain`. The collector
+stores these fields on `ai_usage_events`.
+
+## Failover
+
+In local mode, `ShieldsRouter` and `AsyncShieldsRouter` fail over between
+models that the data policy allows for the call. Failover never widens the
+constraint set:
+
+1. The router builds an ordered candidate list. The chosen model comes first.
+   Then come the other tiers in the same group that pass the same
+   `data_policy` rule (the rule for the call's effective sensitivity) and
+   are served by a configured provider, cheapest first. A use case's
+   `eligible_models` and a `max_cost` hint narrow the list further. For a
+   pinned model (`model="scaleway-small"`) the only fallbacks are the same
+   model on another provider. A candidate that does not comply is never
+   added.
+2. `prompt_shields.failover.FailoverEngine` runs the list (PRD §7.5). It
+   checks each candidate against the data policy again before calling it.
+
+| Failure | What happens |
+|---|---|
+| 5xx, timeout, connection error | Next candidate. Counts against the provider's circuit breaker |
+| 429 | When `Retry-After` is at most `retry_after_max_wait`, waits and retries the same candidate (`rate_limit_retries`, default once). Otherwise, or after that, the next candidate. Counts against the breaker |
+| Context length exceeded | Next candidate with a known, larger context window. Policy tiers have no context window, so in practice the call fails closed |
+| 400, 401, 403, other 4xx | The provider's error is raised. No fallback |
+| Content-filter refusal | The provider's error is raised. A laxer model is never tried |
+| No candidate left, or `max_attempts` used up | `NoCompliantCandidate`, a `PolicyViolation`. The last provider error is its `__cause__` |
+
+A raised provider error carries `ps_attempts` and `ps_fallback_chain`.
+`NoCompliantCandidate` carries `attempts` and `fallback_chain`. Both hold
+error classes only, never error messages or content.
+
+Only the call that succeeds sends a telemetry event. Its `fallback_chain` is
+the error class of each failed attempt before it (`[]` when the first attempt
+succeeded). After a failed attempt the event also has `retry_count` and
+`attempts`, in the same shape as the gateway's events. The collector does not
+store those two fields. A call that fails sends no event.
+
+Settings (local mode only):
+
+```python
+from prompt_shields.failover import BreakerConfig
+
+resilient = ShieldsRouter(
+    providers={
+        "scaleway":   {"api_key": "...", "base_url": "https://api.scaleway.ai/v1"},
+        "mistral-eu": {"api_key": "...", "base_url": "https://..."},
+    },
+    policy=policy,
+    ps_api_key="ps-...",
+    failover=True,                 # False: one attempt, provider error raised
+    breaker_config=BreakerConfig(  # or breakers=<a shared BreakerRegistry>
+        failure_threshold=5,       # consecutive failures that open a breaker
+        open_seconds=30,           # how long an open breaker skips the provider
+        half_open_max_probes=1,    # probe calls once open_seconds is over
+    ),
+    max_attempts=3,                # default: the policy's fallback.max_attempts, else 3
+    retry_after_max_wait=10,       # seconds; default: fallback.retry_after_max_wait_ms, else 10
+    rate_limit_retries=1,          # retries of one candidate after a 429
+)
+resilient.max_attempts  # => 3
+resilient.breakers.state("scaleway")  # => "closed"
+```
+
+`resilient.breakers.snapshot()` gives every tracked provider's state and
+`resilient.breakers.metrics()` the transition counters.
+
+Without `breakers` or `breaker_config`, every router in the process shares
+the process-wide registry (`prompt_shields.failover.default_registry()`).
+Breaker state is per process. It is not shared between processes or
+replicas. `max_attempts` counts every provider call, 429 retries included.
+Set the provider SDK's own `max_retries=0` if you want failover to move on
+at once: those retries stay on the same provider.
 
 ## Sovereignty facts and the model catalog
 
@@ -254,8 +327,9 @@ python demo/demo_route.py
 ```
 
 It shows the routing decisions above, a `PolicyViolation` that sends nothing,
-a provider outage (which surfaces as an error, because failover is not wired
-in yet), and the savings against a single hardcoded model. The SDK tests run
+a provider outage that fails over to the next compliant model (and fails
+closed when every compliant provider is down), and the savings against a
+single hardcoded model. The SDK tests run
 it on every pull request.
 
 ## Limits
@@ -273,12 +347,13 @@ against the code.
   nor the catalog verifies where a provider processes data. A wrong fact in
   the policy routes data to the wrong place. Check catalog facts
   (`sovereignty_checked`) before you copy them.
-- **No failover yet (#21).** The failover engine and circuit breaker exist
-  (`prompt_shields.failover` and the gateway's `psFailover`), but neither
-  `ShieldsRouter` nor the gateway router uses them. A `ShieldsRouter` call
-  makes one attempt. If that provider fails, the provider SDK's error is
-  raised, even when another allowed model exists. The provider SDK's own
-  retries (`max_retries`) still go to the same provider.
+- **Failover stays in one group, and breakers are per process.**
+  `ShieldsRouter` fails over only to compliant tiers in the chosen group (see
+  [Failover](#failover)). It does not move up to another group. Circuit
+  breakers live in each process, so every replica learns about an outage
+  from its own failures. The provider SDK's own retries (`max_retries`) go to
+  the same provider before failover moves on. Gateway router failover is
+  tracked separately in #21.
 - **Local mode refuses streaming.** `stream=True` raises `RouterError` in
   local mode. Gateway mode streams.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
