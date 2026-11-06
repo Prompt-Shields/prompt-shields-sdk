@@ -6,6 +6,7 @@
  */
 
 import { Params, Message, ContentType } from '../../types/requestBody';
+import { CarriedThinkingBlock, decodeThinkingCarry } from './thinkingCarry';
 
 // Role mapping (inline for performance)
 const ROLE_MAP: Record<string, 'system' | 'user' | 'assistant' | 'tool'> = {
@@ -17,9 +18,14 @@ const ROLE_MAP: Record<string, 'system' | 'user' | 'assistant' | 'tool'> = {
 };
 
 /**
- * Transform Responses API request to Chat Completions format
+ * Transform Responses API request to Chat Completions format. PS fork (#73):
+ * `provider` is the target; reasoning items this adapter issued for it are
+ * sent back as signed thinking (see thinkingCarry.ts).
  */
-export function transformResponsesToChatCompletions(req: any): Params {
+export function transformResponsesToChatCompletions(
+  req: any,
+  provider?: string
+): Params {
   const messages: Message[] = [];
 
   // Add system message from instructions
@@ -31,9 +37,40 @@ export function transformResponsesToChatCompletions(req: any): Params {
   if (typeof req.input === 'string') {
     messages.push({ role: 'user', content: req.input });
   } else if (Array.isArray(req.input)) {
+    // PS fork (#73): signed thinking waiting for its assistant message
+    let thinking: CarriedThinkingBlock[] = [];
     for (const item of req.input) {
+      if (item?.type === 'reasoning') {
+        const blocks = decodeThinkingCarry(item.encrypted_content, provider);
+        if (blocks) thinking.push(...blocks);
+        continue;
+      }
       const msg = transformInputItem(item);
       if (!msg) continue;
+      if (msg.role !== 'assistant') {
+        // Reasoning not followed by an assistant item is dropped
+        thinking = [];
+      } else if (thinking.length) {
+        const last = messages[messages.length - 1];
+        const merges =
+          item.type === 'function_call' &&
+          msg.tool_calls &&
+          last?.role === 'assistant';
+        // In content order: thinking before this item's content, or after
+        // the content of the message this function call joins
+        if (merges) {
+          last.content_blocks = [
+            ...assistantContentBlocks(last),
+            ...thinking,
+          ] as ContentType[];
+        } else {
+          msg.content_blocks = [
+            ...thinking,
+            ...assistantContentBlocks(msg),
+          ] as ContentType[];
+        }
+        thinking = [];
+      }
       // PS fork (#73): a turn's function calls (parallel calls, or calls
       // after the assistant's text) are one assistant message, so each call
       // is directly followed by its tool result as Chat Completions,
@@ -191,6 +228,18 @@ function transformInputItem(item: any): Message | null {
   }
 
   return null;
+}
+
+/**
+ * PS fork (#73): an assistant message's content as content_blocks, to
+ * combine with carried thinking. Existing blocks (thinking carried by an
+ * earlier reasoning item of the same turn) are kept as they are.
+ */
+function assistantContentBlocks(msg: Message): ContentType[] {
+  if (msg.content_blocks?.length) return msg.content_blocks;
+  const c = msg.content;
+  if (typeof c === 'string') return c ? [{ type: 'text', text: c }] : [];
+  return Array.isArray(c) ? c : [];
 }
 
 /**

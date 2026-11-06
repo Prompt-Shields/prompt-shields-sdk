@@ -576,6 +576,7 @@ def budget_cache_columns() -> list:
         func.count(status).label("cache_reported"),
         func.count(case((status.in_(CACHE_HIT_STATUSES), 1))).label("cache_hits"),
         func.sum(AIUsageEvent.cache_saved_cost).label("cache_saved_usd"),
+        func.sum(AIUsageEvent.est_tokens_saved).label("cache_tokens_saved"),
     ]
 
 
@@ -585,13 +586,15 @@ def budget_cache_summary(row) -> dict:
     Each is null when no event in the window reported what it needs: the
     budget counts when none reported a budget_action, cache_hit_rate when
     none reported a cache_status, cache_saved_usd when none reported a
-    cache_saved_cost. cache_hit_rate is the share of the gateway's cache
+    cache_saved_cost, cache_tokens_saved when none reported an
+    est_tokens_saved. cache_hit_rate is the share of the gateway's cache
     lookup events that were hits (exact or semantic); see
     budget_cache_columns.
     """
     budget_reported = int(row["budget_reported"] or 0)
     cache_reported = int(row["cache_reported"] or 0)
     saved = row["cache_saved_usd"]
+    tokens_saved = row["cache_tokens_saved"]
     return {
         "budget_downgraded_requests": (
             int(row["budget_downgraded"] or 0) if budget_reported else None
@@ -601,6 +604,7 @@ def budget_cache_summary(row) -> dict:
             round(int(row["cache_hits"] or 0) / cache_reported, 4) if cache_reported else None
         ),
         "cache_saved_usd": round(float(saved), 6) if saved is not None else None,
+        "cache_tokens_saved": int(tokens_saved) if tokens_saved is not None else None,
     }
 
 
