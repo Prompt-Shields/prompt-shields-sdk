@@ -57,6 +57,16 @@ export const finishReasonMap = new Map<PROVIDER_FINISH_REASON, FINISH_REASON>([
     VERTEX_GEMINI_GENERATE_CONTENT_FINISH_REASON.SPII,
     FINISH_REASON.content_filter,
   ],
+  // PS fork (#208, from the Portkey enterprise 2.32 changelog): Model Armor
+  // and prohibited-image stops are content filters, not a normal `stop`.
+  [
+    VERTEX_GEMINI_GENERATE_CONTENT_FINISH_REASON.MODEL_ARMOR,
+    FINISH_REASON.content_filter,
+  ],
+  [
+    VERTEX_GEMINI_GENERATE_CONTENT_FINISH_REASON.IMAGE_PROHIBITED_CONTENT,
+    FINISH_REASON.content_filter,
+  ],
   // https://ai.google.dev/api/generate-content#FinishReason
   [
     GOOGLE_GENERATE_CONTENT_FINISH_REASON.FINISH_REASON_UNSPECIFIED,
@@ -86,6 +96,10 @@ export const finishReasonMap = new Map<PROVIDER_FINISH_REASON, FINISH_REASON>([
   ],
   [
     GOOGLE_GENERATE_CONTENT_FINISH_REASON.IMAGE_SAFETY,
+    FINISH_REASON.content_filter,
+  ],
+  [
+    GOOGLE_GENERATE_CONTENT_FINISH_REASON.IMAGE_PROHIBITED_CONTENT,
     FINISH_REASON.content_filter,
   ],
   // https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-text.html
