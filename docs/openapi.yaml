@@ -6030,6 +6030,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/OperatorNotFound'
+        '413':
+          description: Request body over 32 MiB
 
   /api/v1/admin/connectors/leanix/sync:
     post:
