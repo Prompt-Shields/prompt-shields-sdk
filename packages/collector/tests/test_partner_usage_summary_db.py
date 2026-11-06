@@ -49,7 +49,7 @@ async def _seed(engine):
             ev(ta, asset_a, timedelta(days=2), tokens_in=50, tokens_out=25,
                cost=Decimal("0.005000"), latency_ms=300, session_id="s1",
                fallback_chain=[], budget_state="exceeded", budget_id="b1",
-               budget_action="downgraded", cache_status="miss",
+               budget_action="downgraded", cache_status="miss", est_tokens_saved=0,
                route_learner_mode="exploit", route_propensity=Decimal("0.950000")),
             # Tenant A, nulls are ignored by SUM/AVG; NULL session not counted
             # (an explicit None is SQL NULL, so not counted as reported)
@@ -59,7 +59,8 @@ async def _seed(engine):
                cost=Decimal("1.000000"), latency_ms=500, session_id="s2",
                tokens_cache_write=400, counterfactual_cost=Decimal("0.500000"),
                budget_state="ok", budget_action="none", cache_status="hit",
-               cache_saved_cost=Decimal("0.250000"), route_learner_mode="explore",
+               cache_saved_cost=Decimal("0.250000"), est_tokens_saved=900,
+               route_learner_mode="explore",
                route_propensity=Decimal("0.025000"), route_learner_frozen=False),
             # Tenant A, 30d..90d
             ev(ta, asset_a, timedelta(days=60), tokens_in=7, tokens_out=7, session_id="s3"),
@@ -69,7 +70,8 @@ async def _seed(engine):
             ev(tb, asset_b, timedelta(hours=1), tokens_in=5000, tokens_out=5000,
                cost=Decimal("9.000000"), latency_ms=9000, session_id="sb",
                budget_action="blocked", cache_status="hit",
-               cache_saved_cost=Decimal("5.000000"), route_learner_mode="explore"),
+               cache_saved_cost=Decimal("5.000000"), est_tokens_saved=7777,
+               route_learner_mode="explore"),
         ])
 
         pa = PartnerCredential(tenant_id=ta.id, partner_name="pa", client_id="pa-client",
@@ -117,6 +119,7 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "budget_blocked_requests": 0,
         "cache_hit_rate": 0.0,
         "cache_saved_usd": None,
+        "cache_tokens_saved": 0,
         "learner_requests": 1,
         "learner_routed_share": 0.3333,
         "learner_explore_share": 0.0,
@@ -142,6 +145,7 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "budget_blocked_requests": 0,
         "cache_hit_rate": 0.5,
         "cache_saved_usd": 0.25,
+        "cache_tokens_saved": 900,
         "learner_requests": 2,
         "learner_routed_share": 0.5,
         "learner_explore_share": 0.5,
@@ -161,6 +165,7 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
     assert rb.json()["total_tokens_in"] == 5000
     assert rb.json()["budget_blocked_requests"] == 1
     assert rb.json()["cache_saved_usd"] == 5.0
+    assert rb.json()["cache_tokens_saved"] == 7777
     assert rb.json()["learner_explore_share"] == 1.0
 
     async with async_sessionmaker(seeded_db, class_=AsyncSession)() as s:

@@ -45,13 +45,18 @@ CACHE_HIT = {
 }
 
 # The cache-only event the gateway sends for every cache lookup
-# (buildCacheEvent): no cost and no cost_source.
+# (buildCacheEvent): no cost and no cost_source; est_tokens_saved is its
+# estimate of the prompt tokens the lookup saved (0 on a miss).
 CACHE_LOOKUP = {
     "vendor": "openai",
     "model": "gpt-4o-mini",
     "source": "gateway",
     "cache_status": "SEMANTIC HIT",
+    "est_tokens_saved": 120,
 }
+
+# Migration 031 added these; 034 added est_tokens_saved.
+MIGRATION_031_FIELDS = tuple(f for f in BUDGET_CACHE_FIELDS if f != "est_tokens_saved")
 
 
 def _client():
@@ -72,10 +77,11 @@ async def _events(engine):
 
 @pytest.mark.asyncio
 async def test_budget_and_cache_fields_round_trip(seeded_db):
-    resp, loss = await _ingest([BUDGET_EVENT, CACHE_HIT])
+    resp, loss = await _ingest([BUDGET_EVENT, CACHE_HIT, CACHE_LOOKUP])
     assert resp.status_code == 200, resp.text
 
     events = await _events(seeded_db)
+    assert next(e for e in events if e.est_tokens_saved).est_tokens_saved == 120
     budget = next(e for e in events if e.budget_id)
     assert (budget.budget_state, budget.budget_id, budget.budget_action) == (
         "exceeded",
@@ -83,7 +89,8 @@ async def test_budget_and_cache_fields_round_trip(seeded_db):
         "downgraded",
     )
     assert budget.cache_status is None and budget.cache_saved_cost is None
-    hit = next(e for e in events if e.cache_status)
+    hit = next(e for e in events if e.cost_source == "cache")
+    assert hit.est_tokens_saved is None
     assert hit.cache_status == "semantic hit"
     assert hit.cache_saved_cost == Decimal("0.0021")
     assert hit.cost == 0 and hit.cost_source == "cache"
@@ -111,6 +118,7 @@ async def test_malformed_fields_are_dropped_and_counted(seeded_db):
         "budget_action": "block",
         "cache_status": "STALE",
         "cache_saved_cost": -0.5,
+        "est_tokens_saved": -3,
     }
     good = {"vendor": "openai", "model": "gpt-4o", "budget_state": " WARN "}
     resp, loss = await _ingest([bad, good])
@@ -160,6 +168,10 @@ def test_field_validation():
     assert ev(cache_saved_cost=0).cache_saved_cost == 0
     for bad in (-1, 1e6, float("nan"), "0.1", True):
         assert ev(cache_saved_cost=bad).cache_saved_cost is None, bad
+    assert ev(est_tokens_saved=0).est_tokens_saved == 0
+    assert ev(est_tokens_saved=250.0).est_tokens_saved == 250
+    for bad in (-1, 1.5, 2**31, "12", True, None, [3]):
+        assert ev(est_tokens_saved=bad).est_tokens_saved is None, bad
 
 
 async def _partner_token(engine):
@@ -210,9 +222,9 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
         CACHE_LOOKUP,
         {**CACHE_HIT, "cache_saved_cost": None},
         # A miss: the call's own event carries no cache status.
-        {**CACHE_LOOKUP, "cache_status": "MISS"},
+        {**CACHE_LOOKUP, "cache_status": "MISS", "est_tokens_saved": 0},
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway", "cost": 0.003},
-        {**CACHE_LOOKUP, "cache_status": "SEMANTIC BYPASS"},
+        {**CACHE_LOOKUP, "cache_status": "SEMANTIC BYPASS", "est_tokens_saved": 0},
         # Reports neither: left out of every rate.
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"},
     ]
@@ -226,6 +238,8 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
     # counted a second time.
     assert body["cache_hit_rate"] == 0.6
     assert body["cache_saved_usd"] == 0.003
+    # Summed over the lookup events (three hits at 120, two misses at 0).
+    assert body["cache_tokens_saved"] == 360
 
 
 @pytest.mark.asyncio
@@ -236,6 +250,16 @@ async def test_usage_summary_nulls_without_budget_or_cache_fields(seeded_db):
     assert body["budget_downgraded_requests"] is None
     assert body["budget_blocked_requests"] is None
     assert body["cache_hit_rate"] is None
+    assert body["cache_saved_usd"] is None
+    assert body["cache_tokens_saved"] is None
+
+
+@pytest.mark.asyncio
+async def test_usage_summary_tokens_saved_zero_when_only_misses(seeded_db):
+    resp, _ = await _ingest([{**CACHE_LOOKUP, "cache_status": "MISS", "est_tokens_saved": 0}])
+    assert resp.status_code == 200, resp.text
+    body = await _summary(seeded_db)
+    assert body["cache_tokens_saved"] == 0
     assert body["cache_saved_usd"] is None
 
 
@@ -256,7 +280,7 @@ def _load_migration():
 
 def test_migration_adds_the_ingested_fields():
     m = _load_migration()
-    assert [name for name, _ in m.BUDGET_CACHE_EVENT_COLUMNS] == list(BUDGET_CACHE_FIELDS)
+    assert [name for name, _ in m.BUDGET_CACHE_EVENT_COLUMNS] == list(MIGRATION_031_FIELDS)
     assert set(BUDGET_CACHE_FIELDS) <= set(AIUsageEvent.__table__.columns.keys())
 
 
@@ -279,13 +303,55 @@ async def test_migration_downgrade_and_upgrade(seeded_db):
     async with seeded_db.begin() as conn:
         await conn.run_sync(run, m.downgrade)
         cols = await conn.run_sync(_columns, "ai_usage_events")
-    assert not set(BUDGET_CACHE_FIELDS) & set(cols)
+    assert not set(MIGRATION_031_FIELDS) & set(cols)
     assert {"route_mode", "call_id"} <= set(cols)
 
     async with seeded_db.begin() as conn:
         await conn.run_sync(run, m.upgrade)
         cols = await conn.run_sync(_columns, "ai_usage_events")
-    assert all(cols[f]["nullable"] for f in BUDGET_CACHE_FIELDS)
+    assert all(cols[f]["nullable"] for f in MIGRATION_031_FIELDS)
 
     resp, _ = await _ingest([BUDGET_EVENT, CACHE_HIT])
     assert resp.status_code == 200, resp.text
+
+
+def _load_tokens_saved_migration():
+    pytest.importorskip("alembic")
+    versions = Path(__file__).resolve().parents[2] / "db" / "alembic" / "versions"
+    (path,) = versions.glob("*_usage_event_est_tokens_saved.py")
+    spec = importlib.util.spec_from_file_location("migration_est_tokens_saved", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.asyncio
+async def test_tokens_saved_migration_downgrade_and_upgrade(seeded_db):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    m = _load_tokens_saved_migration()
+
+    def run(sync_conn, step):
+        ctx = MigrationContext.configure(sync_conn)
+        with Operations.context(ctx):
+            step()
+
+    async with seeded_db.begin() as conn:
+        await conn.run_sync(run, m.downgrade)
+        cols = await conn.run_sync(_columns, "ai_usage_events")
+    assert "est_tokens_saved" not in cols
+    assert set(MIGRATION_031_FIELDS) <= set(cols)
+    # 034 sits on 033: its downgrade leaves the learner route columns.
+    assert {"route_learner_mode", "route_propensity", "route_learner_version",
+            "route_learner_frozen"} <= set(cols)
+
+    async with seeded_db.begin() as conn:
+        await conn.run_sync(run, m.upgrade)
+        cols = await conn.run_sync(_columns, "ai_usage_events")
+    assert cols["est_tokens_saved"]["nullable"]
+
+    resp, _ = await _ingest([CACHE_LOOKUP])
+    assert resp.status_code == 200, resp.text
+    (ev,) = await _events(seeded_db)
+    assert ev.est_tokens_saved == 120
