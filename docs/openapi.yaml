@@ -484,6 +484,41 @@ components:
             policy marks it `EEA`. It says nothing about US CLOUD Act
             exposure. See `GET /partner/v1/usage/sovereign-share`.
           example: 0.62
+        budget_downgraded_requests:
+          type: integer
+          nullable: true
+          description: >
+            Events whose `budget_action` is `downgraded`: a spend budget moved
+            the call to a cheaper model (SDK or gateway budgets). Null when no
+            event in the period reported a `budget_action`.
+          example: 14
+        budget_blocked_requests:
+          type: integer
+          nullable: true
+          description: >
+            Events whose `budget_action` is `blocked`. The SDK and gateway
+            refuse an over-budget call before it is sent and report no event
+            for it today, so this stays 0 until an emitter reports refused
+            calls. Null when no event in the period reported a
+            `budget_action`.
+          example: 0
+        cache_hit_rate:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Share (0 to 1) of events reporting a gateway `cache_status` that
+            were served from the cache (exact or semantic hit). Null when no
+            event in the period reported a cache status.
+          example: 0.31
+        cache_saved_usd:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Sum of `cache_saved_cost` (USD): the upstream cost that gateway
+            cache hits avoided. Null when no event in the period reported one.
+          example: 18.4
         period:
           type: string
           description: Time period for this summary
@@ -501,6 +536,10 @@ components:
         - savings_usd
         - fallback_rate
         - sovereign_share
+        - budget_downgraded_requests
+        - budget_blocked_requests
+        - cache_hit_rate
+        - cache_saved_usd
         - period
 
     SavingsTotals:

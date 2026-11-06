@@ -228,6 +228,24 @@ export interface UsageSummary {
    * stated by the route policy), not a US CLOUD Act assessment.
    */
   sovereignShare: number | null;
+  /**
+   * Events a spend budget downgraded to a cheaper model. `null` when no event
+   * reported a budget action.
+   */
+  budgetDowngradedRequests: number | null;
+  /**
+   * Events reported as blocked by a spend budget (SDK and gateway refuse such
+   * calls without an event today, so 0). `null` when no event reported a
+   * budget action.
+   */
+  budgetBlockedRequests: number | null;
+  /**
+   * Share (0 to 1) of events reporting a gateway cache status that were cache
+   * hits (exact or semantic). `null` when no event reported one.
+   */
+  cacheHitRate: number | null;
+  /** Upstream cost (USD) gateway cache hits avoided. `null` when none reported it. */
+  cacheSavedUsd: number | null;
   period: UsagePeriod;
 }
 

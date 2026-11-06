@@ -131,6 +131,8 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
     ]
     chains = present("fallback_chain")
     jurisdictions = present("served_jurisdiction")
+    actions = present("budget_action")
+    statuses = present("cache_status")
     computed = {
         "total_requests": len(rows),
         "total_tokens_in": total("tokens_in"),
@@ -148,6 +150,12 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         "fallback_requests": sum(1 for c in chains if c),
         "jurisdiction_reported": len(jurisdictions),
         "sovereign_requests": sum(1 for j in jurisdictions if j in SOVEREIGN_JURISDICTIONS),
+        "budget_reported": len(actions),
+        "budget_downgraded": actions.count("downgraded"),
+        "budget_blocked": actions.count("blocked"),
+        "cache_reported": len(statuses),
+        "cache_hits": sum(1 for c in statuses if c in ("hit", "semantic hit")),
+        "cache_saved_usd": total("cache_saved_cost"),
     }
     labels = [c.name for c in stmt.selected_columns]
     assert set(labels) == set(computed), labels
@@ -192,6 +200,10 @@ def _seed() -> dict[str, list[Row]]:
                 counterfactual_cost=Decimal("0.025000"),
                 fallback_chain=["rate_limited"],
                 served_jurisdiction="SE",
+                budget_state="warn",
+                budget_id="support-daily",
+                budget_action="downgraded",
+                cache_status="miss",
             ),
             _event(
                 ASSET_A,
@@ -205,6 +217,10 @@ def _seed() -> dict[str, list[Row]]:
                 tokens_cache_write=10,
                 fallback_chain=[],
                 served_jurisdiction="US",
+                budget_state="ok",
+                budget_action="none",
+                cache_status="semantic hit",
+                cache_saved_cost=Decimal("0.020000"),
             ),
             _event(
                 ASSET_A,
@@ -280,6 +296,10 @@ class TestUsageSummary:
             "savings_usd": 0.015,
             "fallback_rate": 0.5,
             "sovereign_share": 0.5,
+            "budget_downgraded_requests": 1,
+            "budget_blocked_requests": 0,
+            "cache_hit_rate": 0.5,
+            "cache_saved_usd": 0.02,
             "period": "30d",
         }
 
@@ -334,6 +354,10 @@ class TestUsageSummary:
             "savings_usd": None,
             "fallback_rate": None,
             "sovereign_share": None,
+            "budget_downgraded_requests": None,
+            "budget_blocked_requests": None,
+            "cache_hit_rate": None,
+            "cache_saved_usd": None,
             "period": "30d",
         }
 
