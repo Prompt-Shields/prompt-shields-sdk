@@ -2159,12 +2159,13 @@ components:
       in: header
       required: false
       description: |
-        Per-request cache mode, overriding `PS_CACHE_DEFAULT`: `on`, `off`,
-        or `refresh` (serve from upstream and overwrite the entry). Never sent
-        upstream.
+        Per-request cache mode, overriding `PS_CACHE_DEFAULT`: `on`
+        (exact match), `semantic` (semantic cache; needs an embedder, see
+        gateway/docs/semantic-cache.md), `off`, or `refresh` (serve from
+        upstream and overwrite the entry). Never sent upstream.
       schema:
         type: string
-        enum: ['on', 'off', refresh]
+        enum: ['on', semantic, 'off', refresh]
       x-ps-sent-upstream: never
     XPsBusinessUnit:
       name: x-ps-business-unit

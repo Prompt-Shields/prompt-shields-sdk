@@ -106,6 +106,8 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "savings_usd": 0.02,
         "fallback_rate": 0.5,
         "sovereign_share": None,
+        "outcome_signals_reported": 0,
+        "outcome_signal_counts": None,
         "period": "7d",
     }
     assert r30.json() == {
@@ -122,6 +124,8 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "savings_usd": -0.48,
         "fallback_rate": 0.5,
         "sovereign_share": None,
+        "outcome_signals_reported": 0,
+        "outcome_signal_counts": None,
         "period": "30d",
     }
     b90 = r90.json()

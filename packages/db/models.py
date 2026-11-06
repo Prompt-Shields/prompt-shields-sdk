@@ -16,6 +16,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     Text,
     UniqueConstraint,
     event,
@@ -189,6 +190,12 @@ class AIUsageEvent(Base):
     baseline_id = Column(Text)
     # Per-call id from the SDK or gateway (#43): what call feedback names.
     call_id = Column(Text)
+    # Implicit outcome signals (#44): sorted list of known class names
+    # ("max_tokens", "refusal", ...; collector.ingest.OUTCOME_SIGNAL_CLASSES),
+    # [] when measured and nothing happened, NULL when not reported; and the
+    # SDK's OUTCOME_SIGNALS_VERSION that defined them.
+    outcome_signals = Column(JSONB(none_as_null=True))
+    outcome_signals_version = Column(SmallInteger)
 
     asset = relationship("AIAsset", back_populates="usage_events")
 
