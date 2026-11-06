@@ -200,7 +200,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - (security) The Fireworks AI account id and image model path are checked the same way.
   - Together AI streams no longer break on keep-alive comments.
   - The Messages adapter's `message_start.model` falls back to the requested model.
-  - `cache.max_age` is read as seconds; it was treated as milliseconds, so cache entries expired almost at once.
+  - `cache.max_age` is read as seconds; it was treated as milliseconds, so cache entries expired almost at once. **Behaviour change for simple-cache users who set `max_age` in milliseconds** to work around this: the value is now read as seconds, so `max_age: 60000` keeps entries for about 16.7 hours instead of 60 seconds. Divide such values by 1000. The semantic cache already read seconds and is unchanged.
   - OpenAI `moderation` (chat) and `prompt_cache_options` (Responses) are forwarded.
 
   Follow-ups are listed in the triage document. The main ones: a Node 24 base image (Node 20 is EOL and still trusts the distrusted emSign CA), zod 4, and dev-tool advisories.
