@@ -72,6 +72,7 @@ from db.models import (
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
+    TenantSecret,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -120,6 +121,7 @@ ERASE_ORDER: tuple[type, ...] = (
     SpendAlert,
     TenantApiKey,
     AdminToken,
+    TenantSecret,
 )
 
 # Tables with a tenant_id that erasure keeps on purpose. Both hold ids and
