@@ -42,18 +42,27 @@ ROUTES = [
     ("/partner/v1/usage/sovereign-share", "usage:read"),
     ("/partner/v1/changes?since=2026-01-01T00:00:00", "changes:read"),
     ("/partner/v1/export", "export:read"),
+    ("/partner/v1/usage/focus-export", "usage:export"),
 ]
+
+# Read routes added after Phase 1 whose scope `registry:read` does not grant.
+NOT_IN_LEGACY = {"usage:export"}
 
 
 class TestExpandScopes:
     def test_legacy_registry_read_maps_to_phase1_read_scopes(self):
         assert expand_scopes(["registry:read"]) == LEGACY_REGISTRY_READ
         for _, scope in ROUTES:
+            if scope in NOT_IN_LEGACY:
+                continue
             assert scope in expand_scopes(["registry:read"])
 
     def test_new_scopes_are_not_in_the_legacy_alias(self):
         assert "webhooks:manage" in SCOPES
         assert "webhooks:manage" not in expand_scopes(["registry:read"])
+        for scope in NOT_IN_LEGACY:
+            assert scope in SCOPES
+            assert scope not in expand_scopes(["registry:read"])
 
     def test_unknown_scopes_grant_nothing(self):
         assert expand_scopes(["admin", "*", "registry:write"]) == frozenset()

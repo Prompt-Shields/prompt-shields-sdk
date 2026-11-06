@@ -26,6 +26,13 @@ import { callIdOf, FEEDBACK_PATH, setCallIdHeader } from './psFeedback';
 import { applyBaseline, getBaseline } from './router/baseline';
 import { RESPONSE_HEADER_KEYS } from '../globals';
 import {
+  OUTCOME_SIGNALS_VERSION,
+  OutcomeInputs,
+  hasRefusal,
+  outcomeSignals,
+  stopReasonsOf,
+} from './psOutcomeSignals';
+import {
   ROUTE_POLICY_KEY,
   ServedTarget,
   servedJurisdiction,
@@ -134,6 +141,11 @@ interface TelemetryEvent {
   // The error class of each failed attempt, in order (PRD 0001 §7.12):
   // empty when the first attempt succeeded. Classes only, never messages.
   fallback_chain?: string[];
+  // Implicit outcome signals (#44): the classes the gateway can see
+  // (fallback, max_tokens, refusal, stream_error, abandoned), with the
+  // SDK's version number. Class names only; see psOutcomeSignals.ts.
+  outcome_signals?: string[];
+  outcome_signals_version?: number;
 }
 
 /**
@@ -594,6 +606,42 @@ export function withStreamSummary(
   return out;
 }
 
+// API surfaces that generate text, where outcome signals mean something.
+const GENERATION_SURFACES = new Set([
+  'chat',
+  'completions',
+  'messages',
+  'responses',
+]);
+
+/** A streamed call's event with its outcome signals, on generation surfaces. */
+export function streamOutcome(
+  event: TelemetryEvent,
+  summary: StreamSummary,
+  generation: boolean
+): TelemetryEvent {
+  if (!generation) return event;
+  return withOutcomeSignals(event, {
+    stopReasons: summary.stopReasons,
+    refusal: summary.refusal,
+    fallbackChain: event.fallback_chain,
+    streamTruncated: summary.truncated,
+    streamCancelled: summary.cancelled,
+  });
+}
+
+/** Sets `outcome_signals` (and its version) on an LLM call's event. */
+export function withOutcomeSignals(
+  event: TelemetryEvent,
+  inputs: OutcomeInputs
+): TelemetryEvent {
+  return {
+    ...event,
+    outcome_signals: outcomeSignals(inputs),
+    outcome_signals_version: OUTCOME_SIGNALS_VERSION,
+  };
+}
+
 /**
  * Hono adapter — emits one telemetry event per request after the response is
  * produced. Reads token usage + served model from a JSON body or, for a
@@ -730,13 +778,24 @@ export function psTelemetry() {
       const served = responseBody?.model || route?.servedModel;
       const cacheStatus =
         c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
+      const cacheHit = cacheStatus.endsWith('HIT');
       const priced = (e: TelemetryEvent, m?: string) =>
-        cacheStatus.endsWith('HIT')
-          ? withCacheHit(e, cacheStatus, m)
-          : withCost(e, m);
+        cacheHit ? withCacheHit(e, cacheStatus, m) : withCost(e, m);
       const stream = observeStream(c);
+      // A cache hit is not a model call: its stop reasons and refusals
+      // belong to the call that filled the cache (which reported them), so
+      // it carries no outcome signals rather than counting them twice.
+      const generation =
+        !!surface && GENERATION_SURFACES.has(surface) && !cacheHit;
       if (!stream) {
-        waitUntil(sendTelemetry(priced(event, served)).catch(() => {}));
+        const outcome = generation
+          ? withOutcomeSignals(event, {
+              stopReasons: stopReasonsOf(responseBody),
+              refusal: hasRefusal(responseBody),
+              fallbackChain: event.fallback_chain,
+            })
+          : event;
+        waitUntil(sendTelemetry(priced(outcome, served)).catch(() => {}));
         return;
       }
       waitUntil(
@@ -744,12 +803,16 @@ export function psTelemetry() {
           .then((summary) =>
             sendTelemetry(
               priced(
-                withStreamSummary(
-                  event,
+                streamOutcome(
+                  withStreamSummary(
+                    event,
+                    summary,
+                    !!route,
+                    !adapted,
+                    zeroFilled
+                  ),
                   summary,
-                  !!route,
-                  !adapted,
-                  zeroFilled
+                  generation
                 ),
                 summary.model || served
               )

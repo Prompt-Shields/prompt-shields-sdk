@@ -192,6 +192,33 @@ If nothing fits the budget, the router uses the cheapest allowed model and
 says so in the reason (`+budget-unsatisfiable`). The budget never overrides
 the data policy.
 
+### Eligibility from measured parity
+
+`eligible_models` should hold only the models that passed the use case's eval
+set at its `min_parity`. `ps-eval-apply` writes them from `ps-eval` results,
+so you do not edit the list by hand:
+
+```bash
+ps-eval --mode live --route-policy policy.json --out-json eval.json ...
+ps-eval-apply --report eval.json --route-policy policy.json \
+  --eval-set claims-v4 --out policy.new.json
+```
+
+For each use case in the report, a candidate stays eligible when its cell has
+at least `min_cell_samples` scored samples and its parity reaches that use
+case's own `min_parity` (default `0.95`). With `--conservative`, the Wilson
+lower bound must reach it instead. The logged model the candidates were
+compared against stays eligible, and so does any `--keep-model`. Every other
+model, including one that was not evaluated, is left out, so both routers stop
+picking it for that use case. The command refuses a `--mode mock` report. It
+warns when the eval ran under a different version of the policy, when an
+eligible model is in no group, and when no model is eligible: the use case then
+gets an empty `eligible_models`, and both routers refuse (fail closed on) its
+calls unless they name a group. `--out` may be the input policy; the file is
+replaced in one step. `min_group` and other bars are left as they
+are. The route reason shows the bar at work: `+use-case-min-group` or
+`+use-case-eligible`.
+
 ## Sending calls
 
 `client.chat.completions.create(...)` takes the same arguments as `route()`,

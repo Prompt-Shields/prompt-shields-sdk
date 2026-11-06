@@ -139,6 +139,8 @@ describe('fails over to the next compliant candidate', () => {
 
     const ev = await telemetryEvent();
     expect(ev.fallback_chain).toEqual(['server_error']);
+    // #44: a failover is the `fallback` outcome class.
+    expect(ev.outcome_signals).toEqual(['fallback']);
     expect(ev.served_model).toBe('mistral-small-eu');
     expect(ev.requested_model).toBe('auto');
     expect(ev.retry_count).toBe(1);
