@@ -334,6 +334,9 @@ export function usageCost(
 /** `cost_source` of a table-priced cost (SDK COST_SOURCE_PRICING_TABLE). */
 export const COST_SOURCE_PRICING_TABLE = 'pricing_table';
 
+/** `cost_source` of a response served from the gateway cache (#33): cost 0. */
+export const COST_SOURCE_CACHE = 'cache';
+
 /** `cost_source` of a cost the provider billed (SDK pricing.py). */
 export const COST_SOURCE_PROVIDER_REPORTED = 'provider_reported';
 
