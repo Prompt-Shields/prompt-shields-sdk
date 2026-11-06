@@ -9,8 +9,9 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from collector import ingest, partner_rate_limit
+from collector import ingest, partner_rate_limit, tenant_limits
 from collector.app import app
+from collector.config import settings
 from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
 from httpx import ASGITransport, AsyncClient
 
@@ -23,7 +24,12 @@ def limiter(monkeypatch):
         return TENANTS[request.headers["Authorization"].removeprefix("Bearer ")]
 
     monkeypatch.setattr(ingest, "resolve_tenant", fake_resolve_tenant)
-    monkeypatch.setattr(ingest.settings, "rate_limit_per_minute", 3)
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 3)
+
+    async def no_overrides(db, tenant_id):
+        return {}
+
+    monkeypatch.setattr(tenant_limits, "overrides", no_overrides)
     # Pin the clock mid-window so a test never straddles a minute boundary.
     monkeypatch.setattr(
         partner_rate_limit, "time", SimpleNamespace(time=lambda: 1_700_000_030.0)
@@ -85,7 +91,7 @@ async def test_ingest_limit_holds_under_concurrent_requests(limiter):
 
 @pytest.mark.asyncio
 async def test_ingest_limit_disabled_when_zero(limiter, monkeypatch):
-    monkeypatch.setattr(ingest.settings, "rate_limit_per_minute", 0)
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 0)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:

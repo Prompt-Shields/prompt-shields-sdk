@@ -60,6 +60,15 @@ assets_created_total = Counter(
     registry=registry,
 )
 
+rate_limit_store_errors_total = Counter(
+    "ps_collector_rate_limit_store_errors",
+    "Rate limiter calls that could not reach the shared store (Redis) and "
+    "were counted in-process instead, by limiter: partner, ingest, kong, "
+    "mcp, feedback.",
+    ["limiter"],
+    registry=registry,
+)
+
 UNMATCHED = "unmatched"
 
 # uvicorn's default HTTP parser (h11) accepts any token as a method, so the
@@ -82,6 +91,10 @@ def record_ingest(endpoint: str, outcome: str, count: int) -> None:
 def record_assets_created(endpoint: str, count: int) -> None:
     if count > 0:
         assets_created_total.labels(endpoint=endpoint).inc(count)
+
+
+def record_rate_limit_store_error(limiter: str) -> None:
+    rate_limit_store_errors_total.labels(limiter=limiter).inc()
 
 
 def _route_template(scope: Scope) -> str:
