@@ -1,10 +1,10 @@
-import { PartnerError } from './errors';
+import { APIConnectionError, PartnerError } from './errors';
 import type { FocusCostRow, FocusExportFormat } from './types';
 
 /** The parts of Node's `fs` and `stream/promises` that `saveTo()` uses. */
 interface NodeFs {
-  createWriteStream(path: string): unknown;
-  promises: { unlink(path: string): Promise<void> };
+  createWriteStream(path: string, options: { flags: string }): unknown;
+  promises: { unlink(path: string): Promise<void>; rename(from: string, to: string): Promise<void> };
 }
 interface NodeStreamPromises {
   pipeline(source: AsyncIterable<Uint8Array>, destination: unknown): Promise<void>;
@@ -14,6 +14,14 @@ interface NodeStreamPromises {
 // modules are absent, and its typings do not need @types/node.
 const loadNodeModule = (name: string): Promise<unknown> => import(name);
 
+/** The last path segment of a server-sent file name, or null if nothing usable is left. */
+function safeFilename(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  // eslint-disable-next-line no-control-regex
+  const name = (raw.split(/[\\/]/).pop() ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  return name === '' || name === '.' || name === '..' ? null : name;
+}
+
 /**
  * A streamed download. The body is read once, by exactly one of
  * `chunks()` / `for await`, `lines()`, `rows()`, `text()`, `saveTo()` or
@@ -22,17 +30,26 @@ const loadNodeModule = (name: string): Promise<unknown> => import(name);
 export class Download implements AsyncIterable<Uint8Array> {
   /** The HTTP response, with the body still unread. */
   readonly response: Response;
-  /** File name from `Content-Disposition`, if the server sent one. */
+  /**
+   * File name from `Content-Disposition`, if the server sent one, reduced
+   * to a bare name (no directory part, no control characters, never `.` or
+   * `..`), so `saveTo(download.filename)` stays in the current directory.
+   */
   readonly filename: string | null;
   /** `Content-Type` of the body. */
   readonly contentType: string | null;
   private used = false;
+  /**
+   * Set by a subclass whose server ends every non-empty body with `\n`, so
+   * a body that stops mid-line is reported as truncated.
+   */
+  protected endsWithNewline = false;
 
   constructor(response: Response) {
     this.response = response;
     this.contentType = response.headers.get('content-type');
     const disposition = response.headers.get('content-disposition') ?? '';
-    this.filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? null;
+    this.filename = safeFilename(/filename="?([^";]+)"?/i.exec(disposition)?.[1]);
   }
 
   /** The raw body stream (Web Streams API). Marks the download as read. */
@@ -46,18 +63,40 @@ export class Download implements AsyncIterable<Uint8Array> {
     return this.used;
   }
 
-  /** The body as byte chunks, as they arrive. Stopping early cancels the download. */
+  /**
+   * The body as byte chunks, as they arrive. Stopping early cancels the
+   * download. A connection lost or aborted part way throws an
+   * `APIConnectionError`.
+   */
   async *chunks(): AsyncGenerator<Uint8Array, void, undefined> {
     const reader = this.body.getReader();
     let done = false;
+    let last = -1;
     try {
       for (;;) {
-        const next = await reader.read();
+        let next: ReadableStreamReadResult<Uint8Array>;
+        try {
+          next = await reader.read();
+        } catch (err) {
+          done = true;
+          if (err instanceof PartnerError) throw err;
+          const aborted = (err as Error)?.name === 'AbortError';
+          throw new APIConnectionError(
+            aborted ? 'Download was aborted' : `Download failed part way: ${(err as Error)?.message ?? err}`,
+            { cause: err },
+          );
+        }
         if (next.done) {
           done = true;
+          if (this.endsWithNewline && last !== -1 && last !== 0x0a) {
+            throw new APIConnectionError('Download ended mid-line: the body is truncated');
+          }
           return;
         }
-        if (next.value && next.value.byteLength > 0) yield next.value;
+        if (next.value && next.value.byteLength > 0) {
+          last = next.value[next.value.byteLength - 1];
+          yield next.value;
+        }
       }
     } finally {
       if (!done) await reader.cancel().catch(() => undefined);
@@ -102,9 +141,11 @@ export class Download implements AsyncIterable<Uint8Array> {
 
   /**
    * Node only: stream the body into a file at `path`, with backpressure and
-   * without holding it in memory. Returns the bytes written. If the
-   * download fails part way, the partial file is removed and the error is
-   * thrown.
+   * without holding it in memory. Returns the bytes written. The body is
+   * written to a new temporary file beside `path` and renamed over `path`
+   * only once complete, so a failed download leaves no partial file and
+   * any existing file at `path` untouched. `path` is yours; the server's
+   * `filename` is never used for it.
    */
   async saveTo(path: string): Promise<number> {
     const fs = (await loadNodeModule('fs')) as NodeFs;
@@ -116,10 +157,13 @@ export class Download implements AsyncIterable<Uint8Array> {
         yield chunk;
       }
     };
+    const tmp = `${path}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.partial`;
     try {
-      await pipeline(counted(this.chunks()), fs.createWriteStream(path));
+      // `wx`: never write through an existing file or symlink.
+      await pipeline(counted(this.chunks()), fs.createWriteStream(tmp, { flags: 'wx' }));
+      await fs.promises.rename(tmp, path);
     } catch (err) {
-      await fs.promises.unlink(path).catch(() => undefined);
+      await fs.promises.unlink(tmp).catch(() => undefined);
       throw err;
     }
     return bytes;
@@ -151,6 +195,7 @@ export class FocusExport extends Download {
 
   constructor(response: Response, format: FocusExportFormat) {
     super(response);
+    this.endsWithNewline = true;
     this.format = format;
     this.focusVersion = response.headers.get('x-focus-version');
     this.windowStart = response.headers.get('x-export-window-start');

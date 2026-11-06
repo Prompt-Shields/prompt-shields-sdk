@@ -8,6 +8,7 @@ import * as path from 'path';
 import {
   APIConnectionError,
   BadRequestError,
+  Download,
   FocusExport,
   InternalServerError,
   NotFoundError,
@@ -260,8 +261,8 @@ describe('client.usage.focusExport', () => {
     expect(await exp.text()).toBe(csv);
   });
 
-  it('lines() yields lines without endings and keeps a last line without a newline', async () => {
-    const exp = await client(mockFetch(streamed(['a,b\r\n1,', '2\n\n3,4'], {}).response).fetch).usage.focusExport();
+  it('Download.lines() yields lines without endings and keeps a last line without a newline', async () => {
+    const exp = new Download(streamed(['a,b\r\n1,', '2\n\n3,4'], {}).response);
     const lines: string[] = [];
     for await (const line of exp.lines()) lines.push(line);
     expect(lines).toEqual(['a,b', '1,2', '3,4']);
@@ -439,8 +440,90 @@ describe('client.usage.focusExport', () => {
         mockFetch(streamed(['a\n', 'b\n', 'c\n'], {}, { failAfter: 2 }).response).fetch,
       ).usage.focusExport();
       const file = path.join(dir, 'focus.csv');
-      await expect(exp.saveTo(file)).rejects.toThrow('terminated');
+      const err = await exp.saveTo(file).catch((e) => e);
+      expect(err).toBeInstanceOf(APIConnectionError);
+      expect(err.message).toMatch(/terminated/);
       expect(fs.existsSync(file)).toBe(false);
+      expect(fs.readdirSync(dir)).toEqual([]);
+    });
+
+    it('leaves an existing file untouched when the download fails', async () => {
+      const file = path.join(dir, 'focus.csv');
+      fs.writeFileSync(file, 'previous\n');
+      const exp = await client(
+        mockFetch(streamed(['a\n', 'b\n', 'c\n'], {}, { failAfter: 2 }).response).fetch,
+      ).usage.focusExport();
+      await expect(exp.saveTo(file)).rejects.toThrow(APIConnectionError);
+      expect(fs.readFileSync(file, 'utf8')).toBe('previous\n');
+      expect(fs.readdirSync(dir)).toEqual(['focus.csv']);
+    });
+
+    it('replaces a symlink at the path instead of writing through it', async () => {
+      const target = path.join(dir, 'target.txt');
+      fs.writeFileSync(target, 'keep\n');
+      const file = path.join(dir, 'focus.csv');
+      fs.symlinkSync(target, file);
+      const exp = await client(mockFetch(streamed(['a\n'], {}).response).fetch).usage.focusExport();
+      await exp.saveTo(file);
+      expect(fs.readFileSync(target, 'utf8')).toBe('keep\n');
+      expect(fs.lstatSync(file).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(file, 'utf8')).toBe('a\n');
+    });
+  });
+
+  it.each([
+    ['../../etc/passwd', 'passwd'],
+    ['..\\..\\evil.csv', 'evil.csv'],
+    ['/abs/x.jsonl', 'x.jsonl'],
+    ['..', null],
+    ['dir/', null],
+  ])('reduces a server file name %j to a bare name', (raw, expected) => {
+    const d = new Download(new Response('', { headers: { 'content-disposition': `attachment; filename="${raw}"` } }));
+    expect(d.filename).toBe(expected);
+  });
+
+  describe('truncation and aborts while streaming', () => {
+    it('throws APIConnectionError when the body ends mid-line', async () => {
+      const exp = await client(
+        mockFetch(streamed(['{"BilledCost":1}\n', '{"BilledC'], {}).response).fetch,
+      ).usage.focusExport({ format: 'jsonl' });
+      const rows: unknown[] = [];
+      const err = await (async () => {
+        for await (const row of exp.rows()) rows.push(row);
+      })().catch((e) => e);
+      expect(rows).toHaveLength(1);
+      expect(err).toBeInstanceOf(APIConnectionError);
+      expect(err.message).toMatch(/truncated/);
+    });
+
+    it('accepts an empty body', async () => {
+      const exp = await client(mockFetch(streamed([], {}).response).fetch).usage.focusExport();
+      expect(await exp.text()).toBe('');
+    });
+
+    it("maps the caller's abort during the body read to APIConnectionError", async () => {
+      const controller = new AbortController();
+      const fetch = async (_url: string, init: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('a\n'));
+            init.signal?.addEventListener('abort', () =>
+              c.error(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })),
+            );
+          },
+        });
+        return new Response(body, { status: 200 });
+      };
+      const exp = await new PartnerClient({ apiKey: 'k', fetch }).usage.focusExport(
+        {},
+        { signal: controller.signal },
+      );
+      const it = exp.chunks();
+      await it.next();
+      controller.abort();
+      const err = await it.next().catch((e) => e);
+      expect(err).toBeInstanceOf(APIConnectionError);
+      expect(err.message).toMatch(/aborted/);
     });
   });
 });
