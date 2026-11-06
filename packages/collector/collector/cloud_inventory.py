@@ -63,7 +63,7 @@ import re
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
@@ -795,6 +795,50 @@ def _str_or_none(value) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def azure_ai_account(account: dict) -> tuple[str, str | None, dict[str, str]] | None:
+    """(account id, region, tags) of an Azure OpenAI or AI Services account
+    from an account listing, or None for other kinds and unexpected ids."""
+    if str(account.get("kind", "")).lower() not in AZURE_AI_KINDS:
+        return None
+    account_id = account.get("id")
+    if not isinstance(account_id, str) or not _ACCOUNT_ID.match(account_id):
+        logger.warning("azure: skipping account with unexpected id")
+        return None
+    region = _str_or_none(account.get("location"))
+    return account_id, region.lower() if region else None, _tags(account.get("tags"))
+
+
+def azure_account_deployments(
+    account_id: str,
+    region: str | None,
+    account_tags: dict[str, str],
+    deployments: Iterable[dict],
+) -> list[CloudDeployment]:
+    """The serving model deployments of one account, from its deployment
+    listing. Deployment tags override the account's."""
+    out: list[CloudDeployment] = []
+    for dep in deployments:
+        props = _dict(dep.get("properties"))
+        # "Disabled" (e.g. the account's quota or subscription was
+        # disabled) is not serving, like Failed or Deleting.
+        state = str(props.get("provisioningState") or "").lower()
+        name = dep.get("name")
+        if state in INACTIVE_STATES or not isinstance(name, str) or not name:
+            continue
+        model = _dict(props.get("model"))
+        out.append(
+            CloudDeployment(
+                cloud="azure",
+                resource_id=f"{account_id}/deployments/{name}",
+                region=region,
+                model=_str_or_none(model.get("name")),
+                model_format=_str_or_none(model.get("format")),
+                tags={**account_tags, **_tags(dep.get("tags"))},
+            )
+        )
+    return out
+
+
 async def _azure_subscription(
     client: httpx.AsyncClient,
     sid: str,
@@ -812,44 +856,22 @@ async def _azure_subscription(
         "account list",
         sleep,
     ):
-        if str(account.get("kind", "")).lower() not in AZURE_AI_KINDS:
-            continue
-        account_id = account.get("id")
-        if not isinstance(account_id, str) or not _ACCOUNT_ID.match(account_id):
-            logger.warning("azure: skipping account with unexpected id")
+        found = azure_ai_account(account)
+        if found is None:
             continue
         accounts_seen += 1
-        region = _str_or_none(account.get("location"))
-        account_tags = _tags(account.get("tags"))
-        async for dep in _arm_list(
-            client,
-            f"{account_id}/deployments",
-            ARM_COGNITIVE_API,
-            auth,
-            "deployment list",
-            sleep,
-        ):
-            props = dep.get("properties")
-            props = props if isinstance(props, dict) else {}
-            # "Disabled" (e.g. the account's quota or subscription was
-            # disabled) is not serving, like Failed or Deleting.
-            state = str(props.get("provisioningState") or "").lower()
-            name = dep.get("name")
-            if state in INACTIVE_STATES or not isinstance(name, str) or not name:
-                continue
-            model = props.get("model")
-            model = model if isinstance(model, dict) else {}
-            deployments.append(
-                CloudDeployment(
-                    cloud="azure",
-                    resource_id=f"{account_id}/deployments/{name}",
-                    region=region.lower() if region else None,
-                    model=_str_or_none(model.get("name")),
-                    model_format=_str_or_none(model.get("format")),
-                    # Deployment tags override the account's.
-                    tags={**account_tags, **_tags(dep.get("tags"))},
-                )
+        listing = [
+            dep
+            async for dep in _arm_list(
+                client,
+                f"{found[0]}/deployments",
+                ARM_COGNITIVE_API,
+                auth,
+                "deployment list",
+                sleep,
             )
+        ]
+        deployments += azure_account_deployments(*found, listing)
     return accounts_seen, deployments
 
 
@@ -869,6 +891,88 @@ def _location(value, fallback: str | None) -> str | None:
 
 def _inactive(props: dict) -> bool:
     return str(props.get("provisioningState") or "").lower() in INACTIVE_STATES
+
+
+def azure_ml_workspace(ws: dict) -> tuple[str, str | None, dict[str, str]] | None:
+    """(workspace id, region, tags) of an Azure ML workspace or hub-based AI
+    Foundry project from a workspace listing, or None for hubs, feature
+    stores and unexpected ids."""
+    if str(ws.get("kind") or "").lower() in AZURE_ML_SKIPPED_KINDS:
+        return None
+    ws_id = ws.get("id")
+    if not isinstance(ws_id, str) or not _WORKSPACE_ID.match(ws_id):
+        logger.warning("azure: skipping ml workspace with unexpected id")
+        return None
+    return ws_id, _location(ws.get("location"), None), _tags(ws.get("tags"))
+
+
+def azure_ml_serverless_endpoints(
+    ws_id: str, region: str | None, ws_tags: dict[str, str], endpoints: Iterable[dict]
+) -> list[CloudDeployment]:
+    """The serving serverless endpoints of one workspace. Endpoint tags
+    override the workspace's."""
+    out: list[CloudDeployment] = []
+    for ep in endpoints:
+        props = _dict(ep.get("properties"))
+        name = ep.get("name")
+        if not isinstance(name, str) or not _ARM_NAME.match(name):
+            continue
+        state = str(props.get("endpointState") or "").lower()
+        if _inactive(props) or state in AZURE_ML_ENDPOINT_INACTIVE:
+            continue
+        out.append(
+            CloudDeployment(
+                cloud="azure",
+                resource_id=f"{ws_id}/serverlessEndpoints/{name}",
+                region=_location(ep.get("location"), region),
+                model=_ml_model(_dict(props.get("modelSettings")).get("modelId")),
+                model_format="serverless",
+                tags={**ws_tags, **_tags(ep.get("tags"))},
+            )
+        )
+    return out
+
+
+def azure_ml_online_endpoint(
+    region: str | None, ws_tags: dict[str, str], ep: dict
+) -> tuple[str, str | None, dict[str, str]] | None:
+    """(name, region, tags) of a managed online endpoint whose deployments
+    are inventoried, or None."""
+    props = _dict(ep.get("properties"))
+    name = ep.get("name")
+    if not isinstance(name, str) or not _ARM_NAME.match(name) or _inactive(props):
+        return None
+    return name, _location(ep.get("location"), region), {**ws_tags, **_tags(ep.get("tags"))}
+
+
+def azure_ml_online_deployments(
+    ws_id: str,
+    endpoint: str,
+    ep_region: str | None,
+    ep_tags: dict[str, str],
+    deployments: Iterable[dict],
+) -> list[CloudDeployment]:
+    """The serving deployments of one managed online endpoint. Deployment
+    tags override the endpoint's."""
+    out: list[CloudDeployment] = []
+    for dep in deployments:
+        dprops = _dict(dep.get("properties"))
+        dname = dep.get("name")
+        if not isinstance(dname, str) or not _ARM_NAME.match(dname):
+            continue
+        if _inactive(dprops):
+            continue
+        out.append(
+            CloudDeployment(
+                cloud="azure",
+                resource_id=f"{ws_id}/onlineEndpoints/{endpoint}/deployments/{dname}",
+                region=_location(dep.get("location"), ep_region),
+                model=_ml_model(dprops.get("model")),
+                model_format="online",
+                tags={**ep_tags, **_tags(dep.get("tags"))},
+            )
+        )
+    return out
 
 
 async def _azure_ml_subscription(
@@ -906,24 +1010,14 @@ async def _azure_ml_subscription(
     seen = 0
     deployments: list[CloudDeployment] = []
     for ws in workspaces:
-        if str(ws.get("kind") or "").lower() in AZURE_ML_SKIPPED_KINDS:
-            continue
-        ws_id = ws.get("id")
-        if not isinstance(ws_id, str) or not _WORKSPACE_ID.match(ws_id):
-            logger.warning("azure: skipping ml workspace with unexpected id")
+        found = azure_ml_workspace(ws)
+        if found is None:
             continue
         seen += 1
         try:
-            deployments += await _azure_ml_workspace(
-                client,
-                ws_id,
-                _location(ws.get("location"), None),
-                _tags(ws.get("tags")),
-                auth,
-                sleep,
-            )
+            deployments += await _azure_ml_workspace(client, *found, auth, sleep)
         except CloudInventoryError as exc:
-            errors[ws_id] = str(exc)
+            errors[found[0]] = str(exc)
     return seen, deployments
 
 
@@ -935,76 +1029,32 @@ async def _azure_ml_workspace(
     auth: _AzureAuth,
     sleep: Sleep,
 ) -> list[CloudDeployment]:
-    """Serverless endpoints and managed online deployments of one workspace.
-    Endpoint tags override the workspace's, deployment tags the endpoint's."""
-    out: list[CloudDeployment] = []
-    async for ep in _arm_list(
-        client,
-        f"{ws_id}/serverlessEndpoints",
-        ARM_ML_API,
-        auth,
-        "serverless endpoint list",
-        sleep,
-    ):
-        props = _dict(ep.get("properties"))
-        name = ep.get("name")
-        if not isinstance(name, str) or not _ARM_NAME.match(name):
-            continue
-        state = str(props.get("endpointState") or "").lower()
-        if _inactive(props) or state in AZURE_ML_ENDPOINT_INACTIVE:
-            continue
-        out.append(
-            CloudDeployment(
-                cloud="azure",
-                resource_id=f"{ws_id}/serverlessEndpoints/{name}",
-                region=_location(ep.get("location"), region),
-                model=_ml_model(_dict(props.get("modelSettings")).get("modelId")),
-                model_format="serverless",
-                tags={**ws_tags, **_tags(ep.get("tags"))},
+    """Serverless endpoints and managed online deployments of one workspace."""
+
+    async def listing(path: str, what: str) -> list[dict]:
+        return [
+            item
+            async for item in _arm_list(
+                client, f"{ws_id}/{path}", ARM_ML_API, auth, what, sleep
             )
-        )
-    endpoints = [
-        ep
-        async for ep in _arm_list(
-            client,
-            f"{ws_id}/onlineEndpoints",
-            ARM_ML_API,
-            auth,
-            "online endpoint list",
-            sleep,
-        )
-    ]
-    for ep in endpoints:
-        props = _dict(ep.get("properties"))
-        name = ep.get("name")
-        if not isinstance(name, str) or not _ARM_NAME.match(name) or _inactive(props):
+        ]
+
+    out = azure_ml_serverless_endpoints(
+        ws_id,
+        region,
+        ws_tags,
+        await listing("serverlessEndpoints", "serverless endpoint list"),
+    )
+    for ep in await listing("onlineEndpoints", "online endpoint list"):
+        found = azure_ml_online_endpoint(region, ws_tags, ep)
+        if found is None:
             continue
-        ep_region = _location(ep.get("location"), region)
-        ep_tags = {**ws_tags, **_tags(ep.get("tags"))}
-        async for dep in _arm_list(
-            client,
-            f"{ws_id}/onlineEndpoints/{name}/deployments",
-            ARM_ML_API,
-            auth,
-            "online deployment list",
-            sleep,
-        ):
-            dprops = _dict(dep.get("properties"))
-            dname = dep.get("name")
-            if not isinstance(dname, str) or not _ARM_NAME.match(dname):
-                continue
-            if _inactive(dprops):
-                continue
-            out.append(
-                CloudDeployment(
-                    cloud="azure",
-                    resource_id=f"{ws_id}/onlineEndpoints/{name}/deployments/{dname}",
-                    region=_location(dep.get("location"), ep_region),
-                    model=_ml_model(dprops.get("model")),
-                    model_format="online",
-                    tags={**ep_tags, **_tags(dep.get("tags"))},
-                )
-            )
+        name = found[0]
+        out += azure_ml_online_deployments(
+            ws_id,
+            *found,
+            await listing(f"onlineEndpoints/{name}/deployments", "online deployment list"),
+        )
     return out
 
 
@@ -1914,24 +1964,18 @@ class _VertexCatalog:
         return _display_name(m.get("displayName")), "custom", labels
 
 
-async def _vertex_catalog(
-    client: httpx.AsyncClient,
-    project: str,
-    region: str,
-    auth: _GcpAuth,
-    sleep: Sleep,
+def vertex_catalog_add(
     catalog: _VertexCatalog,
+    region: str,
+    tuning_jobs: Iterable[dict],
+    models: Iterable[dict],
 ) -> None:
     """Add one project and region's succeeded tuning jobs and Model
-    Registry to ``catalog`` (only once both were read in full)."""
-    parent = f"projects/{project}/locations/{region}"
-
+    Registry, from their listings, to ``catalog``."""
     # Tuned models (supervised tuning of Gemini or open models): trained on
     # the tenant's data, so an asset even before (or without) serving.
     tuned: dict[str, tuple[str | None, str | None, dict[str, str], str]] = {}
-    async for job in _vertex_list(
-        client, region, parent, "tuningJobs", auth, "tuning job list", sleep
-    ):
+    for job in tuning_jobs:
         if job.get("state") != "JOB_STATE_SUCCEEDED":
             continue
         model_name = _vertex_name(
@@ -1950,17 +1994,118 @@ async def _vertex_catalog(
             _tags(job.get("labels")),
             region,
         )
-
-    models: dict[str, dict] = {}
-    async for m in _vertex_list(
-        client, region, parent, "models", auth, "model list", sleep
-    ):
+    found: dict[str, dict] = {}
+    for m in models:
         name = _vertex_name(m.get("name"), region, "models")
         if name is not None:
-            models[name] = m
-
+            found[name] = m
     catalog.tuned.update(tuned)
-    catalog.models.update(models)
+    catalog.models.update(found)
+
+
+def vertex_tuned_deployments(catalog: _VertexCatalog) -> list[CloudDeployment]:
+    """One asset per tuned model in ``catalog``, deployed or not."""
+    return [
+        CloudDeployment(
+            cloud="gcp",
+            resource_id=name,
+            region=region,
+            model=catalog.base_model(name),
+            model_format="tuned_model",
+            # The registry model's labels override the tuning job's.
+            tags={**job_labels, **_tags(catalog.models.get(name, {}).get("labels"))},
+        )
+        for name, (_, _, job_labels, region) in catalog.tuned.items()
+    ]
+
+
+def _vertex_deployed(region: str, endpoints: Iterable[dict], *, warn: bool = False):
+    """(endpoint name, endpoint labels, deployed model, its id) for each
+    valid deployed model in an endpoint listing."""
+    for ep in endpoints:
+        endpoint = _vertex_name(ep.get("name"), region, "endpoints")
+        if endpoint is None:
+            if warn:
+                logger.warning("gcp: skipping endpoint with unexpected name")
+            continue
+        labels = _tags(ep.get("labels"))
+        for dm in ep.get("deployedModels") or []:
+            if not isinstance(dm, dict):
+                continue
+            dm_id = dm.get("id")
+            if isinstance(dm_id, str) and _GCP_ID.match(dm_id):
+                yield endpoint, labels, dm, dm_id
+
+
+def vertex_models_elsewhere(
+    region: str, endpoints: Iterable[dict], catalog: _VertexCatalog
+) -> list[tuple[str, str]]:
+    """(model name, its region) of models deployed to these endpoints that
+    live in another region and are not in ``catalog``."""
+    out: dict[tuple[str, str], None] = {}
+    for _, _, dm, _ in _vertex_deployed(region, endpoints):
+        ref = _vertex_model_ref(dm.get("model"))
+        if (
+            ref is not None
+            and ref[1] != region
+            and ref[0] not in catalog.models
+            and ref[0] not in catalog.tuned
+        ):
+            out[ref] = None
+    return list(out)
+
+
+def vertex_endpoint_deployments(
+    region: str, endpoints: Iterable[dict], catalog: _VertexCatalog
+) -> list[CloudDeployment]:
+    """Models deployed to the endpoints of one project and region, from the
+    endpoint listing. Each is serving capacity (dedicated or shared), the
+    Vertex AI counterpart of an Azure deployment."""
+    found: list[CloudDeployment] = []
+    for endpoint, endpoint_labels, dm, dm_id in _vertex_deployed(
+        region, endpoints, warn=True
+    ):
+        ref = _vertex_model_ref(dm.get("model"))
+        model, kind, model_labels = catalog.describe(ref[0] if ref else None)
+        found.append(
+            CloudDeployment(
+                cloud="gcp",
+                resource_id=f"{endpoint}/deployedModels/{dm_id}",
+                # Where it is served: the endpoint's region.
+                region=region,
+                model=model or _display_name(dm.get("displayName")),
+                model_format=kind,
+                # The endpoint's labels override the model's.
+                tags={**model_labels, **endpoint_labels},
+            )
+        )
+    return found
+
+
+async def _vertex_catalog(
+    client: httpx.AsyncClient,
+    project: str,
+    region: str,
+    auth: _GcpAuth,
+    sleep: Sleep,
+    catalog: _VertexCatalog,
+) -> None:
+    """Add one project and region's succeeded tuning jobs and Model
+    Registry to ``catalog`` (only once both were read in full)."""
+    parent = f"projects/{project}/locations/{region}"
+    jobs = [
+        job
+        async for job in _vertex_list(
+            client, region, parent, "tuningJobs", auth, "tuning job list", sleep
+        )
+    ]
+    models = [
+        m
+        async for m in _vertex_list(
+            client, region, parent, "models", auth, "model list", sleep
+        )
+    ]
+    vertex_catalog_add(catalog, region, jobs, models)
 
 
 async def _vertex_fetch_model(
@@ -2002,48 +2147,17 @@ async def _vertex_endpoints(
     sleep: Sleep,
     catalog: _VertexCatalog,
 ) -> list[CloudDeployment]:
-    """Models deployed to endpoints in one project and region. Each is
-    serving capacity (dedicated or shared), the Vertex AI counterpart of an
-    Azure deployment."""
+    """Models deployed to endpoints in one project and region."""
     parent = f"projects/{project}/locations/{region}"
-    found: list[CloudDeployment] = []
-    async for ep in _vertex_list(
-        client, region, parent, "endpoints", auth, "endpoint list", sleep
-    ):
-        endpoint = _vertex_name(ep.get("name"), region, "endpoints")
-        if endpoint is None:
-            logger.warning("gcp: skipping endpoint with unexpected name")
-            continue
-        endpoint_labels = _tags(ep.get("labels"))
-        for dm in ep.get("deployedModels") or []:
-            if not isinstance(dm, dict):
-                continue
-            dm_id = dm.get("id")
-            if not isinstance(dm_id, str) or not _GCP_ID.match(dm_id):
-                continue
-            ref = _vertex_model_ref(dm.get("model"))
-            model_name = ref[0] if ref else None
-            if (
-                ref is not None
-                and ref[1] != region
-                and model_name not in catalog.models
-                and model_name not in catalog.tuned
-            ):
-                await _vertex_fetch_model(client, *ref, auth, sleep, catalog)
-            model, kind, model_labels = catalog.describe(model_name)
-            found.append(
-                CloudDeployment(
-                    cloud="gcp",
-                    resource_id=f"{endpoint}/deployedModels/{dm_id}",
-                    # Where it is served: the endpoint's region.
-                    region=region,
-                    model=model or _display_name(dm.get("displayName")),
-                    model_format=kind,
-                    # The endpoint's labels override the model's.
-                    tags={**model_labels, **endpoint_labels},
-                )
-            )
-    return found
+    endpoints = [
+        ep
+        async for ep in _vertex_list(
+            client, region, parent, "endpoints", auth, "endpoint list", sleep
+        )
+    ]
+    for ref in vertex_models_elsewhere(region, endpoints, catalog):
+        await _vertex_fetch_model(client, *ref, auth, sleep, catalog)
+    return vertex_endpoint_deployments(region, endpoints, catalog)
 
 
 async def fetch_gcp_deployments(
@@ -2080,21 +2194,7 @@ async def fetch_gcp_deployments(
                 except CloudInventoryError as exc:
                     errors[f"{project}/{region}"] = str(exc)
 
-        for name, (_, _, job_labels, region) in catalog.tuned.items():
-            deployments.append(
-                CloudDeployment(
-                    cloud="gcp",
-                    resource_id=name,
-                    region=region,
-                    model=catalog.base_model(name),
-                    model_format="tuned_model",
-                    # The registry model's labels override the tuning job's.
-                    tags={
-                        **job_labels,
-                        **_tags(catalog.models.get(name, {}).get("labels")),
-                    },
-                )
-            )
+        deployments += vertex_tuned_deployments(catalog)
 
         for project, region in read:
             try:
