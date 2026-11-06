@@ -175,5 +175,25 @@ fences, JSON-schema wording and the resulting complexity), message count, a coar
 label and the use case, versioned by `feature_schema`. They are computed on the customer's
 machine. Inputs without message text get `features_source: "token_counts"`, with only the
 token count, the use case and a complexity label from the count (other fields null). No prompt text,
-hash or embedding is exported. `quality_score` stays null until the eval harness (#14)
-scores sampled calls, and the routed decision per call comes with policy replay (#13).
+hash or embedding is exported.
+
+With `--eval-results`, `quality_score` is the parity the `ps-eval` run measured for the
+call's (use case, model) cell (`quality_source: "eval_parity"`, cell size in
+`quality_samples`). It stays null with `quality_source: "not_measured"` when no eval results
+were given or that cell was not evaluated; it is never estimated.
+
+With `--policy`, each tuple also gets the call's effective `sensitivity_level` (declared
+level plus PII escalation) and a `replay` object, the policy replay's decision for that call:
+
+```json
+"sensitivity_level": "internal",
+"replay": {"outcome": "routed", "group": "cheap", "provider": "openai", "model": "gpt-4o-mini",
+           "cost_usd": 0.000285, "cost_source": "catalog",
+           "quality_score": 0.975, "quality_source": "eval_parity", "quality_samples": 40}
+```
+
+`replay` is a counterfactual arm for the same call (projected cost, and the eval parity of
+the routed model for the use case), not a second logged call, so it adds no traffic. A
+learner can warm-start both the logged arm and the replayed arm from one tuple (PRD §7.13,
+offline/online symmetry). `outcome` is `routed`, `unchanged` or `no_compliant_candidate`
+(model null, cost the baseline).

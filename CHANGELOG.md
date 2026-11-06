@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Teardown learning tuples carry quality and the replayed route** (#42): with `--eval-results`, `ps-teardown run --learning-tuples` fills `quality_score` from the `ps-eval` parity of the call's (use case, model) cell (`quality_source: "eval_parity"`, `quality_samples`); unevaluated cells stay null. With `--policy`, each tuple also gets the effective `sensitivity_level` and a `replay` object (routed provider, model, group, projected cost and that model's parity), a counterfactual arm for warm-starting the learner. Still one tuple per logged call and no prompt text.
 - **Keyless upstream auth: OpenAI and Anthropic workload identity federation, and a stable SDK credential fingerprint** (#76): both vendors now document workload identity federation (OpenAI: RFC 8693 token exchange at `auth.openai.com/oauth/token`; Anthropic: RFC 7523 jwt-bearer at `api.anthropic.com/v1/oauth/token`).
   - **Gateway:** `openai` / `anthropic` callers can send `openai_auth_type` / `anthropic_auth_type: workload`. The gateway exchanges its host's identity token (a projected service-account token file) for a short-lived vendor token, caches it until shortly before it expires, and refuses custom hosts.
   - **Settings:** all federation settings are operator environment variables (`OPENAI_IDENTITY_*`, `OPENAI_SERVICE_ACCOUNT_ID`, `ANTHROPIC_FEDERATION_RULE_ID`, ...). It is off unless `OPENAI_AMBIENT_CREDENTIALS_ENABLED` / `ANTHROPIC_AMBIENT_CREDENTIALS_ENABLED=true`.

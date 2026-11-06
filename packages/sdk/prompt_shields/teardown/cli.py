@@ -27,7 +27,11 @@ from prompt_shields.teardown.engine import (
     build_report,
     price_records,
 )
-from prompt_shields.teardown.policy import EvalResultsError, read_eval_results
+from prompt_shields.teardown.policy import (
+    EvalResultsError,
+    read_eval_results,
+    replay_priced,
+)
 from prompt_shields.teardown.records import FORMATS, load_records
 from prompt_shields.teardown.render import render_report
 from prompt_shields.teardown.tuples import write_learning_tuples
@@ -70,7 +74,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-provider", action="append", metavar="PROVIDER",
                      help="limit same-model arbitrage to these providers (repeatable)")
     run.add_argument("--learning-tuples", metavar="PATH",
-                     help="also write learning tuples (JSONL, no prompt text) to PATH")
+                     help="also write learning tuples (JSONL, no prompt text) to PATH; with "
+                          "--policy / --eval-results they carry the replayed route and "
+                          "measured quality")
     run.add_argument("--policy", metavar="JSON",
                      help="route-policy.v1 file: replay every call through it and add the "
                           "sensitivity mix and projected spend per strategy (#13)")
@@ -152,8 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     report = build_report(priced, loaded.sources, options, source)
 
     if args.learning_tuples:
+        replays = (replay_priced(priced, policy, source, scan_prompts=args.scan_prompts)
+                   if policy is not None else None)
         with open(args.learning_tuples, "w", encoding="utf-8") as fh:
-            n = write_learning_tuples(priced, fh)
+            n = write_learning_tuples(
+                priced, fh, policy=policy, replays=replays,
+                eval_results=read_eval_results(eval_results) if eval_results else None)
         print(f"ps-teardown: wrote {n} learning tuples to {args.learning_tuples}", file=sys.stderr)
 
     if args.stdout:
