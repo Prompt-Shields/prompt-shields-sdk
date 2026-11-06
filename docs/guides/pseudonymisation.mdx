@@ -221,8 +221,9 @@ are numbered per call, so they do not identify a person across calls.
 - **Not anonymisation.** The provider still sees the context around each
   placeholder, which can identify a person. The mapping exists in your process
   while the call runs.
-- **Local mode only, no router streaming.** `ShieldsRouter` local mode still
-  refuses `stream=True`; use a `Shields*` client with `pseudonymise=True` to
-  stream. The gateway does not pseudonymise.
+- **Local mode only.** `ShieldsRouter` streams in local mode
+  (`stream=True`): chunks are restored on the way through, and the mapping is
+  dropped when the stream ends, fails or is closed. The gateway does not
+  pseudonymise.
 - **Not yet per tenant.** It is a client setting. A per-tenant switch, gated on
   the #35 recall benchmark, is not built yet.
