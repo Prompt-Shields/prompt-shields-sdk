@@ -522,3 +522,183 @@ def test_openai_prediction_is_pseudonymised(calls, content):
     assert resp.choices[0].message.content == f"Dear {EMAIL}"
     assert _leaks(events) == []
     assert _cleared(calls)
+
+
+# --- hardening (#36 review follow-ups) ---------------------------------------------------
+
+
+def _fc_chunk(arguments=None, *, name=None, finish=None) -> ChatCompletionChunk:
+    delta: dict = {}
+    if arguments is not None or name is not None:
+        delta["function_call"] = {k: v for k, v in
+                                  (("name", name), ("arguments", arguments)) if v is not None}
+    return ChatCompletionChunk.model_validate({
+        "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    })
+
+
+def _fc_args(chunks) -> str:
+    return "".join(c.choices[0].delta.function_call.arguments or ""
+                   for c in chunks if c.choices and c.choices[0].delta.function_call)
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 7])
+def test_streamed_legacy_function_call_arguments_are_restored(calls, size):
+    client, _ = _sync()
+    args = json.dumps({"to": _ph("EMAIL"), "iban": _ph("IBAN"), "x": _ph("EMAIL", 9)},
+                      ensure_ascii=False)
+    pieces = [args[i:i + size] for i in range(0, len(args), size)]
+    client._upstream.chat.completions.create.return_value = _Stream(
+        [_fc_chunk("", name="send")] + [_fc_chunk(x) for x in pieces]
+        + [_fc_chunk(finish="function_call")])
+    out = list(client.chat.completions.create(model="m", messages=MESSAGES, stream=True))
+    assert json.loads(_fc_args(out)) == {"to": EMAIL, "iban": IBAN, "x": _ph("EMAIL", 9)}
+    names = [c.choices[0].delta.function_call.name for c in out
+             if c.choices and c.choices[0].delta.function_call
+             and c.choices[0].delta.function_call.name]
+    assert names == ["send"]
+    assert out[-1].choices[0].finish_reason == "function_call"
+    assert _cleared(calls)
+
+
+def test_streamed_function_call_tail_gets_its_own_chunk():
+    p = pseudonymise(MESSAGES)
+    out = list(p.restore_stream(iter([
+        _fc_chunk('{"to": "' + OPEN + "EMAIL", name="send"),
+        _fc_chunk(finish="function_call"),
+    ])))
+    assert len(out) == 3
+    extra = out[1].choices[0]
+    assert extra.finish_reason is None
+    assert extra.delta.function_call.arguments == OPEN + "EMAIL"
+    assert extra.delta.function_call.name is None
+
+
+def test_placeholders_in_earlier_thinking_blocks_are_reserved_and_kept():
+    # An earlier turn's signed thinking mentions placeholders minted by an
+    # earlier call. They must not be reused for other values now, and the
+    # blocks must reach the provider byte for byte.
+    thinking = {"type": "thinking", "signature": "sig==",
+                "thinking": f"Mail {_ph('EMAIL')} and {_ph('IBAN')}."}
+    redacted = {"type": "redacted_thinking", "data": f"opaque {_ph('EMAIL', 2)}"}
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [thinking, redacted,
+                                          {"type": "text", "text": "ok"}]},
+        {"role": "user", "content": PROMPT},
+    ]
+    p = pseudonymise(history)
+    assert p.messages[1]["content"][:2] == [thinking, redacted]
+    assert p.messages[2]["content"] == (
+        f"Write to {_ph('EMAIL', 3)} about personnummer {_ph('NATIONAL_ID')}; "
+        f"pay {_ph('IBAN', 2)}.")
+    # The old placeholders are not this call's: echoing them gives nothing.
+    old = f"{_ph('EMAIL')} {_ph('EMAIL', 2)} {_ph('IBAN')}"
+    assert p.restore(old) == old
+    # Restoring an answer never touches thinking, streamed or not.
+    msg = {"content": [{"type": "thinking", "thinking": _ph("EMAIL", 3), "signature": "s"},
+                       {"type": "text", "text": _ph("EMAIL", 3)}]}
+    p.restore_response(msg)
+    assert msg["content"][0]["thinking"] == _ph("EMAIL", 3)
+    assert msg["content"][1]["text"] == EMAIL
+    events = [{"type": "content_block_delta", "index": 0,
+               "delta": {"type": "thinking_delta", "thinking": _ph("EMAIL", 3)}},
+              {"type": "content_block_delta", "index": 0,
+               "delta": {"type": "signature_delta", "signature": "s"}},
+              {"type": "content_block_stop", "index": 0}]
+    expected = json.loads(json.dumps(events))
+    assert list(p.restore_stream(iter(events))) == expected
+
+
+def test_thinking_block_objects_are_reserved():
+    from anthropic.types import RedactedThinkingBlock, ThinkingBlock
+
+    history = [
+        {"role": "assistant", "content": [
+            ThinkingBlock(type="thinking", thinking=_ph("EMAIL"), signature="s"),
+            RedactedThinkingBlock(type="redacted_thinking", data="xyz")]},
+        {"role": "user", "content": EMAIL},
+    ]
+    p = pseudonymise(history)
+    assert p.messages[1]["content"] == _ph("EMAIL", 2)
+    assert p.messages[0]["content"][0]["thinking"] == _ph("EMAIL")
+
+
+def _without_cyclic_gc(fn):
+    import gc
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        return fn()
+    finally:
+        if enabled:
+            gc.enable()
+
+
+def test_abandoned_async_stream_drops_the_mapping_without_aclose():
+    call = ClientCall(MESSAGES, {}, scan_pii=False)
+
+    async def run():
+        stream = call.stream(_AsyncStream(
+            [_chunk(f"to {_ph('EMAIL')}"), _chunk(" more"), _chunk(finish="stop")]))
+        first = await stream.__anext__()
+        assert first.choices[0].delta.content == f"to {EMAIL}"
+        assert call._pseudo.active
+        del stream  # abandoned: no aclose, no async with
+        return call._pseudo.active
+
+    # Dropped at once, by reference counting, not by a later GC pass.
+    assert _without_cyclic_gc(lambda: asyncio.run(run())) is False
+
+
+def test_abandoned_sync_stream_drops_the_mapping():
+    call = ClientCall(MESSAGES, {}, scan_pii=False)
+    stream = call.stream(_Stream([_chunk(_ph("EMAIL")), _chunk("x"), _chunk(finish="stop")]))
+    assert next(iter(stream)).choices[0].delta.content == EMAIL
+
+    def drop():
+        nonlocal stream
+        del stream
+        return call._pseudo.active
+
+    assert _without_cyclic_gc(drop) is False
+
+
+PHONE = 4155551234
+
+
+def test_numbers_in_tool_call_arguments_are_pseudonymised(calls):
+    client, events = _sync()
+    client._upstream.chat.completions.create.return_value = _completion(
+        tool_args=json.dumps({"phone": _ph("PHONE"), "n": 3}, ensure_ascii=False))
+    history = [
+        {"role": "user", "content": "Call the customer back."},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "t0", "type": "function", "function": {
+                "name": "lookup",
+                "arguments": json.dumps({"phone": PHONE, "card": 4111111111111111,
+                                         "count": 2, "ok": True, "ratio": 0.5}),
+            }}]},
+        {"role": "tool", "tool_call_id": "t0", "content": "found"},
+    ]
+    resp = client.chat.completions.create(model="m", messages=history)
+
+    sent = _sent(client._upstream.chat.completions.create)
+    wire = json.dumps(sent, ensure_ascii=False)
+    assert str(PHONE) not in wire and "4111111111111111" not in wire
+    args = json.loads(sent["messages"][1]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"phone": _ph("PHONE"), "card": _ph("CREDIT_CARD"),
+                    "count": 2, "ok": True, "ratio": 0.5}
+    # The value comes back as the string the placeholder stood for.
+    restored = json.loads(resp.choices[0].message.tool_calls[0].function.arguments)
+    assert restored == {"phone": str(PHONE), "n": 3}
+    assert str(PHONE) not in json.dumps(events)
+    assert _cleared(calls)
+
+
+def test_numbers_in_anthropic_tool_use_input_are_pseudonymised():
+    p = pseudonymise([{"role": "assistant", "content": [
+        {"type": "tool_use", "id": "t", "name": "dial", "input": {"to": [PHONE]}}]}])
+    assert p.messages[0]["content"][0]["input"] == {"to": [_ph("PHONE")]}
