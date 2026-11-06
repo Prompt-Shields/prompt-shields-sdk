@@ -2693,9 +2693,13 @@ components:
               default: null
               description: >-
                 Read the written CIs and relations back through the Table
-                API (read only) and fail the sync, keeping the cursor, if
-                any is missing. Null uses the tenant's `verify` setting.
-                Ignored with `dry_run`.
+                API (read only), matched to the CIs sent on
+                `correlation_id`, and fail the sync, keeping the cursor, if
+                any is missing or has a class other than the one sent or a
+                known subclass of it (listed as `reclassified`). Null uses
+                the tenant's `verify` setting; `false` skips the read-back
+                for this run even when the tenant enables it. Ignored with
+                `dry_run`.
 
   responses:
     AdminForbidden:

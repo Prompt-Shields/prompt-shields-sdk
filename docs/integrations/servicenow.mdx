@@ -277,7 +277,7 @@ curl "https://collector.example.com/api/v1/admin/connectors/servicenow/status?te
   -H "Authorization: Bearer $PS_ADMIN_TOKEN"
 
 # CLI
-python -m collector.servicenow --tenant <tenant uuid> [--full] [--dry-run] [--verify]
+python -m collector.servicenow --tenant <tenant uuid> [--full] [--dry-run] [--verify | --no-verify]
 ```
 
 Both run as the target tenant, so they work with row-level security
@@ -303,16 +303,30 @@ tenant's `PS_SERVICENOW` entry), the sync reads back everything it wrote,
 after the last IRE request, through the Table API, read only:
 
 - `GET /api/now/table/cmdb_ci?sysparm_query=sys_idIN<sys_ids>` for the
-  sys_ids IRE returned, checking each CI's `sys_class_name` and
-  `correlation_id`;
+  sys_ids IRE returned. Rows are matched to the CIs sent on
+  `correlation_id`, not on the order of IRE's answers, and each CI's
+  `sys_class_name` (and the class IRE reported for it) is checked;
 - `GET /api/now/table/cmdb_rel_ci?sysparm_query=parentIN...^childIN...`,
-  checking each relationship (parent, child, `type.name`).
+  checking each relationship (parent, child, `type.name`) between the CIs
+  found.
+
+If IRE reclassified a CI to a known subclass of the class sent (for
+example a `cmdb_ci_service` vendor stored as an application service
+`cmdb_ci_service_auto` or `cmdb_ci_service_discovered`, or a
+`cmdb_ci_appl` system stored as `cmdb_ci_appl_ai_application`), the CI
+counts as found and is listed under `reclassified` (`<correlation_id>
+(<sent class> -> <class>)`, up to 20, with `reclassified_count`). Any
+other class fails the run, listed as `<correlation_id> (class <class>)`.
+The known subclasses are a fixed list in the connector
+(`KNOWN_SUBCLASSES`); custom classes have none.
 
 Business unit records and risk key values are not read back. If any CI or
 relationship is missing, the run fails, the cursor stays where it was, and
 the result and the connector state (`last_verification`) list up to 20
 missing identifiers (`correlation_id`s, and `<parent> <type> <child>` for
-relationships) with the counts. The integration user needs read access to
+relationships; a relationship whose CI is missing is listed too) with the
+counts. `"verify": false` (or `--no-verify`) skips the read-back for one
+run even when the tenant's setting enables it. The integration user needs read access to
 `cmdb_ci` and `cmdb_rel_ci` (`itil` has it). Running a first full sync
 with `verify` against a PDI is the round-trip check for a new instance.
 
