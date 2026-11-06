@@ -73,7 +73,10 @@ function allowedHosts(c?: Context | Record<string, any>): string[] {
 
 export function assertSafeTokenUrl(
   tokenUrl: string,
-  c?: Context | Record<string, any>
+  c?: Context | Record<string, any>,
+  // Fixed vendor token hosts (workload identity, ./vendorWorkloadIdentity.ts)
+  // pass the operator allowlist; every other check still applies.
+  alsoAllowedHosts: string[] = []
 ): void {
   let parsed: URL;
   try {
@@ -93,7 +96,7 @@ export function assertSafeTokenUrl(
   const allow = allowedHosts(c);
   if (allow.length) {
     // An explicit operator allowlist may name an internal IdP.
-    if (!allow.includes(host)) {
+    if (!allow.includes(host) && !alsoAllowedHosts.includes(host)) {
       throw new GatewayError('OAuth token URL host is not allowed', 403);
     }
     return;

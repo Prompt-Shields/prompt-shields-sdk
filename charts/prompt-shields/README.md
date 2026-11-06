@@ -477,6 +477,8 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `REDIS_CONNECTION_STRING` (secret) | Shared cache and rate limits across replicas |
 | `AWS_AMBIENT_CREDENTIALS_ENABLED` | Allow IRSA / pod identity / instance credentials for Bedrock and SageMaker |
 | `AWS_*`, `AZURE_*` identity variables | Cloud identity (usually injected by IRSA / Workload Identity) |
+| `OPENAI_AMBIENT_CREDENTIALS_ENABLED`, `OPENAI_IDENTITY_TOKEN_FILE`, `OPENAI_IDENTITY_PROVIDER_ID`, `OPENAI_SERVICE_ACCOUNT_ID`, `OPENAI_SUBJECT_TOKEN_TYPE` | OpenAI workload identity federation for callers that send `openai_auth_type: workload` (mount a projected service-account token with `gateway.extraVolumes`). Default off |
+| `ANTHROPIC_AMBIENT_CREDENTIALS_ENABLED`, `ANTHROPIC_IDENTITY_TOKEN_FILE`, `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID` | Anthropic workload identity federation for callers that send `anthropic_auth_type: workload`. Default off |
 | `HTTPS_PROXY` | Egress proxy |
 | `TLS_KEY_PATH`, `TLS_CERT_PATH`, `TLS_CA_PATH` | Serve TLS from the pod (mount the files) |
 | `LOG_LEVEL`, `LOG_TIMESTAMP`, `LOG_COLORS` | Logging |

@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from prompt_shields.client import _fingerprint, _openai_max_tokens
+from prompt_shields.client import _openai_max_tokens, _resolve_fingerprint
 from prompt_shields.feedback import (
     attach_call_id,
     call_id_headers,
@@ -50,7 +50,7 @@ class AsyncShieldsClient:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None,
         ps_api_key: str,
         vendor: str = "openai",
         ps_collector_url: str = "http://localhost:8000",
@@ -69,6 +69,8 @@ class AsyncShieldsClient:
         on_prompt_features: Callable[[PromptFeatures], Any] | None = None,
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
+        # See ShieldsClient: stable credential fingerprint for keyless auth.
+        credential_fingerprint: str | None = None,
         **provider_kwargs,
     ):
         self._vendor = vendor
@@ -93,7 +95,7 @@ class AsyncShieldsClient:
         self._send_prompt_text = send_prompt_text
         self._pricing_table = pricing_table
         self._on_prompt_features = on_prompt_features
-        self._api_key_fingerprint = _fingerprint(api_key)
+        self._api_key_fingerprint = _resolve_fingerprint(api_key, credential_fingerprint)
 
         self._metadata = {
             k: v for k, v in {
