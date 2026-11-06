@@ -11,7 +11,7 @@ governance. Best-effort — designed as a signal, not a guarantee.
 import re
 from collections.abc import Iterable
 
-from prompt_shields.national_ids import contains_nordic_national_id
+from prompt_shields.national_ids import find_nordic_national_ids
 
 # Compiled patterns — order independent, all run in one pass
 _PATTERNS = {
@@ -63,38 +63,11 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
-def _has_card(text: str) -> bool:
-    pos = 0
-    while m := _CARD_RE.search(text, pos):
-        if _luhn_ok(re.sub(r"\D", "", m.group())):
-            return True
-        # The match can start with an unrelated digit group ("Ref 12 4111
-        # 1111 1111 1111"): retry from the next group, not after the match.
-        sep = _CARD_SEP.search(m.group())
-        pos = m.start() + sep.end() if sep else m.end()
-    return False
-
-
 def _iban_ok(compact: str) -> bool:
     if not 15 <= len(compact) <= 34:
         return False
     rearranged = compact[4:] + compact[:4]
     return int("".join(str(int(c, 36)) for c in rearranged)) % 97 == 1
-
-
-def _mask_iban(m: re.Match) -> str:
-    # A following word or digit group ("... 7466 BIC", "... 7466 4111 1111")
-    # can join the last group: drop trailing space-separated groups until the
-    # checksum holds, and blank only that prefix so what follows is still
-    # scanned (a card number right after an IBAN must not be hidden).
-    match = m.group()
-    groups = match.split(" ")
-    while groups:
-        if _iban_ok("".join(groups)):
-            n = len(" ".join(groups))
-            return " " * n + match[n:]
-        groups.pop()
-    return match
 
 
 def _phone_shape_ok(s: str, min_digits: int, max_digits: int) -> bool:
@@ -126,6 +99,59 @@ _VALIDATED = (
 )
 
 
+def _iban_prefix(match: str) -> int:
+    """Length of the checksum-valid prefix of an IBAN-shaped match (0: none).
+
+    A following word or digit group ("... 7466 BIC", "... 7466 4111 1111")
+    can join the last group: trailing space-separated groups are dropped
+    until the checksum holds.
+    """
+    groups = match.split(" ")
+    while groups:
+        if _iban_ok("".join(groups)):
+            return len(" ".join(groups))
+        groups.pop()
+    return 0
+
+
+def _entity_spans(text: str) -> list[tuple[int, int, str]]:
+    """Every validated entity match in ``text`` as ``(start, end, category)``,
+    possibly overlapping. Shared by ``detect_pii_categories`` and
+    ``find_pii_spans``.
+
+    IBANs first: a checksum-valid IBAN is blanked out before the other
+    patterns run, so its digits never also count as a card or phone number
+    (a spaced IBAN can pass Luhn). Blanking keeps offsets, so every span
+    indexes ``text``.
+    """
+    spans: list[tuple[int, int, str]] = []
+    masked = text
+    for m in _IBAN_RE.finditer(text):
+        n = _iban_prefix(m.group())
+        if n:
+            spans.append((m.start(), m.start() + n, "iban"))
+            masked = masked[: m.start()] + " " * n + masked[m.start() + n:]
+    pos = 0
+    while m := _CARD_RE.search(masked, pos):
+        if _luhn_ok(re.sub(r"\D", "", m.group())):
+            spans.append((m.start(), m.end(), "credit_card"))
+            pos = m.end()
+            continue
+        # The match can start with an unrelated digit group ("Ref 12 4111
+        # 1111 1111 1111"): retry from the next group, not after the match.
+        sep = _CARD_SEP.search(m.group())
+        pos = m.start() + sep.end() if sep else m.end()
+    for name, pattern in _PATTERNS.items():
+        spans.extend((m.start(), m.end(), name) for m in pattern.finditer(masked))
+    for name, pattern, validate in _VALIDATED:
+        spans.extend(
+            (m.start(), m.end(), name) for m in pattern.finditer(masked) if validate(m)
+        )
+    # Checksum-validated categories — regex alone is too noisy for these
+    spans.extend((s, e, "national_id") for s, e in find_nordic_national_ids(masked))
+    return spans
+
+
 # Keyword-based categories — case-insensitive substring match
 _KEYWORD_CATEGORIES = {
     "health_data": (
@@ -149,27 +175,9 @@ def detect_pii_categories(text: str | None) -> list[str]:
     if not text:
         return []
 
-    found: set[str] = set()
-    # IBANs first: a checksum-valid IBAN is blanked out before the other
-    # patterns run, so its digits never also count as a card or phone number
-    # (a spaced IBAN can pass Luhn).
-    original = text
-    text = _IBAN_RE.sub(_mask_iban, text)
-    if text != original:
-        found.add("iban")
-    if _has_card(text):
-        found.add("credit_card")
-
-    for name, pattern in _PATTERNS.items():
-        if pattern.search(text):
-            found.add(name)
-    for name, pattern, validate in _VALIDATED:
-        if name not in found and any(validate(m) for m in pattern.finditer(text)):
-            found.add(name)
-
-    # Checksum-validated categories — regex alone is too noisy for these
-    if contains_nordic_national_id(text):
-        found.add("national_id")
+    # Entities: the same spans the pseudonymiser replaces (one code path, so
+    # the scanner and ``find_pii_spans`` cannot drift apart).
+    found = {category for _, _, category in _entity_spans(text)}
 
     lower = text.lower()
     for category, keywords in _KEYWORD_CATEGORIES.items():
@@ -177,6 +185,38 @@ def detect_pii_categories(text: str | None) -> list[str]:
             found.add(category)
 
     return sorted(found)
+
+
+#: Categories whose matches are entity spans (``find_pii_spans``), most
+#: specific first: when two matches overlap, the earlier category wins.
+#: Keyword categories (``health_data``, ``financial_data``) mark a topic, not
+#: an entity, and have no spans.
+SPAN_CATEGORIES: tuple[str, ...] = (
+    "national_id", "email", "iban", "ssn", "credit_card", "ip_address", "phone",
+)
+
+
+def find_pii_spans(text: str | None) -> list[tuple[int, int, str]]:
+    """Non-overlapping ``(start, end, category)`` entity spans in ``text``.
+
+    The same patterns and validators as ``detect_pii_categories``, for
+    in-process pseudonymisation (``prompt_shields.pseudonymise``) only:
+    callers must never log, store or send the matched text. Overlaps are
+    resolved by ``SPAN_CATEGORIES`` order; spans come back sorted by start.
+    """
+    if not text:
+        return []
+    taken: list[tuple[int, int, str]] = []
+
+    def free(start: int, end: int) -> bool:
+        return all(end <= s or start >= e for s, e, _ in taken)
+
+    spans = _entity_spans(text)
+    for category in SPAN_CATEGORIES:
+        for start, end, cat in spans:
+            if cat == category and end > start and free(start, end):
+                taken.append((start, end, category))
+    return sorted(taken)
 
 
 def _content_text(content: object) -> str:

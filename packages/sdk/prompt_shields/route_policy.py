@@ -480,6 +480,20 @@ def classify_sensitivity(
     return level, source
 
 
+def anonymise_then_route_allowed(policy: Mapping[str, Any], level: str | None) -> bool:
+    """True when ``sensitivity.anonymise_then_route`` lists ``level``.
+
+    A pseudonymised call (``ShieldsRouter(pseudonymise=True)``) whose detected
+    level is listed may be routed at the level of what is left after
+    pseudonymisation. Default: no level is listed, so the detected level
+    applies. The gateway does not pseudonymise and ignores the field.
+    """
+    if level is None:
+        return False
+    allowed = (policy.get("sensitivity") or {}).get("anonymise_then_route") or ()
+    return level in allowed
+
+
 def data_policy_rule(
     policy: Mapping[str, Any], level: str | None
 ) -> Mapping[str, Any] | None:
