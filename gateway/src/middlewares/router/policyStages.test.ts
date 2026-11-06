@@ -278,7 +278,22 @@ describe('detectPiiCategories (port of the SDK detector)', () => {
   test.each<[string, string[]]>([
     ['nothing here', []],
     ['mail jane@acme.com', ['email']],
-    ['IBAN NO9386011117947', ['iban', 'financial_data', 'phone']],
+    // A checksum-valid IBAN is masked first: its digits are not a phone.
+    ['IBAN NO9386011117947', ['iban', 'financial_data']],
+    ['SE45 5000 0000 0583 9825 7466', ['iban']],
+    ['DE89 3704 0044 0532 0130 00', ['iban']],
+    // Card numbers are Luhn checked (the US-shaped phone pattern still
+    // matches a run of 4-digit groups).
+    ['Card 4111 1111 1111 1111', ['credit_card', 'phone']],
+    ['Card 4111 1111 1111 1112', ['phone']],
+    ['Ring 070-174 06 12 eller +46 70 174 06 13', ['phone']],
+    ['Ref 12 4111 1111 1111 1111', ['credit_card', 'phone']],
+    [
+      'SE45 5000 0000 0583 9825 7466 4111 1111 1111 1111',
+      ['credit_card', 'iban', 'phone'],
+    ],
+    ['call +1-555-123-4567x89', ['phone']],
+    ['Datum 05.03.2024 14.30', []],
     ['Mitt personnummer är 19121212-1212.', ['national_id', 'phone']],
     ['fødselsnummer 01818510078', ['national_id', 'phone']],
     ['the diagnosis was clear', ['health_data']],
@@ -510,6 +525,10 @@ describe('PII detection stays linear on large bodies', () => {
     ['digits', '1'.repeat(200_000)],
     ['local part then @', 'a'.repeat(200_000) + '@'],
     ['many @', 'a@'.repeat(100_000)],
+    ['digit-dash', '1-'.repeat(100_000)],
+    ['plus groups', '+1 '.repeat(66_000)],
+    ['zero groups', '0 '.repeat(100_000)],
+    ['iban heads', 'SE45 '.repeat(40_000)],
   ])('%s', (_name, text) => {
     const t = Date.now();
     detectPiiCategories(text);

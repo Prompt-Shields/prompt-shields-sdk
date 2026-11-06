@@ -7,7 +7,8 @@ Retention
     ``mcp_tool_usage`` rows (MCP tool-call aggregates) not seen within the
     same period are purged with the events: such a row only summarises calls
     older than the cutoff. So are ``call_feedback`` rows (explicit feedback
-    on a call, #43) last updated before the cutoff.
+    on a call, #43) last updated before the cutoff, and ``spend_alerts``
+    (spend anomaly alerts, #30) for days before the cutoff.
     :func:`purge_expired_events` deletes older events in batches, committing
     after each batch so no lock is held for long. Running it twice deletes
     nothing the second time.
@@ -63,6 +64,7 @@ from db.models import (
     RetentionAuditLog,
     RiskMapping,
     RiskMappingReview,
+    SpendAlert,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
@@ -108,6 +110,7 @@ ERASE_ORDER: tuple[type, ...] = (
     ProviderCredential,
     McpToolUsage,
     CallFeedback,
+    SpendAlert,
     TenantApiKey,
     AdminToken,
 )
@@ -131,6 +134,7 @@ class PurgeResult:
     dry_run: bool = False
     mcp_tool_usage_deleted: int = 0
     call_feedback_deleted: int = 0
+    spend_alerts_deleted: int = 0
 
 
 @dataclass
@@ -328,8 +332,8 @@ async def purge_tenant_events(
     actor: str = "system",
 ) -> PurgeResult | None:
     """Delete one tenant's usage events older than its retention cutoff,
-    its MCP tool usage rows last seen before it and its call feedback last
-    updated before it.
+    its MCP tool usage rows last seen before it, its call feedback last
+    updated before it and its spend alerts for days before it.
 
     Returns None if the tenant does not exist. With ``dry_run`` the matching
     rows are counted, not deleted, and nothing is audited.
@@ -358,20 +362,27 @@ async def purge_tenant_events(
     fb = CallFeedback.__table__
     fb_conditions = [fb.c.tenant_id == tenant_id, fb.c.updated_at < cutoff]
 
+    sa = SpendAlert.__table__
+    sa_conditions = [sa.c.tenant_id == tenant_id, sa.c.day < cutoff.date()]
+
     if dry_run:
         deleted = await _count(db, table, conditions)
         mcp_deleted = await _count(db, mcp, mcp_conditions)
         fb_deleted = await _count(db, fb, fb_conditions)
+        sa_deleted = await _count(db, sa, sa_conditions)
     else:
         deleted = await _delete_in_batches(db, table, conditions, size)
         mcp_deleted = await _delete_in_batches(db, mcp, mcp_conditions, size)
         fb_deleted = await _delete_in_batches(db, fb, fb_conditions, size)
-        if deleted or mcp_deleted or fb_deleted:
+        sa_deleted = await _delete_in_batches(db, sa, sa_conditions, size)
+        if deleted or mcp_deleted or fb_deleted or sa_deleted:
             details = {AIUsageEvent.__tablename__: deleted}
             if mcp_deleted:
                 details[McpToolUsage.__tablename__] = mcp_deleted
             if fb_deleted:
                 details[CallFeedback.__tablename__] = fb_deleted
+            if sa_deleted:
+                details[SpendAlert.__tablename__] = sa_deleted
             await _audit(
                 db,
                 tenant_id=tenant_id,
@@ -397,6 +408,7 @@ async def purge_tenant_events(
         dry_run=dry_run,
         mcp_tool_usage_deleted=mcp_deleted,
         call_feedback_deleted=fb_deleted,
+        spend_alerts_deleted=sa_deleted,
     )
 
 

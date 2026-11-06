@@ -29,6 +29,7 @@ from db.models import (
     PartnerCredential,
     RetentionAuditLog,
     RiskMapping,
+    SpendAlert,
     TelemetryClientStats,
     Tenant,
 )
@@ -66,6 +67,7 @@ TENANT_TABLES = (
     TelemetryClientStats,
     McpToolUsage,
     CallFeedback,
+    SpendAlert,
 )
 
 
@@ -120,6 +122,13 @@ async def add_events(db, tenant_id, asset_id, *ages_days: int) -> None:
     await db.commit()
 
 
+def _alert(tenant_id, day) -> SpendAlert:
+    return SpendAlert(tenant_id=tenant_id, group_by="use_case", group_key=f"uc-{day}",
+                      day=day, observed_cost=10, baseline_cost=1.0, baseline_sigma=0.5,
+                      z_score=18.0, threshold_sigma=3.0, history_days=28,
+                      severity="critical")
+
+
 async def seed_full_tenant(db, name: str, **tenant_settings) -> uuid.UUID:
     """A tenant with a row in every tenant-owned table."""
     tid = await make_tenant(db, name, **tenant_settings)
@@ -163,6 +172,7 @@ async def seed_full_tenant(db, name: str, **tenant_settings) -> uuid.UUID:
                 call_count=3,
             ),
             CallFeedback(tenant_id=tid, call_id="c-1", score=1.0, source="sdk"),
+            _alert(tid, NOW.date()),
         ]
     )
     await db.commit()
@@ -333,6 +343,21 @@ class TestPurge:
             assert await count(db, CallFeedback, a) == 2
             audit = (await db.execute(select(RetentionAuditLog))).scalar_one()
             assert audit.details == {"ai_usage_events": 0, "call_feedback": 2}
+
+    async def test_purges_spend_alerts_for_days_before_the_cutoff(self, session_factory):
+        async with session_factory() as db:
+            a = await make_tenant(db, "a", retention_days=30)
+            for age in (0, 29, 31, 400):
+                db.add(_alert(a, (NOW - timedelta(days=age)).date()))
+            await db.commit()
+
+            dry = await retention.purge_tenant_events(db, a, now=NOW, dry_run=True)
+            assert dry.spend_alerts_deleted == 2
+            result = await retention.purge_tenant_events(db, a, now=NOW, actor="test")
+            assert result.spend_alerts_deleted == 2
+            assert await count(db, SpendAlert, a) == 2
+            audit = (await db.execute(select(RetentionAuditLog))).scalar_one()
+            assert audit.details == {"ai_usage_events": 0, "spend_alerts": 2}
 
     async def test_single_tenant_purge_leaves_other_tenant_alone(self, session_factory):
         async with session_factory() as db:

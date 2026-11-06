@@ -7,9 +7,9 @@ This directory is a fork of the [Portkey AI Gateway](https://github.com/Portkey-
 | | Commit | Date | Notes |
 |---|---|---|---|
 | Fork base | [`28ed85e`](https://github.com/Portkey-AI/gateway/commit/28ed85e) | 2026-02-19 | v1.15.2. Forked 2026-03-24. Confirmed by diffing `src/` and `plugins/` against every upstream `main` commit (`plugins/` identical; `src/` differs only by our changes). |
-| OSS `main` triaged to | [`669825c`](https://github.com/Portkey-AI/gateway/commit/669825c) | 2026-05-25 | No upstream commits since. |
+| OSS `main` triaged to | [`669825c`](https://github.com/Portkey-AI/gateway/commit/669825c) | 2026-05-25 | No upstream commits since (re-checked 2026-11-06, #208). |
 | OSS `2.0.0` triaged to | [`8febc1d`](https://github.com/Portkey-AI/gateway/commit/8febc1d) | 2026-03-14 | Pre-release; branches from our exact base. |
-| Enterprise changelog triaged to | 2.28.0 | 2026-10-08 | Closed source. Features are re-implemented from the public changelog, never copied. |
+| Enterprise changelog triaged to | 2.33.0 | 2026-11-04 | Closed source. Features are re-implemented from the public changelog, never copied. Per-entry record of 2.29.0-2.33.0: [`docs/upstream-triage-2026-11.md`](docs/upstream-triage-2026-11.md) (#208). |
 
 **Decision (#56, 2026-10-12): stay on `28ed85e` and port features from `2.0.0`; do not rebase.** Run standalone (`FETCH_SETTINGS_FROM_FILE=true`), `2.0.0` rejects every request with `401 Invalid API Key`: its `authNMiddleWare` always validates the caller's key against Portkey's control plane (`ALBUS_BASEPATH`). The branch also does not build on Linux without fixing two filename-case bugs. The features we want (rerank, Responses/Messages adapters, tokenizer, payload-size limit, OTel/metrics, new providers) do not depend on the control plane, so they are ported one at a time (milestone *U1*, #57–#62). Security fixes keep being cherry-picked from `main`.
 
@@ -58,6 +58,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `conf.example.json`
 - `deployment.yaml` (deleted; replaced by the Helm chart in `charts/prompt-shields`)
 - `jest.config.js`
+- `package-lock.json`
 - `package.json`
 - `plugins/acuvity/scan.ts`
 - `plugins/azure/contentSafety.ts`
@@ -207,6 +208,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/mistral-ai/index.ts`
 - `src/providers/ollama/chatComplete.ts`
 - `src/providers/ollama/embed.ts`
+- `src/providers/open-ai-base/createModelResponse.ts`
 - `src/providers/open-ai-base/index.ts`
 - `src/providers/openai/api.ts`
 - `src/providers/openai/chatComplete.ts`
@@ -214,6 +216,8 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `src/providers/openai/imageGenerate.ts`
 - `src/providers/openai/index.ts`
 - `src/providers/sagemaker/api.ts`
+- `src/providers/together-ai/chatComplete.ts`
+- `src/providers/together-ai/complete.ts`
 - `src/providers/types.ts`
 - `src/providers/voyage/api.ts`
 - `src/providers/voyage/index.ts`
@@ -237,7 +241,7 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 
 ```bash
 # 1. What changed upstream (OSS) and in the enterprise changelog since the triage points above
-python3 scripts/upstream-watch.py --since-enterprise 2.28.0 --since-main 669825c --since-2-0 8febc1d
+python3 scripts/upstream-watch.py --since-enterprise 2.33.0 --since-main 669825c --since-2-0 8febc1d
 
 # 2. Re-confirm the base: an empty plugins/ diff and a src/ diff limited to PS files
 git clone --filter=blob:none https://github.com/Portkey-AI/gateway /tmp/portkey
@@ -323,7 +327,15 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 37. **Added** keyless upstream auth, third slice (#76): workload identity federation for `openai` and `anthropic` (`src/utils/vendorWorkloadIdentity.ts`), re-implemented from the vendors' published protocols (OpenAI RFC 8693 token exchange at `auth.openai.com/oauth/token`; Anthropic RFC 7523 jwt-bearer at `api.anthropic.com/v1/oauth/token`). Callers opt in with `openaiAuthType` / `anthropicAuthType: workload` (`x-portkey-*-auth-type` headers read in `src/handlers/handlerUtils.ts`, `openai_auth_type` / `anthropic_auth_type` in `src/middlewares/requestValidator/schema/config.ts`, `src/types/requestBody.ts`). It uses the gateway host's identity token file and operator-only federation settings (`src/utils/env.ts`), behind `OPENAI_AMBIENT_CREDENTIALS_ENABLED` / `ANTHROPIC_AMBIENT_CREDENTIALS_ENABLED`, default off. `src/providers/openai/api.ts` sends the minted bearer. `src/providers/anthropic/api.ts` sends `Authorization: Bearer` with the `oauth-2025-04-20` beta instead of `X-API-Key`. Custom hosts are refused before the exchange. The token URL goes through `assertSafeTokenUrl` (its new `alsoAllowedHosts` argument lets the fixed vendor host pass `OAUTH_TOKEN_URL_ALLOWED_HOSTS`). Redirects are not followed, error bodies are dropped, and tokens are cached until shortly before they expire. `src/utils/credentialFingerprint.ts` fingerprints the vendor service account, and the SDK's `prompt_shields.credentials` computes the same values. `src/utils/env.ts` also keeps `AZURE_FEDERATED_TOKEN_FILE` as a path: it was replaced by the file's contents at startup, so Azure `workload` auth (`azure-openai`, `azure-ai-inference`) passed a token to `readFileSync` and failed on Node.
 38. **Added** (PS OpenAI-compatible sovereign adapter, #20; fork behaviour): `src/providers/openAICompatible.ts` is the one adapter behind `berget`, `scaleway`, `regolo`, `ionos`, `stackit` and the new `infercom` (`https://api.infercom.ai/v1`, chat only; registered in `src/globals.ts` and `src/providers/index.ts`); their base URLs match the model catalog's `api_base`. `tryPost` (`src/handlers/handlerUtils.ts`) records the target that served each successful call (`src/middlewares/psServedTarget.ts`), and `ps-telemetry` reports `served_provider` and, from the active route policy, `served_jurisdiction`. The data policy gate passes the target's provider and custom host: a policy tier that names a provider no longer vouches for the same model id sent directly to another provider, or to a custom host other than that provider's own base URL, including the model the router chose (the router rewrites only the model, so a routed tier at another provider is refused). The router failover engine (`src/middlewares/router/failover.ts`) applies the same binding in its `allow` check, so a candidate at another provider is skipped, not attempted. `mistral-ai` also answers to the policy id `mistral-eu`.
 39. **Added** (PS implicit outcome signals, #44; fork behaviour): `ps-telemetry` adds `outcome_signals` / `outcome_signals_version` to events on text-generation surfaces (`src/middlewares/psOutcomeSignals.ts`): `fallback`, `max_tokens`, `refusal`, `stream_error`, `abandoned`, from the fallback chain, stop reasons, refusals and stream state. `src/middlewares/psStreamObserver.ts` also records a stream's stop reasons (at most 8) and whether it carried a refusal.
-40. **Added** (unified `/v1/models`, #79; re-implemented from the Portkey enterprise changelog 2.14/2.22, not in OSS): `src/index.ts` mounts `GET /v1/models` and `GET /v1/models/:id{.+}` on `src/handlers/unifiedModelsHandler.ts` (a PS file) ahead of the `GET /v1/*` proxy catch-all. Both proxy to the configured provider, then return Anthropic's list or model object to callers that send `anthropic-version` (Claude Code, Anthropic SDKs) and OpenAI's shape to everyone else; errors and unrecognised bodies pass through. The upstream control-plane `modelsHandler` mounted earlier on `/v1/models` is unchanged.
+40. **Fixed** (#208, triage of the Portkey enterprise changelog 2.29.0-2.33.0, see [`docs/upstream-triage-2026-11.md`](docs/upstream-triage-2026-11.md); each item re-implemented from its one-line description, no enterprise code):
+   - (security) Runtime dependencies bumped past their advisories: `hono` 4.13.13, `@hono/node-server` 1.19.17, `ws` 8.22.0. `src/tests/dependencyFloors.test.ts` checks the lockfile against those floors.
+   - (security, 2.31) Vertex AI upstream URL parts are checked before use (`assertVertexUrlParts` in `src/providers/google-vertex-ai/api.ts`). The region is checked first, because it could rewrite the `<region>-aiplatform.googleapis.com` host; then the project id and the model, where `/`, `?`, `#` or `..` could change the path. Batch and finetune list query values are encoded.
+   - (security, 2.31) Fireworks AI: the account id must be a slug, and the image-generation model path may not hold empty or dot segments or URL metacharacters (`src/providers/fireworks-ai/api.ts`). List query values are encoded.
+   - (2.32) Together AI streams skip SSE keep-alive comments and empty events instead of throwing (`getTogetherAIStreamData`). `readStream` (`src/handlers/streamHandler.ts`) no longer yields an `undefined` final chunk.
+   - (2.31) The Messages adapter's `message_start.model` falls back to the requested model when the provider's chunks carry none.
+   - (related to 2.30) `cache.max_age` is seconds. The fork base added it to `Date.now()` as milliseconds, so entries expired almost at once (`cacheExpiresAt` in `src/middlewares/cache/index.ts`).
+   - (2.32, 2.33) OpenAI chat completions forward `moderation`, and `/v1/responses` forwards `prompt_cache_options`.
+41. **Added** (unified `/v1/models`, #79; re-implemented from the Portkey enterprise changelog 2.14/2.22, not in OSS): `src/index.ts` mounts `GET /v1/models` and `GET /v1/models/:id{.+}` on `src/handlers/unifiedModelsHandler.ts` (a PS file) ahead of the `GET /v1/*` proxy catch-all. Both proxy to the configured provider, then return Anthropic's list or model object to callers that send `anthropic-version` (Claude Code, Anthropic SDKs) and OpenAI's shape to everyone else; errors and unrecognised bodies pass through. The upstream control-plane `modelsHandler` mounted earlier on `/v1/models` is unchanged.
 
 ## Original License
 
