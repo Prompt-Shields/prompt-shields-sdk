@@ -44,7 +44,8 @@ Tenant isolation: every statement is filtered on the caller's tenant and
 runs in its row-level security context, the hash uses the tenant's own
 salt, and the response only counts the tenant's rows, so the result says
 nothing about whether another tenant knows the same id. A tenant that has
-never ingested a ``user_id`` has no salt; the erasure then creates none.
+never ingested a ``user_id`` has no salt; the erasure then creates none
+and matches ``user_id_raw`` against the id as sent.
 
 Data already sent elsewhere (webhook receivers, Microsoft Sentinel, a SIEM)
 is outside the collector and must be erased there.
@@ -248,18 +249,16 @@ async def erase_user(
 
     # Ingest stores user_id_raw only next to user_id_hash (same salt), so
     # the hash finds every event of the user, through its partial index.
+    # Without a salt (no hashed rows), match user_id_raw as sent instead, so
+    # a raw id stored any other way is still erased.
     ev = AIUsageEvent
     rows: dict[str, int] = {}
-    rows[ev.__tablename__] = (
-        await _null_in_batches(
-            db,
-            ev,
-            [ev.tenant_id == tenant_id, ev.user_id_hash == user_id_hash],
-            dict.fromkeys(EVENT_COLUMNS),
-            size,
-        )
-        if user_id_hash is not None
-        else 0
+    if user_id_hash is not None:
+        match = ev.user_id_hash == user_id_hash
+    else:
+        match = ev.user_id_raw == user_id
+    rows[ev.__tablename__] = await _null_in_batches(
+        db, ev, [ev.tenant_id == tenant_id, match], dict.fromkeys(EVENT_COLUMNS), size
     )
     if user_id is not None:
         rows[CallFeedback.__tablename__] = await _null_in_batches(

@@ -1002,3 +1002,75 @@ async def test_migration_moves_legacy_keys_and_downgrades(client, seeded_db):
     assert await _works(client, TENANT_KEY) == 200
     # Keys other than the one restored do not survive a downgrade.
     assert await _works(client, issued["key"]) == 401
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Migration 038: admin:privacy for full-scope tokens
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _load_migration_038():
+    pytest.importorskip("alembic")
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "db"
+        / "alembic"
+        / "versions"
+        / "038_admin_privacy_scope.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_038", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_migration_038_covers_every_scope():
+    m = _load_migration_038()
+    assert m.NEW_SCOPE == "admin:privacy"
+    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == set(ADMIN_SCOPES)
+
+
+async def test_migration_038_keeps_full_scope_tokens_full_admin(client, seeded_db):
+    """A token that held every admin scope before admin:privacy existed can
+    still issue ingest keys after the upgrade; narrower tokens gain nothing."""
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    m = _load_migration_038()
+
+    def run(sync_conn, step):
+        ctx = MigrationContext.configure(sync_conn)
+        with Operations.context(ctx):
+            step()
+
+    full = await _token(client, list(m.PREVIOUS_SCOPES), name="full")
+    await _token(client, ["admin:keys", "admin:read"], name="narrow")
+    # Before the upgrade: an old full-scope token is short of admin:privacy.
+    resp = await client.post(
+        "/api/v1/admin/api-keys", headers=H(full["token"]), json={"name": "k1"}
+    )
+    assert resp.status_code == 403
+    assert "admin:privacy" in resp.json()["detail"]["detail"]
+
+    async with seeded_db.begin() as conn:
+        await conn.run_sync(run, m.upgrade)
+    async with _admin(seeded_db)() as s:
+        scopes = dict(
+            (await s.execute(select(AdminToken.name, AdminToken.scopes))).all()
+        )
+    assert set(scopes["full"]) == set(ADMIN_SCOPES)
+    assert sorted(scopes["narrow"]) == ["admin:keys", "admin:read"]
+    resp = await client.post(
+        "/api/v1/admin/api-keys", headers=H(full["token"]), json={"name": "k1"}
+    )
+    assert resp.status_code == 201, resp.text
+
+    # Idempotent, and downgrade takes the scope away again.
+    async with seeded_db.begin() as conn:
+        await conn.run_sync(run, m.upgrade)
+        await conn.run_sync(run, m.downgrade)
+    async with _admin(seeded_db)() as s:
+        scopes = dict(
+            (await s.execute(select(AdminToken.name, AdminToken.scopes))).all()
+        )
+    assert sorted(scopes["full"]) == sorted(m.PREVIOUS_SCOPES)

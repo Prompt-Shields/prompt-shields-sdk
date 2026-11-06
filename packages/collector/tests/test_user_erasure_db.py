@@ -180,22 +180,38 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
 
 async def test_erase_without_a_salt_creates_none(rls_db):  # noqa: F811
     """A tenant that never ingested a user_id has no salt; erasing by id
-    finds nothing and does not create one."""
+    does not create one, and still erases a user_id_raw stored as sent."""
     a = rls_db["a"]
     async with rls_db["admin"]() as s:
         await s.execute(TenantSecret.__table__.delete())
         await s.commit()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        events = [{"vendor": "openai", "model": "gpt-4o", "source": "gateway",
+                   "session_id": f"s-{i}", "tokens_in": 10} for i in range(2)]
+        resp = await c.post("/ingest/events", headers=_head(KEY_A), json={"events": events})
+        assert resp.status_code == 200, resp.text
+        async with rls_db["admin"]() as s:
+            await s.execute(
+                update(AIUsageEvent)
+                .where(AIUsageEvent.tenant_id == a, AIUsageEvent.session_id == "s-0")
+                .values(user_id_raw="someone@example.com")
+            )
+            await s.commit()
         resp = await c.post("/api/v1/admin/users/erase", headers=_head(KEY_A),
                             json={"user_id": "someone@example.com"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["user_id_hash"] is None
     assert resp.json()["rows_erased"] == {
-        "ai_usage_events": 0, "call_feedback": 0, "mcp_tool_usage": 0,
+        "ai_usage_events": 1, "call_feedback": 0, "mcp_tool_usage": 0,
     }
     async with rls_db["plain"]() as s:
         await rls.set_tenant(s, a)
         assert (await s.execute(select(TenantSecret))).first() is None
+        rows = (await s.execute(
+            select(AIUsageEvent.session_id, AIUsageEvent.user_id_raw)
+            .where(AIUsageEvent.source == "gateway")
+        )).all()
+    assert sorted(map(tuple, rows), key=_none_first) == [(None, None), ("s-1", None)]
 
 
 async def test_audit_api_pages_and_filters(rls_db):  # noqa: F811
@@ -227,6 +243,10 @@ async def test_audit_api_pages_and_filters(rls_db):  # noqa: F811
         resp = await c.get("/partner/v1/audit", headers=_head(PARTNER_KEY_A),
                            params={"cursor": "abc"})
         assert resp.status_code == 400
+        for bad in ("9" * 19, "9" * 40, "\u0661"):  # past bigint; Arabic-Indic 1
+            resp = await c.get("/partner/v1/audit", headers=_head(PARTNER_KEY_A),
+                               params={"cursor": bad})
+            assert resp.status_code == 400, bad
 
         # Without audit:read: 403.
         async with rls_db["admin"]() as s:

@@ -84,7 +84,7 @@ A tenant erases what the collector holds about one of its end users with the ten
 | `POST` | `/api/v1/admin/users/erase` | `{"user_id": "<id as the gateway or SDK sent it>"}` | usage events, call feedback, MCP tool usage |
 | `DELETE` | `/api/v1/admin/users/{user_id_hash}/data` | none | usage events |
 
-Send the raw id in the POST body, not in a URL, so it never lands in an access log. The collector hashes it with the tenant's salt; it never creates or rotates the salt for an erasure.
+Send the raw id in the POST body, not in a URL, so it never lands in an access log. The collector hashes it with the tenant's salt; it never creates or rotates the salt for an erasure. Admin tokens that held every admin scope before `admin:privacy` existed are given it by migration `038`.
 
 What changes, in the caller's tenant only:
 

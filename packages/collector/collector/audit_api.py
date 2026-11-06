@@ -67,7 +67,13 @@ async def list_audit(
     await _enforce_rate_limit(request, response, principal)
     after_seq = None
     if cursor is not None:
-        if not cursor.isdigit() or len(cursor) > 19:
+        # isascii: str.isdigit also takes other scripts' digits. The seq is
+        # a bigint, so a larger value would fail in the database (500).
+        if (
+            len(cursor) > 19
+            or not (cursor.isascii() and cursor.isdigit())
+            or int(cursor) > 2**63 - 1
+        ):
             raise _problem(400, "Bad Request", "Invalid `cursor`")
         after_seq = int(cursor)
     rows = await load_audit(
