@@ -23,6 +23,7 @@ import {
   psSecurityEvents,
 } from '../psSecurityEvents';
 import { OIDC_IDENTITY_KEY } from '../psOidc/identity';
+import { psTelemetry, psTelemetrySender } from '../ps-telemetry';
 
 const vectorFile = (name: string) =>
   JSON.parse(
@@ -865,5 +866,122 @@ describe('trust, leaks and interactions', () => {
       'eu-small',
       'us-mini',
     ]);
+  });
+});
+
+// ── telemetry of refused calls ────────────────────────────────────────────
+
+describe('a refused call sends one blocked event', () => {
+  const blockUc = {
+    id: 'support',
+    scope: 'use_case',
+    subject: 'support',
+    window: 'month',
+    limit_usd: 1,
+    mode: 'block',
+  };
+  const sent = () => {
+    const send = jest
+      .spyOn(psTelemetrySender, 'send')
+      .mockImplementation(async () => {});
+    return () => send.mock.calls.map(([e]) => e as any);
+  };
+  const fullApp = () => {
+    const app = new Hono();
+    app.use('*', psBudget({ now: () => NOW }));
+    app.use('*', psTelemetry());
+    app.post('/v1/chat/completions', (c) =>
+      c.json({ model: 'gpt-4o-mini', usage: USAGE })
+    );
+    return app;
+  };
+
+  test('429: budget_action blocked, budget_state exceeded, no cost', async () => {
+    const events = sent();
+    const store = install([blockUc]);
+    await spend(store, key('use_case', 'support'), 1);
+    const res = await post(fullApp(), {
+      'x-ps-use-case': 'support',
+      'x-ps-business-unit': 'care',
+    });
+    expect(res.status).toBe(429);
+    expect(events()).toHaveLength(1);
+    const ev = events()[0];
+    expect(ev).toMatchObject({
+      vendor: 'openai',
+      model: 'gpt-4o-mini',
+      source: 'gateway',
+      api_surface: 'chat',
+      use_case_name: 'support',
+      business_unit: 'care',
+      budget_state: 'exceeded',
+      budget_id: 'support',
+      budget_action: 'blocked',
+    });
+    expect(ev.call_id).toBe(res.headers.get('x-ps-call-id'));
+    for (const f of [
+      'cost',
+      'cost_source',
+      'tokens_in',
+      'tokens_out',
+      'latency_ms',
+      'served_provider',
+      'outcome_signals',
+      'cache_status',
+    ])
+      expect(ev[f]).toBeUndefined();
+  });
+
+  test("the caller's call id names the refused call", async () => {
+    const events = sent();
+    const store = install([blockUc]);
+    await spend(store, key('use_case', 'support'), 1);
+    const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    const res = await post(fullApp(), {
+      'x-ps-use-case': 'support',
+      'x-ps-call-id': id,
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('x-ps-call-id')).toBe(id);
+    expect(events()[0].call_id).toBe(id);
+  });
+
+  test('503 store unavailable (closed): budget_state unknown', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const events = sent();
+    const broken: BudgetStore = {
+      kind: 'redis',
+      read: async () => {
+        throw new Error('down');
+      },
+      reserve: async () => {
+        throw new Error('down');
+      },
+      settle: async () => {
+        throw new Error('down');
+      },
+    };
+    install([blockUc], broken, { on_store_error: 'closed' });
+    const res = await post(fullApp(), { 'x-ps-use-case': 'support' });
+    expect(res.status).toBe(503);
+    expect(events()).toHaveLength(1);
+    expect(events()[0]).toMatchObject({
+      budget_state: 'unknown',
+      budget_id: 'support',
+      budget_action: 'blocked',
+    });
+  });
+
+  test('a served call sends only its own event, not a blocked one', async () => {
+    const events = sent();
+    install([blockUc]);
+    const res = await post(fullApp(), { 'x-ps-use-case': 'support' });
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events()).toHaveLength(1);
+    expect(events()[0]).toMatchObject({
+      budget_state: 'ok',
+      budget_action: 'none',
+    });
   });
 });

@@ -235,6 +235,7 @@ def _seed() -> dict[str, list[Row]]:
                 budget_state="ok",
                 budget_action="none",
                 cache_status="semantic hit",
+                cost_source="cache",
                 cache_saved_cost=Decimal("0.020000"),
                 est_tokens_saved=300,
                 outcome_signals=[],
