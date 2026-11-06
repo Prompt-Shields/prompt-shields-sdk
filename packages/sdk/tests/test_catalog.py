@@ -81,6 +81,30 @@ LEGACY_AUDIO = {
     ("openai", "gpt-4o-audio-preview"): (0.040, 0.080),
     ("openai", "gpt-4o-mini-audio-preview"): (0.010, 0.020),
 }
+# The literal per-unit and per-image tables pricing.py held before they moved
+# into the catalog (#71). They must come out of the catalog unchanged.
+LEGACY_UNIT_PRICING = {
+    ("openai", "whisper-1", "seconds"): 0.006 / 60,
+    ("openai", "tts-1", "characters"): 15.0 / 1_000_000,
+    ("openai", "tts-1-hd", "characters"): 30.0 / 1_000_000,
+    ("mistral", "mistral-ocr-2512", "pages"): 2.0 / 1000,
+    ("elevenlabs", "scribe_v1", "seconds"): 0.22 / 3600,
+    ("elevenlabs", "scribe_v2", "seconds"): 0.22 / 3600,
+    ("cohere", "rerank-v3.5", "search_units"): 2.0 / 1000,
+}
+LEGACY_IMAGE_PRICING = {
+    ("openai", "gpt-image-1"): {
+        ("low", "1024x1024"): 0.011,
+        ("low", "1024x1536"): 0.016,
+        ("low", "1536x1024"): 0.016,
+        ("medium", "1024x1024"): 0.042,
+        ("medium", "1024x1536"): 0.063,
+        ("medium", "1536x1024"): 0.063,
+        ("high", "1024x1024"): 0.167,
+        ("high", "1024x1536"): 0.25,
+        ("high", "1536x1024"): 0.25,
+    },
+}
 
 
 def _effective(vendor, rates):
@@ -175,9 +199,35 @@ def test_catalog_shape():
         assert key == f"{entry['provider']}/{entry['model']}"
         assert entry["provider"] in data["providers"]
         assert entry["currency"] in ("USD", "EUR")
-        assert entry["mode"] == "chat"
+        assert entry["mode"] in CATALOG_MODES, key
+        if entry["mode"] != "chat":
+            # Unit-billed models carry unit prices, not token prices.
+            assert "input_cost_per_token" not in entry, key
+            assert set(entry) & {*catalog.UNIT_PRICE_FIELDS, catalog.IMAGE_PRICE_FIELD}, key
         for field in catalog.SOVEREIGNTY_FIELDS:
             assert field in entry, (key, field)
+
+
+CATALOG_MODES = {"chat", "audio_transcription", "audio_speech", "ocr", "rerank", "image_generation"}
+
+
+def test_legacy_unit_and_image_rates_unchanged():
+    assert pricing.UNIT_PRICING == LEGACY_UNIT_PRICING
+    assert pricing.IMAGE_PRICING == LEGACY_IMAGE_PRICING
+
+
+def test_unit_price_fields_cover_every_token_free_unit_type():
+    assert set(catalog.UNIT_PRICE_FIELDS.values()) | {pricing.UNIT_IMAGES} == pricing.USAGE_UNIT_TYPES
+    assert catalog.UNIT_PRICE_FIELDS == build_catalog.UNIT_PRICE_FIELDS
+    assert catalog.IMAGE_PRICE_FIELD == build_catalog.IMAGE_PRICE_FIELD
+
+
+def test_unit_prices_are_usd_only():
+    source = json.loads(build_catalog.SOURCE.read_text())
+    source["models"]["openai/whisper-1"]["currency"] = "EUR"
+    built = build_catalog.build_sdk_catalog(source)
+    assert ("openai", "whisper-1", "seconds") not in catalog.unit_pricing(built)
+    assert "openai/whisper-1" not in build_catalog.build_gateway_pricing(source)["unitPricing"]
 
 
 def test_seeded_providers_and_sovereign_supply():
@@ -322,6 +372,15 @@ def test_gateway_pricing_tables_match_sdk_pricing():
     assert {k: tuple(v) for k, v in keyed(tables["audioPricing"]).items()} == (
         pricing.AUDIO_PRICING
     )
+    assert {
+        (*key, unit): rate
+        for key, by_unit in keyed(tables["unitPricing"]).items()
+        for unit, rate in by_unit.items()
+    } == pricing.UNIT_PRICING
+    assert {
+        key: {(q, s): rate for q, sizes in by_quality.items() for s, rate in sizes.items()}
+        for key, by_quality in keyed(tables["imagePricing"]).items()
+    } == pricing.IMAGE_PRICING
 
 
 def test_gateway_policy_prices_match_sdk_pricing():
@@ -359,6 +418,26 @@ def _source():
         (lambda s: s["models"]["openai/gpt-4o"].update(aliases="gpt-4o-x"), "aliases must be"),
         (lambda s: s["models"].update({"nobody/x": {"mode": "chat", "source": "x"}}), "unknown provider"),
         (lambda s: s["router"]["groups"]["cheap"].append("openai/nope"), "unknown model"),
+        (
+            lambda s: s["models"]["openai/whisper-1"].update(input_cost_per_second="1"),
+            "input_cost_per_second must be a number",
+        ),
+        (
+            lambda s: s["models"]["openai/gpt-image-1"].update(
+                output_cost_per_image_by_quality={"low": {"1024x1024": -1}}
+            ),
+            "output_cost_per_image_by_quality must map",
+        ),
+        (
+            lambda s: s["models"]["openai/gpt-image-1"].update(
+                output_cost_per_image_by_quality={"low": 0.01}
+            ),
+            "output_cost_per_image_by_quality must map",
+        ),
+        (
+            lambda s: s["router"]["groups"]["cheap"].append("openai/whisper-1"),
+            "needs USD prices",
+        ),
         (
             lambda s: s["router"]["groups"]["cheap"].append("berget/openai/gpt-oss-120b"),
             "needs USD prices",

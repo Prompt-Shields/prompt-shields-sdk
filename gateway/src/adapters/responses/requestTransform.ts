@@ -7,6 +7,11 @@
 
 import { Params, Message, ContentType } from '../../types/requestBody';
 import { CarriedThinkingBlock, decodeThinkingCarry } from './thinkingCarry';
+import {
+  applyMaxToolCalls,
+  transformResponsesInclude,
+  transformResponsesTools,
+} from './requestFields';
 
 // Role mapping (inline for performance)
 const ROLE_MAP: Record<string, 'system' | 'user' | 'assistant' | 'tool'> = {
@@ -98,43 +103,26 @@ export function transformResponsesToChatCompletions(
   if (req.max_output_tokens != null)
     result.max_completion_tokens = req.max_output_tokens;
   if (req.stream != null) result.stream = req.stream;
-  if (req.user) result.user = req.user;
+  // PS fork (#73): safety_identifier replaces the deprecated `user`; both
+  // reach the provider as Chat Completions `user` (Anthropic metadata.user_id).
+  // text.verbosity, prompt_cache_key and service_tier are advisory and not
+  // sent (see requestFields.ts).
+  const user = req.safety_identifier || req.user;
+  if (typeof user === 'string' && user) result.user = user;
   if (req.parallel_tool_calls != null)
     result.parallel_tool_calls = req.parallel_tool_calls;
   if (req.metadata) result.metadata = req.metadata;
 
-  // Transform tools (only function type supported)
-  if (req.tools?.length) {
-    const tools = [];
-    for (const t of req.tools) {
-      if (t.type === 'function') {
-        const tool: any = {
-          type: 'function' as const,
-          function: {
-            name: t.name,
-            description: t.description || '',
-            parameters: t.parameters,
-          },
-        };
-        // Preserve cache_control for prompt caching (Anthropic, etc.)
-        if (t.cache_control) tool.cache_control = t.cache_control;
-        tools.push(tool);
-      }
-    }
-    if (tools.length) result.tools = tools;
-  }
-
-  // Transform tool_choice
-  if (req.tool_choice) {
-    if (typeof req.tool_choice === 'string') {
-      result.tool_choice = req.tool_choice;
-    } else if (req.tool_choice.type === 'function' && req.tool_choice.name) {
-      result.tool_choice = {
-        type: 'function',
-        function: { name: req.tool_choice.name },
-      };
-    }
-  }
+  // PS fork (#73): tools and tool_choice, mapped for the target provider
+  // or refused (requestFields.ts)
+  const { tools, tool_choice } = transformResponsesTools(req, provider);
+  // PS fork (#73): max_tool_calls and include (requestFields.ts)
+  applyMaxToolCalls(req, tools, provider);
+  const { logprobs } = transformResponsesInclude(req, provider);
+  // (Params types logprobs as a number; Chat Completions takes a boolean)
+  if (logprobs) (result as any).logprobs = logprobs;
+  if (tools) result.tools = tools;
+  if (tool_choice !== undefined) result.tool_choice = tool_choice;
 
   // Transform response format (text.format)
   if (req.text?.format) {

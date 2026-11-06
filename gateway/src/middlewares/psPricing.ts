@@ -5,11 +5,11 @@
  * gateway and the SDK report the same `cost` for the same usage. Both run
  * the shared golden vectors in `schemas/pricing/cost-vectors.v1.json`
  * (gateway: psPricing.test.ts). A change to one side's prices must be made
- * on the other. Token, long-context, audio and service-tier rates are
- * generated from the model catalog (schemas/catalog/source.v1.json ->
- * scripts/build_catalog.py -> psPricingTables.json), as the SDK's are; the
- * per-unit and image prices,
- * multipliers and fallbacks are hand-copied from pricing.py and checked by
+ * on the other. Token, long-context, audio, service-tier, per-unit and
+ * per-image rates are generated from the model catalog
+ * (schemas/catalog/source.v1.json -> scripts/build_catalog.py ->
+ * psPricingTables.json), as the SDK's are; the multipliers, fees and
+ * fallbacks are hand-copied from pricing.py and checked by
  * psPricing.drift.test.ts.
  *
  * Usage fields use the SDK event names: `tokens_in` is the whole prompt
@@ -28,6 +28,9 @@ const generatedTables = generatedJson as unknown as {
   longContextPricing: Record<string, { threshold: number; rates: Rates }>;
   audioPricing: Record<string, [number, number]>;
   serviceTierPricing: Record<string, Record<string, Rates>>;
+  // USD per unit and per image, not per 1k.
+  unitPricing: Record<string, Record<string, number>>;
+  imagePricing: Record<string, Record<string, Record<string, number>>>;
 };
 
 const key = (...parts: string[]) => parts.join('\u0000');
@@ -95,32 +98,35 @@ export const USAGE_UNIT_TYPES = new Set([
   'images',
 ]);
 
-const UNIT_PRICING = new Map<string, number>([
-  [key('openai', 'whisper-1', 'seconds'), 0.006 / 60],
-  [key('openai', 'tts-1', 'characters'), 15.0 / 1_000_000],
-  [key('openai', 'tts-1-hd', 'characters'), 30.0 / 1_000_000],
-  [key('mistral', 'mistral-ocr-2512', 'pages'), 2.0 / 1000],
-  [key('elevenlabs', 'scribe_v1', 'seconds'), 0.22 / 3600],
-  [key('elevenlabs', 'scribe_v2', 'seconds'), 0.22 / 3600],
-  [key('cohere', 'rerank-v3.5', 'search_units'), 2.0 / 1000],
-]);
+// USD per unit, key(vendor, model, usage_unit_type), from the catalog's
+// per-unit prices, as pricing.py UNIT_PRICING.
+const UNIT_PRICING = new Map<string, number>(
+  [...catalogMap(generatedTables.unitPricing).entries()].flatMap(
+    ([k, byUnit]) =>
+      Object.entries(byUnit).map(
+        ([unit, rate]) => [k + '\u0000' + unit, rate] as [string, number]
+      )
+  )
+);
 
-const IMAGE_PRICING = new Map<string, Record<string, number>>([
-  [
-    key('openai', 'gpt-image-1'),
-    {
-      [key('low', '1024x1024')]: 0.011,
-      [key('low', '1024x1536')]: 0.016,
-      [key('low', '1536x1024')]: 0.016,
-      [key('medium', '1024x1024')]: 0.042,
-      [key('medium', '1024x1536')]: 0.063,
-      [key('medium', '1536x1024')]: 0.063,
-      [key('high', '1024x1024')]: 0.167,
-      [key('high', '1024x1536')]: 0.25,
-      [key('high', '1536x1024')]: 0.25,
-    },
-  ],
-]);
+// USD per generated image, key(vendor, model) -> {key(quality, size): USD},
+// from the catalog's output_cost_per_image_by_quality, as pricing.py
+// IMAGE_PRICING.
+const IMAGE_PRICING = new Map<string, Record<string, number>>(
+  [...catalogMap(generatedTables.imagePricing).entries()].map(
+    ([k, byQuality]) => [
+      k,
+      Object.fromEntries(
+        Object.entries(byQuality).flatMap(([quality, sizes]) =>
+          Object.entries(sizes).map(([size, rate]) => [
+            key(quality, size),
+            rate,
+          ])
+        )
+      ),
+    ]
+  )
+);
 
 // (input_per_1k, output_per_1k[, cached_per_1k[, cache_write_per_1k
 // [, cache_write_1h_per_1k]]]) in USD, as pricing.py DEFAULT_PRICING.
