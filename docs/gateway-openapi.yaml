@@ -1606,6 +1606,49 @@ paths:
         default:
           $ref: '#/components/responses/UpstreamError'
 
+  /v1/models/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/XPortkeyProvider'
+      - $ref: '#/components/parameters/XPortkeyConfig'
+      - $ref: '#/components/parameters/XPortkeyCustomHost'
+    get:
+      operationId: retrieveModel
+      tags: [Models]
+      summary: Retrieve a model
+      description: |
+        Proxies the provider's single-model endpoint and normalises the
+        object with the same rules as `GET /v1/models`: Anthropic's model
+        object for callers that send `anthropic-version`, OpenAI's for
+        everyone else. Ids may contain slashes. Provider errors keep their
+        status and body.
+      parameters:
+        - $ref: '#/components/parameters/AnthropicVersion'
+      security:
+        - ProviderBearer: []
+        - ProviderApiKey: []
+        - GatewayOidc: []
+        - {}
+      responses:
+        '200':
+          description: Model
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/OpenAIModel'
+                  - $ref: '#/components/schemas/AnthropicModel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PolicyDenied'
+        '502':
+          $ref: '#/components/responses/UpstreamRedirect'
+        default:
+          $ref: '#/components/responses/UpstreamError'
+
   /v1/feedback:
     post:
       operationId: createCallFeedback
@@ -3340,18 +3383,20 @@ components:
         data:
           type: array
           items:
-            type: object
-            required: [id, object]
-            properties:
-              id:
-                type: string
-              object:
-                type: string
-                const: model
-              created:
-                type: integer
-              owned_by:
-                type: string
+            $ref: '#/components/schemas/OpenAIModel'
+    OpenAIModel:
+      type: object
+      required: [id, object]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: model
+        created:
+          type: integer
+        owned_by:
+          type: string
     AnthropicModelList:
       type: object
       required: [data, has_more]
@@ -3359,22 +3404,24 @@ components:
         data:
           type: array
           items:
-            type: object
-            required: [type, id]
-            properties:
-              type:
-                type: string
-                const: model
-              id:
-                type: string
-              display_name:
-                type: string
-              created_at:
-                type: string
-                format: date-time
+            $ref: '#/components/schemas/AnthropicModel'
         has_more:
           type: boolean
         first_id:
           type: [string, 'null']
         last_id:
           type: [string, 'null']
+    AnthropicModel:
+      type: object
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          const: model
+        id:
+          type: string
+        display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
