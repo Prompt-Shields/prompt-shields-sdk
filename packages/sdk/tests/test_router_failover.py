@@ -171,6 +171,60 @@ def test_restricted_data_only_reaches_named_providers():
     assert _called(upstreams) == {"mistral-eu": 1}
 
 
+def test_pii_escalation_bounds_the_fallbacks():
+    """Escalation is worked out before the list is built: declared public,
+    but an IBAN makes it confidential, so the US model is never a fallback."""
+    router = _router()
+    _, upstreams = _wire(router, {
+        "scaleway": [ProviderError(503)], "openai": [ProviderError(503)],
+    })
+    resp = router.chat.completions.create(
+        messages=[{"role": "user", "content": "IBAN DE89370400440532013000"}],
+        data_classification="public",
+    )
+    assert resp.ps.route.sensitivity_level == "confidential"
+    assert resp.ps.route.sensitivity_source == "pii_escalated"
+    assert _called(upstreams) == {"scaleway": 1, "mistral-eu": 1}
+
+
+def test_each_attempt_uses_its_own_providers_credentials():
+    """Never provider A's key on provider B's host."""
+    router = _router()
+    seen = []
+    for name in router._providers:
+        real = router._client(name)._upstream
+        key, url = real.api_key, str(real.base_url)
+
+        def create(_key=key, _url=url, _name=name, **kwargs):
+            seen.append((kwargs["model"], _key, _url))
+            if _name == "scaleway":
+                raise ProviderError(503)
+            return _ok(kwargs["model"])
+
+        router._client(name)._upstream = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        router._client(name)._telemetry.enqueue = lambda event: None
+        router._client(name)._telemetry.flush_sync = lambda: None
+    router.chat.completions.create(messages=HI, data_classification="confidential")
+    assert seen == [
+        ("scaleway-small", "sk-scw", "https://scw.example/v1/"),
+        ("mistral-small-eu", "sk-mis", "https://mis.example/v1/"),
+    ]
+
+
+def test_failover_in_a_session_is_not_a_caller_retry():
+    router = _router()
+    events, _ = _wire(router, {"scaleway": [ProviderError(503)]})
+    router.chat.completions.create(
+        messages=HI, data_classification="confidential",
+        ps_metadata={"session_id": "s-failover-retry"},
+    )
+    (event,) = events
+    assert "fallback" in event["outcome_signals"]
+    assert "retry" not in event["outcome_signals"]
+
+
 def test_engine_rechecks_compliance_before_each_call(monkeypatch):
     """Defence in depth: a non-compliant plan that reached the list anyway is
     skipped by the engine, never called."""
