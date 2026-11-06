@@ -86,12 +86,13 @@ class Pseudonymisation:
         "_restored",
         "_unknown",
         "messages",
+        "prediction",
         "system",
     )
 
     def __init__(self, messages: Iterable[Any] | None, *,
                  categories: Iterable[str] | None = None,
-                 system: Any = None) -> None:
+                 system: Any = None, prediction: Any = None) -> None:
         wanted = None if categories is None else frozenset(categories)
         self._by_token: dict[str, str] = {}
         self._by_value: dict[str, str] = {}
@@ -114,6 +115,7 @@ class Pseudonymisation:
         for m in messages:
             _walk_message(m, reserve)
         _walk_content(system, reserve)
+        _walk_prediction(prediction, reserve)
 
         def replace(text: str) -> str:
             return self._text(text, wanted)
@@ -123,6 +125,9 @@ class Pseudonymisation:
         #: first.
         self.system = _walk_content(system, replace)
         self.messages = [_walk_message(m, replace) for m in messages]
+        #: The pseudonymised OpenAI ``prediction`` (``{"type": "content",
+        #: "content": ...}``), or None.
+        self.prediction = _walk_prediction(prediction, replace)
 
     # --- privacy guards ---------------------------------------------------------
 
@@ -299,9 +304,12 @@ def _arguments(arguments: str, text: Callable[[str], str]) -> str:
 def _walk_content(content: Any, text: Callable[[str], str]) -> Any:
     """``text`` applied to message content: a string or a list of parts.
 
-    Covered: text parts, Anthropic ``tool_result`` parts (their string or
-    text-part ``content``) and Anthropic ``tool_use`` parts (string values in
-    ``input``). Images, audio, files and other parts are kept as they are.
+    Covered: text parts, refusal parts, Anthropic ``tool_result`` parts
+    (their string or part-list ``content``), Anthropic ``tool_use`` parts
+    (string values in ``input``), Anthropic ``document`` parts with a
+    ``text`` or ``content`` source (and their ``title`` and ``context``) and
+    ``search_result`` parts (``title`` and text ``content``). Images, audio,
+    base64 or URL files and other parts are kept as they are.
     """
     if isinstance(content, str):
         return text(content)
@@ -318,12 +326,36 @@ def _walk_content(content: Any, text: Callable[[str], str]) -> Any:
                 part = {**part, "text": text(part["text"])}
             if part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
                 part = {**part, "refusal": text(part["refusal"])}
-            if part.get("type") == "tool_result" and "content" in part:
+            if part.get("type") in ("tool_result", "search_result") and "content" in part:
                 part = {**part, "content": _walk_content(part["content"], text)}
+            if part.get("type") in ("document", "search_result"):
+                for name in ("title", "context"):
+                    if isinstance(part.get(name), str):
+                        part = {**part, name: text(part[name])}
+            if part.get("type") == "document" and isinstance(part.get("source"), Mapping):
+                part = {**part, "source": _walk_document_source(part["source"], text)}
             if part.get("type") == "tool_use" and isinstance(part.get("input"), Mapping):
                 part = {**part, "input": _json_value(part["input"], text)}
         parts.append(part)
     return parts
+
+
+def _walk_document_source(source: Mapping, text: Callable[[str], str]) -> Any:
+    """An Anthropic document source: plain-text ``data`` (``type: text``) or
+    content blocks (``type: content``). Base64, URL and file sources are kept
+    as they are."""
+    if source.get("type") == "text" and isinstance(source.get("data"), str):
+        return {**source, "data": text(source["data"])}
+    if source.get("type") == "content" and "content" in source:
+        return {**source, "content": _walk_content(source["content"], text)}
+    return source
+
+
+def _walk_prediction(prediction: Any, text: Callable[[str], str]) -> Any:
+    """OpenAI predicted output: ``content`` as a string or text parts."""
+    if isinstance(prediction, Mapping) and "content" in prediction:
+        return {**prediction, "content": _walk_content(prediction["content"], text)}
+    return prediction
 
 
 def _walk_message(message: Any, text: Callable[[str], str]) -> Any:
@@ -363,7 +395,7 @@ class ClientCall:
     one call's pseudonymisation, from the request to the restored answer.
 
     Construction pseudonymises ``messages`` and, in place in ``kwargs``,
-    Anthropic's ``system``. A call that carries ``X-PS-*`` headers (route
+    Anthropic's ``system`` and OpenAI's ``prediction``. A call that carries ``X-PS-*`` headers (route
     hints or gateway context) is refused with ``ValueError``: it goes to a
     Prompt Shields gateway, which would classify the placeholders and could
     route the call below the sensitivity of the original prompt.
@@ -379,9 +411,12 @@ class ClientCall:
                 "gateway (route hints or X-PS-* headers): the gateway would "
                 "classify the placeholders, not the original prompt"
             )
-        self._pseudo = Pseudonymisation(messages, system=kwargs.get("system"))
+        self._pseudo = Pseudonymisation(messages, system=kwargs.get("system"),
+                                        prediction=kwargs.get("prediction"))
         if kwargs.get("system") is not None:
             kwargs["system"] = self._pseudo.system
+        if kwargs.get("prediction") is not None:
+            kwargs["prediction"] = self._pseudo.prediction
         self.messages = self._pseudo.messages
         # Labels only: the categories of what the caller wrote, which the
         # client's own scan of the placeholders would no longer see.

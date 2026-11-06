@@ -119,9 +119,17 @@ resp.content[0].text        # the address is back in the answer
 resp.ps_pseudonymisation    # counts only: entities, restored, unknown
 ```
 
-- **Sent:** placeholders in string content, text parts, assistant tool-call
-  arguments, Anthropic's `system` (a string or text blocks), Anthropic
-  `tool_use` input and `tool_result` content.
+- **Sent:** placeholders in string content, text and refusal parts, assistant
+  tool-call and legacy `function_call` arguments, an assistant message's
+  `refusal`, OpenAI `prediction` content (a string or text parts),
+  Anthropic's `system` (a string or text blocks), Anthropic `tool_use` input
+  and `tool_result` content, Anthropic `document` blocks with a `text` or
+  `content` source (and their `title` and `context`) and `search_result`
+  blocks (`title` and text `content`).
+- **Sent unchanged:** other request parameters, including `user` and
+  `metadata` (such as Anthropic's `metadata.user_id`). Do not put PII in them;
+  use an opaque id. Numbers in tool-call arguments and `tool_use` input
+  (`{"phone": 4791234567}`) are not scanned; only string values are.
 - **Restored:** OpenAI `content`, `refusal` and tool-call `arguments`;
   Anthropic `text` blocks and `tool_use` input. A stream is restored chunk by
   chunk, as `restore_stream` below does. Thinking blocks are left as they are,
@@ -202,8 +210,11 @@ are numbered per call, so they do not identify a person across calls.
   real traffic.
 - **Keyword topics are not removed.** `health_data` and `financial_data` mark
   a topic, not an entity. They stay in the text and keep escalating the level.
-- **Only text is pseudonymised.** Images, audio, files and tool definitions
-  (`tools`) are sent as they are. Function names are not changed.
+- **Only text is pseudonymised.** Images, audio, files (base64, URL or file-id
+  documents such as PDFs) and tool definitions (`tools`) are sent as they are.
+  Function names are not changed. Request parameters such as `user` and
+  `metadata` are sent as they are, and numbers in tool arguments are not
+  scanned.
 - **The answer is restored for whoever reads it.** Restored output can hold
   any value from the prompt. Do not pass it on to someone who should not see
   the prompt.

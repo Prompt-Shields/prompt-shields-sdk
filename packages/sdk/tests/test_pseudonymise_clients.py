@@ -447,3 +447,78 @@ def test_earlier_answer_sent_back_as_history_is_pseudonymised():
     p.restore_response(resp)
     fc = resp["choices"][0]["message"]["function_call"]
     assert json.loads(fc["arguments"]) == {"to": EMAIL}
+
+
+def test_anthropic_documents_and_search_results_are_pseudonymised(calls):
+    client, events = _sync("anthropic")
+    client._upstream.messages.create.return_value = Message.model_validate({
+        "id": "msg", "type": "message", "role": "assistant", "model": "m",
+        "stop_reason": "end_turn", "stop_sequence": None,
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "content": [{"type": "text", "text": f"Owner {_ph('EMAIL')}"}],
+    })
+    search = {"type": "search_result", "source": "https://kb.example/1",
+              "title": f"Ticket from {EMAIL2}",
+              "content": [{"type": "text", "text": f"IBAN {IBAN}"}]}
+    messages = [
+        {"role": "user", "content": [
+            {"type": "document", "title": f"Note for {EMAIL}",
+             "context": f"ID {SE_ID}",
+             "source": {"type": "text", "media_type": "text/plain",
+                        "data": f"Contact {EMAIL} or {EMAIL2}."}},
+            {"type": "document", "source": {"type": "content", "content": [
+                {"type": "text", "text": f"Pay {IBAN}"}]}},
+            {"type": "document", "source": {"type": "content",
+                                            "content": f"ID {SE_ID}"}},
+            search,
+            {"type": "text", "text": "Summarise."},
+        ]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "kb", "input": {"q": "x"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": [search]}]},
+    ]
+    resp = client.chat.completions.create(model="m", messages=messages)
+
+    sent = _sent(client._upstream.messages.create)
+    assert _leaks(sent) == []
+    doc = sent["messages"][0]["content"][0]
+    assert doc["source"]["data"] == f"Contact {_ph('EMAIL')} or {_ph('EMAIL', 2)}."
+    assert doc["source"]["media_type"] == "text/plain"
+    assert doc["title"] == f"Note for {_ph('EMAIL')}"
+    assert sent["messages"][0]["content"][3]["source"] == "https://kb.example/1"
+    assert resp.content[0].text == f"Owner {EMAIL}"
+    assert _leaks(events) == []
+    assert _cleared(calls)
+
+
+def test_document_base64_and_url_sources_are_kept():
+    pdf = {"type": "document", "source": {"type": "base64",
+                                          "media_type": "application/pdf",
+                                          "data": "JVBERi0x"}}
+    url = {"type": "document", "source": {"type": "url", "url": "https://x/a.pdf"}}
+    p = pseudonymise([{"role": "user", "content": [pdf, url]}])
+    assert p.messages[0]["content"] == [pdf, url]
+
+
+@pytest.mark.parametrize("content", [
+    f"Dear {EMAIL}, your IBAN {IBAN}",
+    [{"type": "text", "text": f"Dear {EMAIL}, your IBAN {IBAN}"}],
+])
+def test_openai_prediction_is_pseudonymised(calls, content):
+    client, events = _sync()
+    client._upstream.chat.completions.create.return_value = _completion(
+        f"Dear {_ph('EMAIL')}")
+    prediction = {"type": "content", "content": content}
+    resp = client.chat.completions.create(
+        model="m", messages=MESSAGES, prediction=prediction)
+
+    sent = _sent(client._upstream.chat.completions.create)
+    assert _leaks(sent) == []
+    # Same value, same placeholder as in the messages.
+    assert _ph("EMAIL") in json.dumps(sent["prediction"], ensure_ascii=False)
+    assert sent["prediction"]["type"] == "content"
+    assert prediction["content"] == content  # the caller's dict is not changed
+    assert resp.choices[0].message.content == f"Dear {EMAIL}"
+    assert _leaks(events) == []
+    assert _cleared(calls)
