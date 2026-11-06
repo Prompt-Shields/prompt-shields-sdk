@@ -854,9 +854,18 @@ export const getAnthropicStreamChunkTransform = (
     if (isToolBlockStart) {
       streamState.toolIndex = streamState.toolIndex + 1;
     }
+    // PS fork (#73): server tool blocks (server_tool_use, e.g. web_search)
+    // also stream input as partial_json; only a tool_use block's input is a
+    // client tool call.
+    if (parsedChunk.type === 'content_block_start') {
+      streamState.inServerToolBlock =
+        !isToolBlockStart &&
+        parsedChunk.content_block?.type === 'server_tool_use';
+    }
     const isToolBlockDelta: boolean =
       parsedChunk.type === 'content_block_delta' &&
-      parsedChunk.delta?.partial_json != undefined;
+      parsedChunk.delta?.partial_json != undefined &&
+      !streamState.inServerToolBlock;
 
     if (isToolBlockStart && parsedChunk.content_block) {
       toolCalls.push({

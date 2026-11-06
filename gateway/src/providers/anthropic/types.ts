@@ -3,6 +3,8 @@ import { AnthropicCacheCreation } from '../types';
 export type AnthropicStreamState = {
   containsChainOfThoughtMessage?: boolean;
   toolIndex?: number;
+  /** PS fork (#73): the current content block is a server tool's */
+  inServerToolBlock?: boolean;
   usage?: {
     input_tokens?: number;
     completion_tokens?: number;
