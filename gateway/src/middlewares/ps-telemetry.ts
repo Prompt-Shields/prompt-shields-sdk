@@ -22,7 +22,12 @@ import { PSTelemetrySender } from './psTelemetrySender';
 import { isMcpProxyPath } from '../mcp/paths';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 import { oidcTelemetryFields } from './psOidc/telemetry';
-import { callIdOf, FEEDBACK_PATH, setCallIdHeader } from './psFeedback';
+import {
+  CALL_ID_HEADER,
+  callIdOf,
+  FEEDBACK_PATH,
+  setCallIdHeader,
+} from './psFeedback';
 import { applyBaseline, getBaseline } from './router/baseline';
 import { RESPONSE_HEADER_KEYS } from '../globals';
 import {
@@ -99,7 +104,7 @@ interface TelemetryEvent {
   // the call's tokens would have cost on its baseline model, in USD.
   baseline_id?: string;
   counterfactual_cost?: number;
-  // Exact-match cache (populated by emitCacheTelemetry)
+  // Response cache (#33): the call's lookup, see cacheLookupFields.
   cache_status?: string;
   est_tokens_saved?: number;
   // On a cache hit (#33): the upstream cost the hit avoided, in USD.
@@ -143,7 +148,8 @@ interface TelemetryEvent {
   fallback_chain?: string[];
   // Spend budgets (#28, psBudget; schemas/budget/README.md): the call's
   // budget state (ok, warn, unknown, exceeded), the budget that set it, and
-  // what the gateway did (none, downgraded).
+  // what the gateway did (none, downgraded, or blocked on the event of a
+  // refused call, see budgetBlockedEvent).
   budget_state?: string;
   budget_id?: string;
   budget_action?: string;
@@ -512,38 +518,113 @@ export function withBaseline(event: TelemetryEvent): TelemetryEvent {
   }
 }
 
-export function buildCacheEvent(
-  cacheStatus: string,
-  requestBody: any,
-  vendor: string
-): TelemetryEvent {
-  const isHit = cacheStatus === 'HIT' || cacheStatus === 'SEMANTIC HIT';
-  const estTokens = isHit
-    ? Math.ceil(JSON.stringify(requestBody ?? {}).length / 4)
-    : 0;
+/**
+ * The cache lookup of a call (#33), for its own event: `cache_status` for
+ * every lookup the cache made (not `DISABLED`), and `est_tokens_saved`, a
+ * rough estimate of the prompt tokens a hit did not send (request JSON
+ * characters / 4; 0 on a miss). The call's event carries it, once per
+ * request, so a lookup is reported with the call's attribution and is never
+ * a second event: there is no separate cache-only event (it used to be sent
+ * per lookup, and per failover attempt). `status` is the final response's
+ * cache status header, so a call that tried several targets reports the
+ * lookup of the attempt that answered.
+ */
+export function cacheLookupFields(
+  status: string,
+  requestBody: any
+): Pick<TelemetryEvent, 'cache_status' | 'est_tokens_saved'> {
+  if (!status || status === 'DISABLED') return {};
   return {
-    vendor,
-    model: requestBody?.model || 'unknown',
-    source: 'gateway',
-    cache_status: cacheStatus,
-    est_tokens_saved: estTokens,
+    cache_status: status,
+    est_tokens_saved: status.endsWith('HIT')
+      ? Math.ceil(JSON.stringify(requestBody ?? {}).length / 4)
+      : 0,
   };
 }
 
-// Fail-open emit from a spot that already knows cacheStatus (handlerUtils).
-export function emitCacheTelemetry(
-  cacheStatus: string,
-  requestBody: any,
-  vendor: string
-): void {
+/** The final cache status of a response (the last one, if repeated). */
+export function cacheStatusOf(res: Response): string {
+  const raw = res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
+  const parts = raw.split(',');
+  return parts[parts.length - 1].trim();
+}
+
+/** `waitUntil` of the Workers execution context; a no-op on Node. */
+function waitUntilOf(c: any): (p: Promise<unknown>) => void {
   try {
-    if (!cacheStatus || cacheStatus === 'DISABLED') return;
-    sendTelemetry(buildCacheEvent(cacheStatus, requestBody, vendor)).catch(
-      () => {}
-    );
+    const ctx = c.executionCtx;
+    if (ctx?.waitUntil) return (p) => ctx.waitUntil(p);
   } catch {
-    /* fail-open */
+    /* no execution context */
   }
+  return () => {};
+}
+
+/**
+ * The event of a call psBudget refused (#28): HTTP 429 `budget_exceeded`
+ * (`budget_state: exceeded`) or 503 `budget_store_unavailable` with
+ * `on_store_error: closed` (`budget_state: unknown`), both with
+ * `budget_action: blocked`. No provider was called, so it has no usage,
+ * latency, cost, served provider or outcome signals; it carries the call's
+ * attribution, the requested model and the call id (also set on the
+ * response), so the collector can count blocked calls per asset. It is not
+ * a security event (psSecurityEvents counts budget 429s in a metric only).
+ */
+export function budgetBlockedEvent(
+  c: any,
+  opts: {
+    vendor: string;
+    model?: string;
+    state: 'exceeded' | 'unknown';
+    budgetId: string;
+  }
+): TelemetryEvent {
+  const headers = Object.fromEntries(c.req.raw.headers) as Record<
+    string,
+    string
+  >;
+  const path = new URL(c.req.url).pathname;
+  const event: TelemetryEvent = {
+    vendor: opts.vendor,
+    model: opts.model || 'unknown',
+    source: 'gateway',
+    api_surface: apiSurfaceOf(path),
+    modality: modalityOf(path),
+    ...extractPSHeaders(headers),
+    ...oidcTelemetryFields(c.get(OIDC_IDENTITY_KEY)),
+    call_id: callIdOf(c),
+    budget_state: opts.state,
+    budget_id: opts.budgetId,
+    budget_action: 'blocked',
+  };
+  const fingerprint = c.get(CREDENTIAL_FINGERPRINT_KEY);
+  if (typeof fingerprint === 'string' && fingerprint) {
+    event.api_key_fingerprint = fingerprint;
+  }
+  return event;
+}
+
+/**
+ * Sends the event of a refused call (budgetBlockedEvent) and sets its
+ * X-PS-Call-Id on `res`. Fire-and-forget and fail-open: returns `res`.
+ */
+export function emitBudgetBlocked(
+  c: any,
+  res: Response,
+  opts: Parameters<typeof budgetBlockedEvent>[1]
+): Response {
+  try {
+    const event = budgetBlockedEvent(c, opts);
+    try {
+      res.headers.set(CALL_ID_HEADER, event.call_id!);
+    } catch {
+      /* immutable headers: the event still names the call */
+    }
+    waitUntilOf(c)(sendTelemetry(event).catch(() => {}));
+  } catch (err) {
+    console.warn('[PS Telemetry] budget refusal event skipped:', err);
+  }
+  return res;
 }
 
 /**
@@ -800,21 +881,15 @@ export function psTelemetry() {
       // the event is sent once the client has received the whole stream.
       // On Workers, keep the isolate alive until the send settles (Node has
       // no execution context: the sender is flushed at shutdown instead).
-      let waitUntil: (p: Promise<unknown>) => void = () => {};
-      try {
-        const ctx = c.executionCtx;
-        if (ctx?.waitUntil) waitUntil = (p) => ctx.waitUntil(p);
-      } catch {
-        /* no execution context */
-      }
+      const waitUntil = waitUntilOf(c);
       // The model that ran prices the call (SDK: served, then requested).
       // A response served from the gateway cache cost nothing upstream: it
       // is recorded at cost 0 with `cost_source: cache` and what it saved.
       const served =
         responseBody?.model || (route && sentModelOf(c)) || route?.servedModel;
-      const cacheStatus =
-        c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
+      const cacheStatus = cacheStatusOf(c.res);
       const cacheHit = cacheStatus.endsWith('HIT');
+      Object.assign(event, cacheLookupFields(cacheStatus, requestBody));
       const priced = (e: TelemetryEvent, m?: string) =>
         cacheHit ? withCacheHit(e, cacheStatus, m) : withCost(e, m);
       const stream = observeStream(c);

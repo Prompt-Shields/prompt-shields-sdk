@@ -346,6 +346,7 @@ const OPERATIONS: Record<string, Operation> = {
   'POST /partner/v1/spend-alerts/{alert_id}/acknowledge': { methods: ['spendAlerts.acknowledge'] },
   'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,
   'POST /api/v1/admin/cloud-inventory/pull': NOT_WRAPPED,
+  'POST /api/v1/admin/cloud-inventory/import': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/leanix/sync': NOT_WRAPPED,
   'GET /api/v1/admin/connectors/leanix/status': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/servicenow/sync': NOT_WRAPPED,

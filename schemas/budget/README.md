@@ -121,9 +121,15 @@ Every event of a call with at least one matching budget carries:
 |---|---|
 | `budget_state` | `ok`, `warn`, `unknown`, `exceeded` |
 | `budget_id` | The budget that set the state |
-| `budget_action` | `none` or `downgraded` |
+| `budget_action` | `none` or `downgraded`; `blocked` on a refused call's event |
 
-A blocked call sends nothing, so it has no event.
+The gateway sends one event for a call it refuses (HTTP 429
+`budget_exceeded` with `budget_state: exceeded`, or 503
+`budget_store_unavailable` with `budget_state: unknown`), with
+`budget_action: blocked`, the budget's id, the call's attribution, the
+requested model and its call id. No provider was called, so the event has no
+usage, cost or latency. The SDK raises `BudgetExceeded` before the call and
+sends no event for it.
 
 ## SDK stores
 

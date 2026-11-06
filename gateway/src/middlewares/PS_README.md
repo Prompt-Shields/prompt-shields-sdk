@@ -100,6 +100,10 @@ yet:
   changes the model only; every attempt uses the request's own provider and
   credentials (`x-portkey-provider` + `Authorization`, or a single-target
   config).
+- **Run the routing learner in auto mode, or pseudonymise.** Both run only
+  in the SDK: auto mode in `ShieldsRouter` (local mode), pseudonymisation
+  there and in the instrumented clients. Both refuse them for calls sent to
+  the gateway. The gateway classifies and routes what it receives.
 
 The SDK's ordinary clients never pick a model (`ShieldsRouter` is the opt-in
 exception). They express *intent*; the gateway owns the
@@ -338,6 +342,20 @@ the caller's intent or session and are not emitted here. A gateway cache hit
 (`cost_source: cache`) carries no outcome signals: it is not a model call,
 and its answer's outcome was reported by the call that filled the cache.
 
+**Cache lookups (#33).** A call the response cache looked up (exact or
+semantic; not `DISABLED`) carries `cache_status` (`HIT`, `MISS`,
+`SEMANTIC HIT`, `SEMANTIC MISS`, `SEMANTIC BYPASS`, `REFRESH`) and
+`est_tokens_saved` (request JSON characters / 4 on a hit, else 0) on its own
+event. A hit is also priced at `cost: 0` with `cost_source: cache` and
+`cache_saved_cost`. That is the only event: the gateway used to send a
+separate cache-only event per lookup (no attribution, no call id, one per
+failover attempt), which joined the wrong asset, counted as an extra request
+and counted hits twice. The status is the final response's, so a call that
+fell back to another target reports one lookup. A collector computing a hit
+rate counts each event with a `cache_status` once: released gateways (up to
+sdk v0.4.0) sent the cache-only event per lookup and no `cache_status` on the
+call's event, so that count is right for them too.
+
 ## psBudget/ (spend budgets, #28)
 
 A `budget.v1` document (`schemas/budget/`, shared with the SDK: same
@@ -385,7 +403,14 @@ before it. The SDK ignores the set.
 
 Responses carry `x-ps-budget-state`; telemetry events carry `budget_state`
 (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`
-(`none`, `downgraded`). Prometheus (with `PS_METRICS_ENABLED`):
+(`none`, `downgraded`). A refused call never reaches `ps-telemetry`, so
+psBudget sends its event itself (`emitBudgetBlocked`): one event with
+`budget_action: blocked` and `budget_state: exceeded` (429) or `unknown`
+(503, `on_store_error: closed`), the budget id, the `X-PS-*` attribution, the
+requested model and the call id (also returned as `X-PS-Call-Id`). No
+provider was called, so it has no usage, latency, cost or served provider;
+the collector counts it in `budget_blocked_requests`. It is still not a
+security event. Prometheus (with `PS_METRICS_ENABLED`):
 `ps_gateway_budget_decisions_total{budget,state,action}`,
 `ps_gateway_budget_spend_usd{budget,window}` (budgets with a concrete
 subject), `ps_gateway_budget_limit_usd{budget,window}` and

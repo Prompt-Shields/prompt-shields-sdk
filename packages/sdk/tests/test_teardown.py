@@ -325,6 +325,25 @@ def test_learning_tuples():
     assert tok[4]["features"]["complexity"] == "complex"
 
 
+def test_learning_tuples_pass_through_the_auto_mode_propensity(tmp_path):
+    base = {"timestamp": "2026-11-06T08:00:00Z", "vendor": "openai", "model": "auto",
+            "served_model": "gpt-4o-mini", "tokens_in": 100, "tokens_out": 20,
+            "source": "sdk", "use_case_name": "support"}
+    rows = [
+        {**base, "route_learner_mode": "explore", "route_propensity": 0.025,
+         "route_learner_version": "lv1-0123456789abcdef", "route_learner_frozen": False},
+        {**base, "route_learner_mode": "exploit", "route_propensity": 0.0},  # not usable
+        base,
+    ]
+    path = tmp_path / "events.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    t1, t2, t3 = learning_tuples(price_records(load_records([path]).records))
+    assert t1["propensity"] == 0.025 and t1["learner_mode"] == "explore"
+    assert t1["learner_version"] == "lv1-0123456789abcdef"
+    for t in (t2, t3):
+        assert {"propensity", "learner_mode", "learner_version"}.isdisjoint(t)
+
+
 # --- CLI ------------------------------------------------------------------------------
 
 

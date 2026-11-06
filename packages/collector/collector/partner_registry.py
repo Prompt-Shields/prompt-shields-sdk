@@ -41,7 +41,7 @@ from collector.attestation import (
     attestation_changes_since,
 )
 from collector.audit import record_read
-from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE
+from collector.ingest import CACHE_HIT_STATUSES, LEARNER_EXPLORE
 from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.loss_accounting import tenant_coverage
 from collector.mcp_usage import MAX_PAGE, tools_page, usage_page
@@ -492,6 +492,7 @@ async def get_usage_summary(
                     ).label("fallback_requests"),
                     *sovereign_share_columns(),
                     *budget_cache_columns(),
+                    *learner_columns(),
                     *outcome_signal_columns(),
                 ).where(
                     AIUsageEvent.asset_id == asset_id,
@@ -543,6 +544,7 @@ def _usage_summary_dict(row, period: str) -> dict:
         ),
         "sovereign_share": sovereign_share(row),
         **budget_cache_summary(row),
+        **learner_summary(row),
         **outcome_signal_counts(row),
         "period": period,
     }
@@ -554,15 +556,19 @@ def budget_cache_columns() -> list:
     count() skips NULL, so the *_reported counts are the events that sent
     the field at all, and the case() counts only the matching ones.
 
-    The gateway reports a cache lookup twice: a cache-only event for every
-    lookup (any status, no cost_source) and, on a hit, the call's own event
-    with the same cache_status and cost_source "cache". The hit rate counts
-    only the former, so a hit is counted once and misses are in the
-    denominator.
+    The gateway reports each cache lookup once: current gateways as
+    cache_status on the call's own event (cost_source "cache" on a hit),
+    released gateways up to sdk v0.4.0 as a cache-only event per lookup (no
+    cost_source; the call's own event has no cache_status). So every event
+    with a cache_status is one lookup, and the hit rate is right for both,
+    and for a mix of them during a rollout. Only unreleased main builds
+    between #261 and the per-request event sent a hit twice (the cache-only
+    event and the call's cost_source "cache" event); taking hits from
+    cost_source "cache" events alone would instead count no hit at all for
+    the released gateways.
     """
     action = AIUsageEvent.budget_action
-    lookup = AIUsageEvent.cost_source.is_distinct_from(COST_SOURCE_CACHE)
-    status = case((lookup, AIUsageEvent.cache_status))
+    status = AIUsageEvent.cache_status
     return [
         func.count(action).label("budget_reported"),
         func.count(case((action == "downgraded", 1))).label("budget_downgraded"),
@@ -570,6 +576,7 @@ def budget_cache_columns() -> list:
         func.count(status).label("cache_reported"),
         func.count(case((status.in_(CACHE_HIT_STATUSES), 1))).label("cache_hits"),
         func.sum(AIUsageEvent.cache_saved_cost).label("cache_saved_usd"),
+        func.sum(AIUsageEvent.est_tokens_saved).label("cache_tokens_saved"),
     ]
 
 
@@ -579,13 +586,15 @@ def budget_cache_summary(row) -> dict:
     Each is null when no event in the window reported what it needs: the
     budget counts when none reported a budget_action, cache_hit_rate when
     none reported a cache_status, cache_saved_usd when none reported a
-    cache_saved_cost. cache_hit_rate is the share of the gateway's cache
+    cache_saved_cost, cache_tokens_saved when none reported an
+    est_tokens_saved. cache_hit_rate is the share of the gateway's cache
     lookup events that were hits (exact or semantic); see
     budget_cache_columns.
     """
     budget_reported = int(row["budget_reported"] or 0)
     cache_reported = int(row["cache_reported"] or 0)
     saved = row["cache_saved_usd"]
+    tokens_saved = row["cache_tokens_saved"]
     return {
         "budget_downgraded_requests": (
             int(row["budget_downgraded"] or 0) if budget_reported else None
@@ -595,6 +604,39 @@ def budget_cache_summary(row) -> dict:
             round(int(row["cache_hits"] or 0) / cache_reported, 4) if cache_reported else None
         ),
         "cache_saved_usd": round(float(saved), 6) if saved is not None else None,
+        "cache_tokens_saved": int(tokens_saved) if tokens_saved is not None else None,
+    }
+
+
+def learner_columns() -> list:
+    """Aggregate columns for the routing learner's auto mode (#34).
+
+    count() skips NULL: route_learner_mode is set only on calls the learner
+    decided, so learner_requests counts those and learner_explored the
+    ones it explored.
+    """
+    mode = AIUsageEvent.route_learner_mode
+    return [
+        func.count(mode).label("learner_requests"),
+        func.count(case((mode == LEARNER_EXPLORE, 1))).label("learner_explored"),
+    ]
+
+
+def learner_summary(row) -> dict:
+    """Routing learner fields of `UsageSummary`.
+
+    learner_routed_share is the share of all events the learner decided
+    (exploit, explore or policy); 0 when it decided none, null only when
+    there were no events. learner_explore_share is the share of the
+    learner-decided events that it explored; null when it decided none.
+    """
+    total = int(row["total_requests"] or 0)
+    learner = int(row["learner_requests"] or 0)
+    explored = int(row["learner_explored"] or 0)
+    return {
+        "learner_requests": learner,
+        "learner_routed_share": round(learner / total, 4) if total else None,
+        "learner_explore_share": round(explored / learner, 4) if learner else None,
     }
 
 

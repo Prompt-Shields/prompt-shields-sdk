@@ -1,0 +1,29 @@
+{
+    "provisionedModelSummaries": [
+        {
+            "provisionedModelName": "claims-tuned-v2-pt",
+            "provisionedModelArn": "arn:aws:bedrock:eu-central-1:123456789012:provisioned-model/7t2kq9xw4m1z",
+            "modelArn": "arn:aws:bedrock:eu-central-1:123456789012:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/claims-tuned-v2",
+            "desiredModelArn": "arn:aws:bedrock:eu-central-1:123456789012:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/claims-tuned-v2",
+            "foundationModelArn": "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
+            "modelUnits": 1,
+            "desiredModelUnits": 1,
+            "status": "InService",
+            "commitmentDuration": "OneMonth",
+            "creationTime": "2026-09-15T09:00:00+00:00",
+            "lastModifiedTime": "2026-09-15T09:30:00+00:00"
+        },
+        {
+            "provisionedModelName": "old-pt",
+            "provisionedModelArn": "arn:aws:bedrock:eu-central-1:123456789012:provisioned-model/0000failed00",
+            "modelArn": "arn:aws:bedrock:eu-central-1::foundation-model/amazon.titan-text-express-v1:0:8k",
+            "desiredModelArn": "arn:aws:bedrock:eu-central-1::foundation-model/amazon.titan-text-express-v1:0:8k",
+            "foundationModelArn": "arn:aws:bedrock:eu-central-1::foundation-model/amazon.titan-text-express-v1:0:8k",
+            "modelUnits": 1,
+            "desiredModelUnits": 1,
+            "status": "Failed",
+            "creationTime": "2026-07-01T09:00:00+00:00",
+            "lastModifiedTime": "2026-07-01T09:05:00+00:00"
+        }
+    ]
+}

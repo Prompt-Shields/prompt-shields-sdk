@@ -5,8 +5,9 @@
  * shared counters (./keys.ts), in Redis for every replica and the SDK.
  *
  * Per billed call, mounted after psRouter (it sees the routed model and its
- * estimate) and before psTelemetry (refused calls send no event; served
- * calls carry budget_state):
+ * estimate) and before psTelemetry (served calls carry budget_state; a
+ * refused call never reaches psTelemetry and sends its own event with
+ * budget_action "blocked", see emitBudgetBlocked):
  *
  * 1. Read every matching budget's counter (plus the gateway's in-flight
  *    reservations) and decide as schemas/budget/README.md says (`decide`,
@@ -43,6 +44,7 @@ import { ServedTarget, tierServesTarget } from '../psServedTarget';
 import { observeStream, StreamSummary } from '../psStreamObserver';
 import {
   detectVendor,
+  emitBudgetBlocked,
   providerFromHeaders,
   reportsOwnUsage,
   requestBodyForTelemetry,
@@ -563,13 +565,33 @@ export function psBudget(options: PsBudgetOptions = {}) {
         });
     };
 
+    // A refused call sends its own event (budget_action: blocked):
+    // psTelemetry, mounted after this middleware, never sees it.
+    const blocked = (
+      res: Response,
+      state: 'exceeded' | 'unknown',
+      id: string
+    ) =>
+      emitBudgetBlocked(c, res, {
+        vendor,
+        model: route?.requestedModel ?? body?.model,
+        state,
+        budgetId: id,
+      });
+    const exceeded = (s: Matched, used: number) =>
+      blocked(
+        budgetExceededResponse(c, s, used, nowMs),
+        'exceeded',
+        s.budget.id
+      );
+    const unavailable = (id: string) =>
+      blocked(storeUnavailableResponse(c, id), 'unknown', id);
+
     // 2. Block.
     if (decision.blockedBy) {
       record('block');
       const s = decision.blockedBy;
-      return s.spent === null
-        ? storeUnavailableResponse(c, s.budget.id)
-        : budgetExceededResponse(c, s, s.spent, nowMs);
+      return s.spent === null ? unavailable(s.budget.id) : exceeded(s, s.spent);
     }
 
     // 3. Downgrade: clamp the estimate to the ceiling.
@@ -653,12 +675,7 @@ export function psBudget(options: PsBudgetOptions = {}) {
             // Another call (on any replica) used up the budget meanwhile.
             await release();
             record('block');
-            return budgetExceededResponse(
-              c,
-              tightest!,
-              r.spent + r.reserved,
-              nowMs
-            );
+            return exceeded(tightest!, r.spent + r.reserved);
           }
           reserved.push(onKey[0]);
         } catch (err) {
@@ -666,7 +683,7 @@ export function psBudget(options: PsBudgetOptions = {}) {
           if (onStoreError === 'closed' && tightest) {
             await release();
             record('block');
-            return storeUnavailableResponse(c, tightest.budget.id);
+            return unavailable(tightest.budget.id);
           }
         }
       }
