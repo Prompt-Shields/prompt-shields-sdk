@@ -67,8 +67,19 @@ ps-teardown reconcile events.jsonl --usage usage-anthropic.json --format json --
   not discounts or credits, which only an invoice shows. Give one or the other per provider.
 - Models are matched by base name on both sides: lower-cased, without a `provider/` or
   `models/` prefix, an OpenAI-style version date (`gpt-4o-2024-08-06` -> `gpt-4o`) or a
-  Bedrock cross-region prefix (`us.`), the same stripping the SDK's pricing applies. An
-  invoice CSV over 32 MiB or past 200,000 rows is not read (counted as `too_large` /
+  Bedrock cross-region prefix (`us.`), the same stripping the SDK's pricing applies. Provider
+  aliases are then folded into one key: a model name the bundled catalog lists (or an
+  `aliases` entry on a catalog model) is kept; otherwise each provider's documented
+  convention applies. Anthropic `-latest`, `-0` (`claude-sonnet-4-0`) and Vertex AI ids
+  (`claude-3-5-sonnet-v2@20241022`) map to the catalog's dated snapshot when it lists exactly
+  one, and a dated id maps to the catalog's undated name (`claude-sonnet-4-5-20250929` ->
+  `claude-sonnet-4-5`); a snapshot the catalog does not list (`claude-3-5-sonnet-20240620`)
+  is never folded into one it does. Gemini `-latest` and `-001` / `-002` versions are the
+  base model; variants (`-lite`, `-8b`) and previews stay separate. Mistral `-YYMM` versions
+  and `-latest` are one row (so two dated versions of one Mistral model are compared
+  together). Legacy OpenAI `-MMDD` snapshots (`gpt-4-0613`) are the base model when the
+  catalog lists it; `chatgpt-4o-latest` stays separate from `gpt-4o`. Names that already
+  matched still match. An invoice CSV over 32 MiB or past 200,000 rows is not read (counted as `too_large` /
   `too_many_rows`).
 - Only days inside the provider side's window are compared; Prompt Shields events outside
   it are counted. A provider with no provider-side data is listed as not compared.
