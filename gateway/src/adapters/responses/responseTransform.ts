@@ -29,6 +29,7 @@ import {
   toResponsesUsage,
 } from '../shared';
 import { randomUUID } from 'crypto';
+import { encodeThinkingCarry } from './thinkingCarry';
 
 type ResponseStatus = 'completed' | 'incomplete' | 'in_progress';
 
@@ -123,6 +124,9 @@ export function transformChatCompletionsToResponses(
     if (msg.content_blocks?.length) {
       for (const block of msg.content_blocks) {
         // Handle thinking blocks (Anthropic, OpenRouter format)
+        // PS fork (#73): signed and redacted thinking travel in
+        // encrypted_content so the next turn can send them back
+        const encrypted = encodeThinkingCarry(provider, [block]);
         if (block.thinking || block.type === 'thinking') {
           const thinkingText = block.thinking || block.text || '';
           reasoningItems.push({
@@ -134,6 +138,14 @@ export function transformChatCompletionsToResponses(
                 text: thinkingText,
               },
             ],
+            ...(encrypted ? { encrypted_content: encrypted } : {}),
+          } as ResponseOutputItemReasoning);
+        } else if (block.type === 'redacted_thinking' && encrypted) {
+          reasoningItems.push({
+            id: `rs_${randomUUID()}`,
+            type: 'reasoning',
+            summary: [],
+            encrypted_content: encrypted,
           } as ResponseOutputItemReasoning);
         }
       }
