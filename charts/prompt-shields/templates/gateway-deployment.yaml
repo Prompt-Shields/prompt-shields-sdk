@@ -29,6 +29,9 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if $g.routePolicy }}
+        checksum/route-policy: {{ include (print $.Template.BasePath "/gateway-route-policy.yaml") . | sha256sum }}
+        {{- end }}
         {{- if $.Values.secrets.create }}
         checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
         {{- end }}
@@ -110,6 +113,13 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if $g.routePolicy }}
+            # A directory mount (no subPath), so ConfigMap updates reach the
+            # file and PS_ROUTE_POLICY_RELOAD_SECONDS can pick them up.
+            - name: route-policy
+              mountPath: /etc/prompt-shields/route-policy
+              readOnly: true
+            {{- end }}
             {{- with $g.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -117,6 +127,11 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
+        {{- if $g.routePolicy }}
+        - name: route-policy
+          configMap:
+            name: {{ include "ps.fullname" . }}-gateway-route-policy
+        {{- end }}
         {{- with $g.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

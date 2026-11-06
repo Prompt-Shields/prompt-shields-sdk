@@ -1,0 +1,14 @@
+{{- if and .Values.gateway.enabled .Values.gateway.routePolicy }}
+{{- $policy := .Values.gateway.routePolicy }}
+{{- if ne (toString (get $policy "schema_version")) "route-policy.v1" }}
+{{- fail "gateway.routePolicy.schema_version must be route-policy.v1" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ps.fullname" . }}-gateway-route-policy
+  labels:
+    {{- include "ps.labels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+data:
+  route-policy.json: {{ toJson $policy | quote }}
+{{- end }}

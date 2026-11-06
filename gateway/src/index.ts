@@ -16,6 +16,7 @@ import { requestValidator } from './middlewares/requestValidator';
 import { hooks } from './middlewares/hooks';
 import { memoryCache } from './middlewares/cache';
 import { psRouter } from './middlewares/router/hono';
+import { loadedRoutePolicy } from './middlewares/router/policyDoc';
 import { psBudget } from './middlewares/psBudget';
 import { budgetsRequested } from './middlewares/psBudget/config';
 import { psTelemetry } from './middlewares/ps-telemetry';
@@ -155,7 +156,13 @@ app.post('/v1/feedback', psFeedbackHandler);
 // Prompt Shields cost-aware routing (opt-in). Runs before hooks and cache so
 // the resolved model flows into cache-key computation and downstream handlers.
 // Fail-open: non-JSON / unhinted requests pass through untouched.
-if (process.env.PS_ROUTER_ENABLED === 'true') {
+// PS_ROUTE_POLICY_FILE (#336) mounts it with the operator's route-policy.v1
+// document (loaded and validated by start-server.ts before serving, so its
+// data policy gate applies to every model call); otherwise PS_ROUTER_ENABLED
+// mounts it with the built-in policy.
+if (process.env.PS_ROUTE_POLICY_FILE) {
+  app.use('*', psRouter(loadedRoutePolicy));
+} else if (process.env.PS_ROUTER_ENABLED === 'true') {
   app.use('*', psRouter());
 }
 
