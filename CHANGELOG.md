@@ -220,6 +220,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Security
 
+- **Gateway: Node 24 LTS image and CI** (refs #208, follow-up F2). Both stages of `gateway/Dockerfile` now use `node:24.22.2-alpine3.24` (was `node:20-alpine`; Node 20 is end of life). Node 24.22's bundled root store no longer trusts the distrusted emSign ECC Root CA - G3, C1 and C3 roots. The build stage uses the npm bundled with that image (11.x) instead of installing npm 10.9.2. The CI gateway job runs Node 24. Node 24 logs one `DEP0030` (`SlowBuffer`) deprecation warning when the Cohere batch-output code loads `avsc` 5.7.7; it is harmless on Node 24, but `SlowBuffer` is removed in Node 25.
 - **Gateway: Portkey upstream triage since enterprise 2.28.0** (refs #208). OSS `main` and `2.0.0` have no new commits. All 89 enterprise changelog entries from 2.29.0 to 2.33.0 are classified, one row each, in `gateway/docs/upstream-triage-2026-11.md`. Ported here, each re-implemented from its changelog line with a test:
   - (security) Runtime dependencies moved past their advisories: `hono` 4.13.13, `@hono/node-server` 1.19.17 and `ws` 8.22.0.
   - (security) Vertex AI region, project id and model are checked before they go into the upstream URL. A crafted `x-portkey-vertex-region` could rewrite the upstream host.
