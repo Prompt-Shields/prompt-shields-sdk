@@ -42,6 +42,7 @@
             "audio_tokens",
             "tool_fee",
             "provider_reported",
+            "reasoning",
             "usage_units"
           ]
         },
@@ -62,6 +63,7 @@
             "tokens_cache_write_1h": { "$ref": "#/$defs/count" },
             "tokens_audio_in": { "$ref": "#/$defs/count" },
             "tokens_audio_out": { "$ref": "#/$defs/count" },
+            "tokens_reasoning": { "$ref": "#/$defs/count" },
             "web_search_requests": { "$ref": "#/$defs/count" },
             "service_tier": { "type": "string" },
             "provider_cost": { "type": "number", "minimum": 0 },

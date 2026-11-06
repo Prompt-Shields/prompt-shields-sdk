@@ -6,7 +6,8 @@
   "notes": [
     "Hand-maintained source for scripts/build_catalog.py. Edit this file, then run `python scripts/build_catalog.py` to regenerate packages/sdk/prompt_shields/catalog.json and gateway/src/middlewares/router/defaultPolicy.json. CI fails when the generated files drift from this source.",
     "Model entries use LiteLLM model_prices_and_context_window.json field names: prices are per token in `currency` (USD unless stated). `litellm_key` names the LiteLLM entry used to cross-check the entry (`--litellm`).",
-    "Sovereignty fields are set per provider and copied onto each of its models; a model entry may override them. null means unknown or not verified, and policies must treat it as non-compliant. `us_cloud_act_exposure` reflects the provider's ownership and hosting, not a legal opinion. `zdr` is true only when prompts and outputs are not retained by default; ZDR available on request is false with a note. `certifications` lists company-level certifications, whose scope may not cover the inference service."
+    "Sovereignty fields are set per provider and copied onto each of its models; a model entry may override them. null means unknown or not verified, and policies must treat it as non-compliant. `us_cloud_act_exposure` reflects the provider's ownership and hosting, not a legal opinion. `zdr` is true only when prompts and outputs are not retained by default; ZDR available on request is false with a note. `certifications` lists company-level certifications, whose scope may not cover the inference service.",
+    "Models billed per unit rather than per token carry LiteLLM per-unit prices instead of token prices: `input_cost_per_second` (speech to text), `input_cost_per_character` (text to speech), `ocr_cost_per_page` (OCR) and `input_cost_per_query` (rerank search units). Generated images are priced by `output_cost_per_image_by_quality` ({quality: {size: USD per image}}), a catalog field LiteLLM does not have. Models billed by tokens are not given unit prices (their unit counts cannot be priced exactly), and prices that could not be confirmed are left out rather than guessed."
   ],
   "providers": {
     "openai": {
@@ -108,6 +109,20 @@
       "trains_on_data": null,
       "certifications": [],
       "notes": "Not verified."
+    },
+    "elevenlabs": {
+      "name": "ElevenLabs API",
+      "kind": "direct",
+      "api_base": "https://api.elevenlabs.io/v1",
+      "openai_compatible": false,
+      "jurisdiction": null,
+      "hosting_countries": null,
+      "provider_hq_country": null,
+      "us_cloud_act_exposure": null,
+      "zdr": null,
+      "trains_on_data": null,
+      "certifications": [],
+      "notes": "Speech to text and text to speech, priced per unit (seconds, characters), not per token. Not verified."
     },
     "berget": {
       "name": "Berget AI",
@@ -2047,6 +2062,169 @@
       ],
       "provider_hq_country": "IT",
       "us_cloud_act_exposure": false,
+      "zdr": null,
+      "trains_on_data": null,
+      "certifications": []
+    },
+    "openai/whisper-1": {
+      "provider": "openai",
+      "model": "whisper-1",
+      "currency": "USD",
+      "mode": "audio_transcription",
+      "litellm_key": "whisper-1",
+      "source": "pricing.py UNIT_PRICING, https://platform.openai.com/docs/pricing (checked 2026-10-18, cross-checked with LiteLLM 1.105.1)",
+      "comment": "Whisper $0.006 / minute.",
+      "input_cost_per_second": 0.0001,
+      "jurisdiction": "US",
+      "hosting_countries": [
+        "US"
+      ],
+      "provider_hq_country": "US",
+      "us_cloud_act_exposure": true,
+      "zdr": false,
+      "trains_on_data": false,
+      "certifications": [
+        "SOC 2 Type 2"
+      ]
+    },
+    "openai/tts-1": {
+      "provider": "openai",
+      "model": "tts-1",
+      "currency": "USD",
+      "mode": "audio_speech",
+      "litellm_key": "tts-1",
+      "source": "pricing.py UNIT_PRICING, https://platform.openai.com/docs/pricing (checked 2026-10-18, cross-checked with LiteLLM 1.105.1)",
+      "comment": "TTS $15 / 1M characters.",
+      "input_cost_per_character": 1.5e-05,
+      "jurisdiction": "US",
+      "hosting_countries": [
+        "US"
+      ],
+      "provider_hq_country": "US",
+      "us_cloud_act_exposure": true,
+      "zdr": false,
+      "trains_on_data": false,
+      "certifications": [
+        "SOC 2 Type 2"
+      ]
+    },
+    "openai/tts-1-hd": {
+      "provider": "openai",
+      "model": "tts-1-hd",
+      "currency": "USD",
+      "mode": "audio_speech",
+      "litellm_key": "tts-1-hd",
+      "source": "pricing.py UNIT_PRICING, https://platform.openai.com/docs/pricing (checked 2026-10-18, cross-checked with LiteLLM 1.105.1)",
+      "comment": "TTS HD $30 / 1M characters.",
+      "input_cost_per_character": 3e-05,
+      "jurisdiction": "US",
+      "hosting_countries": [
+        "US"
+      ],
+      "provider_hq_country": "US",
+      "us_cloud_act_exposure": true,
+      "zdr": false,
+      "trains_on_data": false,
+      "certifications": [
+        "SOC 2 Type 2"
+      ]
+    },
+    "openai/gpt-image-1": {
+      "provider": "openai",
+      "model": "gpt-image-1",
+      "currency": "USD",
+      "mode": "image_generation",
+      "source": "pricing.py IMAGE_PRICING, https://platform.openai.com/docs/pricing \"Image generation\" (checked 2026-10-18)",
+      "comment": "gpt-image-1 bills image output tokens; these are OpenAI's published per-image equivalents, used when only an image count is known. Token prices are not catalogued.",
+      "output_cost_per_image_by_quality": {
+        "low": {
+          "1024x1024": 0.011,
+          "1024x1536": 0.016,
+          "1536x1024": 0.016
+        },
+        "medium": {
+          "1024x1024": 0.042,
+          "1024x1536": 0.063,
+          "1536x1024": 0.063
+        },
+        "high": {
+          "1024x1024": 0.167,
+          "1024x1536": 0.25,
+          "1536x1024": 0.25
+        }
+      },
+      "jurisdiction": "US",
+      "hosting_countries": [
+        "US"
+      ],
+      "provider_hq_country": "US",
+      "us_cloud_act_exposure": true,
+      "zdr": false,
+      "trains_on_data": false,
+      "certifications": [
+        "SOC 2 Type 2"
+      ]
+    },
+    "mistral/mistral-ocr-2512": {
+      "provider": "mistral",
+      "model": "mistral-ocr-2512",
+      "currency": "USD",
+      "mode": "ocr",
+      "source": "pricing.py UNIT_PRICING, https://mistral.ai/news/mistral-ocr-3 and https://mistral.ai/pricing (checked 2026-10-18)",
+      "comment": "Mistral OCR 3: $2 / 1,000 pages; annotations are billed apart and not included. Mistral OCR 2505 and the moving mistral-ocr-latest alias are left out (prices not confirmed).",
+      "ocr_cost_per_page": 0.002,
+      "jurisdiction": "EEA",
+      "hosting_countries": null,
+      "provider_hq_country": "FR",
+      "us_cloud_act_exposure": null,
+      "zdr": false,
+      "trains_on_data": false,
+      "certifications": []
+    },
+    "cohere/rerank-v3.5": {
+      "provider": "cohere",
+      "model": "rerank-v3.5",
+      "currency": "USD",
+      "mode": "rerank",
+      "source": "pricing.py UNIT_PRICING, https://cohere.com/pricing (checked 2026-10-18; the page was not indexed, the rate is from LiteLLM and two price trackers that agree on it)",
+      "comment": "Rerank 3.5: $2 / 1,000 searches (one search unit is a query over up to 100 documents).",
+      "input_cost_per_query": 0.002,
+      "jurisdiction": null,
+      "hosting_countries": null,
+      "provider_hq_country": "CA",
+      "us_cloud_act_exposure": null,
+      "zdr": null,
+      "trains_on_data": null,
+      "certifications": []
+    },
+    "elevenlabs/scribe_v1": {
+      "provider": "elevenlabs",
+      "model": "scribe_v1",
+      "currency": "USD",
+      "mode": "audio_transcription",
+      "source": "pricing.py UNIT_PRICING, https://elevenlabs.io/pricing/api (checked 2026-10-18)",
+      "comment": "Scribe v1 (batch speech to text) $0.22 / hour. ElevenLabs text to speech is left out: the vendor page and LiteLLM disagree.",
+      "input_cost_per_second": 6.111111111111111e-05,
+      "jurisdiction": null,
+      "hosting_countries": null,
+      "provider_hq_country": null,
+      "us_cloud_act_exposure": null,
+      "zdr": null,
+      "trains_on_data": null,
+      "certifications": []
+    },
+    "elevenlabs/scribe_v2": {
+      "provider": "elevenlabs",
+      "model": "scribe_v2",
+      "currency": "USD",
+      "mode": "audio_transcription",
+      "source": "pricing.py UNIT_PRICING, https://elevenlabs.io/pricing/api (checked 2026-10-18)",
+      "comment": "Scribe v2 (batch speech to text) $0.22 / hour.",
+      "input_cost_per_second": 6.111111111111111e-05,
+      "jurisdiction": null,
+      "hosting_countries": null,
+      "provider_hq_country": null,
+      "us_cloud_act_exposure": null,
       "zdr": null,
       "trains_on_data": null,
       "certifications": []
