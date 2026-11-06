@@ -49,6 +49,8 @@ from collector.retention import get_retention_cutoff
 from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 from collector.usage_reports import (
     SavingsGroupBy,
+    outcome_signal_columns,
+    outcome_signal_counts,
     savings_report,
     sovereign_share,
     sovereign_share_columns,
@@ -454,6 +456,7 @@ async def get_usage_summary(
                         )
                     ).label("fallback_requests"),
                     *sovereign_share_columns(),
+                    *outcome_signal_columns(),
                 ).where(
                     AIUsageEvent.asset_id == asset_id,
                     AIUsageEvent.tenant_id == principal.tenant_id,
@@ -478,7 +481,9 @@ def _usage_summary_dict(row, period: str) -> dict:
     never taken. savings_usd sums counterfactual_cost - cost over events
     reporting both; fallback_rate is the share of events reporting a
     fallback_chain whose chain is not empty; sovereign_share is the share of
-    events reporting a served_jurisdiction that was in the EEA.
+    events reporting a served_jurisdiction that was in the EEA;
+    outcome_signal_counts counts, per class, the events reporting
+    outcome_signals that carried it (null when none reported any).
     """
     cost = row["estimated_cost_usd"]
     latency = row["avg_latency_ms"]
@@ -501,6 +506,7 @@ def _usage_summary_dict(row, period: str) -> dict:
             else None
         ),
         "sovereign_share": sovereign_share(row),
+        **outcome_signal_counts(row),
         "period": period,
     }
 

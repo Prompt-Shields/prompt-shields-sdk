@@ -180,13 +180,14 @@ describe('a config cannot override the routed model', () => {
   });
 
   test('a fallback target that is not compliant is refused before it runs', async () => {
-    upstream(/api\.openai\.com\/v1\/chat\/completions$/, () =>
+    upstream(/api\.berget\.ai\/v1\/chat\/completions$/, () =>
       json({ error: { message: 'down' } }, 500)
     );
     const config = JSON.stringify({
       strategy: { mode: 'fallback' },
       targets: [
-        { provider: 'openai', api_key: 'sk-regression' },
+        // The policy's berget-llama-70b tier names provider berget (#20).
+        { provider: 'berget', api_key: 'sk-regression' },
         {
           provider: 'openai',
           api_key: 'sk-regression',

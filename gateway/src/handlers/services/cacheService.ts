@@ -9,6 +9,7 @@ import {
   computeCacheScope,
   setCacheScopeForTarget,
 } from '../../middlewares/cache';
+import { semanticLookup } from '../../middlewares/cache/semantic';
 
 export interface CacheResponseObject {
   cacheResponse: Response | undefined;
@@ -80,6 +81,30 @@ export class CacheService {
     };
   }
 
+  private async getSemantic(
+    context: RequestContext,
+    cacheScope: string,
+    maxAge: number | undefined,
+    forceRefresh: boolean
+  ): Promise<[string | null, string, string | null]> {
+    try {
+      const result = await semanticLookup(this.honoContext, {
+        endpoint: context.endpoint,
+        params: context.params,
+        requestHeaders: context.requestHeaders,
+        index: context.index,
+        cacheScope,
+        maxAge,
+        forceRefresh,
+      });
+      return [result.responseBody ?? null, result.status, result.key ?? null];
+    } catch (error) {
+      // Fail open: the request goes upstream and nothing is written.
+      console.error('semantic cache lookup error (fail-open):', error);
+      return [null, 'SEMANTIC BYPASS', null];
+    }
+  }
+
   async getCachedResponse(
     context: RequestContext,
     headers: HeadersInit
@@ -118,17 +143,21 @@ export class CacheService {
     });
     setCacheScopeForTarget(this.honoContext, context.index, cacheScope);
 
+    // PS fork (#33): semantic mode has its own lookup (cache/semantic.ts);
+    // memoryCache writes it back.
     const [cacheResponse, cacheStatus, cacheKey] =
-      await this.getFromCacheFunction(
-        env(context.honoContext),
-        mergedHeaders,
-        context.transformedRequestBody,
-        context.endpoint,
-        this.getCacheIdentifier,
-        mode,
-        maxAge,
-        cacheScope
-      );
+      mode === 'semantic'
+        ? await this.getSemantic(context, cacheScope, maxAge, !!forceRefresh)
+        : await this.getFromCacheFunction(
+            env(context.honoContext),
+            mergedHeaders,
+            context.transformedRequestBody,
+            context.endpoint,
+            this.getCacheIdentifier,
+            mode,
+            maxAge,
+            cacheScope
+          );
 
     if (!cacheResponse) {
       return {
