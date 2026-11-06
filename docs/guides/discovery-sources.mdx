@@ -117,11 +117,11 @@ Read the tenant's servers and tools with `GET /api/v1/registry/mcp-tools` (tenan
 
 Model deployments in your cloud accounts are AI assets whether or not their traffic is instrumented. The collector can read them, read-only, from the cloud control plane. Each deployment becomes an asset with `discovery_source: ["platform_signal"]` (`medium` confidence until another source corroborates it), its cloud `region` for sovereignty reporting, and `owner_email`, `environment` and `business_unit` taken from resource tags (`owner`, `env`/`environment`, `department`/`business_unit`; deployment tags override account tags). Tag values only fill empty fields, so owners curated in the registry are kept. `calling_service` is `azure:<deployment resource id>`, `aws:<Bedrock resource ARN>` or `gcp:<Vertex AI resource name>`.
 
-Supported today: **Azure OpenAI and AI Foundry** (`OpenAI` and `AIServices` Cognitive Services accounts), **Amazon Bedrock** and **Google Vertex AI**.
+Supported today: **Azure OpenAI and AI Foundry** (`OpenAI` and `AIServices` Cognitive Services accounts, and serverless and managed online endpoints in Azure Machine Learning workspaces and hub-based AI Foundry projects), **Amazon Bedrock** and **Google Vertex AI**.
 
 ### Azure: read-only service principal
 
-Create an app registration with a client secret and assign it the built-in **Reader** role on each subscription to inventory, or this narrower custom role. Neither grants `listKeys`, so the principal cannot read account keys or call the models.
+Create an app registration with a client secret and assign it the built-in **Reader** role on each subscription to inventory, or this narrower custom role. Neither grants `listKeys` (or the endpoints' `listKeys`/`token` actions), so the principal cannot read keys or call the models.
 
 ```json
 {
@@ -130,7 +130,11 @@ Create an app registration with a client secret and assign it the built-in **Rea
   "Actions": [
     "Microsoft.Resources/subscriptions/read",
     "Microsoft.CognitiveServices/accounts/read",
-    "Microsoft.CognitiveServices/accounts/deployments/read"
+    "Microsoft.CognitiveServices/accounts/deployments/read",
+    "Microsoft.MachineLearningServices/workspaces/read",
+    "Microsoft.MachineLearningServices/workspaces/serverlessEndpoints/read",
+    "Microsoft.MachineLearningServices/workspaces/onlineEndpoints/read",
+    "Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments/read"
   ],
   "NotActions": [],
   "AssignableScopes": ["/subscriptions/<subscription-id>"]
@@ -147,6 +151,16 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"azure": {
   "subscription_ids": ["<subscription id>"]
 }}}'
 ```
+
+In each subscription the collector records, as assets with vendor `microsoft`:
+
+| Resource | Model recorded |
+| --- | --- |
+| Deployment in an `OpenAI` or `AIServices` (AI Foundry) account | The deployed model (`gpt-4o`, …) |
+| Serverless API endpoint (Model-as-a-Service) in an Azure Machine Learning workspace or a hub-based AI Foundry project | The catalog model (for example `Meta-Llama-3.1-70B-Instruct` from `azureml://registries/azureml-meta/models/…`) |
+| Managed online endpoint deployment in such a workspace or project | The deployed model's name |
+
+Hubs (whose deployments live in their projects) and feature stores are skipped, as are failed, deleting and suspended endpoints. An endpoint's region is its own location, else its workspace's; tags are read workspace, then endpoint, then deployment, the later overriding the earlier. Set `"include_ml_workspaces": false` to skip Machine Learning workspaces. A principal that lacks the `Microsoft.MachineLearningServices` permissions (for example the custom role above without its last four actions) still gets its account deployments: the refusal is reported under `ml_errors`, by subscription or workspace, apart from `subscription_errors`. A subscription where the Machine Learning resource provider is not registered has no workspaces and reports no error.
 
 Leave `subscription_ids` empty to inventory every subscription the principal can read. Run the inventory with `python -m collector.cloud_inventory --tenant <uuid>`, or `POST /api/v1/admin/cloud-inventory/pull` with `Authorization: Bearer $PS_ADMIN_TOKEN` and `{"tenant_id": "<uuid>"}`. Re-runs update the same assets. Deployments that disappear are not deleted; they go `stale` through the normal lifecycle sweep. The ARM access token is renewed five minutes before it expires, and also when ARM rejects it with 401 before that time (for example after the token is revoked, or after the host was suspended). In that case the collector gets a new token and retries the rejected page once, so a long run does not fail part-way.
 
@@ -239,7 +253,7 @@ Vertex AI is regional, so list every region to inventory, per project. In each p
 
 A tuned model that is deployed is therefore two assets: the model and its deployment. Endpoints with nothing deployed, failed tuning jobs and registry models that are neither tuned nor deployed are not recorded. Serverless use of Google and partner models (Gemini, or Model-as-a-Service models such as Claude on Vertex AI) creates no resource in the project, so it shows up through the SDK, the gateway or audit logs instead.
 
-Labels are read like tags: endpoint labels override the model's, and a tuned model's registry labels override its tuning job's. GCP label values cannot contain `@`, so an `owner` label never fills `owner_email`; set owners in the registry.
+Labels are read like tags: endpoint labels override the model's, and a tuned model's registry labels override its tuning job's. GCP label values cannot contain `@`, so an `owner` label fills `owner_email` only through `owner_label_emails` in the operator configuration, which maps label values to email addresses (for example `{"claims-team": "claims-ai@acme.com"}`). Owner labels without a mapping are ignored; set those owners in the registry.
 
 Create a service account with the predefined **Vertex AI Viewer** role (`roles/aiplatform.viewer`) on each project to inventory. It only grants `aiplatform.*.get` / `list` permissions (the inventory uses `aiplatform.endpoints.list`, `aiplatform.models.list` and `aiplatform.tuningJobs.list`) and no `aiplatform.endpoints.predict`, so the account cannot call models. Create a JSON key for it, and put the key file's content in the operator configuration:
 
@@ -253,7 +267,8 @@ gcloud projects add-iam-policy-binding <project id> \
 PS_CLOUD_INVENTORY='{"<tenant uuid>": {"gcp": {
   "service_account": {"type": "service_account", "client_email": "...", "private_key": "...", ...},
   "project_ids": ["<project id>"],
-  "regions": ["europe-west4", "us-central1"]
+  "regions": ["europe-west4", "us-central1"],
+  "owner_label_emails": {"claims-team": "claims-ai@acme.com"}
 }}}'
 ```
 
