@@ -19,6 +19,7 @@ import {
 } from './constraints';
 import {
   cheapestUnderBudget,
+  DEFAULT_OUTPUT_TOKENS,
   defaultPolicy,
   estimateInputTokens,
   estimateTierCost,
@@ -162,6 +163,59 @@ export async function resolveRoute(
   return strategy.route(req, policy);
 }
 
+/** The data policy and use-case bar for one request, as a tier filter. */
+function policyFilter(policy: RoutePolicy, req: RouteRequest) {
+  const { level, source } = classifySensitivity(
+    policy,
+    req.dataClassification,
+    req.piiDetected
+  );
+  const rule = dataPolicyRule(policy, level);
+
+  const bar = req.explicitGroup ? undefined : useCaseBar(policy, req.useCase);
+  const eligible = bar?.evalSet ? new Set(bar.eligibleModels || []) : undefined;
+  const allow = (tier: ModelTier) =>
+    (!eligible || eligible.has(tier.model)) && tierComplies(tier, rule);
+  return { level, source, bar, eligible, allow };
+}
+
+/**
+ * The ordered failover candidates for a decision (#21, PRD §7.5): the
+ * decided model first, then the other tiers of the served group, cheapest
+ * first. Every candidate after the first passes the same filter the router
+ * applied (data policy and use-case bar, under a policy with policy stages)
+ * and, with a maxCost, fits it. So a fallback never widens the constraint
+ * set: it is a model the router could itself have picked for this call.
+ */
+export function routeCandidates(
+  req: RouteRequest,
+  policy: RoutePolicy,
+  decision: RouteDecision
+): ModelTier[] {
+  const allow = hasPolicyStages(policy)
+    ? policyFilter(policy, req).allow
+    : () => true;
+  const tiers = groupTiers(policy, decision.group) || [];
+  const primary = tiers.find((t) => t.model === decision.model) ?? {
+    model: decision.model,
+    group: decision.group,
+    inputCostPer1k: 0,
+    outputCostPer1k: 0,
+  };
+  const out = req.maxOutputTokens ?? DEFAULT_OUTPUT_TOKENS;
+  const seen = new Set([decision.model]);
+  const rest: { tier: ModelTier; cost: number }[] = [];
+  for (const tier of tiers) {
+    if (seen.has(tier.model) || !allow(tier)) continue;
+    const cost = estimateTierCost(tier, req.approxInputTokens, out);
+    if (req.maxCost != null && cost > req.maxCost) continue;
+    seen.add(tier.model);
+    rest.push({ tier, cost });
+  }
+  rest.sort((a, b) => a.cost - b.cost);
+  return [primary, ...rest.map((r) => r.tier)];
+}
+
 /**
  * Routing under the whole policy. A port of `resolve_policy_route`
  * (packages/sdk/prompt_shields/route_policy.py); both run the golden vectors.
@@ -186,17 +240,7 @@ export async function resolvePolicyRoute(
   policy: RoutePolicy,
   strategy: RouterStrategy
 ): Promise<RouteDecision> {
-  const { level, source } = classifySensitivity(
-    policy,
-    req.dataClassification,
-    req.piiDetected
-  );
-  const rule = dataPolicyRule(policy, level);
-
-  const bar = req.explicitGroup ? undefined : useCaseBar(policy, req.useCase);
-  const eligible = bar?.evalSet ? new Set(bar.eligibleModels || []) : undefined;
-  const allow = (tier: ModelTier) =>
-    (!eligible || eligible.has(tier.model)) && tierComplies(tier, rule);
+  const { level, source, bar, eligible, allow } = policyFilter(policy, req);
   const tiersOf = (g: string) => groupTiers(policy, g) || [];
 
   // 3. Pick the group as resolveRoute would.

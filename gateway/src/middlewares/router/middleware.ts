@@ -16,7 +16,12 @@ import { HeuristicStrategy } from './heuristic';
 import { defaultPolicy } from './policy';
 import { PolicyViolation } from './constraints';
 import { scanRequestBody } from './pii';
-import { buildRouteRequest, parseRouteHeaders, resolveRoute } from './index';
+import {
+  buildRouteRequest,
+  parseRouteHeaders,
+  resolveRoute,
+  routeCandidates,
+} from './index';
 import { RoutePolicy, RouterStrategy, SensitivitySource } from './types';
 
 export interface PSRoute {
@@ -28,6 +33,19 @@ export interface PSRoute {
   /** Effective sensitivity level, when the policy classifies calls. */
   sensitivityLevel?: string;
   sensitivitySource?: SensitivitySource;
+  /**
+   * The ordered failover candidates (#21): the decided model first, then
+   * the other models the router could have picked under the same
+   * constraints (routeCandidates). The handler tries them in order on a
+   * 5xx, 429 or timeout (router/failover.ts). `provider` is the tier's
+   * stated provider and keys the circuit breaker.
+   */
+  candidates?: RouteCandidate[];
+}
+
+export interface RouteCandidate {
+  model: string;
+  provider?: string;
 }
 
 /** Why a routed call was refused under the data policy. */
@@ -111,6 +129,17 @@ export function psRouterMiddleware(
           route.sensitivityLevel = decision.sensitivityLevel;
         if (decision.sensitivitySource !== undefined)
           route.sensitivitySource = decision.sensitivitySource;
+        try {
+          route.candidates = routeCandidates(routeReq, policy, decision).map(
+            (t) =>
+              t.provider
+                ? { model: t.model, provider: t.provider }
+                : { model: t.model }
+          );
+        } catch (err) {
+          // No fallbacks: the decided model alone, as before #21.
+          console.warn('[PS Router] failover candidates skipped:', err);
+        }
         (request as any)._psRoute = route;
 
         body.model = decision.model;
