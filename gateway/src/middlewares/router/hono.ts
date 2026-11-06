@@ -50,13 +50,41 @@ declare module 'hono' {
   }
 }
 
-export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
-  const active = policy ?? defaultPolicy;
-  const mw = psRouterMiddleware(active, strategy as RouterStrategy);
+/**
+ * `policy` is a RoutePolicy, or a function returning the active one per
+ * request (PS_ROUTE_POLICY_FILE, #336, which can be reloaded). A function
+ * that returns undefined means the policy is not loaded: model calls are
+ * refused with a 503 rather than routed without it.
+ */
+export function psRouter(
+  policy?: RoutePolicy | (() => RoutePolicy | undefined),
+  strategy?: RouterStrategy
+) {
+  const provide =
+    typeof policy === 'function' ? policy : () => policy ?? defaultPolicy;
+  let built: RoutePolicy | undefined;
+  let mw: ReturnType<typeof psRouterMiddleware> | undefined;
 
   return async (c: Context, next: Next) => {
     // MCP proxy traffic is not a model call (#63).
     if (isMcpProxyPath(c.req.path)) return next();
+    const active = provide();
+    if (!active) {
+      return c.json(
+        {
+          error: {
+            message: 'route policy not loaded; refusing the call',
+            type: 'policy_unavailable',
+          },
+        },
+        503
+      );
+    }
+    if (!mw || built !== active) {
+      mw = psRouterMiddleware(active, strategy as RouterStrategy);
+      built = active;
+    }
+    const router = mw;
     // The semantic cache keys entries by the active policy's version (#33),
     // and ps-telemetry looks up served_jurisdiction in it (#20).
     c.set(PS_ROUTE_POLICY_KEY as any, active);
@@ -117,7 +145,7 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
         const headers = Object.fromEntries(c.req.raw.headers);
         const request: any = { url: c.req.url, headers, body };
         if (pii) request._psPii = pii;
-        await mw.beforeRequest(request);
+        await router.beforeRequest(request);
         const violation: PSRouteViolation | undefined =
           request._psRouteViolation;
         if (violation) return policyViolationResponse(c, violation);

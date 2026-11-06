@@ -58,6 +58,7 @@ import {
   withStreamSummary,
 } from '../ps-telemetry';
 import { estimateCost } from '../psPricing';
+import { PS_ROUTE_POLICY_KEY } from '../cache/semantic';
 import { supportsResponsesApiNatively } from '../../adapters/responses';
 import { classifySensitivity, dataPolicyRule } from '../router/constraints';
 import { DATA_POLICY_GATE_KEY, DataPolicyGate } from '../router/dataPolicyGate';
@@ -493,11 +494,15 @@ export interface PsBudgetOptions {
 }
 
 export function psBudget(options: PsBudgetOptions = {}) {
-  const policy = options.policy ?? defaultPolicy;
   const now = options.now ?? Date.now;
 
   return async (c: Context, next: Next) => {
     if (c.req.method !== 'POST') return next();
+    // The router's active policy (PS_ROUTE_POLICY_FILE, #336) when it ran.
+    const policy: RoutePolicy =
+      options.policy ??
+      (c.get(PS_ROUTE_POLICY_KEY as any) as RoutePolicy | undefined) ??
+      defaultPolicy;
     const path = c.req.path;
     if (isMcpProxyPath(path) || !BILLED_PATHS.has(path)) return next();
     const rt: BudgetRuntime | null = getBudgetRuntime(

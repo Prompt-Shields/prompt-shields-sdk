@@ -43,6 +43,16 @@ gateway:
           match: [Chat.Use]
           providers: [azure-openai]
           rate_limit: {requests_per_minute: 60}
+  routePolicy:
+    schema_version: route-policy.v1
+    default_group: balanced
+    quality_to_group: {draft: balanced, balanced: balanced, critical: balanced}
+    groups:
+      balanced:
+        - {model: gpt-4o, provider: azure-openai, input_cost_per_1k: 0.0025, output_cost_per_1k: 0.01, jurisdiction: EEA, zdr: true}
+    data_policy:
+      confidential: {jurisdictions: [EEA], require_zdr: true}
+  routePolicyReloadSeconds: 60
   budgets:
     enabled: true
     redis:
