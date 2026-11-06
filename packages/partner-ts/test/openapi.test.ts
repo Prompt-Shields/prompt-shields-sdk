@@ -339,6 +339,11 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /api/v1/admin/connectors/leanix/status': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/servicenow/sync': NOT_WRAPPED,
   'GET /api/v1/admin/connectors/servicenow/status': NOT_WRAPPED,
+  'POST /api/v1/admin/connectors/sentinel/sync': NOT_WRAPPED,
+  'GET /api/v1/admin/connectors/sentinel/status': NOT_WRAPPED,
+  // SIEM export (#32): NDJSON for log forwarders, not wrapped.
+  'GET /partner/v1/siem/calls': NOT_WRAPPED,
+  'GET /partner/v1/siem/audit': NOT_WRAPPED,
   'GET /api/v1/operator/tenants': NOT_WRAPPED,
   'POST /api/v1/operator/tenants': NOT_WRAPPED,
   'GET /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,

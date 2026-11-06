@@ -29,6 +29,7 @@ from collector import (
     provider_usage_admin,
     risk_reviews,
     risk_suggestions,
+    sentinel_export,
     servicenow,
     tenant_keys,
     webhook_admin,
@@ -311,6 +312,7 @@ ADMIN_ROUTERS = (
     cloud_inventory.router,
     leanix.router,
     servicenow.router,
+    sentinel_export.router,
     operator_admin.router,
 )
 

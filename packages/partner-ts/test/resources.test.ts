@@ -22,6 +22,8 @@ describe('assets', () => {
       since: new Date('2026-03-01T00:00:00Z'),
       limit: 200,
       vendor: undefined,
+      attestationField: 'owner',
+      attestationState: 'unreviewed',
     });
     const url = new URL(m.calls[0].url);
     expect(url.pathname).toBe('/partner/v1/assets');
@@ -32,6 +34,8 @@ describe('assets', () => {
       discovery_source: 'sdk',
       since: '2026-03-01T00:00:00.000Z',
       limit: '200',
+      attestation_field: 'owner',
+      attestation_state: 'unreviewed',
     });
   });
 
@@ -187,6 +191,10 @@ describe('assets', () => {
         avg_latency_ms: 380,
         savings_usd: 120.75,
         fallback_rate: 0.0125,
+        budget_downgraded_requests: 14,
+        budget_blocked_requests: 0,
+        cache_hit_rate: 0.31,
+        cache_saved_usd: 18.4,
         period: '7d',
       }),
     );
@@ -203,6 +211,10 @@ describe('assets', () => {
       avgLatencyMs: 380,
       savingsUsd: 120.75,
       fallbackRate: 0.0125,
+      budgetDowngradedRequests: 14,
+      budgetBlockedRequests: 0,
+      cacheHitRate: 0.31,
+      cacheSavedUsd: 18.4,
       period: '7d',
     });
     expect(m.calls[0].url).toBe('https://api.promptshields.io/partner/v1/assets/id1/usage-summary?period=7d');

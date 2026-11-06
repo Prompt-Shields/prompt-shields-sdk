@@ -190,6 +190,16 @@ class AIUsageEvent(Base):
     baseline_id = Column(Text)
     # Per-call id from the SDK or gateway (#43): what call feedback names.
     call_id = Column(Text)
+    # Spend budgets (#28 gateway, #29 SDK; schemas/budget/README.md), all
+    # optional. budget_state: ok, warn, unknown or exceeded; budget_id: the
+    # budget that set it; budget_action: none, downgraded or blocked.
+    budget_state = Column(Text)
+    budget_id = Column(Text)
+    budget_action = Column(Text)
+    # Gateway cache (#33): the lower-cased cache status (hit, semantic hit,
+    # miss, ...) and, on a hit, the upstream cost in USD the hit avoided.
+    cache_status = Column(Text)
+    cache_saved_cost = Column(Numeric(10, 6))
     # Implicit outcome signals (#44): sorted list of known class names
     # ("max_tokens", "refusal", ...; collector.ingest.OUTCOME_SIGNAL_CLASSES),
     # [] when measured and nothing happened, NULL when not reported; and the

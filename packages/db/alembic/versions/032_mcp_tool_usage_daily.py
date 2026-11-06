@@ -10,12 +10,10 @@ period are purged.
 The new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Assigned number 032 (030 = learner #266, 031 = telemetry columns #274).
-Chained from main's current head (030) so the branch migrates in CI; it
-will be re-chained to "031" at merge.
+Follows 031 (telemetry budget/cache columns, #274).
 
 Revision ID: 032
-Revises: 030
+Revises: 031
 Create Date: 2026-11-06
 """
 
@@ -26,8 +24,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "032"
-# Re-chained to "031" at merge (main's head is "030" while this PR is open).
-down_revision: str | None = "030"
+down_revision: str | None = "031"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
