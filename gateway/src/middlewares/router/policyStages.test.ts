@@ -292,6 +292,15 @@ describe('detectPiiCategories (port of the SDK detector)', () => {
       'SE45 5000 0000 0583 9825 7466 4111 1111 1111 1111',
       ['credit_card', 'iban', 'phone'],
     ],
+    // Card windows: a run's first group starts a card only after a non-word
+    // character and ends one only before one; at most 19 digits; a card
+    // stops at the group that reaches 13 digits.
+    ['x4111 1111 1111 1111', ['phone']],
+    ['4111 1111 1111 1111x', ['phone']],
+    ['41111111111111111111', []],
+    ['4111 1111 1111 1111 9', ['credit_card', 'phone']],
+    ['4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1', []],
+    ['1-'.repeat(300) + '4111-1111-1111-1111', ['credit_card', 'phone']],
     ['call +1-555-123-4567x89', ['phone']],
     ['Datum 05.03.2024 14.30', []],
     ['Mitt personnummer är 19121212-1212.', ['national_id', 'phone']],

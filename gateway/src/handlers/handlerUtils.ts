@@ -58,7 +58,9 @@ import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import {
   adaptResponse,
   applyAdapterRequestTransform,
+  estimatedResponseInputTokensResponse,
   messagesCountTokensRoute,
+  RESPONSES_PROVIDER_OPERATIONS,
 } from './adapterUtils';
 import {
   MESSAGES_VIA_RESPONSES_HEADER,
@@ -420,6 +422,19 @@ export async function tryPost(
     !isRawBody && typeof overrideModel === 'string' && overrideModel
       ? { ...params, model: overrideModel }
       : params;
+  // PS fork (#73 follow-up): hooks do not run on token counts, so a target
+  // with hooks is never sent the prompt to count; it gets a marked local
+  // estimate, as on /v1/messages/count_tokens (messagesCountTokensRoute).
+  if (
+    fn === 'countResponseInputTokens' &&
+    targetHasHooks &&
+    !isRawBody &&
+    RESPONSES_PROVIDER_OPERATIONS.countResponseInputTokens?.providers.includes(
+      providerOption.provider ?? ''
+    )
+  ) {
+    return estimatedResponseInputTokensResponse(routingParams);
+  }
   const adapterResult =
     fn === 'messagesCountTokens' && !isRawBody
       ? // PS fork (#73 follow-up): count_tokens for every provider.
