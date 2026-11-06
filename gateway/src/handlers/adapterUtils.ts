@@ -179,7 +179,7 @@ export function applyAdapterRequestTransform(
         ? {}
         : { ...(requestBody as Params) };
     const transformedParams = normalizeTokenLimitForProvider(
-      transformResponsesToChatCompletions(params),
+      transformResponsesToChatCompletions(params, provider),
       provider
     );
 
@@ -614,7 +614,10 @@ function adaptStreamingResponse(
   } else {
     // Responses API adapter
     // PS fork (#73): snapshots echo the client's request fields
-    const state = responsesCreateStreamState(adapterCtx.originalRequest);
+    const state = responsesCreateStreamState(
+      adapterCtx.originalRequest,
+      adapterCtx.provider
+    );
 
     (async () => {
       try {
