@@ -40,6 +40,14 @@ tags:
     description: Delta feeds and bulk export for EA tool integration
   - name: Auth
     description: OAuth 2.0 token management
+  - name: MCP
+    description: |
+      MCP servers and tools seen in the tenant's telemetry (SDK
+      instrumentation, the gateway's MCP proxy, OpenTelemetry MCP spans),
+      their daily tool-call metering, and the registry asset each named
+      server is registered as (vendor `mcp`, model = server name), with its
+      owner. Names and numbers only: tool arguments and results are never
+      stored.
   - name: Provider Credentials
     description: |
       Write-only provider admin keys for the usage pull, and links from
@@ -99,7 +107,9 @@ components:
             attestations:write: Record human attestations, including retiring and un-retiring assets (never granted by default)
             risks:review: Confirm or reject risk mappings, with reviewer and comment (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
-            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
+            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events, or pull it from `/siem/audit` (never granted by default)
+            evidence:read: Pull per-call routing evidence as NDJSON from `/siem/calls` (never granted by default)
+            mcp:read: Read observed MCP servers and tools, with each server's asset and owner, and their daily tool-call metering (never granted by default)
             learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
             learner:review: Accept or reject routing learner recommendations, with reviewer and comment (never granted by default)
             spend-alerts:read: List spend anomaly alerts and receive them as `spend.anomaly` webhook events (never granted by default)
@@ -497,6 +507,43 @@ components:
             policy marks it `EEA`. It says nothing about US CLOUD Act
             exposure. See `GET /partner/v1/usage/sovereign-share`.
           example: 0.62
+        budget_downgraded_requests:
+          type: integer
+          nullable: true
+          description: >
+            Events whose `budget_action` is `downgraded`: a spend budget moved
+            the call to a cheaper model (SDK or gateway budgets). Null when no
+            event in the period reported a `budget_action`.
+          example: 14
+        budget_blocked_requests:
+          type: integer
+          nullable: true
+          description: >
+            Events whose `budget_action` is `blocked`. The SDK and gateway
+            refuse an over-budget call before it is sent and report no event
+            for it today, so this stays 0 until an emitter reports refused
+            calls. Null when no event in the period reported a
+            `budget_action`.
+          example: 0
+        cache_hit_rate:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Share (0 to 1) of the gateway's cache lookups that were served
+            from the cache (exact or semantic hit), counted on the gateway's
+            cache-only events; a hit call's own event (`cost_source: cache`)
+            is not counted again. Null when no lookup was reported in the
+            period.
+          example: 0.31
+        cache_saved_usd:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Sum of `cache_saved_cost` (USD): the upstream cost that gateway
+            cache hits avoided. Null when no event in the period reported one.
+          example: 18.4
         outcome_signals_reported:
           type: integer
           description: >
@@ -542,6 +589,10 @@ components:
         - savings_usd
         - fallback_rate
         - sovereign_share
+        - budget_downgraded_requests
+        - budget_blocked_requests
+        - cache_hit_rate
+        - cache_saved_usd
         - outcome_signals_reported
         - outcome_signal_counts
         - period
@@ -1221,6 +1272,108 @@ components:
         - dropped_events
         - unaccounted_events
         - sources
+
+    McpTool:
+      type: object
+      description: |
+        One observed (source, server, tool, calling service, environment,
+        user) combination, with lifetime counts. Names are data reported by
+        MCP servers and apps: escape them when rendering.
+      properties:
+        server_name: {type: string}
+        tool_name: {type: string}
+        source:
+          type: string
+          enum: [sdk, gateway, otel, scan]
+        calling_service: {type: string, nullable: true}
+        environment: {type: string, nullable: true}
+        transport: {type: string, nullable: true}
+        call_count: {type: integer}
+        error_count: {type: integer}
+        blocked_count:
+          type: integer
+          description: Calls a guardrail blocked at the gateway (not errors)
+        user_hash:
+          type: string
+          nullable: true
+          description: Pseudonymous caller (the gateway's OIDC subject hash)
+        user_group: {type: string, nullable: true}
+        avg_latency_ms: {type: integer, nullable: true}
+        first_seen: {type: string, format: date-time, nullable: true}
+        last_seen: {type: string, format: date-time, nullable: true}
+        asset_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The server's registry asset (vendor `mcp`); null for server `unknown`
+        owner_email:
+          type: string
+          nullable: true
+          description: |
+            The server asset's owner: set in the registry, or taken from the
+            gateway's server config (`owner`) while the asset has none.
+
+    McpUsageDay:
+      type: object
+      description: Tool-call metering for one MCP tool on one server on one UTC day, per source.
+      properties:
+        day: {type: string, format: date}
+        source:
+          type: string
+          enum: [sdk, gateway, otel, scan]
+        server_name: {type: string}
+        tool_name: {type: string}
+        call_count: {type: integer}
+        error_count: {type: integer}
+        blocked_count: {type: integer}
+        latency_ms_total: {type: integer}
+        latency_count:
+          type: integer
+          description: Calls that reported a latency
+        avg_latency_ms: {type: integer, nullable: true}
+        request_bytes:
+          type: integer
+          description: Request body bytes, summed over the calls that reported bytes (the gateway does)
+        response_bytes:
+          type: integer
+          description: Response message bytes, summed over the calls that reported bytes
+        bytes_count:
+          type: integer
+          description: Calls that reported bytes
+        asset_id: {type: string, format: uuid, nullable: true}
+        owner_email: {type: string, nullable: true}
+
+    McpPageMeta:
+      type: object
+      properties:
+        has_more: {type: boolean}
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque; pass as `cursor` for the next page
+      required: [has_more, next_cursor]
+
+    McpToolPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/McpTool'}
+        meta: {$ref: '#/components/schemas/McpPageMeta'}
+
+    McpUsagePage:
+      type: object
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/McpUsageDay'}
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/McpPageMeta'
+            - type: object
+              properties:
+                since: {type: string, format: date}
+                until: {type: string, format: date, nullable: true}
 
     PaginationMeta:
       type: object
@@ -3975,6 +4128,139 @@ paths:
               schema:
                 $ref: '#/components/schemas/TelemetryCoverage'
 
+  /partner/v1/mcp/tools:
+    get:
+      operationId: listMcpTools
+      tags: [MCP]
+      summary: List observed MCP servers and tools
+      description: |
+        MCP servers and tools seen in the tenant's telemetry, most recently
+        seen first, with each server's registry asset id and owner. Pages of
+        at most 1000 rows; follow `meta.next_cursor`. A row seen again while
+        a client pages moves to the front, so a long sync may see it twice.
+      parameters:
+        - name: server_name
+          in: query
+          schema: {type: string}
+        - name: source
+          in: query
+          schema:
+            type: string
+            enum: [sdk, gateway, otel, scan]
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 200}
+        - name: cursor
+          in: query
+          schema: {type: string}
+          description: "`meta.next_cursor` of the previous page"
+      security:
+        - OAuth2: [mcp:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: Invalid cursor
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: One page of tools
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpToolPage'
+
+  /partner/v1/mcp/usage:
+    get:
+      operationId: listMcpUsage
+      tags: [MCP]
+      summary: Daily MCP tool-call metering
+      description: |
+        Calls, errors, blocked calls, latency and request/response bytes per
+        MCP tool per server per UTC day (and per source that reported them),
+        newest day first. `since` defaults to 30 days ago; rows older than
+        the tenant's retention period are purged. Counts only.
+      parameters:
+        - name: since
+          in: query
+          schema: {type: string, format: date}
+          description: First UTC day (default 30 days ago)
+        - name: until
+          in: query
+          schema: {type: string, format: date}
+          description: Last UTC day, inclusive
+        - name: tool_name
+          in: query
+          schema: {type: string}
+        - name: server_name
+          in: query
+          schema: {type: string}
+        - name: source
+          in: query
+          schema:
+            type: string
+            enum: [sdk, gateway, otel, scan]
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 200}
+        - name: cursor
+          in: query
+          schema: {type: string}
+          description: "`meta.next_cursor` of the previous page"
+      security:
+        - OAuth2: [mcp:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: Invalid cursor, or `until` before `since`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: One page of daily metering rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpUsagePage'
+
+  /api/v1/registry/mcp-tools:
+    get:
+      operationId: listRegistryMcpTools
+      tags: [MCP]
+      summary: List observed MCP tools (tenant key)
+      description: |
+        The same data and paging as `GET /partner/v1/mcp/tools`, for the
+        tenant's own ingest key. Pages of at most 1000 rows; follow
+        `meta.next_cursor` (before #77 this route returned one page of at
+        most 1000 rows and no `meta`).
+      parameters:
+        - name: server_name
+          in: query
+          schema: {type: string}
+        - name: source
+          in: query
+          schema:
+            type: string
+            enum: [sdk, gateway, otel, scan]
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 200}
+        - name: cursor
+          in: query
+          schema: {type: string}
+          description: "`meta.next_cursor` of the previous page"
+      security:
+        - TenantApiKey: []
+      responses:
+        '400':
+          description: Invalid cursor
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: One page of tools
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpToolPage'
+
   /partner/v1/vendors:
     get:
       operationId: listVendors
@@ -4138,6 +4424,124 @@ paths:
                   has_more: false
                   next_cursor: null
                   sync_token: "2026-03-25T15:01:00Z"
+
+  /partner/v1/siem/calls:
+    get:
+      operationId: pullSiemCalls
+      tags: [Sync]
+      summary: Per-call routing evidence as NDJSON (SIEM export)
+      description: |
+        One `AICall` record per model call, in the Microsoft Sentinel table
+        schema `PromptShieldsAudit_CL` (see the Microsoft Sentinel
+        integration guide): served provider, model and jurisdiction, route
+        policy version, sensitivity level and source, route mode, group and
+        reason, fallback chain, cost and tokens. Metadata only.
+
+        Ordered by call time. Only calls older than `settle_seconds` are
+        returned. `X-PS-Cursor` is the position after the last line: pass
+        it back as `cursor`. `X-PS-Has-More: true` means call again now.
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: '`X-PS-Cursor` of the previous call'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start time when there is no cursor
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 1000
+        - name: settle_seconds
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 86400
+            default: 300
+          description: Leave out calls newer than this, so late-delivered events are not skipped
+      security:
+        - OAuth2: [evidence:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: Invalid cursor or `since`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: NDJSON, one record per line
+          headers:
+            X-PS-Cursor:
+              schema:
+                type: string
+            X-PS-Has-More:
+              schema:
+                type: string
+                enum: ['true', 'false']
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+
+  /partner/v1/siem/audit:
+    get:
+      operationId: pullSiemAudit
+      tags: [Sync]
+      summary: Audit trail rows with chain hashes as NDJSON (SIEM export)
+      description: |
+        One `Audit` record per row of the tenant's hash-chained audit trail,
+        in chain order, with `PsAuditSeq`, `PsAuditPrevHash` and
+        `PsAuditRowHash`, in the Microsoft Sentinel table schema
+        `PromptShieldsAudit_CL`. `X-PS-Cursor` is the `seq` of the last line.
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+          description: '`X-PS-Cursor` of the previous call'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start time when there is no cursor
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 1000
+      security:
+        - OAuth2: [audit:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: Invalid `since`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: NDJSON, one record per line
+          headers:
+            X-PS-Cursor:
+              schema:
+                type: string
+            X-PS-Has-More:
+              schema:
+                type: string
+                enum: ['true', 'false']
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
 
   /partner/v1/export:
     get:
@@ -5614,6 +6018,62 @@ paths:
       responses:
         '200':
           description: Connector configuration (no secrets) and sync state
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/sentinel/sync:
+    post:
+      operationId: syncSentinel
+      tags: [Operator]
+      summary: Push a tenant's AI call evidence and audit trail to Microsoft Sentinel (operator)
+      description: |
+        Sends new `AICall` and `Audit` records to the tenant's Log Analytics
+        workspace through the Azure Monitor Logs Ingestion API
+        (`PS_SENTINEL_EXPORT`). Returns `not_configured` when the tenant has
+        no configuration.
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id]
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Export result (counts, status)
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/sentinel/status:
+    get:
+      operationId: sentinelStatus
+      tags: [Operator]
+      summary: Microsoft Sentinel export state for a tenant (operator)
+      security:
+        - OperatorToken: []
+      parameters:
+        - $ref: '#/components/parameters/TenantIdQueryParam'
+      responses:
+        '200':
+          description: Configuration (hosts and ids, no secrets), cursors and last run
           content:
             application/json:
               schema:
