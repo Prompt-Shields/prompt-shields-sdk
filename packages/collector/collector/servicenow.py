@@ -89,7 +89,8 @@ one of ``PS_SERVICENOW_ALLOWED_HOST_SUFFIXES`` (default
 
 Run with ``POST /api/v1/admin/connectors/servicenow/sync`` (operator only:
 ``Authorization: Bearer $PS_ADMIN_TOKEN``) or ``python -m
-collector.servicenow --tenant <uuid> [--full] [--dry-run] [--verify]``.
+collector.servicenow --tenant <uuid> [--full] [--dry-run]
+[--verify | --no-verify]``.
 The cursor is kept in the tenant settings and only advances when IRE
 accepted every item.
 
@@ -103,10 +104,15 @@ With ``verify`` (per tenant in ``PS_SERVICENOW``, or ``--verify`` /
 ``"verify": true`` per run) the sync reads every CI and relation it just
 wrote back through the Table API (``GET /api/now/table/cmdb_ci`` by the
 sys_ids IRE returned, ``GET /api/now/table/cmdb_rel_ci`` by parent and
-child) and checks each CI has the expected class and ``correlation_id``
-and each relation exists with its type. Reads only: the connector never
-writes through the Table API. A CI or relation that is not there fails
-the sync and the cursor stays where it was.
+child), matches the rows to the CIs sent on ``correlation_id`` (not on
+the order of IRE's answers) and checks each CI has the class sent and
+each relation exists with its type. A CI IRE reclassified to a known
+subclass of the class sent (``KNOWN_SUBCLASSES``) counts as found and is
+listed under ``reclassified``. Reads only: the connector never writes
+through the Table API. A CI or relation that is not there, or a CI of
+any other class, fails the sync and the cursor stays where it was.
+``--no-verify`` / ``"verify": false`` skips the read-back for one run
+even when the tenant enables it.
 """
 
 from __future__ import annotations
@@ -170,6 +176,36 @@ VERIFY_CHUNK = 100
 VERIFY_PAGE = 1000
 VERIFY_MAX_PAGES = 50
 MAX_MISSING_REPORTED = 20
+# CMDB classes IRE may reclassify a CI to (a class -> every class known to
+# extend it, at any depth), for the classes this connector writes by
+# default. The read-back reports a CI found under one of these as present
+# but reclassified; a CI under any other class than the one sent fails.
+# Explicit on purpose: the connector does not read sys_db_object.
+KNOWN_SUBCLASSES: dict[str, frozenset[str]] = {
+    # Business service (CSDM): technical service, service offering and
+    # the application service family.
+    "cmdb_ci_service": frozenset(
+        {
+            "cmdb_ci_service_technical",
+            "service_offering",
+            "cmdb_ci_service_auto",
+            "cmdb_ci_service_discovered",
+            "cmdb_ci_service_calculated",
+            "cmdb_ci_service_by_tags",
+            "cmdb_ci_query_based_service",
+        }
+    ),
+    "cmdb_ci_service_auto": frozenset(
+        {
+            "cmdb_ci_service_discovered",
+            "cmdb_ci_service_calculated",
+            "cmdb_ci_service_by_tags",
+            "cmdb_ci_query_based_service",
+        }
+    ),
+    # Application -> AI Application (CMDB CI Class Models).
+    "cmdb_ci_appl": frozenset({"cmdb_ci_appl_ai_application"}),
+}
 
 # CMDB CI Class Models (store app, 1.68.0+): externally hosted AI (SaaS
 # model APIs) and AI the organisation hosts itself.
@@ -809,9 +845,12 @@ def check_ire_result(body: Any, sent: dict) -> dict[str, int]:
     return parse_ire_result(body, sent)[0]
 
 
-def parse_ire_result(body: Any, sent: dict) -> tuple[dict[str, int], list[str]]:
-    """`check_ire_result` plus the sys_id of every item, in payload order
-    (IRE answers the items in the order they were sent)."""
+def parse_ire_result(
+    body: Any, sent: dict
+) -> tuple[dict[str, int], list[tuple[str, str]]]:
+    """`check_ire_result` plus the class and sys_id IRE reported for every
+    item. No order is assumed: the read-back matches them to the items
+    sent on ``correlation_id``."""
     result = body.get("result") if isinstance(body, dict) else None
     if isinstance(result, str):
         # Some releases return the result as a JSON string.
@@ -828,7 +867,7 @@ def parse_ire_result(body: Any, sent: dict) -> tuple[dict[str, int], list[str]]:
         )
     failed: list[str] = []
     ops: dict[str, int] = {}
-    sys_ids: list[str] = []
+    results: list[tuple[str, str]] = []
     for entry in items:
         if not isinstance(entry, dict):
             failed.append("ERROR")
@@ -837,7 +876,8 @@ def parse_ire_result(body: Any, sent: dict) -> tuple[dict[str, int], list[str]]:
         if codes or not _SYS_ID.match(str(entry.get("sysId") or "")):
             failed.extend(codes or ["NO_SYS_ID"])
             continue
-        sys_ids.append(entry["sysId"])
+        cls = entry.get("className")
+        results.append((cls if isinstance(cls, str) else "", entry["sysId"]))
         op = str(entry.get("operation") or "UNKNOWN").upper()
         ops[op] = ops.get(op, 0) + 1
     for entry in result.get("relations") or []:
@@ -848,7 +888,7 @@ def parse_ire_result(body: Any, sent: dict) -> tuple[dict[str, int], list[str]]:
         raise ConnectorError(
             f"servicenow: IRE rejected {len(failed)} entries ({', '.join(distinct)})"
         )
-    return ops, sys_ids
+    return ops, results
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -857,27 +897,50 @@ def parse_ire_result(body: Any, sent: dict) -> tuple[dict[str, int], list[str]]:
 
 
 class Expected:
-    """What a sync wrote, keyed on the sys_ids IRE returned: CIs (sys_id ->
-    class, correlation_id) and relations (parent, child, type)."""
+    """What a sync wrote: the CIs sent (correlation_id -> class), the
+    relations between them (parent, child correlation_id, type) and what
+    IRE answered (sys_id -> class). Keyed on correlation_id, not on the
+    position of IRE's answers, so a reordered response changes nothing."""
 
     def __init__(self) -> None:
-        self.cis: dict[str, tuple[str, str]] = {}
+        self.cis: dict[str, str] = {}
         self.relations: dict[tuple[str, str, str], None] = {}
+        self.returned: dict[str, str] = {}
 
     def add(
-        self, payload: dict, sys_ids: list[str], conn: ServiceNowConnection
+        self,
+        payload: dict,
+        results: list[tuple[str, str]],
+        conn: ServiceNowConnection,
     ) -> None:
-        for item, sys_id in zip(payload["items"], sys_ids, strict=True):
+        refs: list[str | None] = []
+        for item in payload["items"]:
             ref = (item.get("values") or {}).get("correlation_id")
             if item.get("className") == conn.business_unit_table or not ref:
-                continue  # non-CMDB records (business units) are not CIs
-            self.cis[sys_id] = (item["className"], ref)
+                ref = None  # non-CMDB records (business units) are not CIs
+            else:
+                self.cis[ref] = item["className"]
+            refs.append(ref)
         for rel in payload["relations"]:
-            key = (sys_ids[rel["parent"]], sys_ids[rel["child"]], rel["type"])
-            self.relations[key] = None
+            parent, child = refs[rel["parent"]], refs[rel["child"]]
+            if parent and child:
+                self.relations[(parent, child, rel["type"])] = None
+        for cls, sys_id in results:
+            if cls != conn.business_unit_table:
+                self.returned[sys_id] = cls
 
-    def label(self, sys_id: str) -> str:
-        return self.cis[sys_id][1] if sys_id in self.cis else sys_id
+
+def class_status(sent: str, got: str) -> str:
+    """``same``, ``subclass`` (``got`` is a known subclass of ``sent``:
+    IRE reclassified the CI) or ``other``."""
+    if got == sent:
+        return "same"
+    return "subclass" if got in KNOWN_SUBCLASSES.get(sent, ()) else "other"
+
+
+def _class_label(cls: str) -> str:
+    """A class name from a response, safe to report."""
+    return cls if _TABLE.match(cls) else "?"
 
 
 def _field(row: dict, name: str) -> str:
@@ -963,8 +1026,9 @@ class ServiceNowClient:
 
     async def identify_reconcile_ids(
         self, payload: dict
-    ) -> tuple[dict[str, int], list[str]]:
-        """IRE upsert; counts per operation and the items' sys_ids."""
+    ) -> tuple[dict[str, int], list[tuple[str, str]]]:
+        """IRE upsert; counts per operation and each item's class and
+        sys_id as IRE reported them."""
         body = await self._call(
             "POST",
             IRE_PATH,
@@ -1009,12 +1073,18 @@ class ServiceNowClient:
 
     async def verify(self, expected: Expected) -> dict:
         """Read the expected CIs and relations back; counts and (capped)
-        missing identifiers. A CI is found when the row with its sys_id
-        has the expected class and correlation_id; a relation when a
-        cmdb_rel_ci row links the same parent and child with its type.
-        Queries only carry sys_ids IRE returned (32 hex characters)."""
+        missing identifiers. Every sys_id IRE returned is read from
+        cmdb_ci and its row matched to the CI sent on correlation_id. A CI
+        is found when exactly one row carries its correlation_id and both
+        that row and IRE's answer have the class sent, or a known subclass
+        of it (reported as reclassified); any other class fails. A
+        relation is found when a cmdb_rel_ci row links the CIs found for
+        its parent and child with its type. Queries only carry sys_ids IRE
+        returned (32 hex characters)."""
         missing: list[str] = []
-        ids = list(expected.cis)
+        reclassified: list[str] = []
+        by_ref: dict[str, set[tuple[str, str]]] = {}
+        ids = list(expected.returned)
         for i in range(0, len(ids), VERIFY_CHUNK):
             chunk = ids[i : i + VERIFY_CHUNK]
             rows = await self.query_table(
@@ -1023,20 +1093,43 @@ class ServiceNowClient:
                 ["sys_id", "sys_class_name", "correlation_id"],
                 "CI lookup",
             )
-            seen = {
-                _field(r, "sys_id"): (
-                    _field(r, "sys_class_name"),
-                    _field(r, "correlation_id"),
-                )
-                for r in rows
-            }
-            missing += [
-                expected.cis[s][1] for s in chunk if seen.get(s) != expected.cis[s]
-            ]
+            for r in rows:
+                sys_id = _field(r, "sys_id")
+                if sys_id in expected.returned:
+                    by_ref.setdefault(_field(r, "correlation_id"), set()).add(
+                        (sys_id, _field(r, "sys_class_name"))
+                    )
+        found_ci: dict[str, str] = {}
+        for ref, sent in expected.cis.items():
+            hits = by_ref.get(ref, set())
+            if not hits:
+                missing.append(ref)
+                continue
+            if len({sys_id for sys_id, _ in hits}) > 1:
+                missing.append(f"{ref} (duplicate CIs)")
+                continue
+            ((sys_id, got),) = hits
+            # The row's class is what the CMDB holds; IRE's answer for the
+            # same sys_id (when it named a class) must agree as well.
+            classes = [got] + [c for c in (expected.returned[sys_id],) if c]
+            other = [c for c in classes if class_status(sent, c) == "other"]
+            if other:
+                missing.append(f"{ref} (class {_class_label(other[0])})")
+                continue
+            sub = [c for c in classes if c != sent]
+            if sub:
+                reclassified.append(f"{ref} ({sent} -> {_class_label(sub[0])})")
+            found_ci[ref] = sys_id
         rels = list(expected.relations)
+        resolved = [
+            (found_ci[p], found_ci[c], t)
+            for p, c, t in rels
+            if p in found_ci and c in found_ci
+        ]
+        found_rels: set[tuple[str, str, str]] = set()
         step = VERIFY_CHUNK // 2
-        for i in range(0, len(rels), step):
-            chunk = rels[i : i + step]
+        for i in range(0, len(resolved), step):
+            chunk = resolved[i : i + step]
             parents = ",".join(sorted({p for p, _, _ in chunk}))
             children = ",".join(sorted({c for _, c, _ in chunk}))
             rows = await self.query_table(
@@ -1045,22 +1138,28 @@ class ServiceNowClient:
                 ["parent", "child", "type.name"],
                 "relationship lookup",
             )
-            found = {
+            found_rels |= {
                 (_field(r, "parent"), _field(r, "child"), _field(r, "type.name"))
                 for r in rows
             }
-            missing += [
-                f"{expected.label(p)} {t} {expected.label(c)}"
-                for p, c, t in chunk
-                if (p, c, t) not in found
-            ]
-        checked = len(ids) + len(rels)
+        missing += [
+            f"{p} {t} {c}"
+            for p, c, t in rels
+            if (found_ci.get(p), found_ci.get(c), t) not in found_rels
+        ]
+        checked = len(expected.cis) + len(rels)
+        if reclassified:
+            logger.info(
+                "servicenow read-back: %d CIs reclassified by IRE", len(reclassified)
+            )
         return {
             "checked": checked,
             "found": checked - len(missing),
             "missing_count": len(missing),
             "missing": missing[:MAX_MISSING_REPORTED],
-            "cis_checked": len(ids),
+            "reclassified_count": len(reclassified),
+            "reclassified": reclassified[:MAX_MISSING_REPORTED],
+            "cis_checked": len(expected.cis),
             "relations_checked": len(rels),
         }
 
@@ -1166,11 +1265,11 @@ async def sync_servicenow(
                 conn, transport=servicenow_transport, resolver=resolver, sleep=sleep
             ) as sn:
                 for payload in payloads:
-                    ops, sys_ids = await sn.identify_reconcile_ids(payload)
+                    ops, results = await sn.identify_reconcile_ids(payload)
                     for op, n in ops.items():
                         operations[op] = operations.get(op, 0) + n
                     if verify:
-                        expected.add(payload, sys_ids, conn)
+                        expected.add(payload, results, conn)
                 if verify:
                     verification = await sn.verify(expected)
                     if verification["missing_count"]:
@@ -1341,11 +1440,20 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="build the payloads and print what would be sent; send nothing",
     )
-    parser.add_argument(
+    verify = parser.add_mutually_exclusive_group()
+    verify.add_argument(
         "--verify",
-        action="store_true",
+        action="store_const",
+        const=True,
         default=None,
         help="read the written CIs and relations back (round-trip check)",
+    )
+    verify.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_const",
+        const=False,
+        help="skip the read-back for this run even if the tenant enables it",
     )
     args = parser.parse_args(argv)
     out = asyncio.run(_main(args.tenant, args.full, args.dry_run, args.verify))

@@ -366,6 +366,10 @@ class Fakes:
         self.table_requests: list[httpx.Request] = []
         self.hidden_cis: set[str] = set()
         self.hidden_rel_types: set[str] = set()
+        # IRE answering the items in reverse order, and IRE storing (and
+        # reporting) a CI of the sent class under another class.
+        self.reverse_ire = False
+        self.reclassify: dict[str, str] = {}
 
     def partner(self, r: httpx.Request) -> httpx.Response:
         self.partner_requests.append(r)
@@ -436,7 +440,8 @@ class Fakes:
             # Vendors and assets: identification rule on correlation_id;
             # business unit records (cmn_department): on name.
             ident = item["values"].get("correlation_id") or item["values"]["name"]
-            key = (item["className"], ident)
+            cls = self.reclassify.get(item["className"], item["className"])
+            key = (cls, ident)
             sys_id = hashlib.md5("|".join(key).encode()).hexdigest()
             if key not in self.cmdb:
                 op = "INSERT"
@@ -445,9 +450,7 @@ class Fakes:
             else:
                 op = "NO_CHANGE"
             self.cmdb[key] = item["values"]
-            out.append(
-                {"className": item["className"], "operation": op, "sysId": sys_id}
-            )
+            out.append({"className": cls, "operation": op, "sysId": sys_id})
             sys_ids.append(sys_id)
         for rel in payload["relations"]:
             self.rels.add((sys_ids[rel["parent"]], rel["type"], sys_ids[rel["child"]]))
@@ -463,6 +466,8 @@ class Fakes:
             for rel in item.get("related", []):
                 assert rel["className"] == "cmdb_key_value"
                 self.key_values[(sys_id, rel["values"]["key"])] = rel["values"]["value"]
+        if self.reverse_ire:
+            out.reverse()
         return {"items": out, "relations": []}
 
     def _table(self, r: httpx.Request) -> httpx.Response:
@@ -1302,6 +1307,8 @@ async def test_verify_reads_cis_and_relations_back():
         "found": 8,
         "missing_count": 0,
         "missing": [],
+        "reclassified_count": 0,
+        "reclassified": [],
         "cis_checked": 5,
         "relations_checked": 3,
     }
@@ -1329,13 +1336,25 @@ async def test_verify_follows_the_tenant_setting():
 @pytest.mark.parametrize(
     "hide,missing",
     [
-        ({"cis": {f"promptshields:asset:{A1}"}}, f"promptshields:asset:{A1}"),
+        # A CI that is not there; its relation cannot be checked either.
+        (
+            {"cis": {f"promptshields:asset:{A1}"}},
+            [
+                f"promptshields:asset:{A1}",
+                (
+                    f"promptshields:asset:{A1} Depends on::Used by "
+                    "promptshields:provider:openai"
+                ),
+            ],
+        ),
         (
             {"rels": {"Depends on::Used by"}},
-            (
-                f"promptshields:asset:{A1} Depends on::Used by "
-                "promptshields:provider:openai"
-            ),
+            [
+                (
+                    f"promptshields:asset:{A1} Depends on::Used by "
+                    "promptshields:provider:openai"
+                )
+            ],
         ),
     ],
 )
@@ -1349,27 +1368,142 @@ async def test_missing_ci_or_relation_fails_and_keeps_cursor(hide, missing):
     fakes.hidden_rel_types = hide.get("rels", set())
     out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs())
     assert out["status"] == "error"
-    assert out["error"] == "servicenow: 1 of 3 CIs and relations not found after sync"
-    assert out["verification"]["missing"] == [missing]
+    assert out["error"] == (
+        f"servicenow: {len(missing)} of 3 CIs and relations not found after sync"
+    )
+    assert out["verification"]["missing"] == missing
     state = db.tenant.settings["connectors"]["servicenow"]
     assert state["cursor"] == cursor and state["last_status"] == "error"
-    assert state["last_verification"]["missing_count"] == 1
+    assert state["last_verification"]["missing_count"] == len(missing)
 
 
-async def test_verify_rejects_a_ci_with_another_class():
+def _expected_one(sent: str, ire: str) -> "sn.Expected":
     expected = sn.Expected()
-    expected.cis = {"a" * 32: ("cmdb_ci_function_ai", "promptshields:asset:x")}
+    expected.cis = {"promptshields:asset:x": sent}
+    expected.returned = {"a" * 32: ire}
+    return expected
+
+
+def _one_row(cls: str) -> httpx.MockTransport:
     row = {
         "sys_id": "a" * 32,
-        "sys_class_name": "cmdb_ci_appl",
+        "sys_class_name": cls,
         "correlation_id": "promptshields:asset:x",
     }
+    return httpx.MockTransport(lambda r: httpx.Response(200, json={"result": [row]}))
+
+
+@pytest.mark.parametrize(
+    "ire,row,bad",
+    [
+        # The CMDB holds the CI under an unrelated class.
+        ("cmdb_ci_function_ai", "cmdb_ci_appl", "cmdb_ci_appl"),
+        # IRE reports an unrelated class for the same sys_id.
+        ("cmdb_ci_appl", "cmdb_ci_function_ai", "cmdb_ci_appl"),
+        # A parent class is not a subclass.
+        ("cmdb_ci_function_ai", "cmdb_ci", "cmdb_ci"),
+    ],
+)
+async def test_verify_rejects_a_ci_of_an_unrelated_class(ire, row, bad):
+    async with _basic_client(_one_row(row)) as client:
+        out = await client.verify(_expected_one("cmdb_ci_function_ai", ire))
+    assert out["missing"] == [f"promptshields:asset:x (class {bad})"]
+    assert out["missing_count"] == 1 and out["reclassified_count"] == 0
+
+
+async def test_verify_checks_the_row_class_when_ire_names_none():
+    async with _basic_client(_one_row("cmdb_ci_appl")) as client:
+        out = await client.verify(_expected_one("cmdb_ci_appl", ""))
+    assert out["missing_count"] == 0 and out["found"] == 1
+
+
+async def test_verify_class_labels_from_the_response_are_not_echoed():
+    async with _basic_client(_one_row("<script>x")) as client:
+        out = await client.verify(_expected_one("cmdb_ci_appl", "cmdb_ci_appl"))
+    assert out["missing"] == ["promptshields:asset:x (class ?)"]
+
+
+@pytest.mark.parametrize(
+    "sent,got",
+    [
+        ("cmdb_ci_service", "cmdb_ci_service_discovered"),
+        ("cmdb_ci_service", "service_offering"),
+        ("cmdb_ci_appl", "cmdb_ci_appl_ai_application"),
+    ],
+)
+async def test_verify_accepts_a_known_subclass_as_reclassified(sent, got):
+    async with _basic_client(_one_row(got)) as client:
+        out = await client.verify(_expected_one(sent, got))
+    assert out["missing_count"] == 0 and out["found"] == 1
+    assert out["reclassified"] == [f"promptshields:asset:x ({sent} -> {got})"]
+
+
+async def test_verify_rejects_two_cis_with_one_correlation_id():
+    expected = _expected_one("cmdb_ci_appl", "cmdb_ci_appl")
+    expected.returned["b" * 32] = "cmdb_ci_appl"
+    rows = [
+        {
+            "sys_id": s,
+            "sys_class_name": "cmdb_ci_appl",
+            "correlation_id": "promptshields:asset:x",
+        }
+        for s in ("a" * 32, "b" * 32)
+    ]
     transport = httpx.MockTransport(
-        lambda r: httpx.Response(200, json={"result": [row]})
+        lambda r: httpx.Response(200, json={"result": rows})
     )
     async with _basic_client(transport) as client:
         out = await client.verify(expected)
-    assert out["missing"] == ["promptshields:asset:x"]
+    assert out["missing"] == ["promptshields:asset:x (duplicate CIs)"]
+
+
+async def test_verify_does_not_depend_on_the_order_of_ire_answers():
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2, vendor="anthropic")])
+    fakes.flows = {A1: [{"direction": "input", "source_system": "crm"}]}
+    fakes.reverse_ire = True
+    settings = _settings(data_system_class="cmdb_ci_appl", **BU_OPTS)
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs(settings))
+    assert out["status"] == "ok", out
+    v = out["verification"]
+    assert (v["found"], v["missing_count"], v["reclassified_count"]) == (8, 0, 0)
+
+
+async def test_reclassified_ci_is_reported_not_failed():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"servicenow": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    fakes.reclassify = {"cmdb_ci_service": "cmdb_ci_service_discovered"}
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "ok", out
+    v = out["verification"]
+    assert v["missing_count"] == 0 and v["found"] == 3
+    assert v["reclassified"] == [
+        "promptshields:provider:openai (cmdb_ci_service -> cmdb_ci_service_discovered)"
+    ]
+    state = db.tenant.settings["connectors"]["servicenow"]
+    assert state["cursor"] != cursor
+    assert state["last_verification"]["reclassified_count"] == 1
+
+
+async def test_unrelated_class_mismatch_fails_and_keeps_cursor():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"servicenow": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    fakes.reclassify = {"cmdb_ci_function_ai": "cmdb_ci_appl"}
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "error"
+    ref = f"promptshields:asset:{A1}"
+    # The CI and, with it, its relation to the vendor are not found.
+    assert out["verification"]["missing"] == [
+        f"{ref} (class cmdb_ci_appl)",
+        f"{ref} Depends on::Used by promptshields:provider:openai",
+    ]
+    assert db.tenant.settings["connectors"]["servicenow"]["cursor"] == cursor
 
 
 async def test_verify_pages_and_chunks(monkeypatch):
@@ -1480,6 +1614,74 @@ async def test_recorded_responses_round_trip():
     ]
 
 
+def _recorded(ire: dict, cis: dict) -> httpx.MockTransport:
+    def servicenow(r: httpx.Request) -> httpx.Response:
+        if r.url.path == sn.TOKEN_PATH:
+            return httpx.Response(
+                200, json={"access_token": BEARER, "expires_in": 1800}
+            )
+        if r.url.path == sn.IRE_PATH:
+            return httpx.Response(201, json=ire)
+        table = r.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200, json=cis if table == "cmdb_ci" else _fixture(f"table_{table}.json")
+        )
+
+    return httpx.MockTransport(servicenow)
+
+
+async def test_recorded_responses_reordered_ire_answer_passes():
+    ire = _fixture("identifyreconcile.json")
+    ire["result"]["items"].reverse()
+    kw = Fakes().kwargs()
+    kw["servicenow_transport"] = _recorded(ire, _fixture("table_cmdb_ci.json"))
+    out = await sn.sync_servicenow(FakeSession(), TENANT, verify=True, **kw)
+    assert out["status"] == "ok", out
+    assert out["verification"]["found"] == 3
+
+
+async def test_recorded_responses_reordered_ire_answer_cannot_pass_falsely():
+    # Two answers, one sys_id: the vendor CI was not written, whatever
+    # order IRE answered in.
+    ire = _fixture("identifyreconcile.json")
+    items = ire["result"]["items"]
+    items[0]["sysId"] = items[1]["sysId"]
+    items[0]["className"] = items[1]["className"]
+    items.reverse()
+    cis = _fixture("table_cmdb_ci.json")
+    cis["result"] = [r for r in cis["result"] if r["sys_id"] == items[0]["sysId"]]
+    kw = Fakes().kwargs()
+    kw["servicenow_transport"] = _recorded(ire, cis)
+    out = await sn.sync_servicenow(FakeSession(), TENANT, verify=True, **kw)
+    assert out["status"] == "error"
+    assert out["verification"]["missing"][0] == f"promptshields:asset:{A1}"
+
+
+async def test_recorded_responses_reclassified_vendor():
+    ire = _fixture("identifyreconcile.json")
+    ire["result"]["items"][1]["className"] = "cmdb_ci_service_auto"
+    cis = _fixture("table_cmdb_ci.json")
+    cis["result"][1]["sys_class_name"] = "cmdb_ci_service_auto"
+    kw = Fakes().kwargs()
+    kw["servicenow_transport"] = _recorded(ire, cis)
+    out = await sn.sync_servicenow(FakeSession(), TENANT, verify=True, **kw)
+    assert out["status"] == "ok", out
+    assert out["verification"]["reclassified"] == [
+        "promptshields:provider:openai (cmdb_ci_service -> cmdb_ci_service_auto)"
+    ]
+
+
+async def test_no_verify_skips_the_read_back_the_tenant_enables():
+    db = FakeSession()
+    fakes = Fakes()
+    out = await sn.sync_servicenow(
+        db, TENANT, verify=False, **fakes.kwargs(_settings(verify=True))
+    )
+    assert out["status"] == "ok" and "verification" not in out
+    assert fakes.table_requests == []
+    assert "last_verification" not in db.tenant.settings["connectors"]["servicenow"]
+
+
 def test_cli_parses_dry_run_and_verify(monkeypatch, capsys):
     calls = []
 
@@ -1490,4 +1692,11 @@ def test_cli_parses_dry_run_and_verify(monkeypatch, capsys):
     monkeypatch.setattr(sn, "_main", fake_main)
     sn.main(["--tenant", str(TENANT)])
     sn.main(["--tenant", str(TENANT), "--dry-run", "--verify", "--full"])
-    assert calls == [(TENANT, False, False, None), (TENANT, True, True, True)]
+    sn.main(["--tenant", str(TENANT), "--no-verify"])
+    assert calls == [
+        (TENANT, False, False, None),
+        (TENANT, True, True, True),
+        (TENANT, False, False, False),
+    ]
+    with pytest.raises(SystemExit):
+        sn.main(["--tenant", str(TENANT), "--verify", "--no-verify"])
