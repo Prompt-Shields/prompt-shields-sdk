@@ -1,6 +1,9 @@
 import { Context } from 'hono';
 import { InMemoryLruStore } from './store';
 import { isSensitiveKey } from '../../utils/redact';
+import { canonicalJSON, sha256Hex } from './hash';
+import { semanticStore } from './semantic';
+import { cacheWritesTotal } from '../psMetrics/cache';
 
 const store = new InMemoryLruStore({
   maxEntries: parseInt(process.env.PS_CACHE_MAX_ENTRIES || '1000', 10),
@@ -33,16 +36,6 @@ export const isCacheableBody = (body: unknown): boolean => {
   return proto === Object.prototype || proto === null;
 };
 
-const sha256Hex = async (value: string): Promise<string> => {
-  const digest = await crypto.subtle.digest(
-    { name: 'SHA-256' },
-    new TextEncoder().encode(value)
-  );
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-};
-
 // PS fork: the cache key is scoped to the caller. Upstream keyed on body +
 // endpoint only, so with caching on, caller B was served caller A's cached
 // response for an identical body. The scope covers every provider option and
@@ -65,18 +58,6 @@ const GATEWAY_DERIVED_AWS_KEYS = [
   'awsSecretAccessKey',
   'awsSessionToken',
 ];
-
-const canonicalJSON = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonicalJSON(record[k])}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
-};
 
 const pickIdentity = (
   record: Record<string, unknown> | undefined | null,
@@ -300,16 +281,52 @@ export const isCompleteResponseBody = (body: any): boolean => {
   return true;
 };
 
+/**
+ * PS fork (#33): whether a response body is a model refusal, which is never
+ * cached in either mode: a refusal can depend on context the key does not
+ * see, and serving one again would turn a one-off into a standing denial.
+ * Covers Chat Completions (`message.refusal`, `finish_reason:
+ * content_filter`), Messages (`stop_reason: refusal`) and Responses (a
+ * `refusal` output part).
+ */
+export const isRefusalResponse = (body: any): boolean => {
+  if (!body || typeof body !== 'object') return false;
+  if (body.stop_reason === 'refusal') return true;
+  if (
+    Array.isArray(body.choices) &&
+    body.choices.some(
+      (ch: any) =>
+        (typeof ch?.message?.refusal === 'string' && ch.message.refusal) ||
+        ch?.finish_reason === 'content_filter'
+    )
+  )
+    return true;
+  if (
+    Array.isArray(body.output) &&
+    body.output.some(
+      (o: any) =>
+        o?.type === 'refusal' ||
+        (Array.isArray(o?.content) &&
+          o.content.some((p: any) => p?.type === 'refusal'))
+    )
+  )
+    return true;
+  return (
+    Array.isArray(body.content) &&
+    body.content.some((p: any) => p?.type === 'refusal')
+  );
+};
+
 const DEFAULT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * PS fork (#208): absolute expiry for a write-back. The config's
- * `cache.max_age` is in seconds (Portkey's documented unit), but the fork base
- * added it to `Date.now()` as milliseconds, so `max_age: 3600` expired after
- * 3.6 s. Related to the Portkey enterprise changelog 2.30 fix "simple cache
- * entries now expire at the configured max_age" (closed source; their bug was
- * a fallback to the default TTL). A missing, zero, negative or non-numeric
- * max_age keeps the default.
+ * PS fork (#208): absolute expiry for a simple-cache write-back. The config's
+ * `cache.max_age` is in seconds (Portkey's documented unit, and the unit the
+ * semantic cache already uses), but the fork base added it to `Date.now()` as
+ * milliseconds, so `max_age: 3600` expired after 3.6 s. Related to the Portkey
+ * enterprise changelog 2.30 fix "simple cache entries now expire at the
+ * configured max_age" (closed source; their bug was a fallback to the default
+ * TTL). A missing, zero, negative or non-numeric max_age keeps the default.
  */
 export const cacheExpiresAt = (
   maxAgeSeconds: unknown,
@@ -337,37 +354,60 @@ export const memoryCache = () => {
         ? requestLogs[requestLogs.length - 1]
         : undefined;
 
+    const mode = requestOptions?.cacheMode;
     if (
-      requestOptions &&
-      requestOptions.requestParams?.stream !== true &&
-      requestOptions.cacheMode === 'simple' &&
-      isCacheableResponse(requestOptions.response)
+      !requestOptions ||
+      requestOptions.requestParams?.stream === true ||
+      (mode !== 'simple' && mode !== 'semantic') ||
+      !isCacheableResponse(requestOptions.response)
     ) {
-      // Reuse the scope the read computed for this target: the logged
-      // provider options are a snapshot taken before credentials resolve.
-      const cacheScope = getCacheScopeForTarget(
-        c,
-        requestOptions.lastUsedOptionIndex
-      );
-      if (cacheScope) {
-        try {
-          const parsed = await requestOptions.response.clone().json();
-          if (!isCompleteResponseBody(parsed)) return;
-          await putInCache(
-            null,
-            null,
-            requestOptions.transformedRequest.body,
-            parsed,
-            requestOptions.providerOptions.rubeusURL,
-            '',
-            null,
-            cacheExpiresAt(requestOptions.cacheMaxAge),
-            cacheScope
-          );
-        } catch (error) {
-          console.error('memoryCache write-back error (fail-open):', error);
-        }
+      return;
+    }
+    // A simple HIT is written back as before (it renews the entry), but
+    // not counted as a new write.
+    const isHit = String(requestOptions.cacheStatus ?? '').endsWith('HIT');
+
+    // Reuse the scope the read computed for this target: the logged
+    // provider options are a snapshot taken before credentials resolve.
+    const cacheScope = getCacheScopeForTarget(
+      c,
+      requestOptions.lastUsedOptionIndex
+    );
+    if (!cacheScope) return;
+    try {
+      const parsed = await requestOptions.response.clone().json();
+      if (!isCompleteResponseBody(parsed)) {
+        cacheWritesTotal.inc({ mode, outcome: 'incomplete' });
+        return;
       }
+      if (isRefusalResponse(parsed)) {
+        cacheWritesTotal.inc({ mode, outcome: 'refusal' });
+        return;
+      }
+      if (mode === 'semantic') {
+        const outcome = semanticStore(
+          c,
+          requestOptions.lastUsedOptionIndex,
+          parsed
+        );
+        if (outcome !== 'no_lookup') cacheWritesTotal.inc({ mode, outcome });
+        return;
+      }
+      await putInCache(
+        null,
+        null,
+        requestOptions.transformedRequest.body,
+        parsed,
+        requestOptions.providerOptions.rubeusURL,
+        '',
+        null,
+        cacheExpiresAt(requestOptions.cacheMaxAge),
+        cacheScope
+      );
+      if (!isHit) cacheWritesTotal.inc({ mode, outcome: 'stored' });
+    } catch (error) {
+      cacheWritesTotal.inc({ mode, outcome: 'error' });
+      console.error('memoryCache write-back error (fail-open):', error);
     }
   };
 };

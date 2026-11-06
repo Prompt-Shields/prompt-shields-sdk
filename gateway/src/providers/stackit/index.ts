@@ -1,20 +1,11 @@
 import { STACKIT } from '../../globals';
-import {
-  chatCompleteParams,
-  embedParams,
-  responseTransformers,
-} from '../open-ai-base';
-import { ProviderConfigs } from '../types';
-import STACKITAPIConfig from './api';
+import { openAICompatibleProvider } from '../openAICompatible';
+import { STACKIT_BASE_URL } from './api';
 
-const STACKITConfig: ProviderConfigs = {
-  chatComplete: chatCompleteParams([]),
-  embed: embedParams([]),
-  api: STACKITAPIConfig,
-  responseTransforms: responseTransformers(STACKIT, {
-    chatComplete: true,
-    embed: true,
-  }),
-};
+const STACKITConfig = openAICompatibleProvider({
+  provider: STACKIT,
+  baseURL: STACKIT_BASE_URL,
+  embed: true,
+});
 
 export default STACKITConfig;
