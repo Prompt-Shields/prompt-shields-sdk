@@ -70,6 +70,15 @@ Enables all 70+ providers to support OpenAI's newer Responses API.
 
 **Native Providers** (bypass adapter): `openai`, `azure-openai`
 
+**Signed thinking round-trip (PS fork, #73).** Anthropic, Bedrock and
+Vertex AI sign thinking blocks and, with extended thinking and tools, need
+the signed blocks of a tool-use turn back on the next request. Reasoning
+items from these providers carry the blocks in `encrypted_content` as
+`ps-thk1:<provider>:<base64 JSON>` (`thinkingCarry.ts`); when a client sends
+such an item back, it becomes the leading `content_blocks` of the next
+assistant message, for the issuing provider only. Native Responses targets
+never receive these items (`stripIssuedThinking` in `tryPost`).
+
 ### `messages/` - Anthropic Messages API Adapter
 
 Enables all providers to accept Anthropic's Messages API format.
