@@ -20,7 +20,9 @@ Detector
 
     σ is floored at ``min_sigma_fraction`` · m (and one cent), so a flat
     series still needs a real jump to alert. z = (spend - m) / σ. Only
-    spikes alert (z ≥ ``sigma``), never drops. z ≥ 2·``sigma`` is
+    spikes alert (z ≥ ``sigma``), never drops, and only a day above every
+    day of the history window (a periodic job's usual spend after quiet
+    days is not a spike). z ≥ 2·``sigma`` is
     ``critical``, otherwise ``warning``. A group with fewer than
     ``min_history_days`` days of history is not judged. Day-of-week
     seasonality is not modelled.
@@ -223,6 +225,11 @@ def detect(
     before it, oldest first, missing days as 0). None means no alert."""
     series = trim_leading_zeros(history)
     if len(series) < cfg.min_history_days:
+        return None
+    # A day no higher than the window's busiest day is not a spike. Without
+    # this, a periodic job (spend once a week, zeros in between) alerts every
+    # time: the zero days pull the EWMA mean and σ towards zero.
+    if observed <= max(series):
         return None
     base = ewma_baseline(series, cfg.alpha)
     sigma = max(base.sigma, cfg.min_sigma_fraction * base.mean, MIN_SIGMA_USD)

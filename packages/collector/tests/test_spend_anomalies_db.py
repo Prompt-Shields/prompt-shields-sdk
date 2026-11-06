@@ -9,6 +9,7 @@ and erasure in test_retention.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -192,6 +193,22 @@ async def test_rerun_creates_no_duplicates_and_no_new_webhooks(env):
     assert second["tenants"][str(env["a"])][0]["alerts_created"] == 0
     assert second["tenants"][str(env["a"])][0]["webhooks_queued"] == 0
     assert len(await _alerts(env["factory"])) == 2
+    async with env["factory"]() as s:
+        assert len((await s.execute(select(WebhookDelivery))).scalars().all()) == 1
+
+
+async def test_concurrent_runs_record_one_alert_and_one_webhook(env):
+    # Two overlapping cron runs: the unique (tenant, group, day) constraint
+    # makes the second insert wait for the first, then do nothing.
+    async with _client() as c:
+        resp = await c.post("/api/v1/admin/webhooks/subscriptions", headers=H_A, json={
+            "partner_id": str(env["pa"]), "url": URL, "event_types": ["spend.anomaly"]})
+        assert resp.status_code == 201, resp.text
+    runs = await asyncio.gather(*(_run(env) for _ in range(3)))
+    created = sum(r["tenants"][str(env["a"])][0]["alerts_created"] for r in runs)
+    queued = sum(r["tenants"][str(env["a"])][0]["webhooks_queued"] for r in runs)
+    assert (created, queued) == (1, 1)
+    assert len(await _alerts(env["factory"], env["a"])) == 1
     async with env["factory"]() as s:
         assert len((await s.execute(select(WebhookDelivery))).scalars().all()) == 1
 

@@ -17,7 +17,7 @@ For each use case, over the `baseline_days` days before the day (starting at its
 2. `σ` is at least `min_sigma_fraction × m` (and one cent), so a perfectly flat series still needs a real jump.
 3. `z = (spend − m) / σ`. The day is an alert when `z ≥ sigma` **and** `spend − m ≥ min_delta_usd`. With `z ≥ 2 × sigma` the alert is `critical`, otherwise `warning`.
 
-Only rises alert, never drops. A use case with fewer than `min_history_days` days of history is not judged. Day-of-week patterns are not modelled: a business whose weekday spend is far above its weekend spend may want a higher `sigma`.
+Only rises alert, never drops, and only a day above the highest day of the baseline window: a weekly or monthly job spending its usual amount after quiet days is not an alert. A use case with fewer than `min_history_days` days of history is not judged. Day-of-week patterns are not modelled: a business whose weekday spend is far above its weekend spend may want a higher `sigma`.
 
 ## Thresholds
 

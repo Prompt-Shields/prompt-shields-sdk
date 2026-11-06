@@ -1217,6 +1217,8 @@ components:
         `spend.anomaly` delivers spend anomaly alerts (see `SpendAlert`);
         the event id is the alert id and `data.alert` the alert. It needs
         `spend-alerts:read` and is not part of the default list either.
+        New values are added over time: clients should treat this as an
+        open string and ignore types they do not handle.
       enum: [asset.created, asset.changed, asset.retired, asset.attested, audit.*, spend.anomaly]
 
     CreateWebhookSubscriptionRequest:

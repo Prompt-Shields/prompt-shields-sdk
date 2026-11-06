@@ -69,6 +69,25 @@ class TestDetect:
         found = detect([10.0, 0.0] * 7, 30.0)
         assert found is not None and found.history_days == 14
 
+    def test_periodic_spend_does_not_alert_every_period(self):
+        # A weekly $5 batch job: zero days in between pull m and σ towards
+        # zero, but the usual spend is never above the window's busiest day.
+        series = [5.0 if day % 7 == 0 else 0.0 for day in range(90)]
+        series += [0.0] * 6 + [50.0]  # a real spike still alerts
+        alerts = [
+            day
+            for day in range(28, len(series))
+            if series[day] > 0
+            and detect(series[day - 28 : day], series[day]) is not None
+        ]
+        assert alerts == [len(series) - 1]
+
+    def test_not_above_the_window_peak_never_alerts(self):
+        # z would pass (σ floor 1, m = 10) but the window already had 40.
+        history = [40.0] + [10.0] * 27
+        assert detect(history, 40.0) is None
+        assert detect(history, 40.5) is not None
+
     def test_min_delta_usd_ignores_tiny_spend(self):
         # Cents a day: a 10x jump is still well under a dollar.
         assert detect([0.02] * 14, 0.2) is None
