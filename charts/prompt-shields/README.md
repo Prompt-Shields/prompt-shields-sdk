@@ -271,6 +271,31 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
   drain + telemetry flush (`PS_TELEMETRY_SHUTDOWN_TIMEOUT_MS`, 5 s); raise
   it with the drain timeout.
 - Pin images by digest with `gateway.image.digest` / `collector.image.digest`.
+- Tenant admin routes (`/api/v1/admin/*`) accept scoped admin tokens only
+  (`PS_ADMIN_REQUIRE_SCOPED_TOKENS`, default `true` since 0.4.11).
+
+### Upgrading to 0.4.11: scoped admin tokens required
+
+The collector now ships roles (principals, teams, projects, memberships;
+migration `036`), and `PS_ADMIN_REQUIRE_SCOPED_TOKENS` defaults to `true`:
+a tenant ingest key (the key SDKs and gateways send) gets **403 on every
+`/api/v1/admin` route**. Ingest, the registry and the Partner API are
+unchanged, and existing admin tokens and partner credentials keep working.
+
+Before upgrading, move any automation that calls `/api/v1/admin` with an
+ingest key to an admin token: issue one with
+`POST /api/v1/admin/tokens` while the old version still runs, or afterwards
+with the operator route
+`POST /api/v1/operator/tenants/{tenant_id}/admin-tokens` (`PS_ADMIN_TOKEN`).
+To keep the old behaviour for now, set it back in `collector.config`:
+
+```yaml
+collector:
+  config:
+    PS_ADMIN_REQUIRE_SCOPED_TOKENS: "false"
+```
+
+Even then an ingest key never reaches member management (`admin:members`).
 - The images are **amd64 only** for now, so every workload defaults to
   `nodeSelector: {kubernetes.io/arch: amd64}` (CronJobs use
   `collector.nodeSelector`). Replacing a `nodeSelector` drops that entry.
@@ -496,7 +521,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_DATABASE_URL` (secret) | — | Application role URL (migration Job: owner role URL) |
 | `PS_PARTNER_JWT_SECRET` (secret) | development value | Partner token signing key |
 | `PS_ADMIN_TOKEN` (secret) | empty (off) | Operator endpoints `/api/v1/operator/*` |
-| `PS_ADMIN_REQUIRE_SCOPED_TOKENS` | `false` | `true`: tenant admin routes (`/api/v1/admin/*`) take only scoped admin tokens and refuse tenant ingest keys. Set it in `collector.config` |
+| `PS_ADMIN_REQUIRE_SCOPED_TOKENS` | `true` (since chart 0.4.11) | Tenant admin routes (`/api/v1/admin/*`) take only scoped admin tokens and refuse tenant ingest keys. `false` lets ingest keys back onto the pre-roles admin routes (never member management). Set it in `collector.config`; see "Upgrading to 0.4.11" |
 | `PS_RLS_REQUIRED` (*chart*) | `true` in the chart | Refuse to start unless RLS binds the role |
 | `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `true`; the chart sets `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob | Background loops in the API process |
 | `PS_COLLECTOR_METRICS_ENABLED` (*chart*) | `false` | Prometheus `/metrics` |

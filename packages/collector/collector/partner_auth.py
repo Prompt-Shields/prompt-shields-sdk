@@ -33,7 +33,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import audit_trail, rls
+from collector import audit_trail, rbac, rls
 from collector.audit import record_read
 from collector.partner_scopes import SCOPES, effective_rate_limit, expand_scopes
 
@@ -260,7 +260,7 @@ async def _resolve_credential(request: Request) -> PartnerPrincipal:
             tenant_id=UUID(payload["tenant_id"]),
             partner_id=partner_id,
             client_id=payload["sub"],
-            scopes=set(token_scopes & expand_scopes(partner.scopes)),
+            scopes=set(token_scopes & await _credential_scopes(db, partner)),
             rate_limit=_rate_limit_for(partner),
         )
 
@@ -292,9 +292,32 @@ async def _resolve_credential(request: Request) -> PartnerPrincipal:
         tenant_id=partner.tenant_id,
         partner_id=partner.id,
         client_id=partner.client_id,
-        scopes=set(expand_scopes(partner.scopes)),
+        scopes=set(await _credential_scopes(db, partner)),
         rate_limit=_rate_limit_for(partner),
     )
+
+
+async def _credential_scopes(db: AsyncSession, partner: PartnerCredential) -> frozenset[str]:
+    """The credential's effective scopes. One issued for a principal
+    (#338) reaches at most what the principal's tenant-wide roles grant
+    now; a disabled or deleted principal's credential gets 401. Runs under
+    the credential's tenant context."""
+    scopes = expand_scopes(partner.scopes)
+    if partner.principal_id is None:
+        return scopes
+    try:
+        roles = await rbac.tenant_roles(db, partner.principal_id)
+    except rbac.PrincipalDisabled:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "type": "about:blank",
+                "title": "Unauthorized",
+                "status": 401,
+                "detail": "The credential's principal is disabled or deleted",
+            },
+        ) from None
+    return scopes & rbac.role_scopes(roles)
 
 
 def _rate_limit_for(partner: PartnerCredential) -> int:

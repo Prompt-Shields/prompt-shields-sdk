@@ -39,6 +39,7 @@ import type {
   ListLearnerSnapshotsParams,
   ListMcpToolsParams,
   ListMcpUsageParams,
+  ListProjectsParams,
   ListRiskReviewsParams,
   ListSpendAlertsParams,
   ListWebhookDeliveriesParams,
@@ -48,6 +49,7 @@ import type {
   McpUsageDay,
   McpUsagePage,
   Page,
+  Project,
   ProviderCredential,
   ProviderCredentialList,
   ProviderKeyFingerprintLink,
@@ -65,6 +67,7 @@ import type {
   SovereignShareReport,
   SpendAlert,
   SpendAlertList,
+  Team,
   TelemetryCoverage,
   TokenResponse,
   UpdateWebhookSubscriptionParams,
@@ -223,6 +226,10 @@ export class PartnerClient {
   readonly telemetry: TelemetryResource;
   readonly usage: UsageResource;
   readonly spendAlerts: SpendAlertsResource;
+  /** The tenant's teams. Needs `members:read`. */
+  readonly teams: TeamsResource;
+  /** The tenant's projects. Needs `members:read`. */
+  readonly projects: ProjectsResource;
   readonly mcp: McpResource;
   readonly learner: LearnerResource;
   readonly siem: SiemResource;
@@ -284,6 +291,8 @@ export class PartnerClient {
     this.telemetry = new TelemetryResource(this);
     this.usage = new UsageResource(this);
     this.spendAlerts = new SpendAlertsResource(this);
+    this.teams = new TeamsResource(this);
+    this.projects = new ProjectsResource(this);
     this.mcp = new McpResource(this);
     this.learner = new LearnerResource(this);
     this.siem = new SiemResource(this);
@@ -662,6 +671,26 @@ export class TaxonomyResource {
 
   async list(): Promise<string[]> {
     const res = await this.client.get<{ data: string[] }>(this.path);
+    return res.data;
+  }
+}
+
+/** `/partner/v1/teams`: the tenant's teams, by name. Needs `members:read`. */
+export class TeamsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  async list(): Promise<Team[]> {
+    const res = await this.client.get<{ data: Team[] }>('/partner/v1/teams');
+    return res.data;
+  }
+}
+
+/** `/partner/v1/projects`: the tenant's projects, by name. Needs `members:read`. */
+export class ProjectsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  async list(params: ListProjectsParams = {}): Promise<Project[]> {
+    const res = await this.client.get<{ data: Project[] }>('/partner/v1/projects', { ...params });
     return res.data;
   }
 }

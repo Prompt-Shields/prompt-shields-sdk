@@ -61,14 +61,18 @@ from db.models import (
     LearnerSnapshot,
     McpToolUsage,
     McpToolUsageDaily,
+    Membership,
     PartnerAuditLog,
     PartnerCredential,
+    Principal,
+    Project,
     ProviderCredential,
     ProviderKeyFingerprint,
     RetentionAuditLog,
     RiskMapping,
     RiskMappingReview,
     SpendAlert,
+    Team,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
@@ -120,6 +124,11 @@ ERASE_ORDER: tuple[type, ...] = (
     SpendAlert,
     TenantApiKey,
     AdminToken,
+    # After the credentials that may name a principal (#338).
+    Membership,
+    Project,
+    Team,
+    Principal,
 )
 
 # Tables with a tenant_id that erasure keeps on purpose. Both hold ids and

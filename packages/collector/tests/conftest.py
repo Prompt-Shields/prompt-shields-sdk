@@ -25,6 +25,28 @@ def _reset_auth_cache():
     yield
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "scoped_admin_default: run with PS_ADMIN_REQUIRE_SCOPED_TOKENS at its "
+        "real default (true) instead of the legacy setting most tests use",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_admin_ingest_keys(request, monkeypatch):
+    """PS_ADMIN_REQUIRE_SCOPED_TOKENS defaults to true since roles shipped
+    (#338). Most route tests predate that and use the tenant ingest key on
+    /api/v1/admin for brevity, so they run with it off. Tests of the default
+    itself (and of roles) opt out with ``@pytest.mark.scoped_admin_default``
+    and get the real setting; tests that set it themselves still can."""
+    if request.node.get_closest_marker("scoped_admin_default"):
+        return
+    from collector.config import settings
+
+    monkeypatch.setattr(settings, "admin_require_scoped_tokens", False)
+
+
 @pytest.fixture
 def test_database_url() -> str:
     """For tests that manage their own engine (e.g. a server on another loop)."""

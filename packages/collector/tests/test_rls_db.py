@@ -37,14 +37,18 @@ from db.models import (
     LearnerSnapshot,
     McpToolUsage,
     McpToolUsageDaily,
+    Membership,
     PartnerAuditLog,
     PartnerCredential,
+    Principal,
+    Project,
     ProviderCredential,
     ProviderKeyFingerprint,
     RetentionAuditLog,
     RiskMapping,
     RiskMappingReview,
     SpendAlert,
+    Team,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
@@ -256,6 +260,25 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     projection={},
                 ),
             ]
+        )
+        principal = Principal(
+            tenant_id=tenant_id, kind="user", external_id=f"sub-{name}", email=f"u@{name}.example"
+        )
+        team = Team(tenant_id=tenant_id, name=f"team-{name}")
+        s.add_all([principal, team])
+        await s.flush()
+        project = Project(tenant_id=tenant_id, team_id=team.id, name=f"project-{name}")
+        s.add(project)
+        await s.flush()
+        s.add(
+            Membership(
+                tenant_id=tenant_id,
+                principal_id=principal.id,
+                team_id=team.id,
+                project_id=project.id,
+                role="viewer",
+                created_by="operator",
+            )
         )
         await s.commit()
 

@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from collector import audit_trail
+from collector import audit_trail, rbac
 from collector.admin_auth import AdminPrincipal, admin_actor, require_admin
 from collector.partner_auth import (
     generate_api_key,
@@ -49,6 +49,7 @@ from collector.partner_scopes import (
     SCOPE_ALIASES,
     SCOPES,
     effective_rate_limit,
+    expand_scopes,
     unknown_scopes,
 )
 from collector.sanitize import BoundedJsonRoute, StorableJson, StorableStr
@@ -72,6 +73,11 @@ class IssuePartnerCredentialBody(BaseModel):
     rate_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     metadata: StorableJson | None = None
+    # Issue it for a principal (#338): it gets the scopes asked for (by
+    # default every partner scope the principal's roles grant) intersected
+    # with those roles, and on every request no more than the roles grant
+    # then.
+    principal_id: UUID | None = None
 
 
 class UpdatePartnerCredentialBody(BaseModel):
@@ -93,6 +99,7 @@ class IssuePartnerCredentialResponse(BaseModel):
     rate_limit_tier: str | None
     created_at: datetime
     expires_at: datetime | None
+    principal_id: str | None
     warning: Literal["Save the client_secret and api_key now — they will never be shown again."]
 
 
@@ -157,7 +164,29 @@ def _credential_dict(r: PartnerCredential) -> dict:
         "has_api_key": r.api_key_hash is not None,
         "expires_at": r.expires_at.isoformat() if r.expires_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
+        "principal_id": str(r.principal_id) if r.principal_id else None,
     }
+
+
+async def _principal_scopes(
+    request: Request, principal_id: UUID, requested: list[str] | None
+) -> list[str]:
+    """Scopes to store for a credential issued for ``principal_id``: the
+    requested ones (aliases expanded; None means every partner scope the
+    roles grant) intersected with the principal's tenant-wide roles. 400
+    when the principal is unknown or disabled, or nothing is left."""
+    try:
+        granted = await rbac.granted_scopes(request.state.db, principal_id)
+    except rbac.PrincipalDisabled:
+        raise _bad_request("principal_id: no such principal, or it is disabled") from None
+    wanted = expand_scopes(requested) if requested is not None else frozenset(SCOPES)
+    scopes = rbac.ordered(wanted & granted, SCOPES)
+    if not scopes:
+        raise _bad_request(
+            "None of the requested scopes is granted by the principal's "
+            "tenant-wide roles"
+        )
+    return scopes
 
 
 async def _get_credential(
@@ -210,6 +239,12 @@ async def issue_partner_credential(
     tenant_id = principal.tenant_id
 
     scopes = _validated_scopes(body.scopes)
+    if body.principal_id is not None:
+        scopes = await _principal_scopes(
+            request,
+            body.principal_id,
+            scopes if "scopes" in body.model_fields_set else None,
+        )
     tier, rate_limit = _resolve_rate_limit(
         body.rate_limit_tier, body.rate_limit, default_tier="standard"
     )
@@ -231,6 +266,7 @@ async def issue_partner_credential(
         is_active="true",
         partner_metadata=body.metadata or {},
         expires_at=body.expires_at,
+        principal_id=body.principal_id,
     )
     db.add(partner)
     await db.flush()
@@ -248,6 +284,7 @@ async def issue_partner_credential(
             "rate_limit": rate_limit,
             "issued_partner_api_key": api_key is not None,
             "expires_at": body.expires_at,
+            "principal_id": str(body.principal_id) if body.principal_id else None,
         },
     )
     await db.commit()
@@ -264,6 +301,7 @@ async def issue_partner_credential(
         rate_limit_tier=partner.rate_limit_tier,
         created_at=partner.created_at,
         expires_at=partner.expires_at,
+        principal_id=str(partner.principal_id) if partner.principal_id else None,
         warning="Save the client_secret and api_key now — they will never be shown again.",
     )
 
@@ -326,6 +364,10 @@ async def update_partner_credential(
     try:
         if body.scopes is not None:
             row.scopes = _validated_scopes(body.scopes)
+            if row.principal_id is not None:
+                row.scopes = await _principal_scopes(
+                    request, row.principal_id, row.scopes
+                )
         if body.rate_limit_tier is not None or body.rate_limit is not None:
             row.rate_limit_tier, row.rate_limit = _resolve_rate_limit(
                 body.rate_limit_tier, body.rate_limit, default_tier=None

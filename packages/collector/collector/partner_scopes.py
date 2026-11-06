@@ -82,6 +82,7 @@ SCOPES: dict[str, str] = {
         "Pull per-call routing evidence (served provider, model and "
         "jurisdiction, policy version, sensitivity) as NDJSON from /siem/calls"
     ),
+    "members:read": "List the tenant's teams and projects (/teams, /projects)",
 }
 
 # What `registry:read` meant in Phase 1: every read route. Frozen on

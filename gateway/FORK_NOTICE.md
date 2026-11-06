@@ -273,7 +273,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 - Guardrails additions
 - Virtual-key / secure-key-management features
 - Cost-optimization routing
-- RBAC and tenancy primitives — these live in the Atlas AI dashboard repo
+- RBAC and tenancy primitives from upstream — Prompt Shields owns RBAC (and virtual keys) in this repository: principals, teams, projects and built-in roles live in the collector (`packages/collector/collector/rbac.py`, #338), not in the gateway fork
 
 ## Modifications by Prompt Shields
 

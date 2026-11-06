@@ -1201,3 +1201,29 @@ export interface SiemAuditParams {
   /** 1 to 5000. Server default is 1000. */
   limit?: number;
 }
+
+/** A team in the tenant (`GET /partner/v1/teams`). Needs `members:read`. */
+export interface Team {
+  id: string;
+  /** Unique in the tenant. */
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
+/** A project, owned by a team (`GET /partner/v1/projects`). Needs `members:read`. */
+export interface Project {
+  id: string;
+  teamId: string;
+  /** Unique in the tenant. */
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
+export interface ListProjectsParams {
+  /** Only this team's projects. */
+  teamId?: string;
+}

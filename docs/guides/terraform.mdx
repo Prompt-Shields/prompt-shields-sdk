@@ -45,7 +45,8 @@ resource "helm_release" "prompt_shields" {
   values = [yamlencode({
     collector = {
       config = {
-        # Admin routes take scoped admin tokens only (see "Auth" below).
+        # Admin routes take scoped admin tokens only (the default since
+        # roles shipped; see "Auth" below). Kept explicit here.
         PS_ADMIN_REQUIRE_SCOPED_TOKENS = "true"
       }
     }
@@ -62,7 +63,7 @@ The collector has three kinds of credential. Terraform should only ever hold the
 | Credential | Reaches | Use in Terraform |
 |------------|---------|------------------|
 | `PS_ADMIN_TOKEN` (operator) | `/api/v1/operator/*` and operator pulls, across every tenant, bypassing row-level security | Only in a separate platform workspace that creates tenants, or not at all |
-| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | Ingest, the registry, and every `/api/v1/admin` route unless `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` | No: it is what SDKs and gateways send |
+| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | Ingest and the registry; `/api/v1/admin` only with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` | No: it is what SDKs and gateways send |
 | Admin token (`ps-at-...`) | `/api/v1/admin` routes allowed by its scopes, for one tenant | Yes |
 
 Admin token scopes:
@@ -76,14 +77,19 @@ Admin token scopes:
 | `admin:webhooks` | Webhook subscriptions and redelivery |
 | `admin:partners` | Partner API credentials |
 | `admin:registry` | Lifecycle sweep, risk suggestions, risk reviews |
+| `admin:members` | Principals, teams, projects and role memberships |
 
 Each operation in the OpenAPI spec names its scope in `x-admin-scope`.
 
 ### `PS_ADMIN_REQUIRE_SCOPED_TOKENS`
 
-By default (`false`) a tenant ingest key still has full access to `/api/v1/admin`, as it always had. That includes rotating provider admin keys, issuing partner credentials and issuing more ingest keys, so anyone holding a key deployed with an SDK or gateway can do those things. With `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` the collector refuses ingest keys on every `/api/v1/admin` route (403, audited), and only admin tokens with the right scope get in. Ingest and registry routes are unchanged. Turn it on once your automation uses admin tokens.
+By default (`true`, since roles shipped) the collector refuses ingest keys on every `/api/v1/admin` route (403, audited), and only admin tokens with the right scope get in. Ingest and registry routes are unchanged. Before, the default was `false`: any ingest key, including one deployed with an SDK or gateway, could rotate provider admin keys, issue partner credentials and mint more keys. **Upgrading:** move automation that calls `/api/v1/admin` with an ingest key to an admin token first, or set `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` to keep the old behaviour for now.
 
-While it is off, an ingest key reaches every admin route, so issuing or rotating one (`POST /api/v1/admin/api-keys`, `.../rotate`) needs a token with every admin scope; `admin:keys` alone can list, read and revoke keys. With the setting on, `admin:keys` is enough.
+With it set to `false`, an ingest key reaches every admin route except member management (`admin:members`), so issuing or rotating one (`POST /api/v1/admin/api-keys`, `.../rotate`) needs a token with all of those scopes; `admin:keys` alone can list, read and revoke keys. With the setting on, `admin:keys` is enough.
+
+### Roles
+
+Principals (users and service accounts), teams, projects and memberships are managed under `/api/v1/admin/principals`, `/teams`, `/projects` and `/memberships` (`admin:members`). A membership gives a principal one built-in role (`owner`, `admin`, `developer`, `viewer`, `auditor`, `billing`; `GET /api/v1/admin/roles` lists their scopes) tenant-wide, in a team, or in a project. Pass `principal_id` when issuing an admin token or partner credential to issue it for a principal: it keeps the requested scopes the principal's tenant-wide roles grant, and on every request reaches no more than those roles grant then, so demoting or disabling the principal takes effect at once. Tokens issued without `principal_id` (Terraform's own) work as before. Only an owner can grant, change or remove the owner role.
 
 ### Bootstrap the first admin token
 

@@ -14,11 +14,12 @@ from db.models import PartnerCredential, Tenant
 from fastapi import APIRouter, Form, HTTPException, Request
 from sqlalchemy import select
 
-from collector import rls
+from collector import rbac, rls
 from collector.partner_auth import (
     issue_access_token,
     verify_secret,
 )
+from collector.partner_scopes import expand_scopes
 from collector.sanitize import is_storable_text
 
 router = APIRouter(tags=["Partner OAuth"])
@@ -107,6 +108,21 @@ async def token_endpoint(
 
     await rls.set_tenant(db, partner.tenant_id)
     scopes = list(partner.scopes or [])
+    if partner.principal_id is not None:
+        # Issued for a principal (#338): no token for a disabled one, and
+        # the token names only scopes its roles still grant (resolve_partner
+        # checks again on every request).
+        try:
+            granted = rbac.role_scopes(await rbac.tenant_roles(db, partner.principal_id))
+        except rbac.PrincipalDisabled:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "invalid_client",
+                    "error_description": "Client's principal is disabled",
+                },
+            ) from None
+        scopes = sorted(expand_scopes(scopes) & granted)
     token, expires_in = issue_access_token(
         tenant_id=partner.tenant_id,
         partner_id=partner.id,

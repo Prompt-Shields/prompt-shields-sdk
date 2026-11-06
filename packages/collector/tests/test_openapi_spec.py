@@ -28,6 +28,8 @@ from collector import (
     partner_admin,
     provider_credentials_api,
     provider_usage_admin,
+    rbac,
+    rbac_admin,
     risk_reviews,
     risk_suggestions,
     sentinel_export,
@@ -148,6 +150,14 @@ def test_webhook_schemas_match_serializers():
         ("BootstrapAdminTokenRequest", operator_admin.BootstrapAdminTokenBody),
         ("RiskReviewRequest", risk_reviews.ReviewBody),
         ("LearnerReviewRequest", learner.LearnerReviewBody),
+        ("CreatePrincipalRequest", rbac_admin.CreatePrincipalBody),
+        ("UpdatePrincipalRequest", rbac_admin.UpdatePrincipalBody),
+        ("CreateTeamRequest", rbac_admin.CreateTeamBody),
+        ("UpdateTeamRequest", rbac_admin.UpdateTeamBody),
+        ("CreateProjectRequest", rbac_admin.CreateProjectBody),
+        ("UpdateProjectRequest", rbac_admin.UpdateProjectBody),
+        ("CreateMembershipRequest", rbac_admin.CreateMembershipBody),
+        ("UpdateMembershipRequest", rbac_admin.UpdateMembershipBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -322,6 +332,7 @@ ADMIN_ROUTERS = (
     leanix.router,
     servicenow.router,
     sentinel_export.router,
+    rbac_admin.router,
     operator_admin.router,
 )
 
@@ -379,6 +390,7 @@ def test_admin_credential_schemas_match_serializers():
         name="terraform",
         scopes=["admin:read"],
         token_hint="abcd",
+        principal_id=None,
         created_by="operator",
         created_at=now,
         expires_at=None,
@@ -418,6 +430,7 @@ def test_partner_credential_schemas_match_serializers():
         api_key_hash=None,
         expires_at=None,
         created_at=datetime.now(UTC),
+        principal_id=uuid.uuid4(),
     )
     keys = set(partner_admin._credential_dict(cred))
     assert _props("PartnerCredential") == keys == set(SCHEMAS["PartnerCredential"]["required"])
@@ -451,3 +464,48 @@ def test_focus_cost_row_schema_matches_the_export_columns():
     assert params["granularity"]["enum"] == ["hour", "day"]
     assert params["cost_mode"]["enum"] == ["estimated", "merge_safe"]
     assert set(focus_export.MEDIA_TYPES) == set(params["format"]["enum"])
+
+
+def test_rbac_schemas_match_serializers():
+    now = datetime.now(UTC)
+    principal = SimpleNamespace(
+        id=uuid.uuid4(),
+        kind="user",
+        external_id="oidc|1",
+        email="a@example.com",
+        display_name="A",
+        created_at=now,
+        updated_at=None,
+        disabled_at=None,
+    )
+    keys = set(rbac_admin.serialize_principal(principal))
+    assert _props("Principal") == keys == set(SCHEMAS["Principal"]["required"])
+    assert _props("PrincipalWithMemberships") == keys | {"memberships"}
+    team = SimpleNamespace(
+        id=uuid.uuid4(), name="t", description=None, created_at=now, updated_at=None
+    )
+    keys = set(rbac_admin.serialize_team(team))
+    assert _props("Team") == keys == set(SCHEMAS["Team"]["required"])
+    project = SimpleNamespace(**vars(team), team_id=uuid.uuid4())
+    keys = set(rbac_admin.serialize_project(project))
+    assert _props("Project") == keys == set(SCHEMAS["Project"]["required"])
+    membership = SimpleNamespace(
+        id=uuid.uuid4(),
+        principal_id=uuid.uuid4(),
+        team_id=None,
+        project_id=None,
+        role="viewer",
+        created_by="token:abc",
+        created_at=now,
+        updated_at=None,
+    )
+    keys = set(rbac_admin.serialize_membership(membership))
+    assert _props("Membership") == keys == set(SCHEMAS["Membership"]["required"])
+    assert SCHEMAS["Role"]["enum"] == list(rbac.ROLES)
+
+
+def test_partner_member_routes_need_members_read():
+    for path in ("/partner/v1/teams", "/partner/v1/projects"):
+        assert SPEC["paths"][path]["get"]["security"][0] == {"OAuth2": ["members:read"]}
+    scopes = SPEC["components"]["securitySchemes"]["OAuth2"]["flows"]["clientCredentials"]["scopes"]
+    assert "members:read" in scopes
