@@ -247,6 +247,11 @@ export interface UsageSummary {
   /** Upstream cost (USD) gateway cache hits avoided. `null` when none reported it. */
   cacheSavedUsd: number | null;
   /**
+   * The gateway's estimate of the prompt tokens cache lookups saved (from
+   * the request size, not a provider count). `null` when none reported it.
+   */
+  cacheTokensSaved: number | null;
+  /**
    * Events that reported implicit outcome signals (#44), including those that
    * reported none happened.
    */

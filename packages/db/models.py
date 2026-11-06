@@ -200,6 +200,9 @@ class AIUsageEvent(Base):
     # miss, ...) and, on a hit, the upstream cost in USD the hit avoided.
     cache_status = Column(Text)
     cache_saved_cost = Column(Numeric(10, 6))
+    # The gateway's estimate of the prompt tokens a cache lookup saved (0 on
+    # a miss); summed as cache_tokens_saved in the usage summary.
+    est_tokens_saved = Column(Integer)
     # Implicit outcome signals (#44): sorted list of known class names
     # ("max_tokens", "refusal", ...; collector.ingest.OUTCOME_SIGNAL_CLASSES),
     # [] when measured and nothing happened, NULL when not reported; and the

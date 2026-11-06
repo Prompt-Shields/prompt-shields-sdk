@@ -158,6 +158,7 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         "cache_reported": len(statuses),
         "cache_hits": sum(1 for c in statuses if c in ("hit", "semantic hit")),
         "cache_saved_usd": total("cache_saved_cost"),
+        "cache_tokens_saved": total("est_tokens_saved"),
         "outcome_signals_reported": len(signals),
         **{
             f"outcome_{name}": sum(1 for s in signals if name in s)
@@ -230,6 +231,7 @@ def _seed() -> dict[str, list[Row]]:
                 budget_action="none",
                 cache_status="semantic hit",
                 cache_saved_cost=Decimal("0.020000"),
+                est_tokens_saved=300,
                 outcome_signals=[],
                 outcome_signals_version=1,
             ),
@@ -311,6 +313,7 @@ class TestUsageSummary:
             "budget_blocked_requests": 0,
             "cache_hit_rate": 0.5,
             "cache_saved_usd": 0.02,
+            "cache_tokens_saved": 300,
             "outcome_signals_reported": 2,
             "outcome_signal_counts": {
                 "abandoned": 0,
@@ -381,6 +384,7 @@ class TestUsageSummary:
             "budget_blocked_requests": None,
             "cache_hit_rate": None,
             "cache_saved_usd": None,
+            "cache_tokens_saved": None,
             "outcome_signals_reported": 0,
             "outcome_signal_counts": None,
             "period": "30d",

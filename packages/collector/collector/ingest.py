@@ -89,6 +89,7 @@ class IngestEvent(BaseModel):
     budget_action: str | None = None
     cache_status: str | None = None
     cache_saved_cost: float | None = None
+    est_tokens_saved: int | None = None
     # Implicit outcome signals (#44): the SDK's (and gateway's) outcome
     # classes for the call. Known class names only, see _outcome_signals.
     outcome_signals: list[str] | None = None
@@ -247,6 +248,7 @@ class IngestEvent(BaseModel):
         "tokens_cache_write",
         "tokens_cache_write_1h",
         "tokens_reasoning",
+        "est_tokens_saved",
         mode="before",
     )
     @classmethod
@@ -345,6 +347,7 @@ BUDGET_CACHE_FIELDS = (
     "budget_action",
     "cache_status",
     "cache_saved_cost",
+    "est_tokens_saved",
 )
 
 # Lenient fields whose dropped values are reported in ignored_fields as
