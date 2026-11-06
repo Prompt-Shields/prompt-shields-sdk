@@ -24,10 +24,14 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import sys
+import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
+
+from prompt_shields.evals.report import wilson_interval
 
 #: The schema's default for ``use_cases.*.min_parity``.
 DEFAULT_MIN_PARITY = 0.95
@@ -52,9 +56,15 @@ def _cell_passes(cell: Mapping[str, Any], min_parity: float, min_samples: int,
     n, passed = cell.get("n") or 0, cell.get("passed") or 0
     if n < min_samples:
         return False, f"n={n} < min_cell_samples={min_samples}"
-    score = cell.get("ci_low") if conservative else passed / n
-    if score is None:
-        return False, "no confidence interval"
+    if conservative:
+        # Recompute from the counts: the report's ci_low is rounded to 4
+        # places, which can lift a bound just below min_parity onto it.
+        ci = wilson_interval(passed, n)
+        if ci is None:
+            return False, "no confidence interval"
+        score = ci[0]
+    else:
+        score = passed / n
     if score < min_parity:
         what = "ci_low" if conservative else "parity"
         return False, f"{what}={round(score, 4)} < min_parity={min_parity}"
@@ -122,7 +132,7 @@ def apply_parity(
     for uc, cells in sorted(cells_by_uc.items()):
         bar = dict(bars.get(uc) or {})
         min_parity = float(bar.get("min_parity", DEFAULT_MIN_PARITY))
-        eligible = {_model_id(m) for m in keep_models}
+        eligible = {_model_id(m) for m in keep_models if m}
         if reference.get(uc):
             eligible.add(_model_id(reference[uc]))
         passed, excluded = [], []
@@ -140,7 +150,11 @@ def apply_parity(
                     "eligible_models": sorted(eligible)})
         bars[uc] = bar
         unknown = sorted(m for m in eligible if m not in known_models)
-        if unknown:
+        if not eligible:
+            summary["warnings"].append(
+                f"use case {uc!r}: no model is eligible, so the router refuses "
+                "(fails closed on) every call for it that does not name a group")
+        elif unknown:
             summary["warnings"].append(
                 f"use case {uc!r}: eligible models not in any policy group: "
                 + ", ".join(unknown))
@@ -171,6 +185,21 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` in one step, so ``--out`` may be the input policy."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent or ".", prefix=f".{path.name}.",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -184,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     text = json.dumps(new_policy, indent=2) + "\n"
     if args.out:
-        Path(args.out).write_text(text)
+        _write_atomic(Path(args.out), text)
     else:
         sys.stdout.write(text)
     for w in summary["warnings"]:

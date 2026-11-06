@@ -130,3 +130,54 @@ def test_cli_writes_the_policy(tmp_path, capsys):
     (tmp_path / "r.json").write_text(json.dumps(_report(notes=["MOCK RUN: x"])))
     assert main(["--report", str(tmp_path / "r.json"), "--route-policy",
                  str(tmp_path / "p.json"), "--eval-set", "x"]) == 2
+
+
+SCHEMA = json.loads((SCHEMA_DIR / "route-policy.v1.schema.json").read_text())
+
+
+def test_output_is_schema_valid_and_keeps_unrelated_keys_in_order():
+    jsonschema = pytest.importorskip("jsonschema")
+    new, _ = apply_parity(POLICY, _report(), eval_set="claims-v4",
+                          keep_models=["", "berget:berget-llama-70b"])
+    jsonschema.validate(new, SCHEMA)
+    assert list(new) == list(POLICY)
+    assert list(new["use_cases"]) == list(POLICY["use_cases"])
+    for key in POLICY:
+        if key != "use_cases":
+            assert new[key] == POLICY[key]
+
+
+def test_conservative_recomputes_the_bound_instead_of_trusting_rounding():
+    # Wilson low of 169/172 is 0.94998..., which the report rounds to 0.95.
+    report = _report()
+    report["cells"] = [_cell("mistral-eu:mistral-small-eu", 169, 172, 0.95)]
+    new, _ = apply_parity(POLICY, report, eval_set="x")
+    assert "mistral-small-eu" in new["use_cases"]["claim-summary"]["eligible_models"]
+    new, _ = apply_parity(POLICY, report, eval_set="x", conservative=True)
+    assert new["use_cases"]["claim-summary"]["eligible_models"] == ["mistral-large-eu"]
+
+
+def test_no_eligible_model_is_written_as_empty_list_and_fails_closed():
+    jsonschema = pytest.importorskip("jsonschema")
+    from prompt_shields.route_policy import PolicyViolation
+
+    report = _report()
+    report["use_cases"] = []  # no logged reference model
+    report["cells"] = [_cell("scaleway:scaleway-small", 20, 40, 0.35)]
+    new, summary = apply_parity(POLICY, report, eval_set="x")
+    assert new["use_cases"]["claim-summary"]["eligible_models"] == []
+    jsonschema.validate(new, SCHEMA)
+    assert any("no model is eligible" in w for w in summary["warnings"])
+    with pytest.raises(PolicyViolation):
+        _route(new)
+
+
+def test_cli_can_rewrite_the_policy_in_place(tmp_path):
+    (tmp_path / "r.json").write_text(json.dumps(_report()))
+    policy = tmp_path / "p.json"
+    policy.write_text(json.dumps(POLICY))
+    assert main(["--report", str(tmp_path / "r.json"), "--route-policy",
+                 str(policy), "--eval-set", "claims-v4", "--out", str(policy)]) == 0
+    assert json.loads(policy.read_text())["use_cases"]["claim-summary"][
+        "eval_set"] == "claims-v4"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["p.json", "r.json"]
