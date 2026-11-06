@@ -28,14 +28,15 @@ data. See ``docs/guides/pseudonymisation.mdx``.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
-from prompt_shields.pii import find_pii_spans
+from prompt_shields.pii import find_pii_spans, scan_messages
 
 OPEN = "\u27e6"  # ⟦
 CLOSE = "\u27e7"  # ⟧
@@ -85,10 +86,12 @@ class Pseudonymisation:
         "_restored",
         "_unknown",
         "messages",
+        "system",
     )
 
     def __init__(self, messages: Iterable[Any] | None, *,
-                 categories: Iterable[str] | None = None) -> None:
+                 categories: Iterable[str] | None = None,
+                 system: Any = None) -> None:
         wanted = None if categories is None else frozenset(categories)
         self._by_token: dict[str, str] = {}
         self._by_value: dict[str, str] = {}
@@ -98,13 +101,28 @@ class Pseudonymisation:
         self._unknown = 0
         messages = list(messages or ())
         # Placeholder-shaped text already in the prompt is never minted, so
-        # an echo of it can never be restored to a value.
-        self._reserved = {
-            (kind.upper(), int(n))
-            for text in _all_texts(messages)
-            for kind, n in _TOKEN_JSON.findall(text)
-        }
-        self.messages = [self._message(m, wanted) for m in messages]
+        # an echo of it can never be restored to a value. This is the same
+        # walk as the replacement below, so every text replaced is scanned.
+        self._reserved: set[tuple[str, int]] = set()
+
+        def reserve(text: str) -> str:
+            self._reserved.update(
+                (kind.upper(), int(n)) for kind, n in _TOKEN_JSON.findall(text)
+            )
+            return text
+
+        for m in messages:
+            _walk_message(m, reserve)
+        _walk_content(system, reserve)
+
+        def replace(text: str) -> str:
+            return self._text(text, wanted)
+
+        #: The pseudonymised ``system`` prompt (Anthropic: a string or text
+        #: blocks), or None. It comes first in the prompt, so it is numbered
+        #: first.
+        self.system = _walk_content(system, replace)
+        self.messages = [_walk_message(m, replace) for m in messages]
 
     # --- privacy guards ---------------------------------------------------------
 
@@ -168,54 +186,6 @@ class Pseudonymisation:
         out.append(text[last:])
         return "".join(out)
 
-    def _json_value(self, value: Any, wanted: frozenset[str] | None) -> Any:
-        if isinstance(value, str):
-            return self._text(value, wanted)
-        if isinstance(value, list):
-            return [self._json_value(v, wanted) for v in value]
-        if isinstance(value, dict):
-            return {self._text(k, wanted): self._json_value(v, wanted)
-                    for k, v in value.items()}
-        return value
-
-    def _arguments(self, arguments: str, wanted: frozenset[str] | None) -> str:
-        """Tool-call arguments: JSON string values (and keys) when they parse,
-        else the raw text."""
-        try:
-            parsed = json.loads(arguments)
-        except (TypeError, ValueError):
-            return self._text(arguments, wanted)
-        return json.dumps(self._json_value(parsed, wanted), ensure_ascii=False)
-
-    def _message(self, message: Any, wanted: frozenset[str] | None) -> Any:
-        if not isinstance(message, Mapping):
-            dump = getattr(message, "model_dump", None)
-            if not callable(dump):
-                return message
-            message = dump(exclude_none=True)
-        out = dict(message)
-        content = out.get("content")
-        if isinstance(content, str):
-            out["content"] = self._text(content, wanted)
-        elif isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, Mapping) and isinstance(part.get("text"), str):
-                    part = {**part, "text": self._text(part["text"], wanted)}
-                parts.append(part)
-            out["content"] = parts
-        if isinstance(out.get("tool_calls"), list):
-            calls = []
-            for tc in out["tool_calls"]:
-                fn = tc.get("function") if isinstance(tc, Mapping) else None
-                if isinstance(fn, Mapping) and isinstance(fn.get("arguments"), str):
-                    tc = {**tc, "function": {
-                        **fn, "arguments": self._arguments(fn["arguments"], wanted),
-                    }}
-                calls.append(tc)
-            out["tool_calls"] = calls
-        return out
-
     # --- restoring ----------------------------------------------------------------
 
     def restore(self, text: str | None, *, json_escape: bool = False) -> str | None:
@@ -240,43 +210,211 @@ class Pseudonymisation:
     def stream_restorer(self, *, json_escape: bool = False) -> StreamRestorer:
         return StreamRestorer(self, json_escape=json_escape)
 
-    def restore_stream(self, stream: Any) -> Any:
+    def restore_response(self, response: Any) -> Any:
+        """Restore a whole (not streamed) response in place and return it.
+
+        OpenAI chat completions: each choice's message ``content``,
+        ``refusal`` and tool-call ``arguments`` (JSON-escaped). Anthropic
+        Messages: ``text`` blocks and string values in ``tool_use`` input.
+        Thinking blocks are left as they are (their signature covers the
+        text). Objects and dicts are both accepted.
+        """
+        choices = _get(response, "choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                message = _get(choice, "message")
+                if message is None:
+                    continue
+                for name in ("content", "refusal"):
+                    if isinstance(_get(message, name), str):
+                        _set(message, name, self.restore(_get(message, name)))
+                for tc in _get(message, "tool_calls") or ():
+                    fn = _get(tc, "function")
+                    if fn is not None and isinstance(_get(fn, "arguments"), str):
+                        _set(fn, "arguments",
+                             self.restore(_get(fn, "arguments"), json_escape=True))
+            return response
+        content = _get(response, "content")
+        if isinstance(content, list):
+            for block in content:
+                kind = _get(block, "type")
+                if kind == "text" and isinstance(_get(block, "text"), str):
+                    _set(block, "text", self.restore(_get(block, "text")))
+                elif kind == "tool_use" and isinstance(_get(block, "input"), Mapping):
+                    _set(block, "input", _json_value(
+                        _get(block, "input"), lambda s: self.restore(s) or s,
+                    ))
+        return response
+
+    def restore_stream(self, stream: Any, *, clear_when_done: bool = False) -> Any:
         """Wrap a chat-completions (OpenAI chunk shape) or Anthropic Messages
         stream, sync or async, so placeholders split across chunks are
-        restored. The wrapper closes and forwards attributes to ``stream``."""
+        restored. The wrapper closes and forwards attributes to ``stream``.
+
+        ``clear_when_done`` drops the mapping once the stream ends, fails or
+        is closed (the instrumented clients' ``pseudonymise=True`` uses it).
+        """
+        on_done = self.clear if clear_when_done else None
         if hasattr(stream, "__aiter__") and not hasattr(stream, "__iter__"):
-            return _AsyncRestoringStream(stream, _ChunkRestorer(self))
-        return _RestoringStream(stream, _ChunkRestorer(self))
+            return _AsyncRestoringStream(stream, _ChunkRestorer(self), on_done)
+        return _RestoringStream(stream, _ChunkRestorer(self), on_done)
 
 
 def pseudonymise(messages: Iterable[Any] | None, *,
-                 categories: Iterable[str] | None = None) -> Pseudonymisation:
+                 categories: Iterable[str] | None = None,
+                 system: Any = None) -> Pseudonymisation:
     """Pseudonymise chat ``messages`` for one call (see the module docstring).
 
     ``categories`` limits which ``prompt_shields.pii.SPAN_CATEGORIES`` are
-    replaced (default: all of them).
+    replaced (default: all of them). ``system`` is an Anthropic system
+    prompt (a string or text blocks); its pseudonymised copy is ``.system``,
+    with the same placeholders as the messages.
     """
-    return Pseudonymisation(messages, categories=categories)
+    return Pseudonymisation(messages, categories=categories, system=system)
 
 
-def _all_texts(messages: list) -> list[str]:
-    texts: list[str] = []
-    for m in messages:
-        get = m.get if isinstance(m, Mapping) else lambda k, m=m: getattr(m, k, None)
-        content = get("content")
-        if isinstance(content, str):
-            texts.append(content)
-        elif isinstance(content, list):
-            for part in content:
-                text = part.get("text") if isinstance(part, Mapping) else None
-                if isinstance(text, str):
-                    texts.append(text)
-        for tc in get("tool_calls") or ():
-            fn = tc.get("function") if isinstance(tc, Mapping) else getattr(tc, "function", None)
-            args = fn.get("arguments") if isinstance(fn, Mapping) else getattr(fn, "arguments", None)
-            if isinstance(args, str):
-                texts.append(args)
-    return texts
+def _json_value(value: Any, text: Callable[[str], str]) -> Any:
+    """``text`` applied to every string, keys included, in a JSON value."""
+    if isinstance(value, str):
+        return text(value)
+    if isinstance(value, list):
+        return [_json_value(v, text) for v in value]
+    if isinstance(value, Mapping):
+        return {text(k) if isinstance(k, str) else k: _json_value(v, text)
+                for k, v in value.items()}
+    return value
+
+
+def _arguments(arguments: str, text: Callable[[str], str]) -> str:
+    """Tool-call arguments: JSON string values (and keys) when they parse,
+    else the raw text."""
+    try:
+        parsed = json.loads(arguments)
+    except (TypeError, ValueError):
+        return text(arguments)
+    return json.dumps(_json_value(parsed, text), ensure_ascii=False)
+
+
+def _walk_content(content: Any, text: Callable[[str], str]) -> Any:
+    """``text`` applied to message content: a string or a list of parts.
+
+    Covered: text parts, Anthropic ``tool_result`` parts (their string or
+    text-part ``content``) and Anthropic ``tool_use`` parts (string values in
+    ``input``). Images, audio, files and other parts are kept as they are.
+    """
+    if isinstance(content, str):
+        return text(content)
+    if not isinstance(content, list):
+        return content
+    parts = []
+    for part in content:
+        if not isinstance(part, Mapping):
+            dump = getattr(part, "model_dump", None)
+            if callable(dump):
+                part = dump(exclude_none=True)
+        if isinstance(part, Mapping):
+            if isinstance(part.get("text"), str):
+                part = {**part, "text": text(part["text"])}
+            if part.get("type") == "tool_result" and "content" in part:
+                part = {**part, "content": _walk_content(part["content"], text)}
+            if part.get("type") == "tool_use" and isinstance(part.get("input"), Mapping):
+                part = {**part, "input": _json_value(part["input"], text)}
+        parts.append(part)
+    return parts
+
+
+def _walk_message(message: Any, text: Callable[[str], str]) -> Any:
+    """A copy of one chat message with ``text`` applied to its content and
+    its assistant tool-call arguments. SDK message objects become dicts;
+    anything else is returned as it is."""
+    if not isinstance(message, Mapping):
+        dump = getattr(message, "model_dump", None)
+        if not callable(dump):
+            return message
+        message = dump(exclude_none=True)
+    out = dict(message)
+    if "content" in out:
+        out["content"] = _walk_content(out["content"], text)
+    if isinstance(out.get("tool_calls"), list):
+        calls = []
+        for tc in out["tool_calls"]:
+            fn = tc.get("function") if isinstance(tc, Mapping) else None
+            if isinstance(fn, Mapping) and isinstance(fn.get("arguments"), str):
+                tc = {**tc, "function": {
+                    **fn, "arguments": _arguments(fn["arguments"], text),
+                }}
+            calls.append(tc)
+        out["tool_calls"] = calls
+    return out
+
+
+class ClientCall:
+    """``pseudonymise=True`` on ``ShieldsClient`` / ``AsyncShieldsClient``:
+    one call's pseudonymisation, from the request to the restored answer.
+
+    Construction pseudonymises ``messages`` and, in place in ``kwargs``,
+    Anthropic's ``system``. A call that carries ``X-PS-*`` headers (route
+    hints or gateway context) is refused with ``ValueError``: it goes to a
+    Prompt Shields gateway, which would classify the placeholders and could
+    route the call below the sensitivity of the original prompt.
+    """
+
+    __slots__ = ("_original_pii", "_pseudo", "messages")
+
+    def __init__(self, messages: Any, kwargs: dict, *, scan_pii: bool) -> None:
+        headers = kwargs.get("extra_headers") or {}
+        if any(str(k).lower().startswith("x-ps-") for k in headers):
+            raise ValueError(
+                "pseudonymise=True cannot be used on a call to the Prompt Shields "
+                "gateway (route hints or X-PS-* headers): the gateway would "
+                "classify the placeholders, not the original prompt"
+            )
+        self._pseudo = Pseudonymisation(messages, system=kwargs.get("system"))
+        if kwargs.get("system") is not None:
+            kwargs["system"] = self._pseudo.system
+        self.messages = self._pseudo.messages
+        # Labels only: the categories of what the caller wrote, which the
+        # client's own scan of the placeholders would no longer see.
+        self._original_pii = scan_messages(messages or []) if scan_pii else None
+
+    def __repr__(self) -> str:
+        return f"<ClientCall {self._pseudo!r}>"
+
+    def event_hook(self, hook: Callable[[dict], None] | None) -> Callable[[dict], None] | None:
+        """``hook`` preceded by putting the original prompt's PII categories
+        on the telemetry event (``detected_pii_types``)."""
+        if self._original_pii is None:
+            return hook
+        categories = list(self._original_pii)
+
+        def report_original(event: dict) -> None:
+            if categories:
+                event["detected_pii_types"] = list(categories)
+            else:
+                event.pop("detected_pii_types", None)
+            if hook is not None:
+                hook(event)
+
+        return report_original
+
+    def response(self, response: Any) -> Any:
+        """The response restored in place, with counts as
+        ``ps_pseudonymisation``; the mapping is dropped."""
+        try:
+            self._pseudo.restore_response(response)
+            with contextlib.suppress(Exception):
+                object.__setattr__(response, "ps_pseudonymisation", self._pseudo.stats())
+            return response
+        finally:
+            self._pseudo.clear()
+
+    def stream(self, stream: Any) -> Any:
+        """The stream restoring placeholders; the mapping is dropped when it
+        ends, fails or is closed."""
+        return self._pseudo.restore_stream(stream, clear_when_done=True)
+
+    def clear(self) -> None:
+        self._pseudo.clear()
 
 
 class StreamRestorer:
@@ -464,15 +602,24 @@ def _choice(chunk: Any, index: Any) -> Any:
 
 
 class _RestoringStream:
-    def __init__(self, stream: Any, restorer: _ChunkRestorer) -> None:
+    def __init__(self, stream: Any, restorer: _ChunkRestorer,
+                 on_done: Callable[[], None] | None = None) -> None:
         self._stream = stream
         self._restorer = restorer
+        self._on_done = on_done
         self._gen = self._run()
 
+    def _done(self) -> None:
+        if self._on_done is not None:
+            self._on_done()
+
     def _run(self):
-        for chunk in self._stream:
-            yield from self._restorer.process(chunk)
-        yield from self._restorer.finish()
+        try:
+            for chunk in self._stream:
+                yield from self._restorer.process(chunk)
+            yield from self._restorer.finish()
+        finally:
+            self._done()
 
     def __iter__(self):
         return self
@@ -481,9 +628,12 @@ class _RestoringStream:
         return next(self._gen)
 
     def close(self) -> None:
-        close = getattr(self._stream, "close", None)
-        if close is not None:
-            close()
+        try:
+            close = getattr(self._stream, "close", None)
+            if close is not None:
+                close()
+        finally:
+            self._done()
 
     def __enter__(self):
         return self
@@ -496,17 +646,26 @@ class _RestoringStream:
 
 
 class _AsyncRestoringStream:
-    def __init__(self, stream: Any, restorer: _ChunkRestorer) -> None:
+    def __init__(self, stream: Any, restorer: _ChunkRestorer,
+                 on_done: Callable[[], None] | None = None) -> None:
         self._stream = stream
         self._restorer = restorer
+        self._on_done = on_done
         self._gen = self._run()
 
+    def _done(self) -> None:
+        if self._on_done is not None:
+            self._on_done()
+
     async def _run(self):
-        async for chunk in self._stream:
-            for out in self._restorer.process(chunk):
+        try:
+            async for chunk in self._stream:
+                for out in self._restorer.process(chunk):
+                    yield out
+            for out in self._restorer.finish():
                 yield out
-        for out in self._restorer.finish():
-            yield out
+        finally:
+            self._done()
 
     def __aiter__(self):
         return self
@@ -515,11 +674,14 @@ class _AsyncRestoringStream:
         return await self._gen.__anext__()
 
     async def close(self) -> None:
-        close = getattr(self._stream, "close", None)
-        if close is not None:
-            result = close()
-            if hasattr(result, "__await__"):
-                await result
+        try:
+            close = getattr(self._stream, "close", None)
+            if close is not None:
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
+        finally:
+            self._done()
 
     async def aclose(self) -> None:
         await self.close()
