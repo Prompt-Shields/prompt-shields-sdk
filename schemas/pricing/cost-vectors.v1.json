@@ -313,6 +313,33 @@
       "derivation": "Audio tokens on a model with no audio rate: unmetered rather than priced as text"
     },
     {
+      "id": "openai-o3-reasoning",
+      "dimension": "reasoning",
+      "vendor": "openai",
+      "model": "o3",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 3000,
+        "tokens_reasoning": 2500
+      },
+      "expected_cost": 0.026,
+      "derivation": "Reasoning tokens are a subset of tokens_out, billed once at the output rate: 1000 x $2.00 + 3000 x $8.00 = $0.002 + $0.024"
+    },
+    {
+      "id": "google-gemini-2.5-flash-reasoning-with-cache-read",
+      "dimension": "reasoning",
+      "vendor": "google",
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "tokens_in": 2000,
+        "tokens_out": 1500,
+        "tokens_cached": 1000,
+        "tokens_reasoning": 1200
+      },
+      "expected_cost": 0.00408,
+      "derivation": "Thinking tokens are a subset of tokens_out at the output rate (catalog output_cost_per_reasoning_token equals output_cost_per_token): 1000 uncached x $0.30 + 1000 cached x $0.03 + 1500 x $2.50 = $0.0003 + $0.00003 + $0.00375"
+    },
+    {
       "id": "anthropic-sonnet-4-web-search",
       "dimension": "tool_fee",
       "vendor": "anthropic",

@@ -12,6 +12,7 @@ export {
 } from './responseTransform';
 export { transformStreamChunk, createStreamState } from './streamTransform';
 export { stripIssuedThinking } from './thinkingCarry';
+export { ResponsesAdapterRequestError } from './requestFields';
 
 // Providers that natively support the Responses API (no adapter needed).
 // PS fork: matches the providers in this tree that define a

@@ -26,6 +26,7 @@ import {
   transformStreamChunk as responsesTransformStreamChunk,
   createStreamState as responsesCreateStreamState,
   supportsResponsesApiNatively,
+  ResponsesAdapterRequestError,
 } from '../adapters/responses';
 import {
   routesMessagesViaResponses,
@@ -178,10 +179,28 @@ export function applyAdapterRequestTransform(
       requestBody instanceof ReadableStream || requestBody instanceof FormData
         ? {}
         : { ...(requestBody as Params) };
-    const transformedParams = normalizeTokenLimitForProvider(
-      transformResponsesToChatCompletions(params, provider),
-      provider
-    );
+    // PS fork (#73): a field the target cannot honour is a 400, not a
+    // silent drop (src/adapters/responses/requestFields.ts)
+    let transformedParams: Params;
+    try {
+      transformedParams = normalizeTokenLimitForProvider(
+        transformResponsesToChatCompletions(params, provider),
+        provider
+      );
+    } catch (err) {
+      if (!(err instanceof ResponsesAdapterRequestError)) throw err;
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: err.message,
+            type: 'invalid_request_error',
+            param: err.param,
+            code: 'unsupported_parameter',
+          },
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
 
     return {
       adapterCtx: {
