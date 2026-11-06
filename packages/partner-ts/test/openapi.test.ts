@@ -172,6 +172,21 @@ const SCHEMAS: Record<string, string> = {
   // tenant setting, typed for convenience.
   SpendAlert: 'SpendAlert',
   SpendAnomalySettings: 'SpendAnomalySettings',
+  // MCP observability (client.mcp).
+  McpTool: 'McpTool',
+  McpUsageDay: 'McpUsageDay',
+  McpPageMeta: 'McpPageMeta',
+  McpToolPage: 'McpToolPage',
+  McpUsagePage: 'McpUsagePage',
+  // Routing learner (client.learner). The upload result is what the Python
+  // SDK's ps-learn gets back from the ingest route, typed for convenience.
+  LearnerSnapshotSummary: 'LearnerSnapshotSummary',
+  LearnerSnapshot: 'LearnerSnapshot',
+  LearnerArmProjection: 'LearnerArmProjection',
+  LearnerRealised: 'LearnerRealised',
+  LearnerRecommendation: 'LearnerRecommendation',
+  LearnerReviewRequest: 'LearnerReviewRequest',
+  LearnerSnapshotUploadResult: 'LearnerSnapshotUploadResult',
 };
 /**
  * Schemas whose property names the SDK keeps as sent (not camelCased):
@@ -216,21 +231,6 @@ const UNMAPPED_SCHEMAS = new Set([
   'UpdateTenantRequest',
   'ConnectorSyncRequest',
   'LeanIXSyncRequest',
-  // MCP observability (#77): not wrapped yet; call them with client.send().
-  'McpTool',
-  'McpUsageDay',
-  'McpPageMeta',
-  'McpToolPage',
-  'McpUsagePage',
-  // Routing learner snapshots and recommendation review (#47, #48): not
-  // wrapped yet; call them with client.send().
-  'LearnerSnapshotSummary',
-  'LearnerSnapshot',
-  'LearnerArmProjection',
-  'LearnerRealised',
-  'LearnerRecommendation',
-  'LearnerReviewRequest',
-  'LearnerSnapshotUploadResult',
 ]);
 
 interface Operation {
@@ -351,9 +351,9 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /api/v1/admin/connectors/servicenow/status': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/sentinel/sync': NOT_WRAPPED,
   'GET /api/v1/admin/connectors/sentinel/status': NOT_WRAPPED,
-  // SIEM export (#32): NDJSON for log forwarders, not wrapped.
-  'GET /partner/v1/siem/calls': NOT_WRAPPED,
-  'GET /partner/v1/siem/audit': NOT_WRAPPED,
+  // SIEM export (#32): NDJSON for log forwarders, streamed (client.siem).
+  'GET /partner/v1/siem/calls': { methods: ['siem.calls', 'siem.callsFeed'], params: 'SiemCallsParams' },
+  'GET /partner/v1/siem/audit': { methods: ['siem.audit', 'siem.auditFeed'], params: 'SiemAuditParams' },
   'GET /api/v1/operator/tenants': NOT_WRAPPED,
   'POST /api/v1/operator/tenants': NOT_WRAPPED,
   'GET /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,
@@ -367,19 +367,25 @@ const OPERATIONS: Record<string, Operation> = {
   // Call feedback (#43) is sent by the Python SDK and the gateway with the
   // tenant ingest key, never by a partner.
   'POST /ingest/feedback': NOT_WRAPPED,
-  // MCP observability (#77): not wrapped yet. The registry route takes the
-  // tenant ingest key.
-  'GET /partner/v1/mcp/tools': NOT_WRAPPED,
-  'GET /partner/v1/mcp/usage': NOT_WRAPPED,
+  // MCP observability (#77): client.mcp. The registry route takes the
+  // tenant ingest key and is not wrapped.
+  'GET /partner/v1/mcp/tools': { methods: ['mcp.listTools', 'mcp.listToolsPage'], params: 'ListMcpToolsParams' },
+  'GET /partner/v1/mcp/usage': { methods: ['mcp.listUsage', 'mcp.listUsagePage'], params: 'ListMcpUsageParams' },
   'GET /api/v1/registry/mcp-tools': NOT_WRAPPED,
-  // Learner snapshots are uploaded by the Python SDK's ps-learn with the
-  // tenant ingest key; the learner routes are not wrapped yet (#47, #48).
+  // Routing learner (#47, #48): client.learner. Snapshots are uploaded by
+  // the Python SDK's ps-learn with the tenant ingest key, not by a partner.
   'POST /ingest/learner-snapshots': NOT_WRAPPED,
-  'GET /partner/v1/learner/snapshots': NOT_WRAPPED,
-  'GET /partner/v1/learner/snapshots/{learner_version}': NOT_WRAPPED,
-  'GET /partner/v1/learner/recommendations': NOT_WRAPPED,
-  'GET /partner/v1/learner/recommendations/{rec_id}': NOT_WRAPPED,
-  'POST /partner/v1/learner/recommendations/{rec_id}/review': NOT_WRAPPED,
+  'GET /partner/v1/learner/snapshots': { methods: ['learner.listSnapshots'], params: 'ListLearnerSnapshotsParams' },
+  'GET /partner/v1/learner/snapshots/{learner_version}': { methods: ['learner.getSnapshot'] },
+  'GET /partner/v1/learner/recommendations': {
+    methods: ['learner.listRecommendations'],
+    params: 'ListLearnerRecommendationsParams',
+  },
+  'GET /partner/v1/learner/recommendations/{rec_id}': { methods: ['learner.getRecommendation'] },
+  'POST /partner/v1/learner/recommendations/{rec_id}/review': {
+    methods: ['learner.reviewRecommendation'],
+    body: 'LearnerReviewRequest',
+  },
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];
@@ -431,6 +437,25 @@ describe('docs/openapi.yaml drift check', () => {
     expect(
       compareSchema(responseSchema('POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review', '201'), 'RiskReviewResult'),
     ).toEqual([]);
+    expect(compareSchema(spec.components.schemas.McpUsagePage.properties.meta, 'McpUsagePageMeta')).toEqual([]);
+    expect(
+      compareSchema(spec.components.schemas.LearnerRecommendation.properties.projection, 'LearnerProjection'),
+    ).toEqual([]);
+    for (const [key, iface] of [
+      ['GET /partner/v1/learner/snapshots', 'LearnerSnapshotList'],
+      ['GET /partner/v1/learner/recommendations', 'LearnerRecommendationList'],
+    ]) {
+      expect(compareSchema(responseSchema(key), iface)).toEqual([]);
+      expect(compareSchema(responseSchema(key).properties.meta, 'LearnerListMeta')).toEqual([]);
+    }
+  });
+
+  it('documents the SIEM pull as NDJSON with cursor headers', () => {
+    for (const key of ['GET /partner/v1/siem/calls', 'GET /partner/v1/siem/audit']) {
+      const ok = specOperations().get(key).responses['200'];
+      expect(Object.keys(ok.content)).toEqual(['application/x-ndjson']);
+      expect(Object.keys(ok.headers).sort()).toEqual(['X-PS-Cursor', 'X-PS-Has-More']);
+    }
   });
 
   it('documents the FOCUS export as CSV and JSON Lines', () => {

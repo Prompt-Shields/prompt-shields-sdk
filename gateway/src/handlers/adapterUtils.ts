@@ -35,6 +35,10 @@ import {
   transformResponsesStreamChunk,
   createResponsesToMessagesStreamState,
 } from '../adapters/messagesViaResponses';
+import { estimateMessagesInputTokens } from '../adapters/messages/estimateTokens';
+import { toMessagesError } from '../adapters/shared';
+import { GOOGLE, GOOGLE_VERTEX_AI, OPEN_AI } from '../globals';
+import { getModelAndProvider } from '../providers/google-vertex-ai/utils';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -229,6 +233,126 @@ export function applyAdapterRequestTransform(
   return null;
 }
 
+// ── PS fork (#73 follow-up): Messages count_tokens ─────────────────────────
+
+/** Response header set on count_tokens answers estimated in the gateway. */
+export const TOKEN_COUNT_SOURCE_HEADER = 'x-ps-token-count';
+
+/** The provider's config for `fn` (resolving getConfig), or undefined. */
+function providerFnConfig(
+  provider: string,
+  fn: endpointStrings,
+  params: Params
+): unknown {
+  const providerConfig: any = Object.hasOwn(Providers, provider)
+    ? Providers[provider]
+    : undefined;
+  if (!providerConfig) return undefined;
+  if (providerConfig[fn]) return providerConfig[fn];
+  if (!providerConfig.getConfig) return undefined;
+  try {
+    return providerConfig.getConfig({
+      params,
+      providerOptions: { provider },
+    })?.[fn];
+  } catch {
+    return undefined;
+  }
+}
+
+/** An Anthropic count_tokens answer estimated in the gateway. */
+export function estimatedCountTokensResponse(params: Params): Response {
+  return new Response(
+    JSON.stringify({ input_tokens: estimateMessagesInputTokens(params) }),
+    {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        [TOKEN_COUNT_SOURCE_HEADER]: 'estimated',
+      },
+    }
+  );
+}
+
+/**
+ * Decide how `POST /v1/messages/count_tokens` reaches one target:
+ *
+ * 1. `null`: the provider has its own Messages count_tokens config
+ *    (anthropic, bedrock, claude-platform-aws, Vertex AI for Claude, and
+ *    Gemini on google / vertex-ai via countTokens): call it as is.
+ * 2. `openai` without a custom host: the request goes through the Messages
+ *    → Responses translation to `POST /v1/responses/input_tokens`, and the
+ *    answer is reduced to `{ input_tokens }`.
+ * 3. Any other provider the Messages endpoint can reach (it has a
+ *    chatComplete or messages config): a local estimate, marked with
+ *    `x-ps-token-count: estimated`; nothing is sent upstream.
+ * 4. Anything else: a 400 in Anthropic's error shape.
+ *
+ * Guardrails and mutators do not run on count requests, so a target with
+ * hooks is never sent its content on the routes added here (Gemini, OpenAI):
+ * it gets the local estimate, as /v1/messages would redact or deny first.
+ */
+export function messagesCountTokensRoute(
+  provider: string,
+  params: Params,
+  customHost?: string,
+  targetHasHooks = false
+): AdapterRequestResult | Response | null {
+  const gemini =
+    provider === GOOGLE ||
+    (provider === GOOGLE_VERTEX_AI &&
+      getModelAndProvider(String(params.model ?? '')).provider === 'google');
+  if (targetHasHooks && (gemini || provider === OPEN_AI)) {
+    return estimatedCountTokensResponse(params);
+  }
+  if (providerFnConfig(provider, 'messagesCountTokens', params)) return null;
+  if (provider === OPEN_AI && !customHost) {
+    let responsesParams: Params;
+    try {
+      responsesParams = transformMessagesToResponses(params, provider);
+    } catch (err) {
+      if (!(err instanceof MessagesViaResponsesRequestError)) throw err;
+      // Content the Responses route cannot carry: count it locally.
+      return estimatedCountTokensResponse(params);
+    }
+    // Generation-only fields have no place in an input-token count.
+    const {
+      store: _store,
+      stream: _stream,
+      max_output_tokens: _max,
+      ...countParams
+    } = responsesParams as any;
+    return {
+      adapterCtx: {
+        isActive: true,
+        originalFn: 'messagesCountTokens',
+        originalRequest: {},
+        provider,
+        via: 'responses',
+      },
+      params: countParams,
+      requestBody: countParams,
+      fn: 'countResponseInputTokens',
+    };
+  }
+  if (
+    providerFnConfig(provider, 'chatComplete', params) ||
+    providerFnConfig(provider, 'messages', params)
+  ) {
+    return estimatedCountTokensResponse(params);
+  }
+  return new Response(
+    JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: `POST /v1/messages/count_tokens is not supported for provider ${provider || '(none)'}`,
+      },
+    }),
+    { status: 400, headers: { 'content-type': 'application/json' } }
+  );
+}
+
 // ── PS fork: provider-aware token limit ─────────────────────────────────────
 
 /**
@@ -317,7 +441,17 @@ async function adaptNonStreamingResponse(
   // failed; translate it as one. Hook results (246, 446) are kept.
   const status = response.status === 246 ? 200 : response.status;
   let transformedJson: any;
-  if (adapterCtx.via === 'responses') {
+  let outStatus = response.status;
+  if (adapterCtx.originalFn === 'messagesCountTokens') {
+    // PS fork (#73 follow-up): Responses input_tokens → Messages count; a
+    // success without a count is an invalid upstream answer (502).
+    if (status === 200 && typeof json?.input_tokens === 'number') {
+      transformedJson = { input_tokens: json.input_tokens };
+    } else {
+      if (status === 200) outStatus = 502;
+      transformedJson = toMessagesError(json, outStatus, adapterCtx.provider);
+    }
+  } else if (adapterCtx.via === 'responses') {
     transformedJson = transformResponsesToMessages(
       json,
       status,
@@ -346,7 +480,7 @@ async function adaptNonStreamingResponse(
   headers.set('content-type', 'application/json');
 
   const newResponse = new Response(JSON.stringify(transformedJson), {
-    status: response.status,
+    status: outStatus,
     headers,
   });
 

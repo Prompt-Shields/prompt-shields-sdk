@@ -13,6 +13,9 @@ import type {
   WebhookSubscription,
   SpendAlert,
   FocusCostRow,
+  McpTool,
+  LearnerRecommendation,
+  SiemRecord,
 } from '../src';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -333,6 +336,87 @@ describe('docs/sdks/typescript.mdx', () => {
     ]);
   });
 
+  it('MCP Tools, Routing Learner and SIEM Pull', async () => {
+    const tool = { server_name: 'github', tool_name: 'create_issue', source: 'gateway', calling_service: null, environment: null, transport: null, call_count: 42, error_count: 0, blocked_count: 2, user_hash: null, user_group: null, avg_latency_ms: 100, first_seen: null, last_seen: null, asset_id: null, owner_email: 'platform@acme.com' };
+    const day = { day: '2026-11-05', source: 'gateway', server_name: 'github', tool_name: 'create_issue', call_count: 10, error_count: 0, blocked_count: 3, latency_ms_total: 0, latency_count: 0, avg_latency_ms: null, request_bytes: 0, response_bytes: 0, bytes_count: 0, asset_id: null, owner_email: null };
+    const rec = { id: 'rec1', snapshot_id: 's1', learner_version: 'lv1-0123456789abcdef', use_case: 'support-triage', sensitivity_level: 'internal', current_model: 'openai:gpt-4o', recommended_model: 'mistral:mistral-small', candidates: [], projection: { savings_pct: 75 }, status: 'pending', reviewed_by: null, reviewed_at: null, review_comment: null, reviewer_actor_type: null, created_at: '2026-11-05T08:00:00Z', realised: null };
+    const posted: unknown[] = [];
+    const siemQueries: string[] = [];
+    const call = (n: number) => JSON.stringify({ TimeGenerated: 't', EventUid: `e${n}`, EventType: 'AICall', PsTenantId: 't1' });
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/oauth/token') return token('docs.jwt.token');
+      if (url.pathname === '/partner/v1/mcp/tools') {
+        expect(url.searchParams.get('source')).toBe('gateway');
+        return url.searchParams.get('cursor')
+          ? json({ data: [{ ...tool, tool_name: 'list_repos', call_count: 5 }], meta: { has_more: false, next_cursor: null } })
+          : json({ data: [tool], meta: { has_more: true, next_cursor: 'c1' } });
+      }
+      if (url.pathname === '/partner/v1/mcp/usage') {
+        expect(url.searchParams.get('server_name')).toBe('github');
+        return json({ data: [day, day], meta: { since: '2026-10-01', until: null, has_more: false, next_cursor: null } });
+      }
+      if (url.pathname === '/partner/v1/learner/recommendations') {
+        expect(url.searchParams.get('status')).toBe('pending');
+        return json({ data: [rec], meta: { total: 1 } });
+      }
+      if (url.pathname === '/partner/v1/learner/recommendations/rec1/review' && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+        return json({ data: { ...rec, status: 'accepted', reviewed_by: 'finops@acme.com' } });
+      }
+      if (url.pathname === '/partner/v1/siem/calls') {
+        siemQueries.push(url.search);
+        const first = url.searchParams.get('cursor') === 'saved';
+        return new Response(first ? `${call(1)}\n${call(2)}\n` : `${call(3)}\n`, {
+          headers: { 'content-type': 'application/x-ndjson', 'x-ps-cursor': first ? 'c2' : 'c3', 'x-ps-has-more': String(first) },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const client = new PartnerClient({ clientId: 'id', clientSecret: 'secret' });
+    let savedCursor: string | null = 'saved';
+    const forwarded: string[] = [];
+    const forwardToSiem = async (r: SiemRecord) => void forwarded.push(r.EventUid);
+
+    // ---- begin docs ----
+    // MCP tools seen in telemetry, and daily tool-call metering (needs mcp:read)
+    for await (const tool of client.mcp.listTools({ source: 'gateway' })) {
+      console.log(`${tool.serverName}/${tool.toolName}: ${tool.callCount} calls, owner ${tool.ownerEmail}`);
+    }
+    const days = await client.mcp.listUsage({ since: '2026-10-01', serverName: 'github' });
+    console.log(`${days.reduce((n, d) => n + d.blockedCount, 0)} blocked calls`);
+
+    // Learner recommendations awaiting review (learner:read), accepted or rejected with learner:review
+    const { data: pending } = await client.learner.listRecommendations({ status: 'pending' });
+    for (const rec of pending) {
+      console.log(`${rec.useCase}: ${rec.currentModel} -> ${rec.recommendedModel}, ${rec.projection.savingsPct}% cheaper`);
+      await client.learner.reviewRecommendation(rec.id, {
+        decision: 'accepted',
+        reviewedBy: 'finops@acme.com',
+        comment: 'Quality holds on the eval set',
+      });
+    }
+
+    // Routing evidence as Sentinel-schema records (needs evidence:read), from the last saved cursor
+    const feed = client.siem.callsFeed({ cursor: savedCursor, since: '2026-11-01T00:00:00Z' });
+    for await (const record of feed) {
+      await forwardToSiem(record);
+    }
+    savedCursor = feed.cursor;
+    // ---- end docs ----
+
+    expect(logs).toEqual([
+      'github/create_issue: 42 calls, owner platform@acme.com',
+      'github/list_repos: 5 calls, owner platform@acme.com',
+      '6 blocked calls',
+      'support-triage: openai:gpt-4o -> mistral:mistral-small, 75% cheaper',
+    ]);
+    expect(posted).toEqual([{ decision: 'accepted', reviewed_by: 'finops@acme.com', comment: 'Quality holds on the eval set' }]);
+    expect(forwarded).toEqual(['e1', 'e2', 'e3']);
+    expect(savedCursor).toBe('c3');
+    expect(siemQueries).toEqual(['?cursor=saved', '?cursor=c2']);
+  });
+
   it('Webhook Subscriptions', async () => {
     const sub = { id: 's1', partner_id: 'p1', url: 'https://ea-tool.example.com/hooks/prompt-shields', event_types: [], description: null, is_active: true, rotation_grace_ends_at: null, created_at: null, updated_at: null };
     const calls: string[] = [];
@@ -424,6 +508,9 @@ describe('docs/sdks/typescript.mdx', () => {
       WebhookSubscription?,
       SpendAlert?,
       FocusCostRow?,
+      McpTool?,
+      LearnerRecommendation?,
+      SiemRecord?,
     ] = [];
     expect(t).toEqual([]);
   });

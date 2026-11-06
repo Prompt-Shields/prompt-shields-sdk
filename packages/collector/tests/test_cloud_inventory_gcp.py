@@ -662,3 +662,57 @@ def test_request_body_cannot_carry_gcp_credentials():
         {"tenant_id": str(TENANT), "gcp": {"service_account": _key()}}
     )
     assert not hasattr(body, "gcp")
+
+
+async def test_owner_label_values_are_mapped_to_emails():
+    _, deps = await ci.fetch_gcp_deployments(
+        _creds(owner_label_emails={"ml-team": "ml-team@acme.com"}),
+        transport=httpx.MockTransport(_vertex_handler([])),
+        sleep=_no_sleep,
+        clock=_clock,
+    )
+    assert deps[0].tags["owner"] == "ml-team@acme.com"
+    assert deps[1].tags == {"owner": "ml-team@acme.com"}
+    # No owner label: unchanged.
+    assert deps[2].tags == {"environment": "staging", "business_unit": "risk"}
+    assert [ci.owner_from_tags(d.tags) for d in deps[:2]] == ["ml-team@acme.com"] * 2
+
+    db = FakeSession()
+    await ci.pull_cloud_inventory(
+        db,
+        TENANT,
+        clouds=["gcp"],
+        settings=_settings(owner_label_emails={"ml-team": "ml-team@acme.com"}),
+        transport=httpx.MockTransport(_vertex_handler([])),
+        sleep=_no_sleep,
+        now=NOW,
+    )
+    owners = {a.calling_service: a.owner_email for a in db.rows.values()}
+    assert owners[f"gcp:{P}/models/111"] == "ml-team@acme.com"
+    assert owners[f"gcp:{P}/endpoints/901/deployedModels/2001"] is None
+
+
+def test_map_owner_label():
+    emails = {"claims-team": "claims@acme.com"}
+    assert ci.map_owner_label({"Owner": " claims-team "}, emails) == {
+        "Owner": "claims@acme.com"
+    }
+    # The first owner tag decides, as in owner_from_tags.
+    assert ci.map_owner_label({"owner": "other", "contact": "claims-team"}, emails) == {
+        "owner": "other",
+        "contact": "claims-team",
+    }
+    assert ci.map_owner_label({"env": "prod"}, emails) == {"env": "prod"}
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"ml-team": "not-an-email"},
+        {"Bad Label!": "a@acme.com"},
+        {"x" * 64: "a@acme.com"},
+    ],
+)
+def test_owner_label_emails_are_validated(mapping):
+    with pytest.raises(ValueError, match="owner_label_emails"):
+        _creds(owner_label_emails=mapping)
