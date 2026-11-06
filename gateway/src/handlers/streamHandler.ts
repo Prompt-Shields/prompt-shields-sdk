@@ -151,13 +151,17 @@ export async function* readStream(
     if (done) {
       if (buffer.length > 0) {
         if (transformFunction) {
-          yield transformFunction(
+          const transformedChunk = transformFunction(
             buffer,
             fallbackChunkId,
             streamState,
             strictOpenAiCompliance,
             gatewayRequest
           );
+          // PS fork (#208): a skipped event (e.g. a keep-alive) is undefined.
+          if (transformedChunk !== undefined) {
+            yield transformedChunk;
+          }
         } else {
           yield buffer;
         }

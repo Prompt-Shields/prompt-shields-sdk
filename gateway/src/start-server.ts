@@ -21,6 +21,7 @@ import { flushSecurityLogsExporter } from './middlewares/psSecurityEvents/otlp';
 import { createDrain, shutdownTimeoutMs } from './psShutdown';
 import { loadMcpServersFromEnv } from './mcp/loadConfig';
 import { loadBaselineFromEnv } from './middlewares/router/baselineLoader';
+import { loadBudgetsFromEnv } from './middlewares/psBudget/loader';
 import { psMcpTelemetrySender } from './mcp/telemetry';
 
 // Extract the port number from the command line arguments
@@ -47,6 +48,18 @@ try {
   if (baseline) console.log(`Savings baseline: ${baseline.baselineId}`);
 } catch (err) {
   console.error(`Savings baseline error: ${(err as Error).message}`);
+  process.exit(1);
+}
+// PS fork (#28): spend budgets. An invalid config stops the gateway rather
+// than serving calls without the budgets the operator set.
+try {
+  const budgets = await loadBudgetsFromEnv();
+  if (budgets)
+    console.log(
+      `Budgets: ${budgets.config.budgets.length} configured, ${budgets.store.kind} store`
+    );
+} catch (err) {
+  console.error(`Budget configuration error: ${(err as Error).message}`);
   process.exit(1);
 }
 const hasAdminToken = Boolean(readAdminToken());

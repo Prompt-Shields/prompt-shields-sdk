@@ -39,7 +39,7 @@ CI (`.github/workflows/observability.yml`) runs `promtool check rules`, the rule
 | `ps_gateway_streams_total` | counter | `route`, `provider`, `outcome` (`complete`/`truncated`/`cancelled`) |
 | `ps_gateway_guardrail_verdicts_total` | counter | `hook`, `check`, `verdict` (`allow`/`deny`/`flag`/`error`), `stage` |
 | `ps_gateway_pii_detections_total` | counter | `category` |
-| `ps_gateway_rate_limited_total` | counter | `source` (`upstream`/`gateway`) |
+| `ps_gateway_rate_limited_total` | counter | `source` (`upstream`/`gateway`/`budget`) |
 | `ps_gateway_telemetry_dropped_total` | counter | `sink` (`otel`, `otel_logs`, `ps_telemetry`, `security_events`), `reason` |
 
 A request a deny guardrail refuses is `status="446"`. Each metric keeps at most 1000 label sets; further ones are folded into one `__overflow__` series.

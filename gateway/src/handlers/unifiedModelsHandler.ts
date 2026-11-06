@@ -10,6 +10,8 @@
  * - everyone else gets OpenAI's shape: `{ object: 'list', data: [{ id,
  *   object, created, owned_by }] }`.
  *
+ * `GET /v1/models/{id}` gets the same treatment for a single model object.
+ *
  * Error responses and bodies we cannot recognise pass through untouched.
  * Prompt Shields addition; not part of upstream Portkey.
  */
@@ -19,6 +21,11 @@ import {
   tryTargetsRecursively,
 } from './handlerUtils';
 import { RouterError } from '../errors/RouterError';
+import {
+  classifyProxyRequest,
+  configHasHooks,
+  proxyGuardrailsUnsupportedResponse,
+} from './proxyGuardrails';
 
 export interface OpenAIModel {
   id: string;
@@ -85,28 +92,37 @@ export function extractModels(body: unknown): NormalisedModel[] | null {
 
   const models: NormalisedModel[] = [];
   for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
-    const e = entry as Record<string, unknown>;
-    const id =
-      typeof e.id === 'string'
-        ? e.id
-        : typeof e.name === 'string'
-          ? e.name
-          : null;
-    if (!id) continue;
-    models.push({
-      id,
-      created: toUnixSeconds(e.created ?? e.created_at),
-      ownedBy: typeof e.owned_by === 'string' ? e.owned_by : '',
-      displayName:
-        typeof e.display_name === 'string'
-          ? e.display_name
-          : typeof e.displayName === 'string'
-            ? e.displayName
-            : id,
-    });
+    const model = extractModel(entry);
+    if (model) models.push(model);
   }
   return models;
+}
+
+/**
+ * Extracts one provider-neutral model from a single model object (OpenAI,
+ * Anthropic or Gemini style), or `null` when it has no usable id.
+ */
+export function extractModel(entry: unknown): NormalisedModel | null {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const e = entry as Record<string, unknown>;
+  const id =
+    typeof e.id === 'string'
+      ? e.id
+      : typeof e.name === 'string'
+        ? e.name
+        : null;
+  if (!id) return null;
+  return {
+    id,
+    created: toUnixSeconds(e.created ?? e.created_at),
+    ownedBy: typeof e.owned_by === 'string' ? e.owned_by : '',
+    displayName:
+      typeof e.display_name === 'string'
+        ? e.display_name
+        : typeof e.displayName === 'string'
+          ? e.displayName
+          : id,
+  };
 }
 
 export function isAnthropicModelList(body: unknown): boolean {
@@ -119,19 +135,29 @@ export function isAnthropicModelList(body: unknown): boolean {
   );
 }
 
+export function toOpenAIModel(m: NormalisedModel): OpenAIModel {
+  return {
+    id: m.id,
+    object: 'model',
+    created: m.created,
+    owned_by: m.ownedBy || 'system',
+  };
+}
+
+export function toAnthropicModel(m: NormalisedModel): AnthropicModel {
+  return {
+    type: 'model',
+    id: m.id,
+    display_name: m.displayName,
+    created_at: new Date(m.created * 1000).toISOString(),
+  };
+}
+
 export function toOpenAIModelList(models: NormalisedModel[]): {
   object: 'list';
   data: OpenAIModel[];
 } {
-  return {
-    object: 'list',
-    data: models.map((m) => ({
-      id: m.id,
-      object: 'model',
-      created: m.created,
-      owned_by: m.ownedBy || 'system',
-    })),
-  };
+  return { object: 'list', data: models.map(toOpenAIModel) };
 }
 
 function parseLimit(limit?: string | null): number {
@@ -160,12 +186,7 @@ export function toAnthropicModelList(
     : models.slice(start, start + limit);
   const hasMore = page.before_id ? start > 0 : start + limit < models.length;
 
-  const data: AnthropicModel[] = slice.map((m) => ({
-    type: 'model',
-    id: m.id,
-    display_name: m.displayName,
-    created_at: new Date(m.created * 1000).toISOString(),
-  }));
+  const data: AnthropicModel[] = slice.map(toAnthropicModel);
   return {
     data,
     has_more: hasMore,
@@ -208,6 +229,40 @@ export async function normaliseModelsResponse(
     out = toOpenAIModelList(models);
   }
 
+  return jsonLike(res, out);
+}
+
+/**
+ * Rewrites a provider's single-model response (`GET /v1/models/{id}`) into
+ * the shape the caller expects: Anthropic's model object for
+ * `anthropic-version` callers, OpenAI's otherwise. Non-2xx responses and
+ * unrecognised bodies are returned unchanged.
+ */
+export async function normaliseModelResponse(
+  res: Response,
+  anthropic: boolean
+): Promise<Response> {
+  if (!res.ok) return res;
+  let body: unknown;
+  try {
+    body = await res.clone().json();
+  } catch {
+    return res;
+  }
+  const b = body as Record<string, unknown> | null;
+  // Already in the caller's shape (e.g. Anthropic's own model object).
+  if (anthropic && b?.type === 'model') return res;
+  if (!anthropic && b?.object === 'model') return res;
+  const model = extractModel(body);
+  if (!model) return res;
+  return jsonLike(
+    res,
+    anthropic ? toAnthropicModel(model) : toOpenAIModel(model)
+  );
+}
+
+/** A JSON response with `res`'s status and headers and a new body. */
+function jsonLike(res: Response, out: unknown): Response {
   const headers = new Headers(res.headers);
   headers.delete('content-length');
   headers.delete('content-encoding');
@@ -215,17 +270,30 @@ export async function normaliseModelsResponse(
   return new Response(JSON.stringify(out), { status: res.status, headers });
 }
 
-export async function unifiedModelsHandler(c: Context): Promise<Response> {
-  let res: Response;
+/**
+ * Proxies the request to the configured provider's models endpoint. Routing
+ * errors become a JSON 400, anything else a JSON 500.
+ */
+async function proxyModelsRequest(c: Context): Promise<Response> {
   try {
     // Same upstream call proxyHandler makes for a GET, but always with an
     // empty params object: proxyHandler leaves the body undefined when the
     // caller sends no content-type (as SDK GETs often do), which tryPost
     // cannot handle.
     const requestHeaders = Object.fromEntries(c.req.raw.headers);
-    res = await tryTargetsRecursively(
+    const config = constructConfigFromRequestHeaders(requestHeaders);
+    // Same up-front guardrail gate as proxyHandler (the /v1 catch-all): a
+    // lookup the hooks cannot classify (e.g. an id with slashes) is refused
+    // before any target, so a fallback order cannot reach an upstream first.
+    if (configHasHooks(config)) {
+      const decision = classifyProxyRequest(c, 'GET', {}, requestHeaders);
+      if (decision.kind === 'unsupported') {
+        return proxyGuardrailsUnsupportedResponse(decision.reason, c);
+      }
+    }
+    return await tryTargetsRecursively(
       c,
-      constructConfigFromRequestHeaders(requestHeaders),
+      config,
       {},
       requestHeaders,
       'proxy',
@@ -245,9 +313,19 @@ export async function unifiedModelsHandler(c: Context): Promise<Response> {
       }
     );
   }
+}
+
+export async function unifiedModelsHandler(c: Context): Promise<Response> {
+  const res = await proxyModelsRequest(c);
   return normaliseModelsResponse(res, wantsAnthropicShape(c.req.raw.headers), {
     limit: c.req.query('limit'),
     after_id: c.req.query('after_id'),
     before_id: c.req.query('before_id'),
   });
+}
+
+/** `GET /v1/models/{id}`: one model, in the caller's shape. */
+export async function unifiedModelHandler(c: Context): Promise<Response> {
+  const res = await proxyModelsRequest(c);
+  return normaliseModelResponse(res, wantsAnthropicShape(c.req.raw.headers));
 }
