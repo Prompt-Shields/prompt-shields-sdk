@@ -127,6 +127,28 @@ def test_card_found_next_to_other_digits(text):
     assert "credit_card" in detect_pii_categories(text)
 
 
+@pytest.mark.parametrize(("text", "spans"), [
+    # A run's first group starts a card only after a non-word character, and
+    # a card ends at the run's end only before one.
+    ("x4111 1111 1111 1111", []),
+    ("4111 1111 1111 1111x", []),
+    ("4111 1111 1111 1111.", [(0, 19)]),
+    # More than 19 digits in a row is no card.
+    ("41111111111111111111", []),
+    # A card stops at the end of the group that reaches 13 digits.
+    ("4111 1111 1111 1111 9", [(0, 19)]),
+    ("4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1", []),
+    # After a valid card the scan resumes past it.
+    ("0 " * 30, [(0, 25), (26, 51)]),
+    # Found from any group start of a long run.
+    ("1-" * 300 + "4111-1111-1111-1111", [(576, 604)]),
+])
+def test_card_windows(text, spans):
+    found = [(s, e) for s, e, cat in find_pii_spans(text) if cat == "credit_card"]
+    assert found == spans
+    assert ("credit_card" in detect_pii_categories(text)) == bool(spans)
+
+
 def test_phone_with_letters_attached():
     assert "phone" in detect_pii_categories("call +1-555-123-4567x89")
     assert "phone" in detect_pii_categories("Tel:5551234567")
