@@ -444,6 +444,14 @@ class _StreamBase:
         self._on_abandon: Callable[..., Any] | None = None
 
     def __del__(self):
+        self.abandon()
+
+    def abandon(self) -> None:
+        """Report the stream as abandoned now, as garbage collection would:
+        `on_abandon` (enqueue only, no I/O). A no-op once the stream ended or
+        at interpreter shutdown; never raises. ShieldsRouter calls it when
+        its own stream object is finalised, so the event is built before the
+        router tells the routing learner about the call."""
         # Fail-open, and never raise from a finalizer.
         try:
             if (self._finished or self._on_abandon is None
