@@ -30,6 +30,7 @@ import {
 } from '../shared';
 import { randomUUID } from 'crypto';
 import { encodeThinkingCarry } from './thinkingCarry';
+import { outputTextLogprobs } from './requestFields';
 
 type ResponseStatus = 'completed' | 'incomplete' | 'in_progress';
 
@@ -201,7 +202,8 @@ export function transformChatCompletionsToResponses(
               type: 'output_text',
               text,
               annotations: [],
-              logprobs: [],
+              // PS fork (#73): when include lists them (requestFields.ts)
+              logprobs: outputTextLogprobs(choice, originalRequest),
             } as ResponseOutputText,
           ],
         } as ResponseOutputMessage);

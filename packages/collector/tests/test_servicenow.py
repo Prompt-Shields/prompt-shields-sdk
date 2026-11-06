@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -360,6 +361,11 @@ class Fakes:
         self.references: dict[tuple[str, str], str] = {}
         self.key_values: dict[tuple[str, str], str] = {}
         self.flows: dict[str, list[dict]] = {}
+        # Read-back (Table API): requests seen, CIs (by correlation_id) and
+        # relations (by type) the instance pretends not to have.
+        self.table_requests: list[httpx.Request] = []
+        self.hidden_cis: set[str] = set()
+        self.hidden_rel_types: set[str] = set()
 
     def partner(self, r: httpx.Request) -> httpx.Response:
         self.partner_requests.append(r)
@@ -403,6 +409,8 @@ class Fakes:
             )
         if self.fail_with:
             return httpx.Response(self.fail_with, text=f"denied {CLIENT_SECRET}")
+        if r.url.path.startswith(sn.TABLE_PATH + "/"):
+            return self._table(r)
         assert r.url.path == sn.IRE_PATH and r.method == "POST"
         assert r.url.params["sysparm_data_source"] == "PromptShields"
         auth = r.headers["authorization"]
@@ -456,6 +464,42 @@ class Fakes:
                 assert rel["className"] == "cmdb_key_value"
                 self.key_values[(sys_id, rel["values"]["key"])] = rel["values"]["value"]
         return {"items": out, "relations": []}
+
+    def _table(self, r: httpx.Request) -> httpx.Response:
+        """Table API GET over the fake CMDB, honouring the query shapes the
+        read-back sends (sys_idIN..., parentIN...^childIN...) and paging."""
+        self.table_requests.append(r)
+        assert r.method == "GET"
+        table = r.url.path.rsplit("/", 1)[-1]
+        p = r.url.params
+        assert p["sysparm_exclude_reference_link"] == "true"
+        query = p["sysparm_query"]
+        if table == "cmdb_ci":
+            assert query.startswith("sys_idIN") and "^" not in query
+            assert p["sysparm_fields"] == "sys_id,sys_class_name,correlation_id"
+            wanted = set(query.removeprefix("sys_idIN").split(","))
+            rows = []
+            for (cls, ident), values in self.cmdb.items():
+                ref = values.get("correlation_id")
+                sys_id = hashlib.md5(f"{cls}|{ident}".encode()).hexdigest()
+                if ref and sys_id in wanted and ref not in self.hidden_cis:
+                    rows.append(
+                        {"sys_id": sys_id, "sys_class_name": cls, "correlation_id": ref}
+                    )
+        elif table == "cmdb_rel_ci":
+            assert p["sysparm_fields"] == "parent,child,type.name"
+            parents, children = query.split("^")
+            parents = set(parents.removeprefix("parentIN").split(","))
+            children = set(children.removeprefix("childIN").split(","))
+            rows = [
+                {"parent": pa, "child": ch, "type.name": t}
+                for pa, t, ch in sorted(self.rels)
+                if pa in parents and ch in children and t not in self.hidden_rel_types
+            ]
+        else:
+            return httpx.Response(403)
+        offset, limit = int(p["sysparm_offset"]), int(p["sysparm_limit"])
+        return httpx.Response(200, json={"result": rows[offset : offset + limit]})
 
     def kwargs(self, settings=None):
         return {
@@ -1165,3 +1209,285 @@ async def test_business_units_risks_and_data_flows_together():
     for rel in payload["relations"]:
         assert rel["parent"] < first_bu and rel["child"] < first_bu
     assert len(fakes.rels) == 4 and len(fakes.references) == 2
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Dry run
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_dry_run_sends_nothing_and_records_nothing(caplog):
+    caplog.set_level(logging.DEBUG)
+    cursor = "2026-10-01T00:00:00+00:00"
+    db = FakeSession({"connectors": {"servicenow": {"cursor": cursor}}})
+    before = json.dumps(db.tenant.settings)
+    fakes = Fakes(assets=[_asset(A1), _asset(A2, vendor="anthropic")])
+    out = await sn.sync_servicenow(
+        db, TENANT, full=True, dry_run=True, **fakes.kwargs()
+    )
+    assert out["status"] == "ok" and out["dry_run"] is True, out
+    assert out["assets"] == 2 and out["ci_items"] == 4 and out["relations"] == 2
+    assert out["requests"] == 1 and "operations" not in out
+    assert out["item_classes"] == {"cmdb_ci_function_ai": 2, "cmdb_ci_service": 2}
+    assert out["relation_types"] == {"Depends on::Used by": 2}
+    # The cursor a real run would store, but nothing stored and nothing sent.
+    assert out["cursor"] == "2026-10-15T11:55:00+00:00"
+    assert fakes.sn_requests == [] and fakes.cmdb == {}
+    assert json.dumps(db.tenant.settings) == before
+    # The Partner API is still read (and audited there); the result carries
+    # counts, not asset data.
+    assert [r.url.path for r in fakes.partner_requests] == ["/partner/v1/export"]
+    assert "Support bot" not in json.dumps(out)
+    blob = json.dumps(out) + caplog.text
+    for secret in SECRETS:
+        assert secret not in blob
+
+
+async def test_dry_run_counts_business_units_and_risk_entries():
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2, business_unit="Finance")])
+    fakes.risks = {A2: [RISK]}
+    settings = _settings(push_risk_mappings=True, **BU_OPTS)
+    out = await sn.sync_servicenow(db, TENANT, dry_run=True, **fakes.kwargs(settings))
+    assert out["status"] == "ok", out
+    assert out["business_units"] == 2 and out["risk_entries"] == 1
+    assert out["item_classes"]["cmn_department"] == 2
+    assert out["item_classes"]["cmdb_key_value"] == 1
+    assert fakes.sn_requests == []
+
+
+async def test_dry_run_ignores_verify_and_failures_record_nothing():
+    db = FakeSession()
+    fakes = Fakes()
+    out = await sn.sync_servicenow(
+        db, TENANT, dry_run=True, verify=True, **fakes.kwargs()
+    )
+    assert out["status"] == "ok" and "verification" not in out
+    assert fakes.sn_requests == []
+    fakes.key_tenant = str(uuid.uuid4())
+    out = await sn.sync_servicenow(db, TENANT, dry_run=True, **fakes.kwargs())
+    assert out["status"] == "error" and out["dry_run"] is True
+    assert db.tenant.settings == {}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Read-back verification (Table API)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _basic_client(transport) -> sn.ServiceNowClient:
+    conn = _connection(
+        username="u", password=PASSWORD, oauth_client_id=None, oauth_client_secret=None
+    )
+    return sn.ServiceNowClient(
+        conn, transport=transport, resolver=_public, sleep=_no_sleep
+    )
+
+
+def test_verify_is_off_by_default():
+    assert _connection().verify is False
+
+
+async def test_verify_reads_cis_and_relations_back():
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2, vendor="anthropic")])
+    fakes.flows = {A1: [{"direction": "input", "source_system": "crm"}]}
+    settings = _settings(data_system_class="cmdb_ci_appl", **BU_OPTS)
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs(settings))
+    assert out["status"] == "ok", out
+    # 2 assets, 2 vendors, 1 system; 2 vendor and 1 flow relation. The
+    # business unit record is not a CI and is not read back.
+    assert out["verification"] == {
+        "checked": 8,
+        "found": 8,
+        "missing_count": 0,
+        "missing": [],
+        "cis_checked": 5,
+        "relations_checked": 3,
+    }
+    tables = [r.url.path.rsplit("/", 1)[-1] for r in fakes.table_requests]
+    assert tables == ["cmdb_ci", "cmdb_rel_ci"]
+    # Reads only.
+    assert {r.method for r in fakes.table_requests} == {"GET"}
+    state = db.tenant.settings["connectors"]["servicenow"]
+    assert state["last_verification"]["found"] == 8 and state["cursor"]
+
+
+async def test_verify_follows_the_tenant_setting():
+    db = FakeSession()
+    fakes = Fakes()
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs(_settings(verify=True)))
+    assert out["verification"]["missing_count"] == 0
+    out = await sn.sync_servicenow(
+        db, TENANT, full=True, verify=False, **fakes.kwargs(_settings(verify=True))
+    )
+    assert "verification" not in out
+    out = await sn.sync_servicenow(db, TENANT, full=True, **fakes.kwargs())
+    assert "verification" not in out and len(fakes.table_requests) == 2
+
+
+@pytest.mark.parametrize(
+    "hide,missing",
+    [
+        ({"cis": {f"promptshields:asset:{A1}"}}, f"promptshields:asset:{A1}"),
+        (
+            {"rels": {"Depends on::Used by"}},
+            (
+                f"promptshields:asset:{A1} Depends on::Used by "
+                "promptshields:provider:openai"
+            ),
+        ),
+    ],
+)
+async def test_missing_ci_or_relation_fails_and_keeps_cursor(hide, missing):
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"servicenow": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    fakes.hidden_cis = hide.get("cis", set())
+    fakes.hidden_rel_types = hide.get("rels", set())
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "error"
+    assert out["error"] == "servicenow: 1 of 3 CIs and relations not found after sync"
+    assert out["verification"]["missing"] == [missing]
+    state = db.tenant.settings["connectors"]["servicenow"]
+    assert state["cursor"] == cursor and state["last_status"] == "error"
+    assert state["last_verification"]["missing_count"] == 1
+
+
+async def test_verify_rejects_a_ci_with_another_class():
+    expected = sn.Expected()
+    expected.cis = {"a" * 32: ("cmdb_ci_function_ai", "promptshields:asset:x")}
+    row = {
+        "sys_id": "a" * 32,
+        "sys_class_name": "cmdb_ci_appl",
+        "correlation_id": "promptshields:asset:x",
+    }
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"result": [row]})
+    )
+    async with _basic_client(transport) as client:
+        out = await client.verify(expected)
+    assert out["missing"] == ["promptshields:asset:x"]
+
+
+async def test_verify_pages_and_chunks(monkeypatch):
+    monkeypatch.setattr(sn, "VERIFY_PAGE", 2)
+    monkeypatch.setattr(sn, "VERIFY_CHUNK", 4)
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2), _asset(A3)])
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "ok", out
+    assert out["verification"]["found"] == 7  # 3 assets, 1 vendor, 3 relations
+    params = [dict(r.url.params) for r in fakes.table_requests]
+    ci = [p for p in params if p["sysparm_fields"].startswith("sys_id")]
+    # 4 CIs: one chunk, read in pages of 2 (2, 2, then an empty page).
+    assert [p["sysparm_offset"] for p in ci] == ["0", "2", "4"]
+    rel = [p for p in params if p["sysparm_fields"].startswith("parent")]
+    assert len({p["sysparm_query"] for p in rel}) == 2  # 3 relations, 2 per chunk
+
+
+async def test_verify_gives_up_on_endless_pages(monkeypatch):
+    monkeypatch.setattr(sn, "VERIFY_PAGE", 1)
+    monkeypatch.setattr(sn, "VERIFY_MAX_PAGES", 3)
+    body = {"result": [{"sys_id": "a" * 32}]}
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=body))
+    async with _basic_client(transport) as client:
+        with pytest.raises(sn.ConnectorError, match="too many rows"):
+            await client.query_table(
+                "cmdb_ci", "sys_idIN" + "a" * 32, ["sys_id"], "CI lookup"
+            )
+        with pytest.raises(sn.ConnectorError, match="unexpected table"):
+            await client.query_table("sys_user", "", ["sys_id"], "user lookup")
+
+
+@pytest.mark.parametrize("body", [{"result": {"a": 1}}, ["x"], {"error": "x"}])
+async def test_verify_unexpected_table_body_is_a_failed_run(body):
+    db = FakeSession()
+    fakes = Fakes()
+    real = fakes._table
+
+    def table(r):
+        real(r)
+        return httpx.Response(200, json=body)
+
+    fakes._table = table
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "error"
+    assert out["error"] == "servicenow: CI lookup returned an unexpected body"
+
+
+async def test_verify_table_403_does_not_leak():
+    db = FakeSession()
+    fakes = Fakes()
+
+    def table(r):
+        fakes.table_requests.append(r)
+        return httpx.Response(403, text=f"no read on cmdb_ci {CLIENT_SECRET}")
+
+    fakes._table = table
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["error"] == "servicenow: CI lookup returned HTTP 403"
+    assert CLIENT_SECRET not in json.dumps(db.tenant.settings) + json.dumps(out)
+
+
+# Responses recorded in the documented IRE and Table API shapes (see
+# fixtures/servicenow): IRE answers each item with its sys_id; with
+# sysparm_exclude_reference_link the Table API returns reference fields
+# as plain sys_ids and a dot-walked field under its dotted name.
+FIXTURES = Path(__file__).parent / "fixtures" / "servicenow"
+
+
+def _fixture(name: str) -> dict:
+    return json.loads((FIXTURES / name).read_text())
+
+
+async def test_recorded_responses_round_trip():
+    db = FakeSession()
+    fakes = Fakes()
+    seen: list[str] = []
+
+    def servicenow(r: httpx.Request) -> httpx.Response:
+        seen.append(f"{r.method} {r.url.path}")
+        if r.url.path == sn.TOKEN_PATH:
+            return httpx.Response(
+                200, json={"access_token": BEARER, "expires_in": 1800}
+            )
+        assert r.headers["authorization"] == f"Bearer {BEARER}"
+        if r.url.path == sn.IRE_PATH:
+            return httpx.Response(201, json=_fixture("identifyreconcile.json"))
+        table = r.url.path.rsplit("/", 1)[-1]
+        if table == "cmdb_ci":
+            query = r.url.params["sysparm_query"].removeprefix("sys_idIN")
+            assert set(query.split(",")) == {
+                "3f1c2b7a9d5e4f60a1b2c3d4e5f60718",
+                "b7e9d1c3a5f74e2d9c0b1a2f3e4d5c6b",
+            }
+        return httpx.Response(200, json=_fixture(f"table_{table}.json"))
+
+    kw = fakes.kwargs()
+    kw["servicenow_transport"] = httpx.MockTransport(servicenow)
+    out = await sn.sync_servicenow(db, TENANT, verify=True, **kw)
+    assert out["status"] == "ok", out
+    assert out["operations"] == {"INSERT": 1, "NO_CHANGE": 1}
+    assert out["verification"]["found"] == 3
+    assert seen == [
+        f"POST {sn.TOKEN_PATH}",
+        f"POST {sn.IRE_PATH}",
+        "GET /api/now/table/cmdb_ci",
+        "GET /api/now/table/cmdb_rel_ci",
+    ]
+
+
+def test_cli_parses_dry_run_and_verify(monkeypatch, capsys):
+    calls = []
+
+    async def fake_main(tenant, full, dry_run=False, verify=None):
+        calls.append((tenant, full, dry_run, verify))
+        return {}
+
+    monkeypatch.setattr(sn, "_main", fake_main)
+    sn.main(["--tenant", str(TENANT)])
+    sn.main(["--tenant", str(TENANT), "--dry-run", "--verify", "--full"])
+    assert calls == [(TENANT, False, False, None), (TENANT, True, True, True)]
