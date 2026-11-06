@@ -16,6 +16,8 @@ import { requestValidator } from './middlewares/requestValidator';
 import { hooks } from './middlewares/hooks';
 import { memoryCache } from './middlewares/cache';
 import { psRouter } from './middlewares/router/hono';
+import { psBudget } from './middlewares/psBudget';
+import { budgetsRequested } from './middlewares/psBudget/config';
 import { psTelemetry } from './middlewares/ps-telemetry';
 import { psFeedbackHandler } from './middlewares/psFeedback';
 import { otelConfig, psOtel } from './middlewares/psOtel';
@@ -155,6 +157,13 @@ app.post('/v1/feedback', psFeedbackHandler);
 // Fail-open: non-JSON / unhinted requests pass through untouched.
 if (process.env.PS_ROUTER_ENABLED === 'true') {
   app.use('*', psRouter());
+}
+
+// Spend budgets (#28, opt-in via PS_BUDGETS / PS_BUDGETS_FILE). After the
+// router (it reserves the routed model's estimate and downgrades within the
+// same policy) and before telemetry (a refused call is not an LLM call).
+if (budgetsRequested(process.env)) {
+  app.use('*', psBudget());
 }
 
 // Prompt Shields discovery telemetry (opt-in). Mounted after psRouter so it can
