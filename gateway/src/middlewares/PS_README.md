@@ -331,4 +331,6 @@ stream that ended without its terminal event) and `abandoned` (the client
 disconnected mid-stream) — or `[]` when none applied. Only stop reasons and
 the presence of a refusal are read; no text leaves the gateway. The SDK-only
 classes (`schema_invalid`, `tool_call_invalid`, `regenerate`, `retry`) need
-the caller's intent or session and are not emitted here.
+the caller's intent or session and are not emitted here. A gateway cache hit
+(`cost_source: cache`) carries no outcome signals: it is not a model call,
+and its answer's outcome was reported by the call that filled the cache.

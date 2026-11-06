@@ -14,10 +14,7 @@ Metadata only: class names, never prompt or response content. No new
 table: ai_usage_events already has its tenant_isolation policy (015) and is
 in the erasure order. Existing rows and old events are unaffected.
 
-Chained from 027 (main's head when written); 028 and 029 are assigned to
-other work, so this is renumbered to follow them at merge.
-
-Revision ID: 030
+Revision ID: 028
 Revises: 027
 Create Date: 2026-11-06
 """
@@ -28,7 +25,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "030"
+revision: str = "028"
 down_revision: str | None = "027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

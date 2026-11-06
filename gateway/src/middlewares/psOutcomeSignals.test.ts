@@ -15,6 +15,7 @@ import {
   stopReasonsOf,
 } from './psOutcomeSignals';
 import { SSEUsageTracker } from './psStreamObserver';
+import { RESPONSE_HEADER_KEYS } from '../globals';
 
 const enc = new TextEncoder();
 
@@ -170,6 +171,31 @@ describe('psTelemetry emits outcome signals', () => {
     await post(app, '/v1/messages');
     await flush();
     expect(sent[0].outcome_signals).toEqual([]);
+  });
+
+  test('a cache hit carries no outcome signals (not a model call)', async () => {
+    const app = makeApp(
+      '/v1/chat/completions',
+      () =>
+        new Response(
+          JSON.stringify({
+            model: 'gpt-4o',
+            choices: [{ message: { content: 'Hi' }, finish_reason: 'length' }],
+            usage: { prompt_tokens: 3, completion_tokens: 5 },
+          }),
+          {
+            headers: {
+              'content-type': 'application/json',
+              [RESPONSE_HEADER_KEYS.CACHE_STATUS]: 'SEMANTIC HIT',
+            },
+          }
+        )
+    );
+    await post(app, '/v1/chat/completions');
+    await flush();
+    expect(sent[0].cost_source).toBe('cache');
+    expect(sent[0].outcome_signals).toBeUndefined();
+    expect(sent[0].outcome_signals_version).toBeUndefined();
   });
 
   test('non-generation surfaces carry no outcome signals', async () => {
