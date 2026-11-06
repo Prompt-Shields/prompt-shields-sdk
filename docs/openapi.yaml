@@ -2650,6 +2650,19 @@ components:
           description: Ignore the cursor and push the whole registry
       required: [tenant_id]
 
+    LeanIXSyncRequest:
+      allOf:
+        - $ref: '#/components/schemas/ConnectorSyncRequest'
+        - type: object
+          properties:
+            verify:
+              type: [boolean, 'null']
+              default: null
+              description: >-
+                Read the written fact sheets back from LeanIX (GraphQL) and
+                fail the sync, keeping the cursor, if any is missing. Null
+                uses the tenant's `verify` setting.
+
   responses:
     AdminForbidden:
       description: >-
@@ -3335,6 +3348,13 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/RiskMapping'
+                  meta:
+                    type: object
+                    properties:
+                      tenant_id:
+                        type: string
+                        format: uuid
+                        description: Tenant of the credential that made the request
               example:
                 data:
                   - id: "019e1a2b-0000-7000-8000-000000000020"
@@ -5972,7 +5992,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ConnectorSyncRequest'
+              $ref: '#/components/schemas/LeanIXSyncRequest'
       responses:
         '200':
           description: Sync result
