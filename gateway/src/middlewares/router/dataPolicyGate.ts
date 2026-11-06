@@ -11,16 +11,25 @@
  * classifies every request and stashes a gate on the context, and tryPost
  * checks each target's model (after override_params, plus the Azure
  * deployment) before hooks, cache or upstream, like the OIDC group policy.
+ * A tier's facts count only for the target it describes: a tier that names a
+ * provider does not vouch for the same model id sent to another provider or
+ * to a custom host (#20).
  */
 import { Context } from 'hono';
 import { reportPolicyDenied } from '../psSecurityEvents';
+import { tierServesTarget } from '../psServedTarget';
 import {
   classifySensitivity,
   dataPolicyRule,
   modelComplies,
 } from './constraints';
 import { parseRouteHeaders } from './index';
-import { DataPolicyRule, RoutePolicy, SensitivitySource } from './types';
+import {
+  DataPolicyRule,
+  ModelTier,
+  RoutePolicy,
+  SensitivitySource,
+} from './types';
 
 export const DATA_POLICY_GATE_KEY = 'psDataPolicyGate';
 
@@ -56,7 +65,8 @@ export function dataPolicyTargetDenied(
   c: Context,
   provider: string | undefined,
   models: string[],
-  requireModel: boolean
+  requireModel: boolean,
+  customHost?: string
 ): Response | undefined {
   let gate: DataPolicyGate | undefined;
   try {
@@ -72,7 +82,15 @@ export function dataPolicyTargetDenied(
       ? [undefined]
       : [];
   for (const model of toCheck) {
-    if (!modelComplies(gate.policy, model, gate.rule)) {
+    // A tier naming a provider vouches only for a call sent to that
+    // provider at its own base URL (#20, psServedTarget.ts). This holds for
+    // the model the router chose too: the gateway router rewrites only the
+    // model, not the provider, so a routed tier at another provider (e.g. an
+    // EEA tier's `meta-llama/Llama-3.3-70B-Instruct` sent to a US provider
+    // that serves the same id) must fail closed rather than run there.
+    const target = { provider, customHost };
+    const applies = (tier: ModelTier) => tierServesTarget(tier, target);
+    if (!modelComplies(gate.policy, model, gate.rule, applies)) {
       return policyViolationResponse(c, {
         requestedModel: model ?? '',
         provider,
