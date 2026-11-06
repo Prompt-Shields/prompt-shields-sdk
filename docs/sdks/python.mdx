@@ -326,6 +326,7 @@ resp.ps.route    # model, provider, group, reason, jurisdiction, policy_version,
                  # sensitivity_level, sensitivity_source, est_cost
 resp.ps.cost     # usd, source, estimated_usd
 resp.ps.attempts # one Attempt per upstream call
+resp.ps.fallback_chain  # error classes of failed attempts, () if none
 ```
 
 How a call is routed (`resolve_policy_route`, the same router policy replay uses):
@@ -358,8 +359,15 @@ sent. A call is never served by a model the policy does not allow.
   messages, `stop` and `max_completion_tokens` are translated; tool messages
   and OpenAI-only parameters (`tools`, `response_format`, `n`, ...) raise
   `RouterError` instead of being dropped.
-- `stream=True` is not supported in local mode yet. There is no failover
-  yet: each call makes one attempt.
+- `stream=True` is not supported in local mode yet.
+- **Failover**: on a 5xx, timeout, connection error or 429, the call moves to
+  the next model in the chosen group that the data policy allows (for a
+  pinned model, only the same model on another provider), with per-provider
+  circuit breakers. A 4xx or a content-filter refusal is raised, never
+  retried. When no allowed model is left, `NoCompliantCandidate` (a
+  `PolicyViolation`) is raised. `resp.ps.fallback_chain` and the event's
+  `fallback_chain` list the error classes of the failed attempts. See
+  [Failover](/guides/routing#failover) for the settings.
 - `client.route(messages, ...)` returns the decision without sending the call.
 
 The [routing guide](/guides/routing) walks through a full policy, with

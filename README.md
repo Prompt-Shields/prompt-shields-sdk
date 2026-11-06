@@ -240,7 +240,7 @@ This is a discovery and inventory tool. It is not a control, and the statements 
 **Routing enforces only what its policy says, and only where it runs.** See the [routing guide](docs/guides/routing.mdx) for details.
 - The sensitivity level of an undeclared call comes from the policy's `unclassified_default` and the PII detector below, which misses names, addresses and most free-text identifiers.
 - Sovereignty facts (`jurisdiction`, `zdr`, `us_cloud_act_exposure`) are claims made by the policy author. Nothing verifies them. A missing fact fails closed, and in the model catalog `null` means unverified, so leave it out of a policy tier rather than guessing.
-- There is no failover yet (#21). The failover engine and circuit breaker exist but are not wired in, so a `ShieldsRouter` call makes one attempt, and a provider outage surfaces as the provider's error even when another allowed model exists.
+- `ShieldsRouter` fails over only to models the data policy allows for the call, within the chosen group. When none is left it fails closed (`NoCompliantCandidate`). Its circuit breakers are per process, so each replica learns about an outage from its own failures. Gateway router failover is tracked separately (#21).
 - In local mode, `ShieldsRouter` refuses `stream=True`, and tool calls cannot be routed to Anthropic. Both raise `RouterError` rather than degrading silently.
 - The gateway runs its built-in default policy, which has no sensitivity or data rules. Its data-policy stages only run when a route policy is passed to `psRouter()` in code; there is no setting for a policy file yet.
 - Calls that do not go through the router are neither routed nor checked.
