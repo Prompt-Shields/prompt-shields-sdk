@@ -28,7 +28,7 @@ rely on routing for compliance.
 | Provider keys | Yours, kept in your process (BYOK) | Forwarded by the gateway |
 | Policy | Any `route-policy.v1` document you pass | The built-in default policy. A custom policy needs code (see [Limits](#limits)) |
 | Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
-| Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Not from the router. Fallback targets in a gateway config still work, and are checked against the data policy |
+| Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Yes, to the next compliant model in the routed group on a 5xx, 429 or timeout, with the request's own provider credentials. A gateway config with its own fallback or retry settings takes over instead |
 | Streaming | Refused (`RouterError`) | Yes |
 
 `ShieldsRouter(mode="gateway", ...)` sends the call to the gateway with your
@@ -349,11 +349,13 @@ against the code.
   (`sovereignty_checked`) before you copy them.
 - **Failover stays in one group, and breakers are per process.**
   `ShieldsRouter` fails over only to compliant tiers in the chosen group (see
-  [Failover](#failover)). It does not move up to another group. Circuit
-  breakers live in each process, so every replica learns about an outage
-  from its own failures. The provider SDK's own retries (`max_retries`) go to
-  the same provider before failover moves on. Gateway router failover is
-  tracked separately in #21.
+  [Failover](#failover)); the gateway router fails over to the next compliant
+  model in the routed group on a 5xx, 429 or timeout, never after a stream
+  started and never on a content-filter refusal, using the request's own
+  provider credentials for every attempt. Neither moves up to another group.
+  Circuit breakers live in each process, so every replica learns about an
+  outage from its own failures. The provider SDK's own retries (`max_retries`)
+  go to the same provider before failover moves on.
 - **Local mode refuses streaming.** `stream=True` raises `RouterError` in
   local mode. Gateway mode streams.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
