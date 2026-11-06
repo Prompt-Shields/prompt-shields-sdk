@@ -240,6 +240,69 @@ async def test_export_streams_many_rows_in_chunks(seeded_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_client_disconnect_mid_stream_returns_the_connection(seeded_db, monkeypatch):
+    """Starlette leaves the body generator suspended on disconnect; the
+    response must close it so the export's connection and transaction end."""
+    seed = await _seed(seeded_db)
+    monkeypatch.setattr(focus_export, "STREAM_BATCH", 1)
+    query = (
+        f"start={(seed['day'] - timedelta(days=1)).isoformat()}"
+        "&granularity=hour&format=jsonl"
+    ).replace("+", "%2B").encode()
+    scope = {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1", "method": "GET", "scheme": "http", "path": PATH,
+        "raw_path": PATH.encode(), "root_path": "", "query_string": query,
+        "headers": [(b"host", b"test"), (b"authorization", f"Bearer {seed['token']}".encode())],
+        "client": ("127.0.0.1", 1), "server": ("test", 80),
+    }
+    bodies: list[bytes] = []
+    checked_out_while_streaming: list[int] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+        elif message["type"] == "http.response.body":
+            bodies.append(message["body"])
+            if len(bodies) == 1:
+                checked_out_while_streaming.append(seeded_db.pool.checkedout())
+                raise OSError("client went away")  # what servers raise on spec 2.4
+
+    with pytest.raises(Exception):  # noqa: B017 - Starlette's ClientDisconnect
+        await app(scope, receive, send)
+    assert len(bodies) == 1
+    assert checked_out_while_streaming and checked_out_while_streaming[0] >= 1
+    assert seeded_db.pool.checkedout() == 0
+
+
+@pytest.mark.asyncio
+async def test_stalled_client_cannot_hold_the_export_transaction(seeded_db, monkeypatch):
+    """The cursor's transaction gets an idle-in-transaction timeout, so a
+    client that stops reading does not hold a snapshot back from vacuum."""
+    import asyncio
+
+    seed = await _seed(seeded_db)
+    monkeypatch.setattr(focus_export, "STREAM_BATCH", 1)
+    monkeypatch.setattr(focus_export, "STREAM_IDLE_TIMEOUT", "300ms")
+    stream = focus_export.stream_export(
+        seeded_db, tenant_id=seed["tenant_a"], tenant_name="Tenant A",
+        start=seed["day"] - timedelta(days=1), end=datetime.now(UTC),
+        granularity="hour", cost_mode="estimated", fmt="jsonl",
+    )
+    try:
+        assert await anext(stream)  # first row; the transaction is open
+        await asyncio.sleep(1.5)  # the client stops reading
+        with pytest.raises(Exception):  # noqa: B017 - the backend ended the session
+            async for _ in stream:
+                pass
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_export_works_under_rls(seeded_db):
     seed = await _seed(seeded_db, admin_info=rls.bypass_info("test-seed"))
     async with seeded_db.begin() as conn:

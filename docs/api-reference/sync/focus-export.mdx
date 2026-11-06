@@ -7,7 +7,8 @@ Exports the tenant's AI usage cost in the [FinOps FOCUS](https://focus.finops.or
 format, so FinOps tools can load it next to cloud bills. Rows follow the
 **Cost and Usage** dataset of **FOCUS v1.4** (announced June 2026). The
 response is streamed, so a long window does not have to fit in memory on either
-side.
+side. Read it without long pauses: if the client stops reading for 60 seconds,
+the export ends and the response is cut off.
 
 ```bash
 curl -H "Authorization: Bearer $PS_PARTNER_KEY" \
@@ -107,6 +108,7 @@ quantities and the model as the SKU without a price-list reference.
 
 A CSV cell that is text starting with `=`, `+`, `-`, `@`, a tab or a carriage
 return gets a leading `'`, so a spreadsheet does not run it as a formula.
+Numbers are never changed, so a negative cost stays a number.
 Registry fields such as the use case come from telemetry and are not trusted.
 JSON Lines values are not changed.
 

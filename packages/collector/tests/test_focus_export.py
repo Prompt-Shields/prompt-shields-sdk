@@ -242,6 +242,16 @@ def test_csv_neutralises_formulas_from_telemetry():
     assert cells["ChargeClass"] == ""
 
 
+def test_csv_keeps_negative_numbers_numeric():
+    # A credit (negative cost) is a number, not a formula: no leading quote.
+    row = _row(_agg(cost=Decimal("-0.250000")))
+    text = fx.serialize_csv([row], header=True)
+    header, line = list(csv.reader(io.StringIO(text)))
+    cells = dict(zip(header, line, strict=True))
+    assert cells["BilledCost"] == "-0.250000"
+    assert cells["x_EstimatedCost"] == "-0.250000"
+
+
 def test_jsonl_has_one_object_per_line_in_column_order():
     text = fx.serialize_jsonl([_row(), _row(_agg(**SPARSE))])
     lines = text.splitlines()

@@ -31,7 +31,7 @@ from db.models import (
     Tenant,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, func, select
 
 from collector import aibom, focus_export
@@ -657,7 +657,7 @@ async def export_usage_focus(
             "Cache-Control": "no-store",
         }
     )
-    return StreamingResponse(
+    return focus_export.StreamExportResponse(
         focus_export.stream_export(
             db.bind,
             tenant_id=principal.tenant_id,

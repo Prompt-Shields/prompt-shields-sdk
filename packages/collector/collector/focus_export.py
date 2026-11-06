@@ -70,7 +70,14 @@ quantities and the model as SKU without a price-list reference.
 
 CSV cells that are strings starting with ``=``, ``+``, ``-``, ``@``, tab or
 carriage return get a leading ``'`` so spreadsheets do not run them as
-formulas (`csv_safe`). JSON Lines values are left as they are.
+formulas (`csv_safe`); numbers are left alone, so a negative cost stays a
+number. JSON Lines values are left as they are.
+
+Streaming keeps one transaction open (the cursor's snapshot holds back
+vacuum) while the body is sent, so it gets an idle-in-transaction timeout
+(`STREAM_IDLE_TIMEOUT`) against clients that stop reading, and
+`StreamExportResponse` closes the generator, and with it the session, as
+soon as the client disconnects.
 """
 
 from __future__ import annotations
@@ -86,7 +93,9 @@ from uuid import UUID
 
 from db.models import AIAsset, AIUsageEvent
 from sqlalchemy import and_, func, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import StreamingResponse
 
 from collector import rls
 
@@ -100,6 +109,10 @@ ExportFormat = Literal["csv", "jsonl"]
 MAX_RANGE_DAYS = 366
 # Rows fetched per round trip from the server-side cursor, and per chunk.
 STREAM_BATCH = 1000
+# The cursor keeps a transaction (and its snapshot, which holds back vacuum)
+# open while the body is sent. A client that stops reading for this long
+# gets its transaction ended by Postgres instead of holding it open.
+STREAM_IDLE_TIMEOUT = "60s"
 
 # FOCUS v1.4 Cost and Usage columns in this export, in output order.
 FOCUS_COLUMNS: tuple[str, ...] = (
@@ -316,7 +329,8 @@ def serialize_csv(rows: list[dict[str, Any]], header: bool) -> str:
     if header:
         writer.writerow(COLUMNS)
     for row in rows:
-        writer.writerow([csv_safe(_text(row[c])) for c in COLUMNS])
+        # Guard the value, not its text: a negative Decimal must stay a number.
+        writer.writerow([_text(csv_safe(row[c])) for c in COLUMNS])
     return buf.getvalue()
 
 
@@ -410,6 +424,11 @@ async def stream_export(
         yield serialize_csv([], header=True).encode()
     async with AsyncSession(bind, expire_on_commit=False) as session:
         await rls.set_tenant(session, tenant_id)
+        # Opens the transaction (the RLS context is applied on begin).
+        await session.execute(
+            sql_text("SELECT set_config('idle_in_transaction_session_timeout', :t, true)"),
+            {"t": STREAM_IDLE_TIMEOUT},
+        )
         result = await session.stream(
             focus_query(tenant_id, start, end, granularity).execution_options(
                 yield_per=STREAM_BATCH
@@ -432,6 +451,25 @@ async def stream_export(
             yield text.encode()
 
 
+
+class StreamExportResponse(StreamingResponse):
+    """A streamed export that closes its body iterator however it ends.
+
+    Starlette stops iterating when the client disconnects but leaves the
+    generator suspended until it is garbage collected, so the export's
+    session (connection and open transaction) would stay checked out until
+    then. Closing it here returns the connection right away.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
 __all__ = [
     "COLUMNS",
     "CUSTOM_COLUMNS",
@@ -442,6 +480,7 @@ __all__ = [
     "CostMode",
     "ExportFormat",
     "Granularity",
+    "StreamExportResponse",
     "csv_safe",
     "focus_datetime",
     "focus_query",
