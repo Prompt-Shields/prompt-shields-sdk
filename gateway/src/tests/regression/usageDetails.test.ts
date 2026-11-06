@@ -184,8 +184,9 @@ describe('OpenAI', () => {
       tokens_cached: 4096,
       tokens_reasoning: 768,
       service_tier: 'flex',
-      // Served o4-mini-2025-04-16 is priced as o4-mini, at the flex rate.
-      cost: 0.00304,
+      // Served o4-mini-2025-04-16 is priced as o4-mini, at its flex rates:
+      // 904 x $0.55 + 4096 x $0.138 (flex cached) + 900 x $2.20 per 1M.
+      cost: 0.003042,
       cost_source: 'pricing_table',
     });
   });
