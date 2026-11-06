@@ -129,9 +129,9 @@ client = ShieldsRouter(
     providers={                      # BYOK: one entry per provider the policy names
         "openai":     {"api_key": "sk-..."},
         "anthropic":  {"api_key": "sk-ant-..."},
-        "scaleway":   {"api_key": "...", "base_url": "https://api.scaleway.ai/v1"},
-        "mistral-eu": {"api_key": "...", "base_url": "https://..."},
-        "berget":     {"api_key": "...", "base_url": "https://api.berget.ai/v1"},
+        "scaleway":   {"api_key": "..."},   # base URL from the catalog
+        "mistral-eu": {"api_key": "...", "catalog_provider": "mistral"},
+        "berget":     {"api_key": "..."},
     },
     policy=policy,                   # a dict, or a .json / .yaml path
     ps_api_key="ps-...",
@@ -289,6 +289,33 @@ replicas. `max_attempts` counts every provider call, 429 retries included.
 Set the provider SDK's own `max_retries=0` if you want failover to move on
 at once: those retries stay on the same provider.
 
+## EU sovereign providers
+
+Every non-Anthropic provider is reached through one adapter: the OpenAI SDK
+at the provider's base URL with a bearer key. A provider entry named after a
+catalog OpenAI-compatible provider (`mistral`, `berget`, `infercom`,
+`regolo`, `ionos`, `stackit`, `scaleway`, `ovhcloud`) gets its base URL from
+the [model catalog](/guides/model-catalog); any other name needs `base_url`,
+or `catalog_provider` naming the catalog provider. `region` accepts only the
+region in the catalogued base URL (for example `de-txl` for IONOS). An entry
+with neither is refused, so its key is never sent to OpenAI.
+`prompt_shields.sovereign.catalog_tier("scaleway", "gpt-oss-120b",
+input_cost_per_1k=..., output_cost_per_1k=...)` builds a policy tier with the
+catalog's verified facts and leaves unverified ones out. Calls to these
+providers are priced at the catalog's USD rate when it has one, else at the
+tier's rates; OpenAI's price table never applies to them.
+
+The gateway has the same providers (`x-portkey-provider: scaleway`, ...) on
+fixed base URLs and reports `served_provider` and `served_jurisdiction` on
+each event. Under a data policy, a tier that names a provider vouches for a
+model only when the call goes to that provider at its own base URL; the same
+model id sent directly to another provider, or to another custom host, has no
+facts and fails closed. The model the gateway router chooses is held to the
+same rule: the router rewrites only the model, not the provider, so a routed
+tier that names another provider than the one the request names is refused
+(403). Router failover skips candidates at other providers the same way. Send
+the request to the provider of the tiers the policy can choose.
+
 ## Sovereignty facts and the model catalog
 
 A tier's `jurisdiction`, `zdr` and `us_cloud_act_exposure` are facts about the
@@ -352,7 +379,9 @@ against the code.
   [Failover](#failover)); the gateway router fails over to the next compliant
   model in the routed group on a 5xx, 429 or timeout, never after a stream
   started and never on a content-filter refusal, using the request's own
-  provider credentials for every attempt. Neither moves up to another group.
+  provider credentials for every attempt (under a data policy, candidates
+  whose tier names another provider are skipped). Neither moves up to
+  another group.
   Circuit breakers live in each process, so every replica learns about an
   outage from its own failures. The provider SDK's own retries (`max_retries`)
   go to the same provider before failover moves on.

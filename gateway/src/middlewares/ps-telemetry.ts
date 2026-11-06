@@ -33,6 +33,13 @@ import {
   stopReasonsOf,
 } from './psOutcomeSignals';
 import {
+  ROUTE_POLICY_KEY,
+  ServedTarget,
+  servedJurisdiction,
+  servedTargetOf,
+} from './psServedTarget';
+import { RoutePolicy } from './router/types';
+import {
   COST_SOURCE_CACHE,
   COST_SOURCE_PROVIDER_REPORTED,
   costFields,
@@ -84,6 +91,10 @@ interface TelemetryEvent {
   // it was declared, the policy default, or raised by detected PII.
   route_sensitivity_level?: string;
   route_sensitivity_source?: string;
+  // The provider that served the call (#20) and the jurisdiction the active
+  // route policy states for the served model there (psServedTarget.ts).
+  served_provider?: string;
+  served_jurisdiction?: string;
   // Verified savings (#24): the frozen baseline (PS_BASELINE_FILE) and what
   // the call's tokens would have cost on its baseline model, in USD.
   baseline_id?: string;
@@ -135,6 +146,39 @@ interface TelemetryEvent {
   // SDK's version number. Class names only; see psOutcomeSignals.ts.
   outcome_signals?: string[];
   outcome_signals_version?: number;
+}
+
+/**
+ * `served_provider` and `served_jurisdiction` (#20): the target tryPost
+ * recorded as serving the call, else the request's provider; the
+ * jurisdiction only when the active route policy states one for the served
+ * model at that target.
+ */
+export function servedFields(
+  c: any,
+  vendor: string,
+  fallbackModel?: string
+): Pick<TelemetryEvent, 'served_provider' | 'served_jurisdiction'> {
+  const target: ServedTarget = { ...(servedTargetOf(c) || {}) };
+  if (!target.provider && vendor && vendor !== 'unknown')
+    target.provider = vendor;
+  if (!target.provider) return {};
+  const out: Pick<TelemetryEvent, 'served_provider' | 'served_jurisdiction'> = {
+    served_provider: target.provider.toLowerCase(),
+  };
+  let policy: RoutePolicy | undefined;
+  try {
+    policy = c.get(ROUTE_POLICY_KEY);
+  } catch {
+    policy = undefined;
+  }
+  const jurisdiction = servedJurisdiction(
+    policy,
+    target.model || fallbackModel,
+    target
+  );
+  if (jurisdiction) out.served_jurisdiction = jurisdiction;
+  return out;
 }
 
 /** The error classes of the failed attempts, in order. */
@@ -698,6 +742,15 @@ export function psTelemetry() {
         if (route.sensitivitySource)
           event.route_sensitivity_source = route.sensitivitySource;
       }
+
+      Object.assign(
+        event,
+        servedFields(
+          c,
+          vendor,
+          route?.servedModel || requestBody?.model || responseBody?.model
+        )
+      );
 
       const attempts = attemptsOf(c);
       if (attempts.length) {

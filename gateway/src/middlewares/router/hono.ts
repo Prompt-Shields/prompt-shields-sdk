@@ -57,7 +57,8 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
   return async (c: Context, next: Next) => {
     // MCP proxy traffic is not a model call (#63).
     if (isMcpProxyPath(c.req.path)) return next();
-    // The semantic cache keys entries by the active policy's version (#33).
+    // The semantic cache keys entries by the active policy's version (#33),
+    // and ps-telemetry looks up served_jurisdiction in it (#20).
     c.set(PS_ROUTE_POLICY_KEY as any, active);
     const contentType = c.req.header('content-type') || '';
     const isJsonPost =
@@ -96,7 +97,10 @@ export function psRouter(policy?: RoutePolicy, strategy?: RouterStrategy) {
               c.req.query('model') || '',
               ...targetModels(options as any, undefined),
             ],
-            true
+            true,
+            typeof (options as any)?.customHost === 'string'
+              ? (options as any).customHost
+              : undefined
           );
           if (denied) return denied;
         }

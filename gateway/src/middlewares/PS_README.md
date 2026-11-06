@@ -294,7 +294,10 @@ and credentials and `body.model` set per attempt:
 - Every attempt still goes through `tryPost`, so the data-policy gate checks
   the model the attempt actually runs, and the engine re-checks each
   candidate against the gate before calling it. A non-compliant model is never
-  called.
+  called. Under a data policy that includes the provider binding (#20): a
+  candidate whose tier names another provider than the request's is skipped,
+  not attempted, since every attempt goes to the request's provider; with
+  no candidate left, the call gets a 403 `policy_violation`.
 - The engine returns once the upstream answered with its headers; a streamed
   body is read after that, so nothing is retried once bytes may have reached
   the client.

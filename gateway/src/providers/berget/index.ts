@@ -1,20 +1,11 @@
 import { BERGET } from '../../globals';
-import {
-  chatCompleteParams,
-  embedParams,
-  responseTransformers,
-} from '../open-ai-base';
-import { ProviderConfigs } from '../types';
-import BergetAPIConfig from './api';
+import { openAICompatibleProvider } from '../openAICompatible';
+import { BERGET_BASE_URL } from './api';
 
-const BergetConfig: ProviderConfigs = {
-  chatComplete: chatCompleteParams([]),
-  embed: embedParams([]),
-  api: BergetAPIConfig,
-  responseTransforms: responseTransformers(BERGET, {
-    chatComplete: true,
-    embed: true,
-  }),
-};
+const BergetConfig = openAICompatibleProvider({
+  provider: BERGET,
+  baseURL: BERGET_BASE_URL,
+  embed: true,
+});
 
 export default BergetConfig;
