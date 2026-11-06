@@ -1,0 +1,153 @@
+---
+title: Routing Learner (Recommend Mode)
+description: Learn from your own traffic which policy-compliant model serves each use case best, and review the route changes it recommends
+---
+
+# Routing Learner (Recommend Mode)
+
+The routing learner reads your logged calls and works out, per use case and
+data sensitivity, which model gives the best trade-off between quality, cost
+and latency. It then **recommends** route changes, each with projected
+savings and quality. A person accepts or rejects each recommendation.
+
+<Note>
+The learner never routes a call and never changes a route policy. Accepting
+a recommendation records a decision; you apply it by editing your route
+policy. Automatic routing by the learner (`auto` mode) is not built.
+</Note>
+
+## Where it runs
+
+The learner runs on your machine, with the Python SDK (`ps-learn`). Its input
+is the learning tuples that `ps-teardown --learning-tuples` writes (prompt
+features, model, cost, token counts) plus whatever quality signals you have.
+Prompt text and the local embedding never leave your environment. You can
+upload the resulting snapshot to the collector for review: it holds only
+aggregates over the prompt features and the recommendations.
+
+## How it decides
+
+* **One bandit per (use case, sensitivity).** The arms are the models your
+  [route policy](/guides/routing) allows for that group: the sensitivity
+  level's `data_policy` rule, and the use case's `eligible_models` and
+  `min_group`. The learner only re-ranks that set. It never recommends a
+  model the policy does not allow.
+* **Context.** A small vector from the local prompt features: approximate
+  input tokens, message count, code, JSON-schema wording, complexity,
+  English or not.
+* **Reward** = quality − λ·cost (USD per call) − μ·latency (seconds).
+  Defaults: λ = 20, μ = 0.02. Set per run with `--lambda-cost` and
+  `--mu-latency`, or per use case with `LearnerConfig(use_case_rewards=...)`.
+* **Quality**, strongest signal first: a shadow-eval score, explicit
+  feedback (`client.feedback`), an eval-harness score, then implicit outcome
+  signals (a failure class such as `refusal` or `schema_invalid` scores 0, a
+  retry or regenerate 0.5, no signal 1). Implicit signals count a quarter as
+  much as explicit ones. Rows with no signal count as traffic only.
+* **Thompson sampling.** Each arm keeps a Bayesian linear regression. The
+  learner draws every arm's parameters from its posterior many times (seeded,
+  so a run is reproducible) and counts how often each arm has the best mean
+  reward over the group's logged traffic. `prob_best` is that share.
+
+## Off-policy projection
+
+For the current model and the best one, the learner replays the group's
+logged contexts as if every call had gone to that model:
+
+* **Quality and latency** come from the arm's regression (direct method).
+  When every logged row carries a `propensity` (the probability the logging
+  policy chose that model), quality is doubly robust instead.
+* **Cost** is the counterfactual price of each call's logged token counts at
+  that model (the policy's tier prices, else the SDK price table). If any
+  call cannot be priced, the cost regression is used.
+
+A group gets a recommendation only when both models have enough scored rows
+(`min_arm_samples`, default 30), `prob_best` is at least 0.8, projected
+quality drops by no more than 0.02, and the reward improves. Otherwise the
+group's `status` says why: `keep_current`, `not_confident`,
+`quality_below_parity` or `insufficient_data`.
+
+## Run it
+
+```bash
+ps-teardown run usage.jsonl --learning-tuples tuples.jsonl
+ps-learn --tuples tuples.jsonl --policy route-policy.json \
+  --feedback feedback.jsonl --out snapshot.json
+```
+
+On the synthetic traffic in `packages/sdk/tests/test_learner.py` it prints:
+
+```text
+learner_version lv1-660c243263417596 (recommend mode, 1000 rows, 1000 scored)
+  support / confidential: recommend (current openai:gpt-4o, 1000 calls)
+  recommend openai:gpt-4o -> mistral:mistral-small for support / confidential: saves 92.9% per call, quality +0.003, P(best) 1.00
+```
+
+From Python:
+
+```python
+from prompt_shields.learner import LearnerConfig, train, shadow_tuples
+
+snapshot = train(tuples + shadow_tuples(shadow_results), route_policy, LearnerConfig(seed=1))
+```
+
+`--prior snapshot.json` (or `train(..., prior=...)`) warm-starts from an
+earlier snapshot, for example one built from a teardown.
+
+## Snapshots
+
+A snapshot (`ps-learner-snapshot.v1`) holds the config, each group's
+candidates, status and per-arm statistics, and the recommendations. Its
+`learner_version` is `lv1-` plus the first 16 hex characters of the SHA-256
+of its canonical JSON, so the same input and config always give the same
+version, and any edit changes it. There is no timestamp inside.
+
+Upload it with `PS_API_KEY=... ps-learn ... --upload` (or
+`upload_snapshot()`), which calls `POST /ingest/learner-snapshots`. The
+collector checks the version against the content, accepts only `recommend`
+mode, and refuses a recommended model outside its group's candidates. A
+resend is a no-op. A newer snapshot marks pending recommendations for the
+same group `superseded`.
+
+## Review recommendations
+
+On the Partner API (scopes `learner:read` and `learner:review`, never
+granted by default):
+
+| Route | What it does |
+|---|---|
+| `GET /partner/v1/learner/snapshots` | Snapshots, newest first |
+| `GET /partner/v1/learner/snapshots/{learner_version}` | One snapshot with its full state |
+| `GET /partner/v1/learner/recommendations?status=pending` | Recommendations with projections |
+| `GET /partner/v1/learner/recommendations/{id}` | One recommendation |
+| `POST /partner/v1/learner/recommendations/{id}/review` | Accept or reject it |
+
+```bash
+curl -X POST "$COLLECTOR/partner/v1/learner/recommendations/$ID/review" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"decision": "accepted", "reviewed_by": "finops@example.com", "comment": "Pilot on support first"}'
+```
+
+A recommendation is decided once. The decision, the reviewer and the
+comment are stored on it, and the admin audit trail records
+`learner.recommendation_review` (ids and decision only).
+
+## Realised vs. projected
+
+Once a recommendation is accepted, reads include `realised`: the usage
+events of that use case and sensitivity since the decision, with the cost
+per call, the share served by the recommended model (`adoption`), explicit
+feedback on those calls, and `delta_points`, the gap between realised and
+projected savings in percentage points. The P2 gate asks for this to stay
+within ±5 points.
+
+## Limits
+
+* Offline only: retrain and re-upload to pick up new traffic.
+* The current route is the model most of a group's logged traffic used.
+  A model with too few scored rows is listed in `unevaluated_candidates`;
+  shadow evals are the way to give it data.
+* Realised savings match events by the asset's use case and the event's
+  `sensitivity_level`, so they need both to be reported.
+* Tuples from `ps-teardown` carry no quality score unless you join feedback,
+  shadow-eval results or eval scores; without them the learner recommends
+  nothing.

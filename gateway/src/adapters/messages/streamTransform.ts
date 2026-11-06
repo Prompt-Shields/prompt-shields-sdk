@@ -28,6 +28,8 @@ interface ToolCall {
 interface StreamState {
   messageId: string;
   model: string;
+  /** Model the client asked for; used when the provider's chunks name none */
+  requestedModel: string;
   hasStarted: boolean;
   completed: boolean;
   inputTokens: number;
@@ -201,7 +203,10 @@ export function transformStreamChunk(
   if (!state.hasStarted) {
     state.hasStarted = true;
     state.messageId = `msg_${randomUUID()}`;
-    state.model = parsed.model || '';
+    // PS fork (#208, from the Portkey enterprise changelog 2.31): providers
+    // whose chunks carry no model (e.g. Vertex Gemini) used to get an empty
+    // message_start.model, which breaks clients that group by model.
+    state.model = parsed.model || state.requestedModel;
 
     events.push(
       sse('message_start', {
@@ -337,10 +342,11 @@ export function transformStreamChunk(
 /**
  * Create initial stream state
  */
-export function createStreamState(): StreamState {
+export function createStreamState(requestedModel?: unknown): StreamState {
   return {
     messageId: '',
     model: '',
+    requestedModel: typeof requestedModel === 'string' ? requestedModel : '',
     hasStarted: false,
     completed: false,
     inputTokens: 0,

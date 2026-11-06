@@ -8,6 +8,12 @@ Gateway (in-cluster): http://{{ include "ps.fullname" . }}-gateway.{{ .Release.N
   Note: the gateway has no Secret, so it sends telemetry without PS_API_KEY.
   Set secrets.gateway.existingSecret to a Secret with PS_API_KEY.
 {{- end }}
+{{- $b := .Values.gateway.budgets }}
+{{- if and $b.enabled (not $b.redis.url) (not $b.redis.existingSecret) (or .Values.gateway.autoscaling.enabled (gt (int .Values.gateway.replicaCount) 1)) }}
+  Note: budgets are on without gateway.budgets.redis, so unless the gateway
+  Secret sets PS_BUDGET_REDIS_URL or REDIS_CONNECTION_STRING, each replica
+  counts spend on its own and a budget can be overrun once per replica.
+{{- end }}
 {{- end }}
 {{- if .Values.collector.enabled }}
 

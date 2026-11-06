@@ -1,0 +1,61 @@
+---
+title: Spend Anomaly Alerts
+description: Daily per-use-case spend checked against an EWMA baseline, delivered as signed webhooks and acknowledged through the Partner API
+---
+
+# Spend Anomaly Alerts
+
+The collector can flag a day on which a use case spent far more than usual. A daily job sums `cost` from the usage events per UTC day and per use case (the asset's `use_case_name`; assets without one share the key `(none)`), or per asset, and compares each day with a baseline built from the days before it. A spike becomes a **spend alert**: a row you can list and acknowledge through the Partner API, and a signed `spend.anomaly` [webhook](/api-reference/sync/webhooks) event.
+
+Alerts hold numbers only (spend, baseline, z-score), never prompt content or personal data.
+
+## How a day is judged
+
+For each use case, over the `baseline_days` days before the day (starting at its first day with spend, so a new use case is not compared with zeros; later days without spend count as 0):
+
+1. The baseline `m` is an exponentially weighted moving average (EWMA) with smoothing `alpha`, and `σ` the EWMA standard deviation.
+2. `σ` is at least `min_sigma_fraction × m` (and one cent), so a perfectly flat series still needs a real jump.
+3. `z = (spend − m) / σ`. The day is an alert when `z ≥ sigma` **and** `spend − m ≥ min_delta_usd`. With `z ≥ 2 × sigma` the alert is `critical`, otherwise `warning`.
+
+Only rises alert, never drops, and only a day above the highest day of the baseline window: a weekly or monthly job spending its usual amount after quiet days is not an alert. A use case with fewer than `min_history_days` days of history is not judged. Day-of-week patterns are not modelled: a business whose weekday spend is far above its weekend spend may want a higher `sigma`.
+
+## Thresholds
+
+Defaults suit most tenants. An operator can override any of them per tenant in `settings.spend_anomaly` with `PATCH /api/v1/operator/tenants/{tenant_id}`:
+
+```json
+{"settings": {"spend_anomaly": {"sigma": 4, "min_delta_usd": 25, "group_by": "use_case"}}}
+```
+
+| Field | Default | Range | Meaning |
+|---|---|---|---|
+| `enabled` | `true` | | `false` turns the job off for the tenant |
+| `group_by` | `use_case` | `use_case`, `asset` | What a series is |
+| `alpha` | `0.3` | 0.01–1 | EWMA weight of the newest day |
+| `sigma` | `3` | 0.5–20 | Standard deviations above the baseline to alert |
+| `baseline_days` | `28` | 3–90 | History window |
+| `min_history_days` | `7` | 2–90 | History a series needs before it is judged (at most `baseline_days`) |
+| `min_delta_usd` | `1` | ≥ 0 | Minimum rise in USD |
+| `min_sigma_fraction` | `0.1` | 0–10 | Floor for σ as a fraction of the baseline |
+
+An invalid value is refused by the API (400); setting `spend_anomaly` to `null` restores the defaults.
+
+## Running the job
+
+There is no scheduler in the collector. Run the job once a day after midnight UTC, from cron or a Kubernetes CronJob:
+
+```bash
+python -m collector.spend_anomalies --all-tenants            # yesterday (UTC)
+python -m collector.spend_anomalies --all-tenants --days 3   # the last 3 complete days
+python -m collector.spend_anomalies --tenant <uuid> --day 2026-11-05
+```
+
+It is safe to re-run: there is at most one alert per tenant, series and day, and only a new alert sends a webhook. The all-tenants run lists tenants through a logged row-level security bypass and then works on each tenant under its own tenant context. Late-arriving events for a day already checked are not re-judged unless you run that day again.
+
+## Receiving and acknowledging alerts
+
+1. Give the partner credential the `spend-alerts:read` scope (and `spend-alerts:acknowledge` to acknowledge). Neither is granted by default or by the legacy `registry:read`.
+2. Subscribe it to `spend.anomaly` with `POST /api/v1/admin/webhooks/subscriptions`. The event id is the alert id.
+3. List alerts with `GET /partner/v1/spend-alerts` (filters: `status`, `severity`, `since`, `until`, `limit`), fetch one with `GET /partner/v1/spend-alerts/{alert_id}`, and acknowledge it with `POST /partner/v1/spend-alerts/{alert_id}/acknowledge`. Acknowledging records the time and the credential (`partner:<id>`); doing it again changes nothing.
+
+Alerts for days before the tenant's [retention](/guides/data-retention) cutoff are purged with the usage events, and erasing a tenant removes them.
