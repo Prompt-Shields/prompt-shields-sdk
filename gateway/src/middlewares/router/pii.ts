@@ -42,11 +42,14 @@ const PATTERNS: [string, RegExp][] = [
 
 // Shape regex + validator: the category is found when any match validates.
 
-// Card numbers: 13-19 digits with optional separators, Luhn checked.
-const CARD_RE = new RegExp(
-  String.raw`\b(?:\d[ -]*?){13,19}\b`.replace(/\\b/g, B),
-  'gu'
-);
+// Card numbers: 13-19 digits with optional separators, Luhn checked. The
+// shape is \b(?:\d[ -]*?){13,19}\b, retried from every digit group
+// ("Ref 12 4111 1111 1111 1111"); hasCard evaluates it in one scan over runs
+// of 13+ digits joined by spaces and dashes.
+// The lookahead checks for 13 digits; the rest takes whole groups at a time.
+const CARD_RUN_RE = /\d(?=(?:[ -]*\d){12})\d*(?:[ -]+\d+)*/g;
+const WORD_BEFORE = new RegExp(`${W}$`, 'u');
+const WORD_AFTER = new RegExp(`^${W}`, 'u');
 // IBAN, compact or in groups of four, mod-97 checked.
 const IBAN_RE = new RegExp(
   String.raw`\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b`.replace(
@@ -66,48 +69,112 @@ const TRUNK_PHONE_RE = new RegExp(
   'gu'
 );
 
+/**
+ * True when the retry loop over \b(?:\d[ -]*?){13,19}\b finds a
+ * Luhn-valid match. That loop tries the pattern from every digit group start
+ * (a group: a run of digits; a start: one after a non-word character). From
+ * a start the pattern takes whole groups of its run (digits joined by spaces
+ * and dashes) until it has 13 digits, then stops at the end of that group
+ * (the lazy separator ends the match there); it fails when that is more than
+ * 19 digits, or the run ends there before a word character. Here each start
+ * is checked once, when the group that completes its window is read, instead
+ * of by a fresh regex match, so runs like "1-1-1-..." are not rescanned per
+ * group.
+ */
 function hasCard(text: string): boolean {
-  CARD_RE.lastIndex = 0;
+  CARD_RUN_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = CARD_RE.exec(text)) !== null) {
-    if (luhnOk(m[0].replace(/\D/g, ''))) {
-      CARD_RE.lastIndex = 0;
-      return true;
+  while ((m = CARD_RUN_RE.exec(text)) !== null) {
+    const run = m[0];
+    const end = m.index + run.length;
+    // A window may end at the run's last group only before a non-word
+    // character.
+    const lastOk = !WORD_AFTER.test(text.slice(end, end + 2));
+    // Group g is run[from[g], to[g]), with cum[g] digits before it.
+    const from: number[] = [];
+    const to: number[] = [];
+    const cum = [0];
+    // The next start to check; the run's first group is a start only after
+    // a non-word character.
+    let i = WORD_BEFORE.test(text.slice(Math.max(0, m.index - 2), m.index))
+      ? 1
+      : 0;
+    let p = 0;
+    while (p < run.length) {
+      from.push(p);
+      while (p < run.length && isDigit(run.charCodeAt(p))) p++;
+      to.push(p);
+      while (p < run.length && !isDigit(run.charCodeAt(p))) p++;
+      const e = to.length;
+      cum.push(cum[e - 1] + to[e - 1] - from[e - 1]);
+      // Starts whose window (the fewest groups with 13+ digits) ends here.
+      for (; i < e && cum[e] - cum[i] >= 13; i++) {
+        if (
+          cum[e] - cum[i] <= 19 &&
+          (p < run.length || lastOk) &&
+          luhnRangeOk(run, from[i], to[e - 1])
+        ) {
+          CARD_RUN_RE.lastIndex = 0;
+          return true;
+        }
+      }
     }
-    // The match can start with an unrelated digit group ("Ref 12 4111
-    // 1111 1111 1111"): retry from the next group, not after the match.
-    const sep = /[ -]+/.exec(m[0]);
-    CARD_RE.lastIndex = sep
-      ? m.index + sep.index + sep[0].length
-      : m.index + m[0].length;
   }
   return false;
 }
 
-function ibanOk(compact: string): boolean {
-  if (compact.length < 15 || compact.length > 34) return false;
-  const rearranged = compact.slice(4) + compact.slice(0, 4);
-  // Piecewise mod 97, so no BigInt is needed.
-  let rest = 0;
-  for (const c of rearranged) {
-    const v = parseInt(c, 36).toString();
-    for (const d of v) rest = (rest * 10 + Number(d)) % 97;
+function isDigit(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
+// luhnOk over the digits of s[from, to), without building the string.
+function luhnRangeOk(s: string, from: number, to: number): boolean {
+  let total = 0;
+  let double = false;
+  for (let p = to - 1; p >= from; p--) {
+    const code = s.charCodeAt(p);
+    if (!isDigit(code)) continue;
+    let d = code - 48;
+    if (double) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    total += d;
+    double = !double;
   }
-  return rest === 1;
+  return total % 10 === 0;
+}
+
+// `rest` with the IBAN digits of `c` (A=10 ... Z=35) appended, mod 97.
+function mod97(rest: number, c: string): number {
+  const v = parseInt(c, 36);
+  return (rest * (v < 10 ? 10 : 100) + v) % 97;
 }
 
 function maskIban(match: string): string {
   // A following word or digit group ("... 7466 BIC", "... 7466 4111 1111")
   // can join the last group: drop trailing space-separated groups until the
   // checksum holds, and blank only that prefix so what follows is still
-  // scanned (a card number right after an IBAN must not be hidden).
+  // scanned (a card number right after an IBAN must not be hidden). The
+  // checksum: 15-34 characters, and the digits of compact[4:] + compact[:4]
+  // are 1 mod 97. The remainder after the first four characters is folded
+  // once and shared by every prefix.
   const groups = match.split(' ');
-  while (groups.length) {
-    if (ibanOk(groups.join(''))) {
-      const n = groups.join(' ').length;
-      return ' '.repeat(n) + match.slice(n);
+  const compact = groups.join('');
+  // body[i]: remainder of compact.slice(4, 4 + i).
+  const body = [0];
+  for (let k = 4; k < compact.length; k++)
+    body.push(mod97(body[body.length - 1], compact[k]));
+  let nCompact = compact.length;
+  let nSpaced = match.length;
+  for (let g = groups.length - 1; g >= 0; g--) {
+    if (nCompact >= 15 && nCompact <= 34) {
+      let rest = body[nCompact - 4];
+      for (let k = 0; k < 4; k++) rest = mod97(rest, compact[k]);
+      if (rest === 1) return ' '.repeat(nSpaced) + match.slice(nSpaced);
     }
-    groups.pop();
+    nCompact -= groups[g].length;
+    nSpaced -= groups[g].length + 1;
   }
   return match;
 }
