@@ -9,7 +9,8 @@ Connect Prompt Shields to ServiceNow to add AI assets to your CMDB.
 
 <Info>
   The built-in ServiceNow connector is a first slice: it pushes AI assets
-  and their vendors as CIs, with an asset-to-vendor relationship. It has not
+  and their vendors as CIs, with an asset-to-vendor relationship, and, when
+  enabled per tenant, business units and risk mappings. It has not
   yet been verified against a live ServiceNow instance (PDI); check the
   identification rules below in a sub-production instance before using it
   in production.
@@ -49,6 +50,8 @@ integration that writes CIs.
 | AI Asset, self-hosted vendor | `self_hosted_asset_class` CI (default `cmdb_ci_appl_ai_application`) | `promptshields:asset:<asset id>` |
 | AI Vendor | `provider_class` CI (default `cmdb_ci_service`) | `promptshields:provider:<vendor>` |
 | Asset → Vendor | `cmdb_rel_ci`, type `Depends on::Used by` | |
+| Business unit (opt-in) | `business_unit_table` record (e.g. `cmn_department`), referenced from the asset CI's `business_unit_field` (default `department`) | `name`; source native key `promptshields:business-unit:<name>` |
+| Risk mapping (opt-in) | `cmdb_key_value` related entry of the asset CI | key `promptshields:risk:<framework>:<category>` |
 
 ### AI CI classes
 
@@ -83,8 +86,50 @@ updates the same CIs; the connector never deletes CIs.
 `name` is the use case (or vendor and model) followed by the first eight
 characters of the Prompt Shields id; `short_description` lists vendor,
 model, business unit, owner, environment, region, classification,
-confidence and lifecycle. Data flows, business units and risk mappings are
-not pushed yet.
+confidence and lifecycle. Data flows are not pushed yet.
+
+### Business units and risk mappings (opt-in)
+
+Both are off by default; a tenant without the fields below gets exactly
+the payloads it got before.
+
+**Business units** (`"business_unit_table": "cmn_department"`). A business
+unit is not a CI, and IRE payload relationships (`cmdb_rel_ci`) cannot
+point at a non-CMDB record. IRE does support a fixed set of non-CMDB tables
+in the global scope, Department (`cmn_department`) among them, and links
+records with `referenceItems`. So each distinct business unit (whitespace
+collapsed, at most 100 characters) is sent once per request as a
+`cmn_department` item with only `name` set, and every asset in that
+business unit gets a reference entry that fills its CI's `department`
+field (a `cmdb_ci` base field). Because only `name` is sent, an existing
+department with the same name is linked, not changed. CSDM's
+`business_unit` table is not on IRE's global non-CMDB list; point
+`cmn_department.business_unit` at it inside ServiceNow if you use it. Set
+`business_unit_field` for another reference field (for example a custom
+`u_` field on your AI classes pointing at a custom table).
+
+**Risk mappings** (`"push_risk_mappings": true`). The connector reads each
+asset's **confirmed** risk mappings (`GET /partner/v1/assets/{id}/risks`;
+rule suggestions are never pushed) and sends them in the asset CI's
+`related` array as `cmdb_key_value` entries: key
+`promptshields:risk:<framework>:<category>` (framework `custom` when
+unset; hashed when longer than 100 characters), value the highest level
+(`critical`, `high`, `medium`, `low`), the same as the AI-BOM
+`risk:<framework>:<category>` properties. IRE writes related entries under
+a Related Entry rule and does not use them to identify the CI.
+
+Why not GRC / IRM risk records: `sn_risk_risk`, `sn_risk_definition` and
+the compliance tables belong to the Integrated Risk Management
+application, are not CMDB classes IRE identifies, and need IRM's own APIs
+and licence. Key values on the CI are available on every instance, and IRM
+can pick the CIs up as entities (an entity filter on the AI classes, or on
+their `promptshields:risk:*` key values).
+
+Limitations: the connector never deletes, so a risk mapping that is later
+rejected or removed keeps its key value until you remove it (run a full
+sync after a review round to refresh the levels). Incremental runs only
+see assets that changed; a risk review alone does not change the asset,
+so it reaches ServiceNow on the asset's next change or the next full sync.
 
 ## Setup
 
@@ -105,6 +150,14 @@ not pushed yet.
      fails. Check the rules in a sub-production instance first; the class
      definitions above come from the store application release, and
      out-of-the-box identifier entries can differ between versions.
+   - Business units (opt-in): enable IRE for non-CMDB tables if your
+     release needs it, and create an identification rule (CI Identifier
+     with an identifier entry on `name`) for `cmn_department` in the list
+     views (CI Class Manager does not manage non-CMDB tables).
+   - Risk mappings (opt-in): add a **Related Entry** rule
+     (`cmdb_related_entry`) for `cmdb_key_value` on each asset class, with
+     the referenced field `configuration_item` and `key` as the matching
+     attribute.
    - Add a choice `PromptShields` (or your `data_source`) to the
      `cmdb_ci.discovery_source` choice list and, if other sources write the
      same classes, a reconciliation rule for it.
@@ -113,8 +166,8 @@ not pushed yet.
      or an OAuth application registry entry with the client credentials
      grant enabled for that user.
 2. In Prompt Shields, issue a partner credential for the connector with the
-   scopes `export:read` and `changes:read`
-   (`POST /api/v1/admin/partner-credentials`).
+   scopes `export:read` and `changes:read`, plus `risks:read` for risk
+   mappings (`POST /api/v1/admin/partner-credentials`).
 3. Configure the connector in the collector's environment, per tenant:
 
 ```bash
@@ -138,8 +191,10 @@ auth; exactly one of the two is required. Optional per-tenant fields:
 `cmdb_ci_appl_ai_application`; `null` to use `asset_class` for every
 asset), `self_hosted_vendors` (JSON list, see above), `provider_class`
 (default `cmdb_ci_service`;
-`null` pushes assets only, without vendor CIs or relationships) and
-`batch_size` (assets per IRE request, default 50, at most 100). For a
+`null` pushes assets only, without vendor CIs or relationships),
+`business_unit_table` (default `null`: off; e.g. `cmn_department`),
+`business_unit_field` (default `department`), `push_risk_mappings`
+(default `false`) and `batch_size` (assets per IRE request, default 50, at most 100). For a
 collector reached over an internal network, set
 `"allow_private_network": true` under `partner_api`; it must still be https.
 

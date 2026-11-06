@@ -352,6 +352,13 @@ class Fakes:
         self.rels: set[tuple[str, str, str]] = set()
         self.fail_with: int | None = None
         self.item_error: str | None = None
+        # asset id -> risk mappings served by /assets/{id}/risks.
+        self.risks: dict[str, list[dict]] = {}
+        self.risks_status = 200
+        # (asset sys_id, reference field) -> referenced record sys_id, and
+        # (asset sys_id, key) -> value of cmdb_key_value related entries.
+        self.references: dict[tuple[str, str], str] = {}
+        self.key_values: dict[tuple[str, str], str] = {}
 
     def partner(self, r: httpx.Request) -> httpx.Response:
         self.partner_requests.append(r)
@@ -365,6 +372,12 @@ class Fakes:
         if r.url.path == "/partner/v1/changes":
             meta = {"has_more": False, **tenant}
             return httpx.Response(200, json={"data": self.changes, "meta": meta})
+        if r.url.path.endswith("/risks"):
+            if self.risks_status != 200:
+                return httpx.Response(self.risks_status)
+            aid = r.url.path.split("/")[-2]
+            data = self.risks.get(aid, [])
+            return httpx.Response(200, json={"data": data, "meta": tenant})
         return httpx.Response(404)
 
     def servicenow(self, r: httpx.Request) -> httpx.Response:
@@ -406,7 +419,10 @@ class Fakes:
                 )
                 sys_ids.append(None)
                 continue
-            key = (item["className"], item["values"]["correlation_id"])
+            # Vendors and assets: identification rule on correlation_id;
+            # business unit records (cmn_department): on name.
+            ident = item["values"].get("correlation_id") or item["values"]["name"]
+            key = (item["className"], ident)
             sys_id = hashlib.md5("|".join(key).encode()).hexdigest()
             if key not in self.cmdb:
                 op = "INSERT"
@@ -421,6 +437,18 @@ class Fakes:
             sys_ids.append(sys_id)
         for rel in payload["relations"]:
             self.rels.add((sys_ids[rel["parent"]], rel["type"], sys_ids[rel["child"]]))
+        by_internal = {
+            item["internal_id"]: sys_id
+            for item, sys_id in zip(payload["items"], sys_ids, strict=True)
+            if "internal_id" in item
+        }
+        for ref in payload.get("referenceItems", []):
+            key = (by_internal[ref["referencedBy"]], ref["referenceField"])
+            self.references[key] = by_internal[ref["referenced"]]
+        for item, sys_id in zip(payload["items"], sys_ids, strict=True):
+            for rel in item.get("related", []):
+                assert rel["className"] == "cmdb_key_value"
+                self.key_values[(sys_id, rel["values"]["key"])] = rel["values"]["value"]
         return {"items": out, "relations": []}
 
     def kwargs(self, settings=None):
@@ -681,3 +709,236 @@ async def test_basic_auth_401_is_not_retried():
     out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs(settings))
     assert out["error"] == "servicenow: identify and reconcile returned HTTP 401"
     assert len(fakes.sn_requests) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Business units and risk mappings (opt-in)
+# ──────────────────────────────────────────────────────────────────────
+
+BU_OPTS = {"business_unit_table": "cmn_department"}
+RISK = {
+    "risk_category": "high_risk_annex_iii",
+    "risk_level": "high",
+    "framework": "EU_AI_ACT",
+    "status": "confirmed",
+}
+
+
+def test_business_units_and_risks_are_off_by_default():
+    conn = _connection()
+    assert conn.business_unit_table is None and conn.push_risk_mappings is False
+    payload = sn.build_payload([_asset(A1), _asset(A2)], conn)
+    before = json.dumps(payload, sort_keys=True)
+    counts = sn.add_business_units_and_risks(
+        payload, sn.assets_by_ref([_asset(A1)]), {A1: [RISK]}, conn
+    )
+    assert counts == {"business_units": 0, "risk_entries": 0}
+    assert json.dumps(payload, sort_keys=True) == before
+    assert "referenceItems" not in payload
+
+
+async def test_default_sync_reads_no_risks_and_sends_no_extras():
+    db = FakeSession()
+    fakes = Fakes()
+    fakes.risks = {A1: [RISK]}
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "ok"
+    assert "business_units" not in out and "risk_entries" not in out
+    assert [r.url.path for r in fakes.partner_requests] == ["/partner/v1/export"]
+    payload = fakes.payloads[0]
+    assert set(payload) == {"items", "relations"}
+    for item in payload["items"]:
+        assert set(item) == {"className", "values", "sys_object_source_info"}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("business_unit_table", "cmn_department; x"), ("business_unit_field", "a.b")],
+)
+def test_invalid_business_unit_config(field, value):
+    with pytest.raises(ValueError):
+        _connection(**{field: value})
+
+
+def test_business_units_are_referenced_from_asset_cis():
+    conn = _connection(**BU_OPTS)
+    assets = [
+        _asset(A1),
+        _asset(A2, vendor="anthropic", business_unit="  Customer   Care "),
+        _asset(A3, business_unit=None),
+    ]
+    payload = sn.build_payload(assets, conn)
+    n_before = len(payload["items"])
+    counts = sn.add_business_units_and_risks(
+        payload, sn.assets_by_ref(assets), {}, conn
+    )
+    assert counts == {"business_units": 1, "risk_entries": 0}
+    # One record for the business unit both assets share (whitespace
+    # normalised), appended after the CIs so relation indexes still hold.
+    bu = payload["items"][n_before:]
+    ref = "promptshields:business-unit:Customer Care"
+    assert bu == [
+        {
+            "className": "cmn_department",
+            "internal_id": ref,
+            "values": {"name": "Customer Care"},
+            "sys_object_source_info": {
+                "source_name": "PromptShields",
+                "source_native_key": ref,
+            },
+        }
+    ]
+    assert payload["referenceItems"] == [
+        {
+            "referencedBy": f"promptshields:asset:{A1}",
+            "referenced": ref,
+            "referenceField": "department",
+        },
+        {
+            "referencedBy": f"promptshields:asset:{A2}",
+            "referenced": ref,
+            "referenceField": "department",
+        },
+    ]
+    by_ref = {i["values"].get("correlation_id"): i for i in payload["items"]}
+    assert by_ref[f"promptshields:asset:{A1}"]["internal_id"] == (
+        f"promptshields:asset:{A1}"
+    )
+    # No business unit: no reference, no internal id; vendors untouched.
+    assert "internal_id" not in by_ref[f"promptshields:asset:{A3}"]
+    assert "internal_id" not in by_ref["promptshields:provider:openai"]
+    for rel in payload["relations"]:
+        assert payload["items"][rel["child"]]["className"] == "cmdb_ci_service"
+
+
+def test_business_unit_field_is_configurable():
+    conn = _connection(business_unit_table="u_business_unit", business_unit_field="u_bu")
+    payload = sn.build_payload([_asset(A1)], conn)
+    sn.add_business_units_and_risks(payload, sn.assets_by_ref([_asset(A1)]), {}, conn)
+    assert payload["items"][-1]["className"] == "u_business_unit"
+    assert payload["referenceItems"][0]["referenceField"] == "u_bu"
+
+
+def test_risk_entries_keep_the_highest_confirmed_level():
+    risks = [
+        RISK,
+        {**RISK, "risk_level": "critical"},
+        {**RISK, "risk_level": "low"},
+        {"risk_category": "privacy", "risk_level": "MEDIUM", "framework": None},
+        {**RISK, "risk_category": "suggested_only", "status": "suggested"},
+        {**RISK, "risk_category": "rejected_one", "status": "rejected"},
+        {**RISK, "risk_category": "bad_level", "risk_level": "extreme"},
+        {**RISK, "risk_category": ""},
+        {**RISK, "risk_category": None},
+    ]
+    assert sn.risk_entries(risks) == [
+        {
+            "className": "cmdb_key_value",
+            "values": {
+                "key": "promptshields:risk:EU_AI_ACT:high_risk_annex_iii",
+                "value": "critical",
+            },
+        },
+        {
+            "className": "cmdb_key_value",
+            "values": {"key": "promptshields:risk:custom:privacy", "value": "medium"},
+        },
+    ]
+
+
+def test_long_risk_keys_are_hashed_not_truncated():
+    a = sn.risk_key("custom", "x" * 200 + "a")
+    b = sn.risk_key("custom", "x" * 200 + "b")
+    assert a != b and len(a) <= sn.MAX_KEY and a.startswith("promptshields:risk:")
+
+
+async def test_sync_pushes_business_units_and_risks():
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2, business_unit="Finance")])
+    fakes.risks = {A1: [RISK, {**RISK, "status": "suggested", "risk_level": "low"}]}
+    settings = _settings(push_risk_mappings=True, **BU_OPTS)
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs(settings))
+    assert out["status"] == "ok", out
+    assert out["business_units"] == 2 and out["risk_entries"] == 1
+    # Two assets, one vendor and two departments.
+    assert out["ci_items"] == 5 and out["operations"] == {"INSERT": 5}
+    paths = [r.url.path for r in fakes.partner_requests]
+    assert paths == [
+        "/partner/v1/export",
+        f"/partner/v1/assets/{A1}/risks",
+        f"/partner/v1/assets/{A2}/risks",
+    ]
+
+    def sys_id(cls, ident):
+        return hashlib.md5(f"{cls}|{ident}".encode()).hexdigest()
+
+    a1 = sys_id("cmdb_ci_function_ai", f"promptshields:asset:{A1}")
+    a2 = sys_id("cmdb_ci_function_ai", f"promptshields:asset:{A2}")
+    assert fakes.references == {
+        (a1, "department"): sys_id("cmn_department", "Customer Care"),
+        (a2, "department"): sys_id("cmn_department", "Finance"),
+    }
+    assert fakes.key_values == {
+        (a1, "promptshields:risk:EU_AI_ACT:high_risk_annex_iii"): "high"
+    }
+
+    # Re-running updates the same records: nothing new is created.
+    out = await sn.sync_servicenow(db, TENANT, full=True, **fakes.kwargs(settings))
+    assert out["operations"] == {"NO_CHANGE": 5} and len(fakes.cmdb) == 5
+    blob = json.dumps(db.tenant.settings) + json.dumps(out)
+    for secret in SECRETS:
+        assert secret not in blob
+
+
+async def test_business_units_are_shared_once_per_request_across_batches():
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2), _asset(A3)])
+    settings = _settings(batch_size=2, **BU_OPTS)
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs(settings))
+    assert out["status"] == "ok" and out["requests"] == 2
+    for p in fakes.payloads:
+        depts = [i for i in p["items"] if i["className"] == "cmn_department"]
+        assert len(depts) == 1
+        internal = {i.get("internal_id") for i in p["items"]}
+        for ref in p["referenceItems"]:
+            assert ref["referenced"] in internal and ref["referencedBy"] in internal
+    # One department record in the CMDB; every asset points at it.
+    assert sum(k[0] == "cmn_department" for k in fakes.cmdb) == 1
+    assert len(set(fakes.references.values())) == 1 and len(fakes.references) == 3
+
+
+async def test_risk_read_without_scope_fails_and_keeps_cursor():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"servicenow": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    fakes.risks_status = 403  # partner key lacks risks:read
+    out = await sn.sync_servicenow(
+        db, TENANT, **fakes.kwargs(_settings(push_risk_mappings=True))
+    )
+    assert out["status"] == "error"
+    assert out["error"] == "partner-api: risk mappings returned HTTP 403"
+    assert fakes.sn_requests == []
+    assert db.tenant.settings["connectors"]["servicenow"]["cursor"] == cursor
+
+
+async def test_risk_read_of_another_tenant_fails_closed():
+    db = FakeSession()
+    fakes = Fakes()
+    real = fakes.partner
+
+    def partner(r):
+        if r.url.path.endswith("/risks"):
+            fakes.partner_requests.append(r)
+            meta = {"tenant_id": str(uuid.uuid4())}
+            return httpx.Response(200, json={"data": [RISK], "meta": meta})
+        return real(r)
+
+    fakes.partner = partner
+    out = await sn.sync_servicenow(
+        db, TENANT, **fakes.kwargs(_settings(push_risk_mappings=True))
+    )
+    assert out["status"] == "error"
+    assert "does not belong to the configured tenant" in out["error"]
+    assert fakes.sn_requests == []

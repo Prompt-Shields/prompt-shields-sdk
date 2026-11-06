@@ -1558,3 +1558,95 @@ async def test_audit_trail_under_rls(rls_db, monkeypatch):
         await rls.set_tenant(s, a)
         actions = (await s.execute(select(AuditEvent.action))).scalars().all()
     assert "auth.failure" not in actions  # on the system chain, not tenant a's
+
+
+async def test_servicenow_business_units_and_risks_stay_in_tenant_under_rls(
+    rls_db, monkeypatch
+):
+    """With business units and risk mappings enabled, a sync scoped to
+    tenant B pushes only B's business unit and B's confirmed risk
+    mappings, read through the Partner API under RLS."""
+    from collector import app as app_module
+    from collector import servicenow as sn
+
+    a, b = rls_db["a"], rls_db["b"]
+    async with rls_db["admin"]() as s:
+        for tenant, bu, category in ((a, "BU of A", "a_only"), (b, "BU of B", "b_only")):
+            asset = (
+                await s.execute(select(AIAsset).where(AIAsset.tenant_id == tenant))
+            ).scalar_one()
+            asset.business_unit = bu
+            s.add(
+                RiskMapping(
+                    tenant_id=tenant,
+                    asset_id=asset.id,
+                    risk_category=category,
+                    risk_level="critical",
+                    framework="EU_AI_ACT",
+                )
+            )
+            # Suggestions stay out: the connector reads confirmed ones only.
+            s.add(
+                RiskMapping(
+                    tenant_id=tenant,
+                    asset_id=asset.id,
+                    risk_category=f"{category}_suggested",
+                    risk_level="low",
+                    status="suggested",
+                    source="rules",
+                )
+            )
+        await s.commit()
+
+    monkeypatch.setattr(app_module, "SessionLocal", rls_db["plain"])
+    payloads: list[dict] = []
+
+    def servicenow(r: httpx.Request) -> httpx.Response:
+        payload = json.loads(r.content)
+        payloads.append(payload)
+        items = [
+            {"className": i["className"], "operation": "INSERT", "sysId": "a" * 32}
+            for i in payload["items"]
+        ]
+        return httpx.Response(200, json={"result": {"items": items}})
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    conn = {
+        "instance_host": "acme.service-now.com",
+        "username": "ps",
+        "password": "pw",
+        "business_unit_table": "cmn_department",
+        "push_risk_mappings": True,
+        "partner_api": {"base_url": "https://collector.test", "api_key": PARTNER_KEY_B},
+    }
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        out = await sn.sync_servicenow(
+            s,
+            b,
+            settings=sn.ServiceNowSettings(servicenow={str(b): conn}),
+            partner_transport=ASGITransport(app=app),
+            servicenow_transport=httpx.MockTransport(servicenow),
+            resolver=public,
+        )
+    assert out["status"] == "ok", out
+    assert out["business_units"] == 1 and out["risk_entries"] == 2
+    (payload,) = payloads
+    depts = [i["values"]["name"] for i in payload["items"] if i["className"] == "cmn_department"]
+    assert depts == ["BU of B"]
+    (asset_ci,) = [i for i in payload["items"] if "related" in i]
+    keys = {e["values"]["key"]: e["values"]["value"] for e in asset_ci["related"]}
+    assert keys == {
+        "promptshields:risk:EU_AI_ACT:b_only": "critical",
+        "promptshields:risk:custom:pii": "high",
+    }
+    assert payload["referenceItems"] == [
+        {
+            "referencedBy": asset_ci["internal_id"],
+            "referenced": "promptshields:business-unit:BU of B",
+            "referenceField": "department",
+        }
+    ]
+    assert "a_only" not in json.dumps(payload) and "BU of A" not in json.dumps(payload)

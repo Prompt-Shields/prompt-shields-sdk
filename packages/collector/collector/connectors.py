@@ -16,14 +16,15 @@ connector needs and nothing tool specific:
   - `BearerToken`: an OAuth access token for a `GuardedClient`, fetched on
     first use, refreshed shortly before ``expires_in`` runs out and once
     more if the server answers 401 anyway, so long syncs outlive a token.
-  - `PartnerApiClient`: reads ``/partner/v1/export``, ``/changes`` and
-    ``/assets/{id}/data-flows`` with a scoped partner API key, so a
-    connector sees exactly what its credential's scopes allow
-    (``export:read``, ``changes:read``, ``data-flows:read``) and every read
+  - `PartnerApiClient`: reads ``/partner/v1/export``, ``/changes``,
+    ``/assets/{id}/data-flows`` and ``/assets/{id}/risks`` with a scoped
+    partner API key, so a connector sees exactly what its credential's
+    scopes allow (``export:read``, ``changes:read``, ``data-flows:read``,
+    ``risks:read``) and every read
     lands in the partner audit log. Every response must name the tenant
     being synced (``meta.tenant_id``), so a key paired with the wrong
     tenant fails closed. `read_registry` / `next_cursor` turn it into one
-    run's assets, flows and next cursor.
+    run's assets, flows, risk mappings and next cursor.
   - Sync state (cursor, last run) per tenant and connector, kept in
     ``tenants.settings["connectors"][<name>]``. Never holds secrets.
 
@@ -368,7 +369,7 @@ def _expires_in(value: Any) -> float | None:
 class PartnerApiConnection(BaseModel):
     """Where a connector reads the registry from: a Partner API base URL and
     a partner API key holding ``export:read``, ``changes:read`` and, for
-    data flows, ``data-flows:read``."""
+    data flows, ``data-flows:read`` (for risk mappings, ``risks:read``)."""
 
     base_url: str
     api_key: SecretStr
@@ -470,6 +471,12 @@ class PartnerApiClient:
         path = f"/partner/v1/assets/{quote(str(UUID(str(asset_id))))}/data-flows"
         return _dicts((await self._get(path, "data flows")).get("data"))
 
+    async def risks(self, asset_id: str) -> list[dict]:
+        """The asset's confirmed risk mappings (the endpoint's default:
+        human-set classifications only, no rule suggestions)."""
+        path = f"/partner/v1/assets/{quote(str(UUID(str(asset_id))))}/risks"
+        return _dicts((await self._get(path, "risk mappings")).get("data"))
+
 
 def _dicts(value: Any) -> list[dict]:
     return [v for v in value or [] if isinstance(v, dict)]
@@ -514,19 +521,26 @@ def next_cursor(
 
 @dataclass
 class RegistryRead:
-    """What one sync run read: the assets to push, their flows (when
-    requested) and the cursor to store once the push succeeded."""
+    """What one sync run read: the assets to push, their flows and risk
+    mappings (when requested) and the cursor to store once the push
+    succeeded."""
 
     assets: list[dict]
     flows: dict[str, list[dict]] = field(default_factory=dict)
+    risks: dict[str, list[dict]] = field(default_factory=dict)
     cursor: str | None = None
 
 
 async def read_registry(
-    partner: PartnerApiClient, since: str | None, *, include_data_flows: bool
+    partner: PartnerApiClient,
+    since: str | None,
+    *,
+    include_data_flows: bool,
+    include_risks: bool = False,
 ) -> RegistryRead:
     """``/export`` when there is no cursor, else ``/changes`` since it, plus
-    each asset's data flows when ``include_data_flows``."""
+    each asset's data flows when ``include_data_flows`` and its confirmed
+    risk mappings when ``include_risks``."""
     if since:
         changes = await partner.changes(since)
         assets = [c["asset"] for c in changes if isinstance(c.get("asset"), dict)]
@@ -539,7 +553,12 @@ async def read_registry(
         for a in assets:
             if a.get("id"):
                 flows[a["id"]] = await partner.data_flows(a["id"])
-    return RegistryRead(assets=assets, flows=flows, cursor=cursor)
+    risks: dict[str, list[dict]] = {}
+    if include_risks:
+        for a in assets:
+            if a.get("id"):
+                risks[a["id"]] = await partner.risks(a["id"])
+    return RegistryRead(assets=assets, flows=flows, risks=risks, cursor=cursor)
 
 
 # ──────────────────────────────────────────────────────────────────────

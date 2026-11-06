@@ -392,7 +392,10 @@ async def get_risks(
     await _audit(
         request, principal, f"/partner/v1/assets/{asset_id}/risks", "GET", 200, len(rows)
     )
-    return {"data": [risk_dict(r) for r in rows]}
+    return {
+        "data": [risk_dict(r) for r in rows],
+        "meta": {"tenant_id": str(principal.tenant_id)},
+    }
 
 
 # Supported `period` values for /usage-summary, in days.
