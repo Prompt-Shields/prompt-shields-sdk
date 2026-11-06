@@ -228,7 +228,11 @@ You can only enable a use case that has a proven `recommend` track record.
 `AutoLearner` takes the Partner API's
 `GET /partner/v1/learner/recommendations?use_case=...` answer
 (`fetch_recommendations`, scope `learner:read`) and counts the following
-recommendations:
+recommendations. `fetch_recommendations` needs `ps_collector_url`, the
+collector's `https://` base URL (plain `http://` only for localhost), and
+raises `AutoModeError` without one, because the request carries your partner
+token. A duplicate record counts once, by its `id` or, without one, by its
+snapshot, use case, sensitivity and models.
 
 * **Evaluated**: accepted recommendations whose realised savings were
   measured on at least 50 calls.
@@ -264,11 +268,17 @@ snapshot is rolled back on either of these:
   mean. With too few control calls, the reference is the recommendation's
   projected quality for the current route.
 
-Rollback restores the last good snapshot. A snapshot is good once it has
-served `promote_after` treated calls (default 200) without a breach. With no
-good snapshot, the router falls back to the route policy's own decisions. A
-rolled-back version is never loaded again. Every threshold is in
-`GuardConfig`.
+Rollback restores the last good snapshot. A snapshot is good once every
+(use case, sensitivity) group it moved calls in has served at least
+`promote_after` treated calls (default 200) of its own without a breach. One
+busy group cannot promote a snapshot for the others. With no good snapshot,
+the router falls back to the route policy's own decisions. A rolled-back
+version is never loaded again. Every threshold is in `GuardConfig`.
+
+If the learner itself raises while choosing a model or recording an outcome,
+the call still goes ahead on the policy's own pick. The router logs only the
+error type and counts the fallback in `learner.fallbacks` (per stage,
+`choose` or `observe`) and in a `learner_error` event.
 
 ### Freezing on drift and poisoning
 
