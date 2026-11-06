@@ -451,6 +451,27 @@ export function providerFromHeaders(
 }
 
 /**
+ * The model the last upstream attempt was sent: its config's
+ * `override_params.model`, else the request's model (#69). A routed call
+ * whose provider response names no model (AI21, for one) was served this
+ * model, not the router's tier.
+ */
+export function sentModelOf(c: {
+  get: (key: string) => unknown;
+}): string | undefined {
+  const options = c.get('requestOptions');
+  if (!Array.isArray(options) || !options.length) return undefined;
+  const last = options[options.length - 1];
+  for (const model of [
+    last?.providerOptions?.overrideParams?.model,
+    last?.finalUntransformedRequest?.body?.model,
+  ]) {
+    if (typeof model === 'string' && model) return model;
+  }
+  return undefined;
+}
+
+/**
  * Extract PS metadata from request headers (X-PS-* headers)
  */
 function extractPSHeaders(
@@ -738,7 +759,8 @@ export function psTelemetry() {
 
       if (route) {
         event.requested_model = route.requestedModel;
-        event.served_model = responseBody?.model || route.servedModel;
+        event.served_model =
+          responseBody?.model || sentModelOf(c) || route.servedModel;
         event.route_group = route.group;
         event.route_mode = 'gateway';
         event.route_reason = route.reason;
@@ -788,7 +810,8 @@ export function psTelemetry() {
       // The model that ran prices the call (SDK: served, then requested).
       // A response served from the gateway cache cost nothing upstream: it
       // is recorded at cost 0 with `cost_source: cache` and what it saved.
-      const served = responseBody?.model || route?.servedModel;
+      const served =
+        responseBody?.model || (route && sentModelOf(c)) || route?.servedModel;
       const cacheStatus =
         c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
       const cacheHit = cacheStatus.endsWith('HIT');
