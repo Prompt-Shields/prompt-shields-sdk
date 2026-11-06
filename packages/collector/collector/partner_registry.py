@@ -41,7 +41,7 @@ from collector.attestation import (
     attestation_changes_since,
 )
 from collector.audit import record_read
-from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE
+from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE, LEARNER_EXPLORE
 from collector.lifecycle import LifecycleState, lifecycle_change_for
 from collector.loss_accounting import tenant_coverage
 from collector.mcp_usage import MAX_PAGE, tools_page, usage_page
@@ -492,6 +492,7 @@ async def get_usage_summary(
                     ).label("fallback_requests"),
                     *sovereign_share_columns(),
                     *budget_cache_columns(),
+                    *learner_columns(),
                     *outcome_signal_columns(),
                 ).where(
                     AIUsageEvent.asset_id == asset_id,
@@ -543,6 +544,7 @@ def _usage_summary_dict(row, period: str) -> dict:
         ),
         "sovereign_share": sovereign_share(row),
         **budget_cache_summary(row),
+        **learner_summary(row),
         **outcome_signal_counts(row),
         "period": period,
     }
@@ -595,6 +597,38 @@ def budget_cache_summary(row) -> dict:
             round(int(row["cache_hits"] or 0) / cache_reported, 4) if cache_reported else None
         ),
         "cache_saved_usd": round(float(saved), 6) if saved is not None else None,
+    }
+
+
+def learner_columns() -> list:
+    """Aggregate columns for the routing learner's auto mode (#34).
+
+    count() skips NULL: route_learner_mode is set only on calls the learner
+    decided, so learner_requests counts those and learner_explored the
+    ones it explored.
+    """
+    mode = AIUsageEvent.route_learner_mode
+    return [
+        func.count(mode).label("learner_requests"),
+        func.count(case((mode == LEARNER_EXPLORE, 1))).label("learner_explored"),
+    ]
+
+
+def learner_summary(row) -> dict:
+    """Routing learner fields of `UsageSummary`.
+
+    learner_routed_share is the share of all events the learner decided
+    (exploit, explore or policy); 0 when it decided none, null only when
+    there were no events. learner_explore_share is the share of the
+    learner-decided events that it explored; null when it decided none.
+    """
+    total = int(row["total_requests"] or 0)
+    learner = int(row["learner_requests"] or 0)
+    explored = int(row["learner_explored"] or 0)
+    return {
+        "learner_requests": learner,
+        "learner_routed_share": round(learner / total, 4) if total else None,
+        "learner_explore_share": round(explored / learner, 4) if learner else None,
     }
 
 
