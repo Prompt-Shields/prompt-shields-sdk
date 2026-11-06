@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from collector import partner_auth
+from collector.ingest import OUTCOME_SIGNAL_CLASSES
 from collector.partner_auth import PartnerPrincipal
 from collector.partner_registry import router
 from collector.usage_reports import SOVEREIGN_JURISDICTIONS
@@ -133,6 +134,7 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
     jurisdictions = present("served_jurisdiction")
     actions = present("budget_action")
     statuses = present("cache_status")
+    signals = present("outcome_signals")
     computed = {
         "total_requests": len(rows),
         "total_tokens_in": total("tokens_in"),
@@ -156,6 +158,11 @@ def _aggregate(stmt, rows: list[Row]) -> dict:
         "cache_reported": len(statuses),
         "cache_hits": sum(1 for c in statuses if c in ("hit", "semantic hit")),
         "cache_saved_usd": total("cache_saved_cost"),
+        "outcome_signals_reported": len(signals),
+        **{
+            f"outcome_{name}": sum(1 for s in signals if name in s)
+            for name in OUTCOME_SIGNAL_CLASSES
+        },
     }
     labels = [c.name for c in stmt.selected_columns]
     assert set(labels) == set(computed), labels
@@ -204,6 +211,8 @@ def _seed() -> dict[str, list[Row]]:
                 budget_id="support-daily",
                 budget_action="downgraded",
                 cache_status="miss",
+                outcome_signals=["fallback", "max_tokens"],
+                outcome_signals_version=1,
             ),
             _event(
                 ASSET_A,
@@ -221,6 +230,8 @@ def _seed() -> dict[str, list[Row]]:
                 budget_action="none",
                 cache_status="semantic hit",
                 cache_saved_cost=Decimal("0.020000"),
+                outcome_signals=[],
+                outcome_signals_version=1,
             ),
             _event(
                 ASSET_A,
@@ -300,6 +311,18 @@ class TestUsageSummary:
             "budget_blocked_requests": 0,
             "cache_hit_rate": 0.5,
             "cache_saved_usd": 0.02,
+            "outcome_signals_reported": 2,
+            "outcome_signal_counts": {
+                "abandoned": 0,
+                "fallback": 1,
+                "max_tokens": 1,
+                "refusal": 0,
+                "regenerate": 0,
+                "retry": 0,
+                "schema_invalid": 0,
+                "stream_error": 0,
+                "tool_call_invalid": 0,
+            },
             "period": "30d",
         }
 
@@ -333,7 +356,7 @@ class TestUsageSummary:
         for period in period_param["schema"]["enum"]:
             body = make_client().get(_url(ASSET_A, period)).json()
             assert set(body) == set(schema)
-            types = {"integer": int, "number": (int, float), "string": str}
+            types = {"integer": int, "number": (int, float), "string": str, "object": dict}
             for key, prop in schema.items():
                 if body[key] is not None:
                     assert isinstance(body[key], types[prop["type"]]), key
@@ -358,6 +381,8 @@ class TestUsageSummary:
             "budget_blocked_requests": None,
             "cache_hit_rate": None,
             "cache_saved_usd": None,
+            "outcome_signals_reported": 0,
+            "outcome_signal_counts": None,
             "period": "30d",
         }
 

@@ -89,6 +89,10 @@ class IngestEvent(BaseModel):
     budget_action: str | None = None
     cache_status: str | None = None
     cache_saved_cost: float | None = None
+    # Implicit outcome signals (#44): the SDK's (and gateway's) outcome
+    # classes for the call. Known class names only, see _outcome_signals.
+    outcome_signals: list[str] | None = None
+    outcome_signals_version: int | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -116,6 +120,34 @@ class IngestEvent(BaseModel):
     @classmethod
     def _call_id(cls, value: Any) -> str | None:
         return value if isinstance(value, str) and CALL_ID_RE.fullmatch(value) else None
+
+    @field_validator("outcome_signals", mode="before")
+    @classmethod
+    def _outcome_signals(cls, value: Any) -> list[str] | None:
+        # Class names only: anything that is not a short list of short
+        # snake_case tokens drops the whole field (counted as
+        # outcome_signals:invalid), so nothing else, such as model output,
+        # can be stored here. Tokens that are not a known class (a newer
+        # SDK's) are left out; the known ones are kept. An empty list is
+        # kept: it means "measured, nothing happened".
+        if not isinstance(value, list) or len(value) > MAX_OUTCOME_SIGNALS:
+            return None
+        if not all(isinstance(v, str) and ERROR_CLASS_RE.fullmatch(v) for v in value):
+            return None
+        return sorted(set(value) & set(OUTCOME_SIGNAL_CLASSES))
+
+    @field_validator("outcome_signals_version", mode="before")
+    @classmethod
+    def _outcome_signals_version(cls, value: Any) -> int | None:
+        value = _lenient_count(value)
+        return value if value is not None and 1 <= value <= MAX_OUTCOME_SIGNALS_VERSION else None
+
+    @model_validator(mode="after")
+    def _outcome_signals_pair(self) -> "IngestEvent":
+        # A version without classes describes nothing.
+        if self.outcome_signals is None:
+            self.outcome_signals_version = None
+        return self
 
     @field_validator("requested_model", "served_model", mode="before")
     @classmethod
@@ -249,6 +281,21 @@ MAX_IDENTIFIER_LENGTH = 128
 # The gateway keeps at most MAX_ATTEMPT_RECORDS (32) attempts per request.
 MAX_FALLBACK_CHAIN = 32
 ERROR_CLASS_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# Outcome signal classes (#44), as packages/sdk/prompt_shields/outcome_signals.py
+# SIGNAL_CLASSES defines them (a test keeps the two in step). Version 1.
+OUTCOME_SIGNAL_CLASSES = (
+    "abandoned",
+    "fallback",
+    "max_tokens",
+    "refusal",
+    "regenerate",
+    "retry",
+    "schema_invalid",
+    "stream_error",
+    "tool_call_invalid",
+)
+MAX_OUTCOME_SIGNALS = 32
+MAX_OUTCOME_SIGNALS_VERSION = 1000  # SmallInteger column, generous headroom
 # PRD 0001 §7.12. Matched case-insensitively, stored lower-case.
 ROUTE_MODES = frozenset({"gateway", "local", "none"})
 SENSITIVITY_SOURCES = frozenset({"declared", "pii_escalated", "default"})
@@ -322,6 +369,8 @@ LENIENT_FIELDS = (
     "usage_unit_type",
     "api_key_fingerprint",
     "call_id",
+    "outcome_signals",
+    "outcome_signals_version",
 ) + ROUTE_FIELDS + BUDGET_CACHE_FIELDS
 
 
@@ -586,6 +635,8 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             usage_unit_type=event.usage_unit_type,
             api_key_fingerprint=event.api_key_fingerprint,
             call_id=event.call_id,
+            outcome_signals=event.outcome_signals,
+            outcome_signals_version=event.outcome_signals_version,
             **{name: getattr(event, name) for name in ROUTE_FIELDS + BUDGET_CACHE_FIELDS},
         )
         db.add(usage_event)

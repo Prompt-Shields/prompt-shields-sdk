@@ -13,11 +13,8 @@ already has its tenant_isolation policy (015) and is in the erasure order.
 All columns are nullable with no default, so existing rows and old events
 are unaffected.
 
-Chained from main's head (027) for now; renumbered at merge after 028, 029
-and 030.
-
 Revision ID: 031
-Revises: 027
+Revises: 030
 Create Date: 2026-11-06
 """
 
@@ -27,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "031"
-down_revision: str | None = "027"
+down_revision: str | None = "030"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

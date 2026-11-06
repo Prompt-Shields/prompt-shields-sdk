@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://promptshields.com/schemas/route-policy/route-policy.v1.schema.json",
   "title": "Prompt Shields route policy (route-policy.v1)",
-  "description": "One routing policy shared by the gateway router (TypeScript), the SDK local router and the teardown replay (Python). Precedence: data policy constraints > explicit group (X-PS-Route) > hints (quality, max_cost) > use-case quality bar > default strategy. Cross-field rules JSON Schema cannot express: default_group, quality_to_group values, group_order entries and use_cases.*.min_group must name keys of groups; sensitivity.unclassified_default, pii_escalation values and data_policy keys must be entries of sensitivity.levels.",
+  "description": "One routing policy shared by the gateway router (TypeScript), the SDK local router and the teardown replay (Python). Precedence: data policy constraints > explicit group (X-PS-Route) > hints (quality, max_cost) > use-case quality bar > default strategy. Cross-field rules JSON Schema cannot express: default_group, quality_to_group values, group_order entries and use_cases.*.min_group must name keys of groups; sensitivity.unclassified_default, pii_escalation values, anonymise_then_route entries and data_policy keys must be entries of sensitivity.levels.",
   "type": "object",
   "required": ["schema_version", "default_group", "groups", "quality_to_group"],
   "additionalProperties": false,
@@ -121,6 +121,13 @@
           "description": "Detected PII category -> minimum level. Escalate-only: effective level = max(declared or default, every escalated level).",
           "propertyNames": { "$ref": "#/$defs/identifier" },
           "additionalProperties": { "$ref": "#/$defs/identifier" }
+        },
+        "anonymise_then_route": {
+          "type": "array",
+          "description": "Detected levels at which a call the SDK pseudonymised (ShieldsRouter(pseudonymise=True)) may be routed at the level of what is left after pseudonymisation: max(declared or default, the pii_escalation level of each category still detected). Default: none, so the detected level applies. Entries must be entries of levels. The gateway does not pseudonymise and ignores it.",
+          "items": { "$ref": "#/$defs/identifier" },
+          "uniqueItems": true,
+          "default": []
         }
       }
     },
@@ -172,7 +179,7 @@
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true,
-          "description": "Models that passed eval_set at min_parity. Written back by the eval harness."
+          "description": "Models that passed eval_set at min_parity. Written back from ps-eval results by ps-eval-apply."
         }
       }
     },

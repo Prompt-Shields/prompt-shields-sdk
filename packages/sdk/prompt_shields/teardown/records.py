@@ -137,6 +137,10 @@ class TeardownRecord:
     #: has no price for the model (M§4.3).
     framework_cost: float | None = None
     framework_cost_source: str | None = None
+    #: The cost a ``ps-events`` row itself reports (``ai_usage_events.cost``),
+    #: whatever its source. Never summed into the baseline (M§4.2); read
+    #: only by invoice reconciliation (``ps-teardown reconcile``).
+    event_cost: float | None = None
 
     business_unit: str | None = None
     use_case: str | None = None
@@ -307,7 +311,7 @@ def normalise_provider(value: Any) -> str | None:
 
 # Checked in order: Bedrock model ids ("anthropic.claude-...") come first.
 _MODEL_PREFIX_PROVIDER = (
-    (re.compile(r"^(?:(?:us|eu|apac|global)\.)?(?:anthropic|amazon|meta|cohere|mistral)\."), "bedrock"),
+    (re.compile(r"^(?:(?:us|us-gov|eu|apac|au|ca|jp|in|global)\.)?(?:anthropic|amazon|meta|cohere|mistral)\."), "bedrock"),
     (re.compile(r"^(gpt-|o\d|chatgpt|text-embedding|whisper|tts|dall-e|gpt-image)"), "openai"),
     (re.compile(r"^claude"), "anthropic"),
     (re.compile(r"^gemini"), "google"),
@@ -633,6 +637,7 @@ def _ps_event_record(e: Mapping[str, Any], file: str) -> TeardownRecord:
         provider_cost=cost if cost_source == "provider_reported" else None,
         framework_cost=cost if cost_source and cost_source not in _PS_COST_SOURCES else None,
         framework_cost_source=cost_source if cost_source not in _PS_COST_SOURCES else None,
+        event_cost=cost,
         business_unit=_str(e.get("business_unit")),
         use_case=_str(e.get("use_case_name")) or _str(e.get("use_case")),
         data_classification=_str(e.get("data_classification")),

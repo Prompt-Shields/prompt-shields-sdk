@@ -1,0 +1,17 @@
+{
+  "_comment": "Recall gate for the PII benchmark (#35). Each value is the recall both detectors (SDK and gateway port) measured on dataset.v1.jsonl when the gate was set, rounded down to 2 decimals. Raise a value when a detector improves; never lower one without a security review. Keys are a category (all locales) or category@locale. person_name and postal_address are labelled but not detected, so not gated.",
+  "min_recall": {
+    "credit_card": 1.0,
+    "email": 1.0,
+    "financial_data": 0.25,
+    "health_data": 0.09,
+    "iban": 1.0,
+    "ip_address": 0.86,
+    "national_id": 0.88,
+    "national_id@dk": 1.0,
+    "national_id@fi": 1.0,
+    "national_id@no": 1.0,
+    "national_id@se": 1.0,
+    "phone": 0.82
+  }
+}

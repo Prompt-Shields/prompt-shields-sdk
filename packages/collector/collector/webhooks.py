@@ -19,6 +19,11 @@ Events
                   fields (collector.attestation): field, state, actor type
                   and time. The free-text comment, the attested value and
                   `attested_by` (usually an email) are left out.
+  spend.anomaly   the spend anomaly job (collector.spend_anomalies) found a
+                  day's spend for a use case or asset far above its EWMA
+                  baseline. Subscribe with `spend.anomaly`; the partner
+                  needs `spend-alerts:read`. The event id is the alert id;
+                  the payload is the alert (numbers only).
   audit.*         one per row of the tenant's hash-chained admin audit
                   trail (collector.audit_trail), typed `audit.<action>`,
                   e.g. `audit.provider_credential.rotate`. Subscribe with
@@ -122,9 +127,18 @@ EVENT_TYPES: tuple[str, ...] = (ASSET_CREATED, ASSET_CHANGED, ASSET_RETIRED, ASS
 AUDIT_EVENTS = "audit.*"
 AUDIT_PREFIX = "audit."
 AUDIT_SCOPE = "audit:read"
-SUBSCRIBABLE_EVENT_TYPES: tuple[str, ...] = (*EVENT_TYPES, AUDIT_EVENTS)
+# Spend anomaly alerts (#30, collector.spend_anomalies). Like audit.*, not
+# a default: it needs its own scope.
+SPEND_ANOMALY = "spend.anomaly"
+SPEND_ALERTS_SCOPE = "spend-alerts:read"
+SUBSCRIBABLE_EVENT_TYPES: tuple[str, ...] = (*EVENT_TYPES, AUDIT_EVENTS, SPEND_ANOMALY)
 EventType = Literal[
-    "asset.created", "asset.changed", "asset.retired", "asset.attested", "audit.*"
+    "asset.created",
+    "asset.changed",
+    "asset.retired",
+    "asset.attested",
+    "audit.*",
+    "spend.anomaly",
 ]
 
 # Scope a partner must hold to receive each event type. Asset events carry
@@ -139,6 +153,7 @@ EVENT_SCOPES: dict[str, str] = {
     ASSET_CHANGED: "changes:read",
     ASSET_RETIRED: "changes:read",
     ASSET_ATTESTED: "changes:read",
+    SPEND_ANOMALY: SPEND_ALERTS_SCOPE,
 }
 
 
@@ -763,6 +778,66 @@ async def enqueue_audit_event(
                 subscription_id=sub_id,
                 event_id=event_id,
                 event_type=event_type,
+                asset_id=None,
+                payload=payload,
+                next_attempt_at=created_at,
+                created_at=created_at,
+            )
+        )
+    return len(targets)
+
+
+async def enqueue_spend_anomaly_event(
+    db: AsyncSession,
+    tenant_id: UUID,
+    alert_id: UUID,
+    alert: dict,
+    created_at: datetime,
+) -> int:
+    """Queue one `spend.anomaly` event (collector.spend_anomalies) to every
+    eligible subscription of the tenant that names it. Does not commit.
+
+    The event id is the alert id, so a receiver can de-duplicate retries
+    and acknowledge the alert through the Partner API with it.
+    """
+    subs = (
+        await db.execute(
+            select(
+                WebhookSubscription.id,
+                WebhookSubscription.event_types,
+                PartnerCredential.scopes,
+            )
+            .join(PartnerCredential, PartnerCredential.id == WebhookSubscription.partner_id)
+            .where(
+                WebhookSubscription.tenant_id == tenant_id,
+                WebhookSubscription.is_active.is_(True),
+                PartnerCredential.tenant_id == tenant_id,
+                *_eligible_partner_clause(created_at),
+            )
+        )
+    ).all()
+    targets = [
+        s.id
+        for s in subs
+        if SPEND_ANOMALY in s.event_types
+        and SPEND_ALERTS_SCOPE in expand_scopes(s.scopes)
+    ]
+    if not targets:
+        return 0
+    payload = {
+        "id": str(alert_id),
+        "type": SPEND_ANOMALY,
+        "created_at": created_at.isoformat(),
+        "tenant_id": str(tenant_id),
+        "data": {"alert": alert},
+    }
+    for sub_id in targets:
+        db.add(
+            WebhookDelivery(
+                tenant_id=tenant_id,
+                subscription_id=sub_id,
+                event_id=alert_id,
+                event_type=SPEND_ANOMALY,
                 asset_id=None,
                 payload=payload,
                 next_attempt_at=created_at,

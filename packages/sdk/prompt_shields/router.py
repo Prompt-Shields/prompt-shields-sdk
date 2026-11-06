@@ -19,6 +19,12 @@ gateway:
 When no allowed candidate is left, ``PolicyViolation`` is raised and nothing
 is sent: a call is never served by a non-compliant model.
 
+``pseudonymise=True`` (local mode only, off by default) replaces the PII the
+SDK detects with placeholders before the call and restores the answer
+(``prompt_shields.pseudonymise``). The call keeps the original prompt's
+sensitivity unless the policy's ``sensitivity.anonymise_then_route`` lists
+that level; then it is routed at the level of what is left.
+
 Only candidates whose provider is configured are considered: a policy tier
 whose provider has no entry in ``providers`` is removed before routing, the
 same as a tier the data policy does not allow.
@@ -79,11 +85,18 @@ from prompt_shields.failover import (
     default_registry,
 )
 from prompt_shields.pii import detect_pii_categories
+from prompt_shields.pricing import (
+    COST_SOURCE_PRICING_TABLE,
+    COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
+    estimate_cost,
+)
+from prompt_shields.pseudonymise import Pseudonymisation, pseudonymise
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
     PolicyViolation,
     RouteDecision,
     RouteRequest,
+    anonymise_then_route_allowed,
     build_route_request,
     classify_sensitivity,
     data_policy_rule,
@@ -91,6 +104,11 @@ from prompt_shields.route_policy import (
     parse_route_headers,
     resolve_policy_route,
     tier_complies,
+)
+from prompt_shields.sovereign import (
+    SovereignProviderError,
+    get_openai_compatible,
+    resolve_base_url,
 )
 from prompt_shields.types import PSMetadata, RouteHint
 
@@ -191,6 +209,28 @@ class BudgetInfo:
 
 
 @dataclass(frozen=True)
+class PseudonymisationInfo:
+    """What pseudonymisation did on a call (``pseudonymise=True``). Counts
+    and levels only, never values.
+
+    ``entities`` is distinct values replaced per PII category; ``restored``
+    placeholders put back into the answer; ``unknown_placeholders``
+    placeholder-shaped tokens in the answer that were left as they are.
+    ``detected_level`` is the sensitivity of the original prompt;
+    ``anonymise_then_route`` is True when the policy let the call be routed
+    at the lower level of what was left after pseudonymisation
+    (``sensitivity.anonymise_then_route``); the route's ``sensitivity_level``
+    is then that lower level.
+    """
+
+    entities: Mapping[str, int]
+    restored: int
+    unknown_placeholders: int
+    detected_level: str | None
+    anonymise_then_route: bool
+
+
+@dataclass(frozen=True)
 class PSResult:
     """``fallback_chain`` is the error class of each failed attempt, in
     order: empty when the first attempt succeeded."""
@@ -200,6 +240,7 @@ class PSResult:
     attempts: tuple[Attempt, ...]
     budget: BudgetInfo | None = None
     fallback_chain: tuple[str, ...] = ()
+    pseudonymisation: PseudonymisationInfo | None = None
 
 
 @dataclass
@@ -523,6 +564,18 @@ class _Provider:
     vendor: str
     api_key: str
     options: dict
+    #: Catalog provider id behind an OpenAI-compatible entry, if known.
+    catalog: str | None = None
+
+    @property
+    def openai_compatible(self) -> bool:
+        """Reached through the OpenAI SDK at another provider's base URL, so
+        the OpenAI price table does not apply to its model ids."""
+        return (
+            self.vendor == "openai"
+            and self.name != "openai"
+            and bool(self.options.get("base_url"))
+        )
 
 
 def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _Provider]:
@@ -541,13 +594,46 @@ def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _P
                 f"got {vendor!r} (use 'openai' with a base_url for "
                 "OpenAI-compatible APIs)"
             )
-        out[name] = _Provider(name, vendor, api_key, config)
+        # A named OpenAI-compatible provider (catalog id, #20) gets its base
+        # URL from the catalog unless the entry sets one.
+        catalog_provider = config.pop("catalog_provider", None)
+        region = config.pop("region", None)
+        catalog_id = catalog_provider or (
+            name if get_openai_compatible(name) is not None else None
+        )
+        if vendor == "openai" and not config.get("base_url"):
+            known = catalog_provider or name
+            if known != "openai":
+                if catalog_provider is None and get_openai_compatible(name) is None:
+                    # Never send this provider's key to api.openai.com.
+                    raise RouterError(
+                        f"provider {name!r} has no base_url and is not a known "
+                        "OpenAI-compatible provider; set base_url or "
+                        "catalog_provider"
+                    )
+                try:
+                    config["base_url"] = resolve_base_url(known, region)
+                except SovereignProviderError as exc:
+                    raise RouterError(f"provider {name!r}: {exc}") from exc
+            elif region is not None:
+                raise RouterError(f"provider {name!r}: region needs a catalog provider")
+        elif region is not None:
+            raise RouterError(
+                f"provider {name!r}: region selects a catalog base URL; "
+                "it cannot be combined with base_url"
+            )
+        out[name] = _Provider(name, vendor, api_key, config, catalog_id)
     return out
 
 
 @dataclass(frozen=True)
 class _Plan:
-    """What one call will do: the decision, the tier and its provider."""
+    """What one call will do: the decision, the tier and its provider.
+
+    ``messages`` is what is sent: the caller's messages, or their
+    pseudonymised copy when ``pseudo`` is set (its mapping never leaves this
+    process and is cleared when the call is done).
+    """
 
     decision: RouteDecision
     tier: Mapping[str, Any]
@@ -558,6 +644,11 @@ class _Plan:
     budget: BudgetCheck | None = None
     budget_action: str = "none"
     request: RouteRequest | None = None
+    messages: list = field(default_factory=list)
+    pseudo: Pseudonymisation | None = None
+    original_pii: tuple[str, ...] = ()
+    detected_level: str | None = None
+    anonymised_route: bool = False
 
 
 class _AttemptLimit(Exception):
@@ -619,10 +710,20 @@ class _RouterCore:
         max_attempts: int | None = None,
         retry_after_max_wait: float | None = None,
         rate_limit_retries: int = 1,
+        pseudonymise: bool = False,
     ):
         if mode not in ("local", "gateway"):
             raise RouterError(f"mode must be 'local' or 'gateway', got {mode!r}")
+        if pseudonymise and mode != "local":
+            # The gateway classifies what it receives: it would see only the
+            # placeholders and route at a lower level than the policy allows.
+            raise RouterError(
+                "pseudonymise=True needs mode='local'; the gateway would "
+                "classify the placeholders, not the original prompt"
+            )
         self.mode: RouteMode = mode
+        self.pseudonymise = bool(pseudonymise)
+        self._scan_pii_events = scan_pii
         self._use_case = use_case
         self._data_classification = data_classification
         client_kwargs = {
@@ -794,6 +895,7 @@ class _RouterCore:
         data_classification: str | None,
         use_case: str | None,
         pii_detected: list[str] | None,
+        pii_categories: set[str] | None = None,
     ) -> RouteRequest:
         hints = parse_route_headers(route.to_headers() if route else {})
         req = build_route_request(
@@ -801,6 +903,9 @@ class _RouterCore:
         )
         req.data_classification = data_classification
         req.use_case = use_case
+        if pii_categories is not None:
+            req.pii_detected = sorted(pii_categories)
+            return req
         # Always scanned, also with scan_pii=False: escalation is a safety
         # control and nothing leaves the process here.
         found = set(_scan_pii(messages))
@@ -902,12 +1007,17 @@ class _RouterCore:
         ``pii_detected`` adds categories found elsewhere (a DLP scan) to the
         ones the local scanner finds. Raises ``PolicyViolation`` when the call
         would fail closed, ``BudgetExceeded`` when a block budget is
-        exhausted. Spend budgets are read but nothing is recorded.
+        exhausted. Spend budgets are read but nothing is recorded. With
+        ``pseudonymise=True`` the decision is the one the pseudonymised call
+        would get.
         """
-        return self._plan(
+        plan = self._plan(
             messages, model, route, max_tokens, data_classification, use_case,
             pii_detected, budget=self._budget_check(use_case),
-        ).decision
+        )
+        if plan.pseudo is not None:
+            plan.pseudo.clear()
+        return plan.decision
 
     # --- budgets --------------------------------------------------------------
 
@@ -969,17 +1079,54 @@ class _RouterCore:
             raise RouterError("route() decides locally; this router delegates to the gateway")
         declared = data_classification or self._data_classification
         use_case = use_case or self._use_case
-        req = self._route_request(
-            messages, model, route, max_tokens, declared, use_case, pii_detected
-        )
-        decision = self._decide(req)
-        budget_action = "none"
-        if budget is not None:
-            decision, budget_action, req = self._apply_budget(decision, req, budget)
-        tier = self._find_tier(decision, req)
-        provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
+        pseudo = pseudonymise(messages) if self.pseudonymise else None
+        try:
+            extra: dict[str, Any] = {"messages": messages}
+            if pseudo is None:
+                req = self._route_request(
+                    messages, model, route, max_tokens, declared, use_case,
+                    pii_detected,
+                )
+            else:
+                # Categories the caller supplied (a DLP scan) cannot be
+                # shown to be gone, so they always count.
+                supplied = set(pii_detected or ())
+                local = set(_scan_pii(messages))
+                original = local | supplied
+                # What is still detected in what is sent: keyword topics
+                # (health_data, ...) and anything that was not replaced.
+                residual = set(_scan_pii(pseudo.messages)) | supplied
+                detected_level, _ = classify_sensitivity(
+                    self._reachable, declared, original
+                )
+                allowed = anonymise_then_route_allowed(self._reachable, detected_level)
+                req = self._route_request(
+                    pseudo.messages, model, route, max_tokens, declared, use_case,
+                    None, pii_categories=residual if allowed else original,
+                )
+                extra = {
+                    "messages": pseudo.messages, "pseudo": pseudo,
+                    "original_pii": tuple(sorted(local)),
+                    "detected_level": detected_level,
+                }
+            decision = self._decide(req)
+            if pseudo is not None and decision.sensitivity_level != extra["detected_level"]:
+                # Only reachable when the policy allowed the lower level.
+                decision = replace(
+                    decision, reason=decision.reason + "+anonymise-then-route"
+                )
+                extra["anonymised_route"] = True
+            budget_action = "none"
+            if budget is not None:
+                decision, budget_action, req = self._apply_budget(decision, req, budget)
+            tier = self._find_tier(decision, req)
+            provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
+        except BaseException:
+            if pseudo is not None:
+                pseudo.clear()
+            raise
         return _Plan(decision, tier, provider, model, declared, use_case,
-                     budget, budget_action, req)
+                     budget, budget_action, req, **extra)
 
     # --- failover -------------------------------------------------------------
 
@@ -1121,6 +1268,7 @@ class _RouterCore:
         decision, tier = plan.decision, plan.tier
         policy_version = (self.policy or {}).get("policy_version")
         baseline = self.baseline
+        scan_pii = self._scan_pii_events
 
         def hook(event: dict) -> None:
             # Failover (#21): the error class of each failed attempt before
@@ -1156,6 +1304,38 @@ class _RouterCore:
                 event["data_classification"] = plan.data_classification
             if plan.use_case is not None:
                 event["use_case_name"] = plan.use_case
+            # Pseudonymised: the client scanned the placeholders. Report the
+            # categories of the original prompt (labels only, never values).
+            if plan.pseudo is not None and scan_pii:
+                if plan.original_pii:
+                    event["detected_pii_types"] = list(plan.original_pii)
+                else:
+                    event.pop("detected_pii_types", None)
+            # An OpenAI-compatible provider is dispatched as vendor "openai";
+            # a price from OpenAI's table would be the wrong vendor's rate
+            # for its model id. Use the catalog's USD rate for the provider
+            # instead, else the tier's rates below. A provider-reported cost
+            # is kept.
+            if plan.provider.openai_compatible and event.get("cost_source") in (
+                COST_SOURCE_PRICING_TABLE, COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
+            ):
+                event["cost"] = None
+                event.pop("cost_source", None)
+            if (
+                plan.provider.openai_compatible
+                and plan.provider.catalog is not None
+                and event.get("cost") is None
+            ):
+                cost = estimate_cost(
+                    plan.provider.catalog,
+                    event.get("served_model") or decision.model,
+                    event.get("tokens_in"),
+                    event.get("tokens_out"),
+                    tokens_cached=event.get("tokens_cached"),
+                )
+                if cost is not None:
+                    event["cost"] = cost
+                    event["cost_source"] = COST_SOURCE_PRICING_TABLE
             if plan.budget is not None:
                 event.update(plan.budget.telemetry(plan.budget_action))
             # No provider-reported cost and no pricing-table entry (an
@@ -1225,6 +1405,7 @@ class _RouterCore:
             from_anthropic(response) if plan.provider.vendor == "anthropic"
             else from_openai(response)
         )
+        pseudo_info = _restore_completion(out, plan) if plan.pseudo is not None else None
         d = plan.decision
         out.ps = PSResult(
             route=RouteInfo(
@@ -1256,6 +1437,7 @@ class _RouterCore:
                 if plan.budget is not None and plan.budget.state is not None
                 else None
             ),
+            pseudonymisation=pseudo_info,
         )
         return out
 
@@ -1303,6 +1485,29 @@ class _RouterCore:
         return {name: c.telemetry_stats() for name, c in self._clients.items()}
 
 
+def _restore_completion(out: RoutedChatCompletion, plan: _Plan) -> PseudonymisationInfo:
+    """Put the call's values back into ``out``: content, refusal and tool-call
+    arguments. ``out.raw`` stays as the provider returned it."""
+    pseudo = plan.pseudo
+    assert pseudo is not None
+    for choice in out.choices:
+        m = choice.message
+        m.content = pseudo.restore(m.content)
+        m.refusal = pseudo.restore(m.refusal)
+        for tc in m.tool_calls or ():
+            tc.function.arguments = pseudo.restore(
+                tc.function.arguments, json_escape=True
+            ) or ""
+    stats = pseudo.stats()
+    return PseudonymisationInfo(
+        entities=dict(stats.entities),
+        restored=stats.restored,
+        unknown_placeholders=stats.unknown,
+        detected_level=plan.detected_level,
+        anonymise_then_route=plan.anonymised_route,
+    )
+
+
 def _refuse_stream(kwargs: dict) -> None:
     if kwargs.get("stream") is True:
         raise RouterError(
@@ -1318,8 +1523,12 @@ class ShieldsRouter(_RouterCore):
     ``providers`` maps a provider name, as policy tiers name it in
     ``provider``, to ``{"api_key": ..., "vendor": "openai" | "anthropic",
     **client options}``. ``vendor`` defaults to ``anthropic`` for the
-    ``anthropic`` provider and to ``openai`` (OpenAI-compatible, set
-    ``base_url``) for every other. Tiers without ``provider`` go to
+    ``anthropic`` provider and to ``openai`` (OpenAI-compatible) for every
+    other. A provider named after a catalog OpenAI-compatible provider
+    (``mistral``, ``berget``, ``infercom``, ``regolo``, ``ionos``,
+    ``stackit``, ``scaleway``, ``ovhcloud``; see ``prompt_shields.sovereign``)
+    gets its base URL from the catalog; any other name needs ``base_url`` or
+    ``catalog_provider``. ``region`` picks a catalogued region. Tiers without ``provider`` go to
     ``default_provider`` (the only provider when there is one).
 
     ``client.chat.completions.create(model="auto", messages=[...],
@@ -1421,7 +1630,17 @@ class _RouterCompletions:
             data_classification, use_case,
             budget=r._budget_check(use_case),
         )
-        candidates = r._candidates(plan, messages, max_tokens, kwargs)
+        try:
+            return self._send(plan, max_tokens, kwargs, ps_metadata, captured)
+        finally:
+            # The mapping lives for this call only.
+            if plan.pseudo is not None:
+                plan.pseudo.clear()
+
+    def _send(self, plan: Any, max_tokens: int | None, kwargs: dict,
+              ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
+        candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
         tracker = _AttemptTracker()
 
         def call(c: Candidate) -> Any:
@@ -1500,7 +1719,17 @@ class _AsyncRouterCompletions:
             data_classification, use_case,
             budget=await r._abudget_check(use_case),
         )
-        candidates = r._candidates(plan, messages, max_tokens, kwargs)
+        try:
+            return await self._send(plan, max_tokens, kwargs, ps_metadata, captured)
+        finally:
+            # The mapping lives for this call only.
+            if plan.pseudo is not None:
+                plan.pseudo.clear()
+
+    async def _send(self, plan: Any, max_tokens: int | None, kwargs: dict,
+              ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
+        candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
         tracker = _AttemptTracker()
 
         async def call(c: Candidate) -> Any:

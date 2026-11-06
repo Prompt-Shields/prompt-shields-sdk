@@ -28,12 +28,13 @@ from db.models import (
     DataFlow,
     PartnerCredential,
     RiskMapping,
+    Tenant,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, func, select
 
-from collector import aibom
+from collector import aibom, focus_export
 from collector.attestation import add_attestation_summaries, attestation_changes_since
 from collector.audit import record_read
 from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE
@@ -49,6 +50,8 @@ from collector.retention import get_retention_cutoff
 from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 from collector.usage_reports import (
     SavingsGroupBy,
+    outcome_signal_columns,
+    outcome_signal_counts,
     savings_report,
     sovereign_share,
     sovereign_share_columns,
@@ -455,6 +458,7 @@ async def get_usage_summary(
                     ).label("fallback_requests"),
                     *sovereign_share_columns(),
                     *budget_cache_columns(),
+                    *outcome_signal_columns(),
                 ).where(
                     AIUsageEvent.asset_id == asset_id,
                     AIUsageEvent.tenant_id == principal.tenant_id,
@@ -479,7 +483,9 @@ def _usage_summary_dict(row, period: str) -> dict:
     never taken. savings_usd sums counterfactual_cost - cost over events
     reporting both; fallback_rate is the share of events reporting a
     fallback_chain whose chain is not empty; sovereign_share is the share of
-    events reporting a served_jurisdiction that was in the EEA.
+    events reporting a served_jurisdiction that was in the EEA;
+    outcome_signal_counts counts, per class, the events reporting
+    outcome_signals that carried it (null when none reported any).
     """
     cost = row["estimated_cost_usd"]
     latency = row["avg_latency_ms"]
@@ -503,6 +509,7 @@ def _usage_summary_dict(row, period: str) -> dict:
         ),
         "sovereign_share": sovereign_share(row),
         **budget_cache_summary(row),
+        **outcome_signal_counts(row),
         "period": period,
     }
 
@@ -613,6 +620,116 @@ async def get_usage_sovereign_share(
         len(body["by_sensitivity_level"]),
     )
     return body
+
+
+def _bad_request(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            "type": "about:blank",
+            "title": "Bad Request",
+            "status": 400,
+            "detail": detail,
+        },
+    )
+
+
+def _utc(value: datetime) -> datetime:
+    """A query datetime in UTC; one without an offset is taken as UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+@router.get(
+    "/usage/focus-export",
+    summary="Export AI usage cost in the FinOps FOCUS format",
+)
+async def export_usage_focus(
+    request: Request,
+    response: Response,
+    start: datetime | None = Query(  # noqa: B008 - FastAPI query marker, by design
+        default=None,
+        description="Inclusive start (ISO 8601 date or date-time, UTC if no offset). "
+        "Default: 30 days before `end`",
+    ),
+    end: datetime | None = Query(  # noqa: B008 - FastAPI query marker, by design
+        default=None,
+        description="Exclusive end (ISO 8601 date or date-time, UTC if no offset). "
+        "Default: now",
+    ),
+    format: focus_export.ExportFormat = Query(  # noqa: B008 - FastAPI query marker, by design
+        default="csv", description="`csv` or `jsonl` (one JSON object per line)"
+    ),
+    granularity: focus_export.Granularity = Query(  # noqa: B008 - FastAPI query marker, by design
+        default="day", description="Charge period: one UTC `hour` or `day` per row"
+    ),
+    cost_mode: focus_export.CostMode = Query(  # noqa: B008 - FastAPI query marker, by design
+        default="estimated",
+        description="`estimated`: cost columns carry the estimated cost. `merge_safe`: "
+        "they are 0 (FOCUS rule for a data generator that is not the invoice "
+        "issuer), and the estimate is only in `x_EstimatedCost`",
+    ),
+    principal: PartnerPrincipal = Depends(require_scope("usage:export")),  # noqa: B008 - FastAPI dependency marker, by design
+):
+    """AI usage cost as FOCUS v1.4 Cost and Usage rows, streamed.
+
+    One row per UTC hour or day, asset, model and provider; see
+    `collector.focus_export` for the column mapping. The window is clamped
+    to the tenant's retention period. Events without a cost are left out.
+    """
+    now = datetime.now(UTC)
+    end_at = _utc(end) if end is not None else now
+    start_at = _utc(start) if start is not None else end_at - timedelta(days=30)
+    if start_at >= end_at:
+        raise _bad_request("`start` must be before `end`")
+    if end_at - start_at > timedelta(days=focus_export.MAX_RANGE_DAYS):
+        raise _bad_request(
+            f"The window may span at most {focus_export.MAX_RANGE_DAYS} days"
+        )
+
+    await _enforce_rate_limit(request, response, principal)
+    db = request.state.db
+    # Never export events past the tenant's retention period, even if the
+    # purge has not run yet.
+    cutoff = await get_retention_cutoff(db, principal.tenant_id, now)
+    if cutoff is not None and cutoff > start_at:
+        start_at = min(cutoff, end_at)
+    tenant_name = (
+        await db.execute(select(Tenant.name).where(Tenant.id == principal.tenant_id))
+    ).scalar_one_or_none() or str(principal.tenant_id)
+
+    await _audit(request, principal, "/partner/v1/usage/focus-export", "GET", 200)
+
+    stamp = f"{start_at:%Y%m%dT%H%M%SZ}-{end_at:%Y%m%dT%H%M%SZ}"
+    headers = {
+        k: v for k, v in response.headers.items() if k.startswith("x-ratelimit-")
+    }
+    headers.update(
+        {
+            "Content-Disposition": (
+                f'attachment; filename="focus-cost-{stamp}.{format}"'
+            ),
+            "X-Focus-Version": focus_export.FOCUS_VERSION,
+            "X-Export-Window-Start": focus_export.focus_datetime(start_at),
+            "X-Export-Window-End": focus_export.focus_datetime(end_at),
+            "Cache-Control": "no-store",
+        }
+    )
+    return focus_export.StreamExportResponse(
+        focus_export.stream_export(
+            db.bind,
+            tenant_id=principal.tenant_id,
+            tenant_name=tenant_name,
+            start=start_at,
+            end=end_at,
+            granularity=granularity,
+            cost_mode=cost_mode,
+            fmt=format,
+        ),
+        media_type=focus_export.MEDIA_TYPES[format],
+        headers=headers,
+    )
 
 
 @router.get("/telemetry/coverage", summary="Telemetry coverage per source")

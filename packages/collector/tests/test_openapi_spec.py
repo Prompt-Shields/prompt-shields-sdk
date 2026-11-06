@@ -20,6 +20,7 @@ from collector import (
     admin_api,
     cloud_inventory,
     leanix,
+    learner,
     lifecycle,
     operator_admin,
     partner_admin,
@@ -143,6 +144,7 @@ def test_webhook_schemas_match_serializers():
         ("UpdateTenantRequest", operator_admin.UpdateTenantBody),
         ("BootstrapAdminTokenRequest", operator_admin.BootstrapAdminTokenBody),
         ("RiskReviewRequest", risk_reviews.ReviewBody),
+        ("LearnerReviewRequest", learner.LearnerReviewBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -186,6 +188,50 @@ def test_risk_review_schemas_match_serializers():
     keys = set(risk_reviews.serialize_review(review))
     assert _props("RiskMappingReview") == keys
     assert set(SCHEMAS["RiskMappingReview"]["required"]) == keys
+
+
+def test_learner_schemas_match_serializers():
+    now = datetime.now(UTC)
+    snap = SimpleNamespace(
+        id=uuid.uuid4(),
+        learner_version="lv1-0123456789abcdef",
+        parent_version=None,
+        mode="recommend",
+        algorithm="linear-thompson.v1",
+        feature_schema="ps-prompt-features.v1",
+        policy_version=None,
+        data_fingerprint="0" * 64,
+        training_rows=1,
+        scored_rows=1,
+        snapshot={"recommendations": []},
+        created_at=now,
+    )
+    summary = set(learner.serialize_snapshot(snap))
+    assert _props("LearnerSnapshotSummary") == summary
+    assert set(SCHEMAS["LearnerSnapshotSummary"]["required"]) == summary
+    assert _props("LearnerSnapshot") == set(learner.serialize_snapshot(snap, full=True))
+    rec = SimpleNamespace(
+        id=uuid.uuid4(),
+        snapshot_id=uuid.uuid4(),
+        learner_version="lv1-0123456789abcdef",
+        use_case="support",
+        sensitivity_level="internal",
+        current_model="openai:gpt-4o",
+        recommended_model="mistral:mistral-small",
+        candidates=["mistral:mistral-small"],
+        projection={},
+        status="accepted",
+        reviewed_by="a@example.com",
+        reviewed_at=now,
+        review_comment=None,
+        reviewer_actor_type="partner",
+        created_at=now,
+    )
+    keys = set(learner.serialize_recommendation(rec))
+    assert _props("LearnerRecommendation") == keys
+    assert set(SCHEMAS["LearnerRecommendation"]["required"]) == keys
+    realised_keys = set(SCHEMAS["LearnerRealised"]["required"])
+    assert _props("LearnerRealised") == realised_keys
 
 
 def test_provider_credential_schemas_match_serializers():
@@ -358,3 +404,17 @@ def test_tenant_schema_matches_serializer():
     keys = set(operator_admin._tenant_dict(tenant))
     assert _props("Tenant") == keys == set(SCHEMAS["Tenant"]["required"])
     assert _props("TenantCreated") == keys | {"api_key", "warning"}
+
+
+def test_focus_cost_row_schema_matches_the_export_columns():
+    from collector import focus_export
+
+    assert list(SCHEMAS["FocusCostRow"]["properties"]) == list(focus_export.COLUMNS)
+    assert SCHEMAS["FocusCostRow"]["required"] == list(focus_export.COLUMNS)
+    op = SPEC["paths"]["/partner/v1/usage/focus-export"]["get"]
+    assert op["security"][0] == {"OAuth2": ["usage:export"]}
+    params = {p["name"]: p["schema"] for p in op["parameters"]}
+    assert params["format"]["enum"] == ["csv", "jsonl"]
+    assert params["granularity"]["enum"] == ["hour", "day"]
+    assert params["cost_mode"]["enum"] == ["estimated", "merge_safe"]
+    assert set(focus_export.MEDIA_TYPES) == set(params["format"]["enum"])

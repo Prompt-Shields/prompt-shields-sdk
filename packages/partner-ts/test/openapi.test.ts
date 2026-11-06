@@ -205,6 +205,22 @@ const UNMAPPED_SCHEMAS = new Set([
   'RiskMappingReview',
   'RiskReviewRequest',
   'RiskReviewHistory',
+  // Routing learner snapshots and recommendation review (#47, #48): not
+  // wrapped yet; call them with client.send().
+  'LearnerSnapshotSummary',
+  'LearnerSnapshot',
+  'LearnerArmProjection',
+  'LearnerRealised',
+  'LearnerRecommendation',
+  'LearnerReviewRequest',
+  'LearnerSnapshotUploadResult',
+  // Spend anomaly alerts (#30): not wrapped yet; call them with
+  // client.send(). The thresholds are operator tenant settings.
+  'SpendAlert',
+  'SpendAnomalySettings',
+  // FOCUS cost export (#31): a streamed CSV / JSON Lines file, not wrapped;
+  // download it with fetch or curl.
+  'FocusCostRow',
 ]);
 
 interface Operation {
@@ -243,6 +259,7 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/business-units': { methods: ['businessUnits.list'] },
   'GET /partner/v1/changes': { methods: ['changes.list', 'changes.listPage'], params: 'ListChangesParams' },
   'GET /partner/v1/export': { methods: ['export.get'], params: 'ExportParams' },
+  'GET /partner/v1/usage/focus-export': NOT_WRAPPED, // streamed CSV / JSON Lines file
   'GET /partner/v1/health': { methods: ['health'] },
   'GET /partner/v1/provider-credentials': NOT_WRAPPED,
   'GET /partner/v1/provider-credentials/{provider}': NOT_WRAPPED,
@@ -307,6 +324,9 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /api/v1/admin/risk-mappings/{risk_id}/reviews': NOT_WRAPPED,
   'GET /partner/v1/assets/{asset_id}/risks/{risk_id}/reviews': NOT_WRAPPED,
   'POST /partner/v1/assets/{asset_id}/risks/{risk_id}/review': NOT_WRAPPED,
+  'GET /partner/v1/spend-alerts': NOT_WRAPPED,
+  'GET /partner/v1/spend-alerts/{alert_id}': NOT_WRAPPED,
+  'POST /partner/v1/spend-alerts/{alert_id}/acknowledge': NOT_WRAPPED,
   'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,
   'POST /api/v1/admin/cloud-inventory/pull': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/leanix/sync': NOT_WRAPPED,
@@ -326,6 +346,14 @@ const OPERATIONS: Record<string, Operation> = {
   // Call feedback (#43) is sent by the Python SDK and the gateway with the
   // tenant ingest key, never by a partner.
   'POST /ingest/feedback': NOT_WRAPPED,
+  // Learner snapshots are uploaded by the Python SDK's ps-learn with the
+  // tenant ingest key; the learner routes are not wrapped yet (#47, #48).
+  'POST /ingest/learner-snapshots': NOT_WRAPPED,
+  'GET /partner/v1/learner/snapshots': NOT_WRAPPED,
+  'GET /partner/v1/learner/snapshots/{learner_version}': NOT_WRAPPED,
+  'GET /partner/v1/learner/recommendations': NOT_WRAPPED,
+  'GET /partner/v1/learner/recommendations/{rec_id}': NOT_WRAPPED,
+  'POST /partner/v1/learner/recommendations/{rec_id}/review': NOT_WRAPPED,
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

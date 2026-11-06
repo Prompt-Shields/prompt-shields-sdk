@@ -5,6 +5,13 @@
  * EEA models scaleway-small then mistral-small-eu; the US gpt-4o-mini is
  * never a candidate) and the chat/messages handlers fail over across them
  * on a 5xx, 429 or timeout. Anything else is returned as is.
+ *
+ * The gateway router rewrites only the model, so under a data policy a
+ * candidate whose tier names another provider than the request's is
+ * skipped, never attempted (#20). The failover mechanics below use the
+ * nordic policy with the tiers' providers left out (facts about the model
+ * alone), so every candidate may run at the request's provider; the last
+ * section checks the provider binding with the providers kept.
  */
 jest.mock('jose', () => ({}));
 jest.mock('../../middlewares/router/policy', () => {
@@ -43,6 +50,17 @@ const nordic = fromRoutePolicyDoc(
     )
   )
 );
+
+// The nordic tiers with no provider: facts about the model alone.
+const facts = {
+  ...nordic,
+  groups: Object.fromEntries(
+    Object.entries(nordic.groups).map(([g, tiers]) => [
+      g,
+      tiers.map(({ provider: _provider, ...t }) => t),
+    ])
+  ),
+};
 
 function usePolicy(p: any) {
   for (const k of Object.keys(defaultPolicy)) delete (defaultPolicy as any)[k];
@@ -102,7 +120,7 @@ const chat = (headers: Record<string, string> = routed, body: any = {}) =>
 let breakers: BreakerRegistry;
 beforeEach(() => {
   resetHarness();
-  usePolicy(nordic);
+  usePolicy(facts);
   breakers = _resetRouteBreakersForTests();
 });
 afterAll(() => {
@@ -121,6 +139,8 @@ describe('fails over to the next compliant candidate', () => {
 
     const ev = await telemetryEvent();
     expect(ev.fallback_chain).toEqual(['server_error']);
+    // #44: a failover is the `fallback` outcome class.
+    expect(ev.outcome_signals).toEqual(['fallback']);
     expect(ev.served_model).toBe('mistral-small-eu');
     expect(ev.requested_model).toBe('auto');
     expect(ev.retry_count).toBe(1);
@@ -337,23 +357,23 @@ describe('per-provider circuit breaker', () => {
     breakers = _resetRouteBreakersForTests(
       new BreakerRegistry({ config: { failureThreshold: 2, openSeconds: 60 } })
     );
-    byModel({ 'scaleway-small': 500 });
-    await chat();
-    await chat();
+    // Every candidate runs at the request's provider (the tiers name none).
+    byModel({ 'scaleway-small': 500, 'mistral-small-eu': 500 });
+    expect((await chat()).status).toBe(500);
     // Keyed `<provider>#<caller scope>`.
-    const scaleway = Object.entries(breakers.snapshot()).filter(([k]) =>
-      k.startsWith('scaleway#')
+    const openaiBreakers = Object.entries(breakers.snapshot()).filter(([k]) =>
+      k.startsWith('openai#')
     );
-    expect(scaleway.map(([, state]) => state)).toEqual(['open']);
+    expect(openaiBreakers.map(([, state]) => state)).toEqual(['open']);
 
     resetHarness();
-    byModel({ 'scaleway-small': 500 });
-    expect((await chat()).status).toBe(200);
-    expect(models()).toEqual(['mistral-small-eu']);
+    byModel({});
+    expect((await chat()).status).toBe(503);
+    expect(upstreamCalls).toHaveLength(0);
 
     const metrics = await (await app.request('/metrics')).text();
     expect(metrics).toMatch(
-      /ps_gateway_circuit_breaker_transitions_total\{provider="scaleway",to="open"\} [1-9]/
+      /ps_gateway_circuit_breaker_transitions_total\{provider="openai",to="open"\} [1-9]/
     );
   });
 
@@ -380,7 +400,7 @@ describe('the data policy is checked on every attempt', () => {
   const withUsModel = (keepRest: boolean) =>
     jest.spyOn(routerIndex, 'routeCandidates').mockImplementation((...args) => {
       const [first, ...rest] = actual(...args);
-      const us = nordic.groups.cheap.find((t) => t.model === 'gpt-4o-mini')!;
+      const us = facts.groups.cheap.find((t) => t.model === 'gpt-4o-mini')!;
       return keepRest ? [first, us, ...rest] : [first, us];
     });
   afterEach(() => jest.restoreAllMocks());
@@ -464,5 +484,72 @@ describe('the response cache with failover', () => {
     body = await (await chat(headers)).json();
     expect(body.choices[0].message.content).toBe('from scaleway-small');
     expect(models()).toEqual(['scaleway-small']);
+  });
+});
+
+describe('candidates are held to the request provider (#20)', () => {
+  // A mixed-provider draft group at `confidential`: the cheapest EEA tier is
+  // at scaleway, two more at berget.
+  const mixed = {
+    ...nordic,
+    groups: {
+      ...nordic.groups,
+      cheap: [
+        ...nordic.groups.cheap,
+        {
+          ...nordic.groups.cheap.find((t) => t.model === 'scaleway-small')!,
+          model: 'berget-small',
+          provider: 'berget',
+          inputCostPer1k: 0.0005,
+          outputCostPer1k: 0.0005,
+        },
+        {
+          ...nordic.groups.cheap.find((t) => t.model === 'scaleway-small')!,
+          model: 'berget-medium',
+          provider: 'berget',
+          inputCostPer1k: 0.001,
+          outputCostPer1k: 0.001,
+        },
+      ],
+    },
+  };
+  const BERGET = /api\.berget\.ai\/v1\/chat\/completions$/;
+  const asProvider = (provider: string) => ({
+    'x-portkey-provider': provider,
+    authorization: 'Bearer eu-key',
+    'x-ps-quality': 'draft',
+    'x-ps-data-classification': 'confidential',
+  });
+
+  test("only the request provider's tiers are attempted; served_provider is the one that answered", async () => {
+    usePolicy(mixed);
+    upstream(BERGET, (call) =>
+      call.body.model === 'berget-small'
+        ? json({ error: { message: 'down' } }, 500)
+        : chatOk(call.body.model)
+    );
+    const res = await chat(asProvider('berget'));
+    expect(res.status).toBe(200);
+    // scaleway-small (the router's cheapest pick) and mistral-small-eu name
+    // other providers: skipped, never sent to berget.
+    expect(upstreamCalls.map((c) => [c.url, c.body.model])).toEqual([
+      ['https://api.berget.ai/v1/chat/completions', 'berget-small'],
+      ['https://api.berget.ai/v1/chat/completions', 'berget-medium'],
+    ]);
+    const ev = await telemetryEvent();
+    expect(ev).toMatchObject({
+      served_model: 'berget-medium',
+      served_provider: 'berget',
+      served_jurisdiction: 'EEA',
+    });
+  });
+
+  test('no compliant tier at the request provider: 403, no upstream call', async () => {
+    usePolicy(mixed);
+    byModel({});
+    const res = await chat(asProvider('openai'));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as any).error.code).toBe('policy_violation');
+    expect(upstreamCalls).toHaveLength(0);
   });
 });

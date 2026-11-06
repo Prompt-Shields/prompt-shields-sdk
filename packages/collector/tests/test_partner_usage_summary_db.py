@@ -115,6 +115,8 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "budget_blocked_requests": 0,
         "cache_hit_rate": 0.0,
         "cache_saved_usd": None,
+        "outcome_signals_reported": 0,
+        "outcome_signal_counts": None,
         "period": "7d",
     }
     assert r30.json() == {
@@ -135,6 +137,8 @@ async def test_usage_summary_totals_and_tenant_isolation_on_postgres(seeded_db):
         "budget_blocked_requests": 0,
         "cache_hit_rate": 0.5,
         "cache_saved_usd": 0.25,
+        "outcome_signals_reported": 0,
+        "outcome_signal_counts": None,
         "period": "30d",
     }
     b90 = r90.json()
