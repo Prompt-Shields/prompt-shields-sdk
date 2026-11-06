@@ -12,8 +12,9 @@
  *    it (`HeaderMismatch`, -32020, as the spec requires of servers);
  * 3. `tools/call`: the tool must pass the server's allow/deny list and
  *    description pin, and the OIDC group's MCP policy (`./groupPolicy.ts`),
- *    its `Mcp-Param-*` headers must match its arguments, then the input
- *    guardrails run on its arguments and MRTR `inputResponses`;
+ *    then its `Mcp-Param-*` headers must match its arguments (after the
+ *    policy, so a hidden tool is never told apart from a missing one), then
+ *    the input guardrails run on its arguments and MRTR `inputResponses`;
  * 4. the request goes to the configured URL only, with the server's own
  *    credentials (the client's Authorization header is never forwarded), the
  *    URL re-checked by `isSafeUpstreamURL`, and redirects refused;
@@ -61,6 +62,7 @@ import {
   recordToolCall,
 } from './telemetry';
 import { isMetricsEnabled } from '../middlewares/psMetrics/labels';
+import { byteLength, mcpCallState } from './otel';
 
 /** JSON-RPC error codes. -32000..-32019 are implementation-defined. */
 export const MCP_ERRORS = {
@@ -331,6 +333,7 @@ const jsonResponse = (message: unknown, status: number, upstream: Response) =>
 
 export async function mcpHandler(c: Context): Promise<Response> {
   const started = Date.now();
+  const state = mcpCallState(c, started);
   const serverId = c.req.param('server') ?? '';
   const auth = checkMcpClient(c);
   if (!auth.ok) {
@@ -447,6 +450,13 @@ export async function mcpHandler(c: Context): Promise<Response> {
   }
   const method: unknown = message.method;
   const id: RpcId = isRpcId(message.id) ? message.id : null;
+  if (typeof method === 'string') {
+    state.method = method;
+    state.id = id;
+    state.requestBytes = byteLength(text);
+    if (method === 'tools/call') state.tool = message.params?.name;
+    if (method === 'prompts/get') state.prompt = message.params?.name;
+  }
   if (method !== undefined) {
     const isNotification = !('id' in message);
     if (
@@ -464,11 +474,11 @@ export async function mcpHandler(c: Context): Promise<Response> {
         'Invalid JSON-RPC request'
       );
     }
-    const mismatch =
-      headerMismatch(c.req.raw.headers, message) ??
-      (method === 'tools/call'
-        ? paramHeaderMismatch(server, c.req.raw.headers, message)
-        : undefined);
+    // Mcp-Method / Mcp-Name only here. The Mcp-Param-* check needs the
+    // tool's schema, so it runs after the tool and group policy: otherwise
+    // a tool hidden from the caller would answer -32020 instead of -32010
+    // and leak that it exists.
+    const mismatch = headerMismatch(c.req.raw.headers, message);
     if (mismatch) {
       recordRequest(c, server.id, method, 'invalid');
       return rpcError(
@@ -530,6 +540,20 @@ export async function mcpHandler(c: Context): Promise<Response> {
         id,
         MCP_ERRORS.TOOL_DENIED,
         `Tool ${displayToolName(toolName)} is not allowed for your group`
+      );
+    }
+    const paramMismatch = paramHeaderMismatch(
+      server,
+      c.req.raw.headers,
+      message
+    );
+    if (paramMismatch) {
+      recordRequest(c, server.id, method, 'invalid');
+      return rpcError(
+        400,
+        id,
+        MCP_ERRORS.HEADER_MISMATCH,
+        `Header mismatch: ${paramMismatch}`
       );
     }
     if (
@@ -604,7 +628,17 @@ export async function mcpHandler(c: Context): Promise<Response> {
   const inspect = method === 'tools/list' || isToolCall;
 
   // The response to tools/list or tools/call, checked before it is released.
+  const measure = (response: any) => {
+    try {
+      state.responseBytes = byteLength(JSON.stringify(response));
+    } catch {
+      /* unmeasurable: leave unset */
+    }
+    if (Number.isInteger(response?.error?.code))
+      state.errorCode = response.error.code;
+  };
   const onResponse = async (response: any): Promise<any | undefined> => {
+    measure(response);
     if (method === 'tools/list') {
       if (response.error) {
         finish('error');
@@ -653,7 +687,10 @@ export async function mcpHandler(c: Context): Promise<Response> {
       );
     }
     const replacement = inspect ? await onResponse(error) : undefined;
-    if (!inspect) finish('error');
+    if (!inspect) {
+      measure(error);
+      finish('error');
+    }
     return jsonResponse(replacement ?? error, upstream.status, upstream);
   }
 
@@ -712,7 +749,10 @@ export async function mcpHandler(c: Context): Promise<Response> {
       );
     }
     const replacement = inspect ? await onResponse(response) : undefined;
-    if (!inspect) finish(response.error ? 'error' : 'ok');
+    if (!inspect) {
+      measure(response);
+      finish(response.error ? 'error' : 'ok');
+    }
     return jsonResponse(replacement ?? response, upstream.status, upstream);
   }
   // Fail closed: a result the gateway cannot read is not released.

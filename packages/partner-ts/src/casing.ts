@@ -14,9 +14,16 @@ export function snakeKey(key: string): string {
  * attested field (`asset`, `owner`, `data_classification`), and the usage
  * summary's `outcome_signal_counts` by outcome class (`max_tokens`, ...).
  * Their own keys are kept as sent (so they match `Attestation.field` and the
- * class names); their values are still camelCased.
+ * class names); their values are still camelCased. A learner projection's
+ * `arm_samples` is keyed by model name.
  */
-const MAP_KEYS = new Set(['attestation', 'current', 'outcome_signal_counts']);
+const MAP_KEYS = new Set(['attestation', 'current', 'outcome_signal_counts', 'arm_samples']);
+
+/**
+ * Response keys whose whole value is a document kept exactly as sent: a
+ * learner snapshot's `snapshot` (the uploaded `ps-learner-snapshot.v1`).
+ */
+const RAW_KEYS = new Set(['snapshot']);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -28,7 +35,9 @@ export function camelizeKeys<T = unknown>(value: unknown): T {
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      if (MAP_KEYS.has(k) && isPlainObject(v)) {
+      if (RAW_KEYS.has(k) && isPlainObject(v)) {
+        out[camelKey(k)] = v;
+      } else if (MAP_KEYS.has(k) && isPlainObject(v)) {
         const map: Record<string, unknown> = {};
         for (const [mk, mv] of Object.entries(v)) map[mk] = camelizeKeys(mv);
         out[camelKey(k)] = map;

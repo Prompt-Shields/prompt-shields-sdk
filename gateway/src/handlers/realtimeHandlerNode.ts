@@ -77,9 +77,18 @@ export async function realTimeHandlerNode(
     });
 
     // wait for the upstream websocket to be open
-    const checkWebSocketOpen = new Promise((resolve) => {
+    // PS fork (#208): also settle when the upstream fails before opening
+    // (DNS, TLS, a refused handshake). Otherwise this never resolves and the
+    // client's upgrade request hangs until the client gives up.
+    const checkWebSocketOpen = new Promise((resolve, reject) => {
       outgoingWebSocket.addEventListener('open', () => {
         resolve(true);
+      });
+      outgoingWebSocket.addEventListener('error', () => {
+        reject(new Error('upstream websocket failed before open'));
+      });
+      outgoingWebSocket.addEventListener('close', () => {
+        reject(new Error('upstream websocket closed before open'));
       });
     });
 

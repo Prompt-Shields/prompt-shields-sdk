@@ -10,7 +10,10 @@ and owner / environment / business unit taken from resource tags.
 Supported so far:
 
   - Azure: Azure OpenAI and AI Foundry (``AIServices``) accounts and their
-    model deployments, via Azure Resource Manager.
+    model deployments, and, in Azure Machine Learning workspaces and
+    hub-based AI Foundry projects, serverless API endpoints (Model-as-a-
+    Service) and managed online endpoint deployments, via Azure Resource
+    Manager.
   - AWS: Amazon Bedrock provisioned throughput, custom (fine-tuned) models,
     imported models and application inference profiles, per configured
     region, via the Bedrock control plane (SigV4-signed, read-only); and,
@@ -57,7 +60,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 from uuid import UUID
@@ -91,6 +94,12 @@ ARM_SUBSCRIPTIONS_API = "2022-12-01"
 ARM_COGNITIVE_API = "2024-10-01"
 # Account kinds that host model deployments.
 AZURE_AI_KINDS = {"openai", "aiservices"}
+ARM_ML_API = "2024-10-01"
+# Hubs hold shared configuration (deployments live in their projects) and
+# feature stores serve features, not models.
+AZURE_ML_SKIPPED_KINDS = {"hub", "featurestore"}
+# Serverless endpoint states that are not serving.
+AZURE_ML_ENDPOINT_INACTIVE = {"deleting", "creationfailed", "suspended"}
 # Deployments in these states are not serving and are not inventoried.
 INACTIVE_STATES = {"failed", "deleting", "deleted", "canceled", "disabled"}
 
@@ -177,6 +186,8 @@ _GCP_PEM = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----")
 # A project id or number in a Vertex AI resource name.
 _GCP_SEGMENT = r"[a-z0-9][a-z0-9-]{0,62}"
 _GCP_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_GCP_LABEL_VALUE = re.compile(r"^[\w-]{1,63}$")
+_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
 _VERTEX_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/-]{0,199}$")
 
 MAX_PAGES = 200
@@ -191,6 +202,18 @@ _ACCOUNT_ID = re.compile(
     r"Microsoft\.CognitiveServices/accounts/[^/]+$",
     re.IGNORECASE,
 )
+
+_WORKSPACE_ID = re.compile(
+    r"^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/"
+    r"Microsoft\.MachineLearningServices/workspaces/[^/]+$",
+    re.IGNORECASE,
+)
+# Endpoint and deployment names, before they are put in a URL or id.
+_ARM_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+# azureml://registries/<r>/models/<name>[/versions/<v>], a workspace model
+# id (.../models/<name>/versions/<v>) or azureml:<name>:<version>.
+_ML_MODEL_PATH = re.compile(r"/models/([^/]+)(?:/|$)")
+_ML_MODEL_SHORT = re.compile(r"^azureml:([^:/]+)(?::[^:/]+)?$")
 
 OWNER_TAGS = ("owner", "owner_email", "owneremail", "owner-email", "contact")
 ENVIRONMENT_TAGS = ("environment", "env")
@@ -216,6 +239,10 @@ class AzureInventoryCredentials(BaseModel):
     client_secret: SecretStr
     # Empty: every subscription the principal can read.
     subscription_ids: list[str] = []
+    # Also inventory Azure Machine Learning workspaces and hub-based AI
+    # Foundry projects (serverless and managed online endpoints). Their
+    # failures are reported apart and never drop the accounts' deployments.
+    include_ml_workspaces: bool = True
 
     @field_validator("directory_id")
     @classmethod
@@ -378,6 +405,9 @@ class GcpInventoryCredentials(BaseModel):
     project_ids: list[str] = []
     # Vertex AI is regional: every region to inventory must be listed.
     regions: list[str]
+    # GCP label values cannot hold an email address: maps an ``owner`` label
+    # value (e.g. ``claims-team``) to the owner's email.
+    owner_label_emails: dict[str, str] = {}
 
     @field_validator("service_account", mode="before")
     @classmethod
@@ -391,6 +421,17 @@ class GcpInventoryCredentials(BaseModel):
             # Not echoing the value: it may be (part of) the key.
             raise ValueError(  # noqa: TRY004 (pydantic needs ValueError)
                 "service_account must be a service account JSON key"
+            )
+        return v
+
+    @field_validator("owner_label_emails")
+    @classmethod
+    def _owner_emails(cls, v: dict[str, str]) -> dict[str, str]:
+        if len(v) > 1000 or not all(
+            _GCP_LABEL_VALUE.match(k) and _EMAIL.match(e) for k, e in v.items()
+        ):
+            raise ValueError(
+                "owner_label_emails must map GCP label values to email addresses"
             )
         return v
 
@@ -698,7 +739,8 @@ async def fetch_azure_deployments(
     """
     deployments: list[CloudDeployment] = []
     errors: dict[str, str] = {}
-    accounts_seen = 0
+    ml_errors: dict[str, str] = {}
+    accounts_seen = workspaces_seen = 0
     async with httpx.AsyncClient(
         transport=transport, timeout=30.0, follow_redirects=False
     ) as client:
@@ -727,11 +769,21 @@ async def fetch_azure_deployments(
                 continue
             accounts_seen += accounts
             deployments += found
+            if creds.include_ml_workspaces:
+                workspaces, found = await _azure_ml_subscription(
+                    client, sid, auth, sleep, ml_errors
+                )
+                workspaces_seen += workspaces
+                deployments += found
     if subscriptions and len(errors) == len(subscriptions):
         raise CloudInventoryError("; ".join(dict.fromkeys(errors.values())))
     summary: dict = {"accounts": accounts_seen}
+    if creds.include_ml_workspaces:
+        summary["ml_workspaces"] = workspaces_seen
     if errors:
         summary["subscription_errors"] = errors
+    if ml_errors:
+        summary["ml_errors"] = ml_errors
     return summary, deployments
 
 
@@ -795,6 +847,161 @@ async def _azure_subscription(
                 )
             )
     return accounts_seen, deployments
+
+
+def _ml_model(value) -> str | None:
+    """Model name from an Azure ML model reference, e.g.
+    ``azureml://registries/azureml-meta/models/Meta-Llama-3-8B-Instruct``."""
+    if not isinstance(value, str) or not value or len(value) > 1024:
+        return None
+    m = _ML_MODEL_PATH.search(value) or _ML_MODEL_SHORT.match(value)
+    return m.group(1) if m else None
+
+
+def _location(value, fallback: str | None) -> str | None:
+    loc = _str_or_none(value)
+    return loc.lower() if loc else fallback
+
+
+def _inactive(props: dict) -> bool:
+    return str(props.get("provisioningState") or "").lower() in INACTIVE_STATES
+
+
+async def _azure_ml_subscription(
+    client: httpx.AsyncClient,
+    sid: str,
+    auth: _AzureAuth,
+    sleep: Sleep,
+    errors: dict[str, str],
+) -> tuple[int, list[CloudDeployment]]:
+    """(workspaces seen, endpoint deployments) in the Azure Machine Learning
+    workspaces and hub-based AI Foundry projects of one subscription.
+
+    Failures are recorded in ``errors`` (by subscription id, or by workspace
+    id) and not raised, so a principal without these permissions (a custom
+    role written before they were inventoried) still gets its Cognitive
+    Services deployments.
+    """
+    workspaces: list[dict] = []
+    try:
+        async for ws in _arm_list(
+            client,
+            f"/subscriptions/{sid}/providers/Microsoft.MachineLearningServices/workspaces",
+            ARM_ML_API,
+            auth,
+            "ml workspace list",
+            sleep,
+        ):
+            workspaces.append(ws)
+    except CloudInventoryError as exc:
+        # 409: the resource provider is not registered in the subscription,
+        # so it has no workspaces.
+        if exc.status != 409:
+            errors[sid] = str(exc)
+        return 0, []
+    seen = 0
+    deployments: list[CloudDeployment] = []
+    for ws in workspaces:
+        if str(ws.get("kind") or "").lower() in AZURE_ML_SKIPPED_KINDS:
+            continue
+        ws_id = ws.get("id")
+        if not isinstance(ws_id, str) or not _WORKSPACE_ID.match(ws_id):
+            logger.warning("azure: skipping ml workspace with unexpected id")
+            continue
+        seen += 1
+        try:
+            deployments += await _azure_ml_workspace(
+                client,
+                ws_id,
+                _location(ws.get("location"), None),
+                _tags(ws.get("tags")),
+                auth,
+                sleep,
+            )
+        except CloudInventoryError as exc:
+            errors[ws_id] = str(exc)
+    return seen, deployments
+
+
+async def _azure_ml_workspace(
+    client: httpx.AsyncClient,
+    ws_id: str,
+    region: str | None,
+    ws_tags: dict[str, str],
+    auth: _AzureAuth,
+    sleep: Sleep,
+) -> list[CloudDeployment]:
+    """Serverless endpoints and managed online deployments of one workspace.
+    Endpoint tags override the workspace's, deployment tags the endpoint's."""
+    out: list[CloudDeployment] = []
+    async for ep in _arm_list(
+        client,
+        f"{ws_id}/serverlessEndpoints",
+        ARM_ML_API,
+        auth,
+        "serverless endpoint list",
+        sleep,
+    ):
+        props = _dict(ep.get("properties"))
+        name = ep.get("name")
+        if not isinstance(name, str) or not _ARM_NAME.match(name):
+            continue
+        state = str(props.get("endpointState") or "").lower()
+        if _inactive(props) or state in AZURE_ML_ENDPOINT_INACTIVE:
+            continue
+        out.append(
+            CloudDeployment(
+                cloud="azure",
+                resource_id=f"{ws_id}/serverlessEndpoints/{name}",
+                region=_location(ep.get("location"), region),
+                model=_ml_model(_dict(props.get("modelSettings")).get("modelId")),
+                model_format="serverless",
+                tags={**ws_tags, **_tags(ep.get("tags"))},
+            )
+        )
+    endpoints = [
+        ep
+        async for ep in _arm_list(
+            client,
+            f"{ws_id}/onlineEndpoints",
+            ARM_ML_API,
+            auth,
+            "online endpoint list",
+            sleep,
+        )
+    ]
+    for ep in endpoints:
+        props = _dict(ep.get("properties"))
+        name = ep.get("name")
+        if not isinstance(name, str) or not _ARM_NAME.match(name) or _inactive(props):
+            continue
+        ep_region = _location(ep.get("location"), region)
+        ep_tags = {**ws_tags, **_tags(ep.get("tags"))}
+        async for dep in _arm_list(
+            client,
+            f"{ws_id}/onlineEndpoints/{name}/deployments",
+            ARM_ML_API,
+            auth,
+            "online deployment list",
+            sleep,
+        ):
+            dprops = _dict(dep.get("properties"))
+            dname = dep.get("name")
+            if not isinstance(dname, str) or not _ARM_NAME.match(dname):
+                continue
+            if _inactive(dprops):
+                continue
+            out.append(
+                CloudDeployment(
+                    cloud="azure",
+                    resource_id=f"{ws_id}/onlineEndpoints/{name}/deployments/{dname}",
+                    region=_location(dep.get("location"), ep_region),
+                    model=_ml_model(dprops.get("model")),
+                    model_format="online",
+                    tags={**ep_tags, **_tags(dep.get("tags"))},
+                )
+            )
+    return out
 
 
 # --- AWS Bedrock -----------------------------------------------------------
@@ -1867,6 +2074,11 @@ async def fetch_gcp_deployments(
                 errors[f"{project}/{region}"] = str(exc)
     if len(errors) == len(creds.project_ids) * len(creds.regions):
         raise CloudInventoryError("; ".join(dict.fromkeys(errors.values())))
+    if creds.owner_label_emails:
+        deployments = [
+            replace(d, tags=map_owner_label(d.tags, creds.owner_label_emails))
+            for d in deployments
+        ]
     summary: dict = {
         "projects": len(creds.project_ids),
         "regions": len(creds.regions),
@@ -1882,6 +2094,18 @@ def _tag(tags: dict[str, str], names: tuple[str, ...]) -> str | None:
         if lowered.get(n):
             return lowered[n]
     return None
+
+
+def map_owner_label(tags: dict[str, str], emails: dict[str, str]) -> dict[str, str]:
+    """Replace the owner tag's value by its email from ``emails``, when it
+    has one (for clouds whose tag values cannot hold an email)."""
+    keys = {k.lower(): k for k in tags}
+    for name in OWNER_TAGS:
+        key = keys.get(name)
+        if key and tags[key].strip():
+            email = emails.get(tags[key].strip())
+            return {**tags, key: email} if email else tags
+    return tags
 
 
 def owner_from_tags(tags: dict[str, str]) -> str | None:

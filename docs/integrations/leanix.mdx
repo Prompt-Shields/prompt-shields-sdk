@@ -71,7 +71,8 @@ PS_LEANIX='{
 Optional per-tenant fields: `connector_id` (default `prompt-shields`; set it
 when several Prompt Shields instances feed one workspace),
 `include_data_flows` (default `true`), `batch_size` (assets per run,
-default 500), `business_unit_type` and `lx_workspace`:
+default 500), `verify` (default `false`, see
+[Round-trip check](#round-trip-check)), `business_unit_type` and `lx_workspace`:
 
 - `business_unit_type`: the fact sheet type business units are written to.
   `Organization` (default) in the current meta model (v4); `UserGroup` in
@@ -119,6 +120,30 @@ curl "https://collector.example.com/api/v1/admin/connectors/leanix/status?tenant
 # CLI
 python -m collector.leanix --tenant <tenant uuid> [--full]
 ```
+
+### Round-trip check
+
+Add `"verify": true` to the sync request (or `--verify` to the CLI, or
+`"verify": true` in the tenant's `PS_LEANIX` entry to always do it) and the
+connector reads every fact sheet it just wrote back from the workspace
+through the LeanIX GraphQL API (`POST /services/pathfinder/v1/graphql`,
+filtered by type and `externalId`, 100 ids per query). The result and the
+status endpoint carry `verification` / `last_verification`:
+
+```json
+{"checked": 4, "found": 4, "missing_count": 0, "missing": []}
+```
+
+If any fact sheet is missing, for example because the run finished but its
+processor skipped items (a fact sheet type or relation the workspace's meta
+model does not have, or a technical user without write access), the sync
+fails with `N of M fact sheets not found after sync`, lists up to 20 missing
+external ids, and the cursor does not move. GraphQL error messages are not
+echoed. The technical user needs read access to fact sheets for this.
+
+To check a new workspace end to end, run once with `"full": true,
+"verify": true` and confirm `missing_count` is 0, then look up one of the
+IT Components in the LeanIX UI by its external id.
 
 Schedule the CLI (for example every 4 hours) with your job runner; the
 collector has no built-in scheduler yet.

@@ -241,6 +241,11 @@ export const GoogleApiConfig: ProviderAPIConfig = {
         'imageGenerate',
         `${projectRoute}/publishers/${provider}/models/${model}:predict`,
       ],
+      // PS fork (#73 follow-up): Messages count_tokens for Gemini.
+      [
+        'messagesCountTokens',
+        `${projectRoute}/publishers/${provider}/models/${model}:countTokens`,
+      ],
     ]);
 
     switch (provider) {

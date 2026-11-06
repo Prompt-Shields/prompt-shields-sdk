@@ -10,6 +10,13 @@
  *   says, and nothing when it is `off`) and the policy group name
  *   (`user_group`). Same opt-in, delivery and loss accounting as the LLM
  *   telemetry (`PS_API_KEY`, `PS_COLLECTOR_URL`).
+ * - Metering (#77): the event also carries `request_bytes` (the request
+ *   body) and `response_bytes` (the response message the gateway checked;
+ *   absent when there was none), and `server_owner`, the configured
+ *   server's `owner`, so the collector can register the server as an asset
+ *   with its owner.
+ * - One OTel MCP span per request (`./otel.ts`), when `PS_OTEL_ENDPOINT` is
+ *   set.
  * - Prometheus metrics (`PS_METRICS_ENABLED`). Labels are bounded: `server`
  *   is a configured server id, `method` one of a fixed list, `tool` a tool
  *   name the policy allowed (capped per process), the rest fixed sets.
@@ -23,6 +30,8 @@ import {
   defaultRegistry,
 } from '../middlewares/psMetrics/registry';
 import { PSTelemetrySender } from '../middlewares/psTelemetrySender';
+import { getMcpServer } from './config';
+import { emitMcpSpan, mcpCallState } from './otel';
 
 export type McpOutcome =
   /** Forwarded; the upstream answered with a result. */
@@ -143,6 +152,8 @@ export function recordToolCall(
     }
     const environment = labelValue(c.req.header('x-ps-environment'), '');
     const callingService = c.req.header('x-ps-calling-service');
+    const state = mcpCallState(c);
+    const owner = getMcpServer(record.server)?.owner;
     const event = {
       source: 'gateway',
       server_name: record.server,
@@ -154,6 +165,13 @@ export function recordToolCall(
           : 'error',
       latency_ms: Math.max(0, Math.round(record.latencyMs)),
       transport: 'streamable-http',
+      ...(state.requestBytes !== undefined
+        ? { request_bytes: state.requestBytes }
+        : {}),
+      ...(state.responseBytes !== undefined
+        ? { response_bytes: state.responseBytes }
+        : {}),
+      ...(owner ? { server_owner: owner } : {}),
       ...(environment && environment !== 'other' ? { environment } : {}),
       ...(callingService
         ? { calling_service: callingService.slice(0, 200) }
@@ -195,6 +213,9 @@ export function recordRequest(
   method: unknown,
   outcome: McpOutcome
 ) {
-  if (!isMetricsEnabled(c)) return;
-  mcpRequestsTotal.inc({ server, method: methodLabel(method), outcome });
+  if (isMetricsEnabled(c))
+    mcpRequestsTotal.inc({ server, method: methodLabel(method), outcome });
+  // Called once per request, when its outcome is known (for SSE, when the
+  // response event was checked): the moment the span ends.
+  if (server !== 'unknown') emitMcpSpan(c, server, outcome, mcpUserFields(c));
 }
