@@ -56,6 +56,10 @@ SCOPES: dict[str, str] = {
         "Read observed MCP servers and tools (with each server's registry "
         "asset and owner) and their daily tool-call metering"
     ),
+    "usage:export": (
+        "Bulk export AI usage cost in the FinOps FOCUS format "
+        "(CSV or JSON Lines, per asset, model and provider)"
+    ),
     "audit:read": (
         "Receive the tenant's admin audit trail as `audit.*` webhook events "
         "(credential, scope, webhook, retention and registry changes)"
