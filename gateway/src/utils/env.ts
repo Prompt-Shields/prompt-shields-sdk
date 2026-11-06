@@ -131,8 +131,12 @@ const nodeEnv = {
   ),
   AZURE_TENANT_ID: getValueOrFileContents(process.env.AZURE_TENANT_ID),
   AZURE_CLIENT_ID: getValueOrFileContents(process.env.AZURE_CLIENT_ID),
+  // A path, read per request by the Azure providers: never replace it with
+  // the file's contents (a projected token rotates, and the providers
+  // readFileSync() this value).
   AZURE_FEDERATED_TOKEN_FILE: getValueOrFileContents(
-    process.env.AZURE_FEDERATED_TOKEN_FILE
+    process.env.AZURE_FEDERATED_TOKEN_FILE,
+    true
   ),
   AZURE_AMBIENT_CREDENTIALS_ENABLED: getValueOrFileContents(
     process.env.AZURE_AMBIENT_CREDENTIALS_ENABLED,
