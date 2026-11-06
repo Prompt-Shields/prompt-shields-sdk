@@ -77,6 +77,9 @@ export interface Options {
   oauthClientSecret?: string;
   oauthScope?: string;
   oauthAudience?: string;
+  /** PS fork (#76): `workload` = the operator's workload identity federation */
+  openaiAuthType?: string;
+  anthropicAuthType?: string;
   /** Workers AI specific */
   workersAiAccountId?: string;
   /** The parameter to set custom base url */

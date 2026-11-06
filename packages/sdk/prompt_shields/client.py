@@ -82,6 +82,16 @@ def _fingerprint(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()[:16]
 
 
+def _resolve_fingerprint(api_key: str | None, credential_fingerprint: str | None) -> str | None:
+    """The event's `api_key_fingerprint`: an explicit identity fingerprint
+    (argument, else `PS_CREDENTIAL_FINGERPRINT`), else the key hash, else
+    None (keyless client without one)."""
+    explicit = credential_fingerprint or os.environ.get("PS_CREDENTIAL_FINGERPRINT")
+    if explicit:
+        return explicit.strip()
+    return _fingerprint(api_key) if api_key else None
+
+
 class ShieldsClient:
     """Generic Prompt Shields wrapper. Specify `vendor` to pick the provider.
 
@@ -92,7 +102,7 @@ class ShieldsClient:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None,
         ps_api_key: str,
         vendor: str = "openai",
         ps_collector_url: str = "http://localhost:8000",
@@ -115,6 +125,10 @@ class ShieldsClient:
         # Env fallback: PS_ATLAS_URL / PS_ATLAS_API_KEY. Inactive unless BOTH set.
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
+        # Stable credential fingerprint for keyless auth (#76), e.g. from
+        # prompt_shields.credentials; replaces sha256(api_key)[:16].
+        # Env fallback: PS_CREDENTIAL_FINGERPRINT.
+        credential_fingerprint: str | None = None,
         # Spend budgets (budget.v1, #29): a document (mapping or path) or a
         # BudgetEnforcer. budget_store defaults to an in-process store,
         # which is per-process; see prompt_shields.budgets.
@@ -152,7 +166,7 @@ class ShieldsClient:
         self._send_prompt_text = send_prompt_text
         self._pricing_table = pricing_table
         self._on_prompt_features = on_prompt_features
-        self._api_key_fingerprint = _fingerprint(api_key)
+        self._api_key_fingerprint = _resolve_fingerprint(api_key, credential_fingerprint)
 
         # Build immutable per-client metadata (None values are filtered out)
         self._metadata = {
