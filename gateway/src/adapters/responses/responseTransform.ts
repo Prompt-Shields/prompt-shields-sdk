@@ -30,6 +30,13 @@ import {
 } from '../shared';
 import { randomUUID } from 'crypto';
 import { encodeThinkingCarry } from './thinkingCarry';
+import {
+  UrlCitation,
+  anthropicWebSearchSegments,
+  googleGroundingOutput,
+  hasAnthropicWebSearch,
+  wantsWebSearchSources,
+} from './webSearchOutput';
 
 type ResponseStatus = 'completed' | 'incomplete' | 'in_progress';
 
@@ -108,6 +115,7 @@ export function transformChatCompletionsToResponses(
   const functionCallItems: ResponseOutputItem[] = [];
   let overallStatus: ResponseStatus = 'completed';
   let incompleteReason: string | null = null;
+  const includeSources = wantsWebSearchSources(originalRequest);
 
   // Process choices
   for (const choice of response.choices || []) {
@@ -181,32 +189,49 @@ export function transformChatCompletionsToResponses(
 
     // Handle text content
     const content = msg.content;
-    if (content != null) {
-      const text =
-        typeof content === 'string'
+    const text =
+      content == null
+        ? ''
+        : typeof content === 'string'
           ? content
           : Array.isArray(content)
             ? content.map((c: any) => c.text || '').join('')
             : String(content);
 
-      // Only add message if there's actual text content
-      if (text) {
-        messageItems.push({
-          id: `msg_${randomUUID()}`,
-          type: 'message',
-          role: 'assistant',
-          status,
-          content: [
-            {
-              type: 'output_text',
-              text,
-              annotations: [],
-              logprobs: [],
-            } as ResponseOutputText,
-          ],
-        } as ResponseOutputMessage);
+    // PS fork (#73): Anthropic web search blocks and citations become
+    // web_search_call items and url_citation annotations, in block order
+    // (webSearchOutput.ts). The text is the same, split at each search.
+    const segments = hasAnthropicWebSearch(msg.content_blocks)
+      ? anthropicWebSearchSegments(msg.content_blocks, includeSources)
+      : null;
+    const segmentText = segments
+      ?.map((s) => (s.kind === 'text' ? s.text : ''))
+      .join('');
+    if (segments && segmentText === text) {
+      for (const segment of segments) {
+        if (segment.kind === 'web_search_call') {
+          messageItems.push(segment.item as any);
+        } else if (segment.text) {
+          messageItems.push(
+            outputMessage(segment.text, status, segment.annotations)
+          );
+        }
       }
+      continue;
     }
+
+    // PS fork (#73): Google Search grounding: annotations on the message,
+    // then one web_search_call per search query
+    const grounding = googleGroundingOutput(
+      (choice as any).groundingMetadata,
+      text,
+      includeSources
+    );
+    // Only add message if there's actual text content
+    if (text) {
+      messageItems.push(outputMessage(text, status, grounding.annotations));
+    }
+    messageItems.push(...(grounding.calls as any[]));
   }
 
   // PS fork (#73): reasoning, then message, then function calls
@@ -238,6 +263,28 @@ export function transformChatCompletionsToResponses(
     // PS fork (#73): shared with the streamed snapshots
     ...echoRequestFields(originalRequest),
   } as OpenAIResponse;
+}
+
+/** PS fork (#73): an assistant message output item with one output_text. */
+function outputMessage(
+  text: string,
+  status: ResponseStatus,
+  annotations: UrlCitation[] = []
+): ResponseOutputMessage {
+  return {
+    id: `msg_${randomUUID()}`,
+    type: 'message',
+    role: 'assistant',
+    status,
+    content: [
+      {
+        type: 'output_text',
+        text,
+        annotations,
+        logprobs: [],
+      } as ResponseOutputText,
+    ],
+  } as ResponseOutputMessage;
 }
 
 /** PS fork (#73): the model named in the request, or ''. */

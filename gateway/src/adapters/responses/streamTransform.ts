@@ -12,7 +12,10 @@
  * events and `response.output_item.done`, and a mid-stream provider error
  * ends the stream with `response.failed`. Every response snapshot echoes
  * the client's request fields (`echoRequestFields`), as the JSON response
- * and the native API do.
+ * and the native API do. Web searches (Anthropic server tool blocks, Google
+ * grounding) stream as `web_search_call` items with
+ * `response.web_search_call.*` events, and citations as
+ * `response.output_text.annotation.added` (webSearchOutput.ts).
  */
 
 import { randomUUID } from 'crypto';
@@ -27,8 +30,20 @@ import {
   toResponsesStatus,
 } from './responseTransform';
 import { carriesThinking, encodeThinkingCarry } from './thinkingCarry';
+import {
+  UrlCitation,
+  WebSearchCallStatus,
+  anthropicBlockAnnotations,
+  anthropicSearchQuery,
+  anthropicSearchResult,
+  codePointLength,
+  googleGroundingOutput,
+  mergeGroundingMetadata,
+  wantsWebSearchSources,
+  webSearchCallItem,
+} from './webSearchOutput';
 
-type OutputKind = 'message' | 'reasoning' | 'function_call';
+type OutputKind = 'message' | 'reasoning' | 'function_call' | 'web_search_call';
 
 /** PS fork (#73): one output item of the streamed response. */
 interface OutputItem {
@@ -44,6 +59,25 @@ interface OutputItem {
   thinking?: { index: unknown; block: any }[];
   /** PS fork (#73): the provider, to tag the carried thinking */
   provider?: string;
+  /** PS fork (#73): message url_citation annotations */
+  annotations?: UrlCitation[];
+  /** PS fork (#73): message text length in code points */
+  cpLength?: number;
+  /** PS fork (#73): web search status once its result arrived */
+  searchStatus?: WebSearchCallStatus;
+  /** PS fork (#73): web search query (else parsed from `text`) */
+  query?: string;
+  /** PS fork (#73): result URLs, when the request includes sources */
+  sources?: string[];
+}
+
+/** PS fork (#73): the Anthropic content block text is appended for. */
+interface CitedBlock {
+  index: unknown;
+  /** The message item the block's text went to, and where it started */
+  item: OutputItem | null;
+  start: number;
+  citations: any[];
 }
 
 interface StreamState {
@@ -81,6 +115,15 @@ interface StreamState {
   requestEcho: ReturnType<typeof echoRequestFields>;
   /** PS fork (#73): the provider; signed thinking is carried for some */
   provider: string;
+  /** PS fork (#73): `include` asks for web_search_call.action.sources */
+  includeSources: boolean;
+  /** PS fork (#73): the current Anthropic content block and its citations */
+  citedBlock: CitedBlock | null;
+  /** PS fork (#73): web search items by server_tool_use id / block index */
+  searchByToolId: Record<string, OutputItem>;
+  searchByBlockIndex: Map<unknown, OutputItem>;
+  /** PS fork (#73): Google grounding metadata seen in the stream */
+  grounding: any[];
 }
 
 function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
@@ -97,7 +140,7 @@ function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
               {
                 type: 'output_text',
                 text: item.text,
-                annotations: [],
+                annotations: item.annotations ?? [],
                 logprobs: [],
               },
             ]
@@ -129,6 +172,20 @@ function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
         arguments: final ? item.text : '',
         status,
       };
+    case 'web_search_call':
+      // PS fork (#73): a search without a result did not complete
+      return webSearchCallItem(
+        item.id,
+        final
+          ? item.searchStatus === 'completed'
+            ? 'completed'
+            : 'failed'
+          : item.searchStatus === 'searching'
+            ? 'searching'
+            : 'in_progress',
+        item.query ?? anthropicSearchQuery(item.text),
+        item.sources
+      );
   }
 }
 
@@ -144,6 +201,7 @@ const ID_PREFIX: Record<OutputKind, string> = {
   message: 'msg',
   reasoning: 'rs',
   function_call: 'fc',
+  web_search_call: 'ws',
 };
 
 function openItem(
@@ -177,6 +235,8 @@ function openItem(
         part: { type: 'output_text', text: '', annotations: [], logprobs: [] },
       })
     );
+  } else if (kind === 'web_search_call') {
+    events.push(event(state, 'response.web_search_call.in_progress', base));
   } else if (kind === 'reasoning') {
     events.push(
       event(state, 'response.reasoning_summary_part.added', {
@@ -195,6 +255,7 @@ function closeItem(state: StreamState, events: string[], item: OutputItem) {
   if (state.openItem === item) state.openItem = null;
   const base = { item_id: item.id, output_index: item.outputIndex };
   if (item.kind === 'message') {
+    if (state.citedBlock?.item === item) flushCitations(state, events);
     events.push(
       event(state, 'response.output_text.done', {
         ...base,
@@ -208,11 +269,13 @@ function closeItem(state: StreamState, events: string[], item: OutputItem) {
         part: {
           type: 'output_text',
           text: item.text,
-          annotations: [],
+          annotations: item.annotations ?? [],
           logprobs: [],
         },
       })
     );
+  } else if (item.kind === 'web_search_call') {
+    // completion events were sent when the result arrived
   } else if (item.kind === 'reasoning') {
     events.push(
       event(state, 'response.reasoning_summary_text.done', {
@@ -291,8 +354,17 @@ function appendText(
   text: string
 ) {
   const item = ensureOpen(state, events, kind);
-  item.text += text;
   const base = { item_id: item.id, output_index: item.outputIndex };
+  if (kind === 'message') {
+    // PS fork (#73): where the current Anthropic text block starts
+    const block = state.citedBlock;
+    if (block && !block.item) {
+      block.item = item;
+      block.start = item.cpLength ?? 0;
+    }
+    item.cpLength = (item.cpLength ?? 0) + codePointLength(text);
+  }
+  item.text += text;
   if (kind === 'message') {
     state.accumulatedText += text;
     events.push(
@@ -311,6 +383,157 @@ function appendText(
         delta: text,
       })
     );
+  }
+}
+
+/** PS fork (#73): add a url_citation to a message item. */
+function addAnnotation(
+  state: StreamState,
+  events: string[],
+  item: OutputItem,
+  annotation: UrlCitation
+) {
+  item.annotations ??= [];
+  events.push(
+    event(state, 'response.output_text.annotation.added', {
+      item_id: item.id,
+      output_index: item.outputIndex,
+      content_index: 0,
+      annotation_index: item.annotations.length,
+      annotation,
+    })
+  );
+  item.annotations.push(annotation);
+}
+
+/**
+ * PS fork (#73): annotate the current Anthropic text block once its text is
+ * complete (its citations arrive before the text they cover).
+ */
+function flushCitations(state: StreamState, events: string[]) {
+  const block = state.citedBlock;
+  if (!block?.citations.length) return;
+  const item = block.item;
+  const citations = block.citations;
+  block.citations = [];
+  if (!item || item.done) return;
+  for (const a of anthropicBlockAnnotations(
+    citations,
+    block.start,
+    item.cpLength ?? 0
+  )) {
+    addAnnotation(state, events, item, a);
+  }
+}
+
+/** PS fork (#73): a web search ran; `completed` unless it failed. */
+function searchResult(
+  state: StreamState,
+  events: string[],
+  item: OutputItem,
+  status: 'completed' | 'failed',
+  urls: string[]
+) {
+  if (item.done || item.searchStatus) return;
+  const base = { item_id: item.id, output_index: item.outputIndex };
+  if (state.includeSources) item.sources = urls;
+  item.searchStatus = 'searching';
+  events.push(event(state, 'response.web_search_call.searching', base));
+  item.searchStatus = status;
+  if (status === 'completed') {
+    events.push(event(state, 'response.web_search_call.completed', base));
+  }
+}
+
+/**
+ * PS fork (#73): Anthropic web search blocks and citations in a chunk's
+ * content_blocks. The stream transform drops each block's `type`, so blocks
+ * are told apart by shape: a server_tool_use start has `id` and `name`
+ * (client tool_use starts are tool_calls, not content_blocks), a
+ * web_search_tool_result start has `tool_use_id` and `content`.
+ */
+function anthropicWebSearchBlock(
+  state: StreamState,
+  events: string[],
+  block: any
+) {
+  const index = block?.index;
+  const d = block?.delta || {};
+  if (index !== undefined && state.citedBlock?.index !== index) {
+    flushCitations(state, events);
+    state.citedBlock = { index, item: null, start: 0, citations: [] };
+  }
+  if (
+    typeof d.id === 'string' &&
+    d.name === 'web_search' &&
+    (d.type === undefined || d.type === 'server_tool_use')
+  ) {
+    for (const item of state.items) {
+      if (item.kind !== 'web_search_call') closeItem(state, events, item);
+    }
+    const item = openItem(state, events, 'web_search_call', {
+      call_id: d.id,
+      ...(d.input && Object.keys(d.input).length
+        ? { query: anthropicSearchQuery(d.input) }
+        : {}),
+    });
+    state.searchByToolId[d.id] = item;
+    state.searchByBlockIndex.set(index, item);
+    return;
+  }
+  if (typeof d.partial_json === 'string') {
+    const item = state.searchByBlockIndex.get(index);
+    if (item && !item.done && item.query === undefined)
+      item.text += d.partial_json;
+    return;
+  }
+  if (typeof d.tool_use_id === 'string' && 'content' in d) {
+    const item = state.searchByToolId[d.tool_use_id];
+    if (!item) return;
+    const { status, urls } = anthropicSearchResult(d.content);
+    searchResult(state, events, item, status, urls);
+    closeItem(state, events, item);
+    return;
+  }
+  if (d.citation && state.citedBlock) {
+    state.citedBlock.citations.push(d.citation);
+  } else if (Array.isArray(d.citations) && state.citedBlock) {
+    state.citedBlock.citations.push(...d.citations);
+  }
+}
+
+/**
+ * PS fork (#73): Google grounding, applied when the text is complete: the
+ * annotations go on the (single) message, then each search query is a
+ * completed web_search_call after the items streamed so far.
+ */
+function applyGrounding(state: StreamState, events: string[]) {
+  if (!state.grounding.length) return;
+  const messages = state.items.filter((i) => i.kind === 'message');
+  const message =
+    messages.length === 1 && !messages[0].done ? messages[0] : null;
+  const { calls, annotations } = googleGroundingOutput(
+    mergeGroundingMetadata(state.grounding),
+    message?.text ?? '',
+    state.includeSources
+  );
+  if (message) {
+    for (const a of annotations) addAnnotation(state, events, message, a);
+  }
+  if (!calls.length) return;
+  for (const item of state.items) closeItem(state, events, item);
+  for (const call of calls) {
+    const item = openItem(state, events, 'web_search_call', {
+      query: call.action.query,
+    });
+    searchResult(
+      state,
+      events,
+      item,
+      'completed',
+      call.action.sources?.map((s) => s.url) ?? []
+    );
+    closeItem(state, events, item);
   }
 }
 
@@ -369,6 +592,8 @@ function buildResponseSnapshot(
 function finish(state: StreamState): string {
   state.completed = true;
   const events: string[] = [];
+  // PS fork (#73): grounding annotations before the message closes
+  if (!state.error) applyGrounding(state, events);
   for (const item of state.items) closeItem(state, events, item);
   const status = state.error
     ? 'failed'
@@ -457,6 +682,7 @@ export function transformStreamChunk(
   let sawBlockThinking = false;
   const carry = carriesThinking(state.provider);
   for (const block of delta?.content_blocks || []) {
+    anthropicWebSearchBlock(state, events, block);
     const d = block?.delta || {};
     if (typeof d.thinking === 'string' && d.thinking) {
       sawBlockThinking = true;
@@ -529,6 +755,12 @@ export function transformStreamChunk(
     state.totalTokens = u.total_tokens;
   }
 
+  // PS fork (#73): Google Search grounding, applied at the end
+  const grounding = parsed.choices?.[0]?.groundingMetadata;
+  if (grounding && typeof grounding === 'object') {
+    state.grounding.push(grounding);
+  }
+
   // Track finish reason
   if (parsed.choices?.[0]?.finish_reason) {
     state.finishReason = parsed.choices[0].finish_reason;
@@ -570,5 +802,10 @@ export function createStreamState(
     requestedModel: responseModel(originalRequest),
     requestEcho: echoRequestFields(originalRequest),
     provider: provider || '',
+    includeSources: wantsWebSearchSources(originalRequest),
+    citedBlock: null,
+    searchByToolId: {},
+    searchByBlockIndex: new Map(),
+    grounding: [],
   };
 }
