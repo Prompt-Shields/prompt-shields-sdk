@@ -298,9 +298,12 @@ and credentials and `body.model` set per attempt:
 - The engine returns once the upstream answered with its headers; a streamed
   body is read after that, so nothing is retried once bytes may have reached
   the client.
-- Breakers are keyed by the tier's `provider` (else the request's gateway
-  provider), per process, and transitions are counted in
-  `ps_gateway_circuit_breaker_transitions_total{provider,to}` on `/metrics`.
+- Breakers are per process and keyed by the tier's `provider` (else the
+  request's gateway provider) plus the caller's scope (a digest of the
+  gateway provider, credentials and upstream host), so one caller's failing
+  key or custom host never opens another caller's breaker. Transitions are
+  counted in `ps_gateway_circuit_breaker_transitions_total{provider,to}` on
+  `/metrics` (the label is the provider alone).
 - Telemetry: `attempts`, `retry_count` and `fallback_chain` come from the
   recorded attempts; `served_model` is the candidate that answered.
 

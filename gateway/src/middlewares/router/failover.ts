@@ -11,7 +11,9 @@
  *
  * - A 5xx, 429 (after at most one Retry-After wait) or timeout moves to the
  *   next candidate and counts against the candidate provider's circuit
- *   breaker. Any other 4xx, a content-filter refusal, a guardrail denial or
+ *   breaker. Breakers are process-wide, so each is scoped to the caller
+ *   (provider, credentials and upstream host, see routeBreakerScope): one
+ *   caller's failing key or custom host never opens another caller's. Any other 4xx, a content-filter refusal, a guardrail denial or
  *   a data-policy 403 is returned as is: no fallback.
  * - Only already-compliant candidates are listed. Each attempt still goes
  *   through tryPost, so the data-policy gate checks the model the attempt
@@ -33,6 +35,7 @@
 import { Context } from 'hono';
 import { tryTargetsRecursively } from '../../handlers/handlerUtils';
 import { endpointStrings } from '../../providers/types';
+import { computeCacheScope } from '../cache';
 import {
   BreakerRegistry,
   Candidate,
@@ -109,6 +112,28 @@ async function failureOfResponse(res: Response): Promise<FailureInfo> {
   return info;
 }
 
+/**
+ * Who the attempts go out as: a digest of the provider, the caller's
+ * credential and identity fields and the upstream host (the cache's caller
+ * scope). Breakers are keyed `<provider>#<scope>`, so a caller whose own key
+ * is rate limited or whose custom host fails trips only its own breaker,
+ * never every caller's. The metric label keeps only `<provider>`.
+ */
+export async function routeBreakerScope(
+  targetGroup: any,
+  requestHeaders: Record<string, string>
+): Promise<string> {
+  const scope = await computeCacheScope({
+    provider:
+      typeof targetGroup?.provider === 'string' ? targetGroup.provider : '',
+    providerOption: targetGroup,
+    requestHeaders,
+    requestURL:
+      typeof targetGroup?.customHost === 'string' ? targetGroup.customHost : '',
+  });
+  return scope.slice(0, 32);
+}
+
 function gateOf(c: Context): DataPolicyGate | undefined {
   try {
     return c.get(DATA_POLICY_GATE_KEY as any);
@@ -164,8 +189,24 @@ export async function tryTargetsWithRouteFailover(
   // states none.
   const gatewayProvider =
     typeof targetGroup?.provider === 'string' ? targetGroup.provider : '';
+  let scope: string;
+  try {
+    scope = await routeBreakerScope(targetGroup, requestHeaders);
+  } catch (err) {
+    // No caller scope, no shared breaker state: one attempt, as before #21.
+    console.warn('[PS Router] failover skipped (breaker scope):', err);
+    return tryTargetsRecursively(
+      c,
+      targetGroup,
+      request,
+      requestHeaders,
+      fn,
+      method,
+      jsonPath
+    );
+  }
   const list: Candidate[] = candidates.map((cand) => ({
-    provider: cand.provider || gatewayProvider || 'unknown',
+    provider: `${cand.provider || gatewayProvider || 'unknown'}#${scope}`,
     model: cand.model,
   }));
   const gate = gateOf(c);

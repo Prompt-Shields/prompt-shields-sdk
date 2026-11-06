@@ -340,7 +340,11 @@ describe('per-provider circuit breaker', () => {
     byModel({ 'scaleway-small': 500 });
     await chat();
     await chat();
-    expect(breakers.state('scaleway')).toBe('open');
+    // Keyed `<provider>#<caller scope>`.
+    const scaleway = Object.entries(breakers.snapshot()).filter(([k]) =>
+      k.startsWith('scaleway#')
+    );
+    expect(scaleway.map(([, state]) => state)).toEqual(['open']);
 
     resetHarness();
     byModel({ 'scaleway-small': 500 });
@@ -354,9 +358,12 @@ describe('per-provider circuit breaker', () => {
   });
 
   test('every candidate breaker open: 503, no upstream call', async () => {
-    breakers = _resetRouteBreakersForTests();
-    breakers.forceOpen('scaleway');
-    breakers.forceOpen('mistral-eu');
+    breakers = _resetRouteBreakersForTests(
+      new BreakerRegistry({ config: { failureThreshold: 1, openSeconds: 60 } })
+    );
+    byModel({ 'scaleway-small': 500, 'mistral-small-eu': 500 });
+    expect((await chat()).status).toBe(500);
+    resetHarness();
     byModel({});
     const res = await chat();
     expect(res.status).toBe(503);
@@ -402,5 +409,60 @@ describe('without a data policy', () => {
     const res = await chat({ ...openai, 'x-ps-quality': 'draft' });
     expect(res.status).toBe(200);
     expect(models()).toEqual(['gpt-4o-mini', 'claude-3-5-haiku-20241022']);
+  });
+});
+
+describe('circuit breakers are scoped to the caller', () => {
+  test("one caller's failing upstream never opens another caller's breaker", async () => {
+    breakers = _resetRouteBreakersForTests(
+      new BreakerRegistry({ config: { failureThreshold: 1, openSeconds: 60 } })
+    );
+    // Caller A (its own key) gets 5xx on every candidate: its breakers open.
+    byModel({ 'scaleway-small': 500, 'mistral-small-eu': 500 });
+    const a = { ...routed, authorization: 'Bearer sk-caller-a' };
+    expect((await chat(a)).status).toBe(500);
+    resetHarness();
+    byModel({});
+    expect((await chat(a)).status).toBe(503);
+    expect(upstreamCalls).toHaveLength(0);
+
+    // Caller B, a different key on the same provider, is still served.
+    resetHarness();
+    byModel({});
+    const res = await chat({ ...routed, authorization: 'Bearer sk-caller-b' });
+    expect(res.status).toBe(200);
+    expect(models()).toEqual(['scaleway-small']);
+  });
+});
+
+describe('the response cache with failover', () => {
+  test('a fallback answer is cached under the model that served it', async () => {
+    const config = JSON.stringify({
+      provider: 'openai',
+      api_key: 'sk-cache',
+      cache: { mode: 'simple' },
+    });
+    const headers = {
+      'x-portkey-config': config,
+      'x-ps-quality': 'draft',
+      'x-ps-data-classification': 'confidential',
+    };
+    byModel({ 'scaleway-small': 500 });
+    let body: any = await (await chat(headers)).json();
+    expect(body.choices[0].message.content).toBe('from mistral-small-eu');
+
+    // The primary fails again: the fallback's own entry answers its attempt.
+    resetHarness();
+    byModel({ 'scaleway-small': 500, 'mistral-small-eu': 500 });
+    body = await (await chat(headers)).json();
+    expect(models()).toEqual(['scaleway-small']);
+    expect(body.choices[0].message.content).toBe('from mistral-small-eu');
+
+    // The primary is healthy again: it answers, not the cached fallback.
+    resetHarness();
+    byModel({});
+    body = await (await chat(headers)).json();
+    expect(body.choices[0].message.content).toBe('from scaleway-small');
+    expect(models()).toEqual(['scaleway-small']);
   });
 });
