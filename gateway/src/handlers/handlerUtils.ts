@@ -1222,6 +1222,7 @@ export function constructConfigFromRequestHeaders(
 
   const openAiConfig = {
     ...oauthClientCredentialsConfig,
+    openaiAuthType: requestHeaders[`x-${POWERED_BY}-openai-auth-type`],
     openaiOrganization: requestHeaders[`x-${POWERED_BY}-openai-organization`],
     openaiProject: requestHeaders[`x-${POWERED_BY}-openai-project`],
     openaiBeta:
@@ -1265,6 +1266,7 @@ export function constructConfigFromRequestHeaders(
       requestHeaders[`x-${POWERED_BY}-anthropic-version`] ||
       requestHeaders[`anthropic-version`],
     anthropicApiKey: requestHeaders[`x-api-key`],
+    anthropicAuthType: requestHeaders[`x-${POWERED_BY}-anthropic-auth-type`],
   };
 
   const vertexServiceAccountJson =

@@ -312,6 +312,21 @@ When an SDK event carried that fingerprint for the same vendor and model (the as
 Limits:
 
 - A fingerprint is only matched through a link you registered. A key with no link stays a `medium` shadow key even if the SDK uses it.
-- Gateway events do not carry a fingerprint, so gateway sightings are not matched by key.
+- Gateway events carry a fingerprint only when the gateway sets `PS_TELEMETRY_CREDENTIAL_FINGERPRINT=true`; it is computed the same way as the SDK's.
 - Model names must match exactly. OpenAI often reports a dated snapshot (`gpt-4o-2024-08-06`), which the SDK's `served_model` usually matches.
 - Bedrock and other AWS-credential calls have no API key to fingerprint.
+
+#### Keyless auth: a stable fingerprint
+
+With keyless auth (OAuth client credentials, workload identity federation, cloud role credentials) the credential is a short-lived token, so `sha256(token)` changes at every rotation. Opt in to an identity fingerprint instead: `prompt_shields.credentials` hashes the identity the token belongs to (`sha256("<kind>\n<id>...")[:16]`), exactly as the gateway does, and the value survives token rotation. Pass it as `credential_fingerprint=` to a client or `instrument()`, or set `PS_CREDENTIAL_FINGERPRINT`. Without it nothing changes.
+
+```python
+from prompt_shields import ShieldsAnthropic
+from prompt_shields.credentials import anthropic_workload_fingerprint_from_env
+
+# The Anthropic SDK federates from ANTHROPIC_FEDERATION_RULE_ID, ..._IDENTITY_TOKEN_FILE etc.
+client = ShieldsAnthropic(api_key=None, ps_api_key="ps-...",
+                          credential_fingerprint=anthropic_workload_fingerprint_from_env())
+```
+
+Helpers: `oauth_client_fingerprint(token_url, client_id)`, `openai_workload_fingerprint(service_account_id)`, `anthropic_workload_fingerprint(organization_id, service_account_id)`, `aws_role_fingerprint`, `aws_key_fingerprint`, `azure_entra_fingerprint`, `azure_managed_fingerprint`, `azure_workload_fingerprint`, `gcp_service_account_fingerprint`. An identity fingerprint never matches a provider key link (those are key hashes); it groups one workload's calls across SDK and gateway.
