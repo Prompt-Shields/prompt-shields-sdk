@@ -8,7 +8,7 @@ from db.models import AIAsset, DataFlow, RiskMapping
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import and_, case, func, or_, select
 
-from collector import attestation
+from collector import attestation, tenant_keys
 from collector.attestation import AttestationState, add_attestation_summaries
 from collector.audit import record_read
 from collector.auth import resolve_tenant
@@ -40,7 +40,7 @@ async def list_assets(
     ),
     limit: int = Query(default=50, le=200),
 ):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
 
     conditions = [AIAsset.tenant_id == tenant_id]
@@ -92,7 +92,7 @@ async def list_assets(
 
 @router.get("/assets/{asset_id}")
 async def get_asset(asset_id: UUID, request: Request):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
 
     stmt = select(AIAsset).where(AIAsset.id == asset_id, AIAsset.tenant_id == tenant_id)
@@ -112,7 +112,7 @@ async def get_asset(asset_id: UUID, request: Request):
 
 @router.get("/assets/{asset_id}/data-flows")
 async def get_data_flows(asset_id: UUID, request: Request):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
 
     stmt = select(DataFlow).where(DataFlow.asset_id == asset_id, DataFlow.tenant_id == tenant_id)
@@ -129,7 +129,7 @@ async def get_risks(
     request: Request,
     status: RiskStatus | None = None,
 ):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
 
     stmt = (
@@ -150,7 +150,7 @@ async def get_risks(
 
 @router.get("/vendors")
 async def list_vendors(request: Request):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
 
     stmt = select(AIAsset.vendor).where(AIAsset.tenant_id == tenant_id).distinct()
@@ -162,7 +162,7 @@ async def list_vendors(request: Request):
 
 @router.get("/models")
 async def list_models(request: Request):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
 
     stmt = select(AIAsset.model).where(AIAsset.tenant_id == tenant_id, AIAsset.model.is_not(None)).distinct()
@@ -176,7 +176,7 @@ async def list_models(request: Request):
 async def telemetry_coverage(request: Request):
     """Telemetry coverage overall and per source (sdk, gateway, otel), from
     the loss accounting behind /telemetry/loss (#87)."""
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     data = await tenant_coverage(request.state.db, tenant_id)
     await record_read(
         request, tenant_id=tenant_id, status_code=200, response_count=len(data["sources"])
@@ -193,7 +193,7 @@ async def semantic_search(
 ):
     """Search AI assets: pgvector cosine similarity, or keyword match when
     embeddings are disabled (PS_EMBEDDINGS_BACKEND=none) or unavailable."""
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
 
     if use_mock:

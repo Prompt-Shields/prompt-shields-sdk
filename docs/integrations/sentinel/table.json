@@ -51,7 +51,7 @@
         {
           "name": "ActorUserType",
           "type": "string",
-          "description": "Audit: tenant_key, admin_token, partner, operator, system or anonymous"
+          "description": "Audit: tenant_key, admin_token, partner, operator, operator_token, system or anonymous"
         },
         {
           "name": "ActorUserId",

@@ -26,6 +26,7 @@ from collector import (
     lifecycle,
     mcp_usage,
     operator_admin,
+    operator_auth,
     partner_admin,
     provider_credentials_api,
     provider_usage_admin,
@@ -148,6 +149,7 @@ def test_webhook_schemas_match_serializers():
         ("CreateTenantRequest", operator_admin.CreateTenantBody),
         ("UpdateTenantRequest", operator_admin.UpdateTenantBody),
         ("BootstrapAdminTokenRequest", operator_admin.BootstrapAdminTokenBody),
+        ("CreateOperatorTokenRequest", operator_admin.CreateOperatorTokenBody),
         ("RiskReviewRequest", risk_reviews.ReviewBody),
         ("LearnerReviewRequest", learner.LearnerReviewBody),
         ("EraseUserRequest", user_erasure.EraseUserBody),
@@ -330,15 +332,16 @@ ADMIN_ROUTERS = (
 )
 
 
-def _route_admin_scopes() -> dict[tuple[str, str], str | None]:
-    """(METHOD, path) -> the admin scope its require_admin dependency
-    declares, or None for a route without one (operator routes)."""
+def _route_scopes(attr: str) -> dict[tuple[str, str], str | None]:
+    """(METHOD, path) -> the scope its dependency declares in ``attr``
+    (``admin_scope``: require_admin; ``operator_scope``: an operator route,
+    collector.operator_auth), or None for a route without one."""
     out = {}
     for route in (r for router in ADMIN_ROUTERS for r in router.routes):
         if not isinstance(route, APIRoute):
             continue
         scopes = {
-            getattr(dep.call, "admin_scope", None) for dep in route.dependant.dependencies
+            getattr(dep.call, attr, None) for dep in route.dependant.dependencies
         } - {None}
         assert len(scopes) <= 1, route.path
         for method in route.methods:
@@ -346,8 +349,13 @@ def _route_admin_scopes() -> dict[tuple[str, str], str | None]:
     return out
 
 
+def _route_admin_scopes() -> dict[tuple[str, str], str | None]:
+    return _route_scopes("admin_scope")
+
+
 def test_admin_operations_document_their_scope_and_security():
     scopes = _route_admin_scopes()
+    operator_scopes = _route_scopes("operator_scope")
     assert scopes
     for path, item in SPEC["paths"].items():
         if not path.startswith(("/api/v1/admin/", "/api/v1/operator/")):
@@ -358,9 +366,16 @@ def test_admin_operations_document_their_scope_and_security():
             op = item[method]
             scope = scopes[(method.upper(), path)]
             if scope is None:
-                # Operator routes take PS_ADMIN_TOKEN, never a tenant credential.
+                # Operator routes take an operator token (named, or
+                # PS_ADMIN_TOKEN as break-glass), never a tenant credential.
                 assert op["security"] == [{"OperatorToken": []}], (method, path)
                 assert "x-admin-scope" not in op, (method, path)
+                operator_scope = operator_scopes[(method.upper(), path)]
+                assert operator_scope, (method, path)
+                assert op["x-operator-scope"] == operator_scope, (method, path)
+                assert op["responses"]["403"] == {
+                    "$ref": "#/components/responses/OperatorForbidden"
+                }, (method, path)
             else:
                 assert op["security"] == [{"TenantApiKey": []}, {"AdminToken": []}], (
                     method,
@@ -374,6 +389,33 @@ def test_admin_operations_document_their_scope_and_security():
 
 def test_admin_scope_enum_matches_code():
     assert SCHEMAS["AdminScope"]["enum"] == list(ADMIN_SCOPES)
+
+
+def test_operator_and_ingest_key_scope_enums_match_code():
+    assert SCHEMAS["OperatorScope"]["enum"] == list(operator_auth.OPERATOR_SCOPES)
+    assert SCHEMAS["TenantApiKeyScope"]["enum"] == list(tenant_keys.KEY_SCOPES)
+
+
+def test_operator_token_schema_matches_serializer():
+    now = datetime.now(UTC)
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="ci-deploy",
+        scopes=["operator:read"],
+        token_hint="abcd",
+        created_by="operator",
+        created_at=now,
+        rotated_at=None,
+        expires_at=None,
+        revoked_at=None,
+    )
+    keys = set(operator_auth.serialize_token(row))
+    assert (
+        _props("OperatorTokenRecord")
+        == keys
+        == set(SCHEMAS["OperatorTokenRecord"]["required"])
+    )
+    assert _props("OperatorTokenWithSecret") == keys | {"token", "warning"}
 
 
 def test_admin_credential_schemas_match_serializers():
@@ -397,6 +439,7 @@ def test_admin_credential_schemas_match_serializers():
         name="gateway",
         key_hint="abcd",
         origin="api",
+        scopes=["ingest:write"],
         previous_key_hash=None,
         previous_expires_at=None,
         created_at=now,

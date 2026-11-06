@@ -173,7 +173,7 @@ COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("EventResult", "string", "Success, Failure or NA (ASIM)"),
     ("EventSeverity", "string", "Informational, Low or Medium (ASIM)"),
     ("Operation", "string", "ai.call, or the audit action (e.g. partner_credential.update)"),
-    ("ActorUserType", "string", "Audit: tenant_key, admin_token, partner, operator, system or anonymous"),
+    ("ActorUserType", "string", "Audit: tenant_key, admin_token, partner, operator, operator_token, system or anonymous"),
     ("ActorUserId", "string", "Audit: credential lookup prefix or id, never a secret"),
     ("Object", "string", "Audit: target id"),
     ("ObjectType", "string", "Audit: target type"),

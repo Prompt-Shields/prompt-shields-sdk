@@ -20,7 +20,7 @@ from db.models import AIUsageEvent
 from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import metrics
+from collector import metrics, tenant_keys
 from collector.auth import resolve_tenant
 from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
@@ -184,7 +184,7 @@ async def _reject_too_many_spans(
 
 @router.post("/ingest/otel/v1/traces")
 async def ingest_otel_traces(request: Request):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
 
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
     is_protobuf = content_type in PROTOBUF_CONTENT_TYPES

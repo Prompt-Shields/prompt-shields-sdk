@@ -11,7 +11,9 @@ Every tenant admin route declares one scope from `ADMIN_SCOPES` with
     Terraform, CI and other automation.
   - a tenant ingest key (the key the SDK sends): full access to every admin
     route, as before admin tokens existed. This is the backwards-compatible
-    default.
+    default. Only a key holding every ingest key scope (tenant_keys
+    ALL_KEY_SCOPES: every key from before scopes existed, #341) gets in; a
+    narrowed key, such as a new ``ingest:write``-only key, is refused (403).
 
 ``PS_ADMIN_REQUIRE_SCOPED_TOKENS=true`` refuses tenant ingest keys on every
 admin route (403), so only admin tokens with the right scope get in. It is
@@ -48,7 +50,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import audit_trail, rls
+from collector import audit_trail, operator_auth, rls
 from collector.audit import bearer_key_prefix
 from collector.auth import (
     _DUMMY_HASH,
@@ -60,7 +62,7 @@ from collector.auth import (
     tenant_disabled,
 )
 from collector.config import settings
-from collector.tenant_keys import DuplicateName, key_status
+from collector.tenant_keys import ALL_KEY_SCOPES, DuplicateName, key_status
 
 TOKEN_PREFIX = audit_trail.ADMIN_TOKEN_PREFIX  # "ps-at-"
 TOKEN_WARNING = "Save the token now. It will not be shown again."
@@ -193,7 +195,8 @@ async def resolve_admin(request: Request) -> AdminPrincipal:
     token = await bearer_token(request)
     if token.startswith(TOKEN_PREFIX):
         return await _resolve_admin_token(request, token)
-    tenant_id = await resolve_tenant(request)
+    # Only a full-scope key: what every ingest key could do before #341.
+    tenant_id = await resolve_tenant(request, *sorted(ALL_KEY_SCOPES))
     if settings.admin_require_scoped_tokens:
         await _audit_failure(request, "insufficient_scope", 403, tenant_id)
         raise _problem(
@@ -207,12 +210,18 @@ async def resolve_admin(request: Request) -> AdminPrincipal:
     )
 
 
-async def require_full_admin(request: Request, principal: AdminPrincipal) -> None:
+async def require_full_admin(
+    request: Request, principal: AdminPrincipal, key_scopes=ALL_KEY_SCOPES
+) -> None:
     """403 unless the caller could already do anything a tenant ingest key
     can. Used before handing out an ingest key (issue, rotate): while
-    PS_ADMIN_REQUIRE_SCOPED_TOKENS is off an ingest key reaches every admin
-    route, so an ``admin:keys`` token must not be able to mint one."""
+    PS_ADMIN_REQUIRE_SCOPED_TOKENS is off a full-scope ingest key reaches
+    every admin route, so an ``admin:keys`` token must not be able to mint
+    one. A narrowed key (``key_scopes`` short of every ingest key scope)
+    cannot reach admin routes, so ``admin:keys`` is enough for it."""
     if settings.admin_require_scoped_tokens:
+        return
+    if not ALL_KEY_SCOPES <= set(key_scopes):
         return
     missing = sorted(set(ADMIN_SCOPES) - principal.scopes)
     if missing:
@@ -245,10 +254,11 @@ def require_admin(scope: str):
 
 
 def admin_actor(request: Request, principal: AdminPrincipal | None) -> audit_trail.Actor:
-    """The audit trail actor: the operator, or the caller's credential
-    (admin token or tenant key) by its SHA-256 lookup prefix."""
+    """The audit trail actor: the operator (a named operator token by name,
+    or ``operator`` for PS_ADMIN_TOKEN), or the caller's credential (admin
+    token or tenant key) by its SHA-256 lookup prefix."""
     if principal is None:
-        return audit_trail.OPERATOR
+        return operator_auth.current_actor(request)
     return audit_trail.tenant_key_actor(request)
 
 
