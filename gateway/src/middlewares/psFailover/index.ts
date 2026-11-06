@@ -298,7 +298,10 @@ export class BreakerRegistry {
   private moved(provider: string, from: BreakerState, to: BreakerState) {
     this.transitions[to] += 1;
     try {
-      breakerTransitionsTotal.inc({ provider: provider.slice(0, 128), to });
+      // A key may carry a caller scope after `#` (router/failover.ts): the
+      // label is the provider alone, so its cardinality stays bounded.
+      const label = provider.split('#', 1)[0].slice(0, 128);
+      breakerTransitionsTotal.inc({ provider: label, to });
       this.opts.onTransition?.(provider, from, to);
     } catch {
       /* metrics must never break a call */
