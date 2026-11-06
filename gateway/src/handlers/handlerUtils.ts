@@ -55,7 +55,11 @@ import { recordServedTarget } from '../middlewares/psServedTarget';
 import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
 import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
-import { adaptResponse, applyAdapterRequestTransform } from './adapterUtils';
+import {
+  adaptResponse,
+  applyAdapterRequestTransform,
+  messagesCountTokensRoute,
+} from './adapterUtils';
 import {
   MESSAGES_VIA_RESPONSES_HEADER,
   messagesViaResponsesOverride,
@@ -416,20 +420,28 @@ export async function tryPost(
     !isRawBody && typeof overrideModel === 'string' && overrideModel
       ? { ...params, model: overrideModel }
       : params;
-  const adapterResult = applyAdapterRequestTransform(
-    fn,
-    providerOption.provider ?? '',
-    routingParams,
-    requestBody,
-    Boolean(params.stream),
-    method,
-    // PS fork (#73): explicit Messages → Responses routing choice.
-    messagesViaResponsesOverride(
-      providerOption.messagesViaResponses,
-      requestHeaders[MESSAGES_VIA_RESPONSES_HEADER],
-      targetHasHooks
-    )
-  );
+  const adapterResult =
+    fn === 'messagesCountTokens' && !isRawBody
+      ? // PS fork (#73 follow-up): count_tokens for every provider.
+        messagesCountTokensRoute(
+          providerOption.provider ?? '',
+          routingParams,
+          requestHeaders[HEADER_KEYS.CUSTOM_HOST] || providerOption.customHost
+        )
+      : applyAdapterRequestTransform(
+          fn,
+          providerOption.provider ?? '',
+          routingParams,
+          requestBody,
+          Boolean(params.stream),
+          method,
+          // PS fork (#73): explicit Messages → Responses routing choice.
+          messagesViaResponsesOverride(
+            providerOption.messagesViaResponses,
+            requestHeaders[MESSAGES_VIA_RESPONSES_HEADER],
+            targetHasHooks
+          )
+        );
   if (adapterResult instanceof Response) return adapterResult;
   // PS fork (#73): hooks run on Responses requests, except the few checks
   // that only understand Chat Completions; never skip those silently.
