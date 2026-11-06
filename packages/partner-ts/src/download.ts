@@ -1,5 +1,5 @@
 import { APIConnectionError, PartnerError } from './errors';
-import type { FocusCostRow, FocusExportFormat } from './types';
+import type { FocusCostRow, FocusExportFormat, SiemRecord } from './types';
 
 /** The parts of Node's `fs` and `stream/promises` that `saveTo()` uses. */
 interface NodeFs {
@@ -222,5 +222,97 @@ export class FocusExport extends Download {
       }
       yield row;
     }
+  }
+}
+
+/**
+ * One batch of the SIEM pull: `client.siem.calls()` or `client.siem.audit()`.
+ * NDJSON, one Sentinel-schema record per line.
+ */
+export class SiemBatch extends Download {
+  /**
+   * `X-PS-Cursor`: the position after the last line. Pass it as `cursor`
+   * on the next call. `null` when the server sent none (no rows yet and no
+   * cursor given); keep your previous cursor then.
+   */
+  readonly cursor: string | null;
+  /** `X-PS-Has-More`: true when the batch was full, so call again now. */
+  readonly hasMore: boolean;
+
+  constructor(response: Response) {
+    super(response);
+    this.endsWithNewline = true;
+    this.cursor = response.headers.get('x-ps-cursor');
+    this.hasMore = (response.headers.get('x-ps-has-more') ?? '').toLowerCase() === 'true';
+  }
+
+  /** Parsed records, one at a time. Column names are kept as sent (`TimeGenerated`, `PsServedModel`). */
+  async *records(): AsyncGenerator<SiemRecord, void, undefined> {
+    let n = 0;
+    for await (const line of this.lines()) {
+      n++;
+      let record: SiemRecord;
+      try {
+        record = JSON.parse(line) as SiemRecord;
+      } catch (err) {
+        throw new PartnerError(`SIEM record line ${n} is not JSON: ${line.slice(0, 200)}`, { cause: err });
+      }
+      yield record;
+    }
+  }
+}
+
+/**
+ * Follows the SIEM pull cursor: `client.siem.callsFeed()` or
+ * `client.siem.auditFeed()`. `for await` yields records across batches
+ * until a batch is not full; `cursor` then holds the position to start the
+ * next run from.
+ *
+ * `cursor` moves only after a whole batch has been yielded, so a loop that
+ * stops part way through a batch (or throws) leaves it at the start of
+ * that batch: save it and that batch is read again next time (at least
+ * once delivery). Each iteration continues from `cursor`.
+ */
+export class SiemFeed implements AsyncIterable<SiemRecord> {
+  /** Where the next batch starts: the last fully read batch's cursor, or the starting cursor. */
+  cursor: string | null;
+
+  constructor(
+    private readonly fetchBatch: (cursor: string | null) => Promise<SiemBatch>,
+    cursor: string | null = null,
+  ) {
+    this.cursor = cursor;
+  }
+
+  /** Whole batches. Read each batch's body before asking for the next. */
+  async *batches(): AsyncGenerator<SiemBatch, void, undefined> {
+    const seen = new Set<string>();
+    for (;;) {
+      const batch = await this.fetchBatch(this.cursor);
+      try {
+        yield batch;
+      } finally {
+        if (!batch.bodyUsed) await batch.cancel();
+      }
+      if (batch.cursor !== null) this.cursor = batch.cursor;
+      if (!batch.hasMore) return;
+      if (this.cursor === null || seen.has(this.cursor)) {
+        throw new PartnerError(`SIEM cursor did not advance (${this.cursor}); stopping to avoid an infinite loop`);
+      }
+      seen.add(this.cursor);
+    }
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<SiemRecord, void, undefined> {
+    for await (const batch of this.batches()) {
+      yield* batch.records();
+    }
+  }
+
+  /** Every record until the feed is caught up. Buffers them in memory. */
+  async toArray(): Promise<SiemRecord[]> {
+    const out: SiemRecord[] = [];
+    for await (const record of this) out.push(record);
+    return out;
   }
 }

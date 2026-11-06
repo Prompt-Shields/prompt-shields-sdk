@@ -7,7 +7,7 @@ import {
   RateLimitError,
   makeAPIError,
 } from './errors';
-import { FocusExport } from './download';
+import { FocusExport, SiemBatch, SiemFeed } from './download';
 import { PageIterator } from './pagination';
 import type {
   AIAsset,
@@ -23,13 +23,26 @@ import type {
   ExportResult,
   FocusExportParams,
   HealthStatus,
+  LearnerRecommendation,
+  LearnerRecommendationList,
+  LearnerReviewRequest,
+  LearnerSnapshot,
+  LearnerSnapshotList,
   ListAssetsParams,
   ListAttestationsParams,
   ListChangesParams,
+  ListLearnerRecommendationsParams,
+  ListLearnerSnapshotsParams,
+  ListMcpToolsParams,
+  ListMcpUsageParams,
   ListRiskReviewsParams,
   ListSpendAlertsParams,
   ListWebhookDeliveriesParams,
   ListWebhookSubscriptionsParams,
+  McpTool,
+  McpToolPage,
+  McpUsageDay,
+  McpUsagePage,
   Page,
   RiskMapping,
   RiskReviewHistory,
@@ -39,6 +52,8 @@ import type {
   RotateWebhookSecretParams,
   SavingsParams,
   SavingsReport,
+  SiemAuditParams,
+  SiemCallsParams,
   SovereignShareParams,
   SovereignShareReport,
   SpendAlert,
@@ -201,6 +216,9 @@ export class PartnerClient {
   readonly telemetry: TelemetryResource;
   readonly usage: UsageResource;
   readonly spendAlerts: SpendAlertsResource;
+  readonly mcp: McpResource;
+  readonly learner: LearnerResource;
+  readonly siem: SiemResource;
   /**
    * Webhook subscriptions: the tenant admin API (`/api/v1/admin/webhooks`).
    * Needs a client built with the tenant's own API key (`apiKey`), not
@@ -255,6 +273,9 @@ export class PartnerClient {
     this.telemetry = new TelemetryResource(this);
     this.usage = new UsageResource(this);
     this.spendAlerts = new SpendAlertsResource(this);
+    this.mcp = new McpResource(this);
+    this.learner = new LearnerResource(this);
+    this.siem = new SiemResource(this);
     this.webhooks = new WebhooksResource(this);
   }
 
@@ -702,6 +723,150 @@ export class SpendAlertsResource {
       { retrySafe: true },
     );
     return res.data;
+  }
+}
+
+/** `/partner/v1/mcp`: MCP servers and tools seen in telemetry, and daily tool-call metering. Needs `mcp:read`. */
+export class McpResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** One page of observed MCP tools, most recently seen first (up to 1000 rows). */
+  listToolsPage(params: ListMcpToolsParams = {}): Promise<McpToolPage> {
+    return this.client.get<McpToolPage>('/partner/v1/mcp/tools', { ...params });
+  }
+
+  /**
+   * Every observed MCP tool, page by page as you iterate. A row seen again
+   * while you page moves to the front, so a long walk may yield it twice.
+   */
+  listTools(params: ListMcpToolsParams = {}): PageIterator<McpTool, McpToolPage> {
+    const { cursor, ...rest } = params;
+    return new PageIterator((next) => this.listToolsPage({ ...rest, cursor: next }), cursor ?? undefined);
+  }
+
+  /** One page of daily metering rows, newest day first. `meta.since` / `meta.until` give the window. */
+  listUsagePage(params: ListMcpUsageParams = {}): Promise<McpUsagePage> {
+    return this.client.get<McpUsagePage>('/partner/v1/mcp/usage', { ...params });
+  }
+
+  /**
+   * Calls, errors, blocked calls, latency and bytes per tool per server per
+   * UTC day (and per source), page by page. `since` defaults to 30 days ago.
+   */
+  listUsage(params: ListMcpUsageParams = {}): PageIterator<McpUsageDay, McpUsagePage> {
+    const { cursor, ...rest } = params;
+    return new PageIterator((next) => this.listUsagePage({ ...rest, cursor: next }), cursor ?? undefined);
+  }
+}
+
+/**
+ * `/partner/v1/learner`: routing learner snapshots and the route changes
+ * they recommend. Reading needs `learner:read`; reviewing needs
+ * `learner:review`. The learner never routes traffic, and accepting a
+ * recommendation changes no routing: apply it by editing the route policy.
+ */
+export class LearnerResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** Snapshots, newest first, without their state. No cursor: up to `limit` (default 50, at most 200). */
+  listSnapshots(params: ListLearnerSnapshotsParams = {}): Promise<LearnerSnapshotList> {
+    return this.client.get<LearnerSnapshotList>('/partner/v1/learner/snapshots', { ...params });
+  }
+
+  /**
+   * One snapshot with its full state (`snapshot`, kept exactly as
+   * uploaded). Throws `NotFoundError` if the tenant has no such version.
+   */
+  async getSnapshot(learnerVersion: string): Promise<LearnerSnapshot> {
+    const res = await this.client.get<{ data: LearnerSnapshot }>(
+      `/partner/v1/learner/snapshots/${requireId(learnerVersion, 'learnerVersion')}`,
+    );
+    return res.data;
+  }
+
+  /**
+   * Recommendations, newest first, each with its off-policy projection
+   * and, once accepted, realised vs. projected savings. No cursor: up to
+   * `limit` (default 50, at most 200).
+   */
+  listRecommendations(params: ListLearnerRecommendationsParams = {}): Promise<LearnerRecommendationList> {
+    return this.client.get<LearnerRecommendationList>('/partner/v1/learner/recommendations', { ...params });
+  }
+
+  /** One recommendation. Throws `NotFoundError` if absent. */
+  async getRecommendation(recommendationId: string): Promise<LearnerRecommendation> {
+    const res = await this.client.get<{ data: LearnerRecommendation }>(
+      `/partner/v1/learner/recommendations/${requireId(recommendationId, 'recommendationId')}`,
+    );
+    return res.data;
+  }
+
+  /**
+   * Accept or reject a pending recommendation. Decided once: a second
+   * review throws a 409 `APIError`. Not retried on network errors or 5xx,
+   * since a review that reached the server would then fail with 409.
+   * Needs `learner:review`.
+   */
+  async reviewRecommendation(recommendationId: string, review: LearnerReviewRequest): Promise<LearnerRecommendation> {
+    const res = await this.client.send<{ data: LearnerRecommendation }>(
+      'POST',
+      `/partner/v1/learner/recommendations/${requireId(recommendationId, 'recommendationId')}/review`,
+      { body: review },
+    );
+    return res.data;
+  }
+}
+
+/**
+ * `/partner/v1/siem`: routing evidence and the audit trail as NDJSON in the
+ * Microsoft Sentinel table schema, pulled with a cursor, for log
+ * forwarders and SIEMs.
+ */
+export class SiemResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /**
+   * One batch of per-call routing evidence (`AICall` records), in call
+   * order. Only calls older than `settleSeconds` are returned. Needs
+   * `evidence:read`. Pass the batch's `cursor` back on the next call;
+   * `hasMore` means call again now.
+   */
+  async calls(params: SiemCallsParams = {}, options: DownloadOptions = {}): Promise<SiemBatch> {
+    const res = await this.client.getStream('/partner/v1/siem/calls', { ...params }, {
+      signal: options.signal,
+      accept: 'application/x-ndjson',
+    });
+    return new SiemBatch(res);
+  }
+
+  /** One batch of audit trail rows (`Audit` records) in chain order, with chain hashes. Needs `audit:read`. */
+  async audit(params: SiemAuditParams = {}, options: DownloadOptions = {}): Promise<SiemBatch> {
+    const res = await this.client.getStream('/partner/v1/siem/audit', { ...params }, {
+      signal: options.signal,
+      accept: 'application/x-ndjson',
+    });
+    return new SiemBatch(res);
+  }
+
+  /**
+   * Every call record from `cursor` (or `since`) until caught up, batch by
+   * batch. Save `feed.cursor` afterwards for the next run.
+   */
+  callsFeed(params: SiemCallsParams = {}, options: DownloadOptions = {}): SiemFeed {
+    const { cursor, since, ...rest } = params;
+    return new SiemFeed(
+      (next) => this.calls(next === null ? { ...rest, since } : { ...rest, cursor: next }, options),
+      cursor ?? null,
+    );
+  }
+
+  /** Every audit row from `cursor` (or `since`) until caught up. Save `feed.cursor` for the next run. */
+  auditFeed(params: SiemAuditParams = {}, options: DownloadOptions = {}): SiemFeed {
+    const { cursor, since, ...rest } = params;
+    return new SiemFeed(
+      (next) => this.audit(next === null ? { ...rest, since } : { ...rest, cursor: next }, options),
+      cursor === undefined || cursor === null ? null : String(cursor),
+    );
   }
 }
 
