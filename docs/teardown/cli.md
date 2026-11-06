@@ -65,6 +65,11 @@ ps-teardown reconcile events.jsonl --usage usage-anthropic.json --format json --
   that grain. `--usage FILE` takes the OpenAI / Anthropic usage exports `run` reads, priced at
   catalog list price: this finds traffic missing from telemetry and token mismatches, but
   not discounts or credits, which only an invoice shows. Give one or the other per provider.
+- Models are matched by base name on both sides: lower-cased, without a `provider/` or
+  `models/` prefix, an OpenAI-style version date (`gpt-4o-2024-08-06` -> `gpt-4o`) or a
+  Bedrock cross-region prefix (`us.`), the same stripping the SDK's pricing applies. An
+  invoice CSV over 32 MiB or past 200,000 rows is not read (counted as `too_large` /
+  `too_many_rows`).
 - Only days inside the provider side's window are compared; Prompt Shields events outside
   it are counted. A provider with no provider-side data is listed as not compared.
 - Each row is `reconciled`, `unreconciled` (gap above the tolerance), `missing_in_ps` or

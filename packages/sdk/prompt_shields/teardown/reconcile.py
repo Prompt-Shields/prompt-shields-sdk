@@ -33,6 +33,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -67,6 +68,23 @@ _PROVIDER_COLUMNS = ("provider", "vendor")
 _MODEL_COLUMNS = ("model", "served_model", "line_item")
 _AMOUNT_COLUMNS = ("amount_usd", "cost_usd", "amount", "cost")
 
+#: An invoice CSV larger than this is not read (dropped as ``too_large``):
+#: invoices are per provider / model / day, so this is far above any real one.
+MAX_INVOICE_BYTES = 32 * 1024 * 1024
+#: Rows past this many in one invoice CSV are not read (``too_many_rows``).
+MAX_INVOICE_ROWS = 200_000
+#: Provider and model labels from an invoice are cut to this many characters.
+MAX_LABEL_CHARS = 128
+
+# Same version-stripping the SDK's pricing applies (providers.py
+# ``pricing_candidates``, teardown ``catalog.resolve_model``): an OpenAI-style
+# date (``gpt-4o-2024-08-06`` -> ``gpt-4o``), a Google ``models/`` prefix and a
+# Bedrock cross-region profile (``us.anthropic...``). Invoices and usage
+# exports name snapshots and aliases inconsistently, so both sides are keyed
+# by the base model; otherwise one model shows as two "missing" rows.
+_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+_BEDROCK_PROFILE = re.compile(r"^(?:us|eu|apac|us-gov|global|jp|au|ca)\.")
+
 
 @dataclass
 class Line:
@@ -90,10 +108,18 @@ class Side:
 
 
 def _model_key(model: str | None) -> str | None:
+    model = _str(model)
     if not model:
         return None
-    m = model.strip().lower()
-    return m.rsplit("/", 1)[-1] if "/" in m else m
+    m = model.lower()[:MAX_LABEL_CHARS]
+    m = m.rsplit("/", 1)[-1] if "/" in m else m
+    m = _BEDROCK_PROFILE.sub("", _DATE_SUFFIX.sub("", m))
+    return m or None
+
+
+def _provider_key(value: Any) -> str | None:
+    label = _str(value)
+    return normalise_provider(label[:MAX_LABEL_CHARS]) if label else None
 
 
 def _day(record: TeardownRecord) -> str | None:
@@ -143,10 +169,18 @@ def read_invoice_csv(path: str | Path) -> Side:
     path = Path(path)
     stats = SourceStats(source="invoice-csv", file=path.name)
     side = Side(sources=[stats])
+    if path.stat().st_size > MAX_INVOICE_BYTES:
+        stats.drop("too_large")
+        return side
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
+    rows = []
     try:
-        rows = list(reader)
+        for raw in reader:
+            if len(rows) >= MAX_INVOICE_ROWS:
+                stats.drop("too_many_rows")
+                break
+            rows.append(raw)
     except csv.Error:
         stats.drop("invalid_csv")
         return side
@@ -163,7 +197,7 @@ def read_invoice_csv(path: str | Path) -> Side:
             stats.drop("no_amount")
             continue
         model = _str(_pick(row, _MODEL_COLUMNS))
-        provider = normalise_provider(_pick(row, _PROVIDER_COLUMNS)) or infer_provider(model)
+        provider = _provider_key(_pick(row, _PROVIDER_COLUMNS)) or infer_provider(model)
         if provider is None:
             stats.drop("no_provider")
             continue
@@ -297,6 +331,14 @@ def _fmt_gap(value: float | None) -> str:
     return "—" if value is None else f"{value:+.2f}%"
 
 
+def _cell(value: Any) -> str:
+    """A label for a Markdown table cell: no line breaks, ``|`` escaped."""
+    return _CONTROL_OR_PIPE.sub(lambda m: "\\|" if m.group() == "|" else " ", str(value))
+
+
+_CONTROL_OR_PIPE = re.compile(r"[\x00-\x1f\x7f|]")
+
+
 def render_markdown(report: Mapping[str, Any]) -> str:
     tol = report["tolerance_pct"]
     out = [
@@ -318,7 +360,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         w = t["window"]
         window = f"{w['start']} – {w['end']}" if w["start"] else "whole window"
         out.append(
-            f"| {t['provider']} | {window} | {_fmt_usd(t['ps_cost_usd'])} | "
+            f"| {_cell(t['provider'])} | {window} | {_fmt_usd(t['ps_cost_usd'])} | "
             f"{_fmt_usd(t['provider_usd'])} | {_fmt_gap(t['gap_pct'])} | {t['status']} | "
             f"{t['ps_events_without_cost']} |"
         )
@@ -332,12 +374,16 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     for r in report["rows"]:
         mark = " ⚠" if r["flagged"] else ""
         out.append(
-            f"| {r['provider']} | {r['model']} | {r['day']} | {_fmt_usd(r['ps_cost_usd'])} | "
+            f"| {_cell(r['provider'])} | {_cell(r['model'])} | {r['day']} | "
+            f"{_fmt_usd(r['ps_cost_usd'])} | "
             f"{_fmt_usd(r['provider_usd'])} | {_fmt_gap(r['gap_pct'])} | {r['status']}{mark} |"
         )
     if report["not_compared"]:
         out += ["", "## Not compared (no provider data supplied)", ""]
-        out += [f"- {n['provider']}: {_fmt_usd(n['ps_cost_usd'])}" for n in report["not_compared"]]
+        out += [
+            f"- {_cell(n['provider'])}: {_fmt_usd(n['ps_cost_usd'])}"
+            for n in report["not_compared"]
+        ]
     out += [
         "",
         (

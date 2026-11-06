@@ -210,3 +210,47 @@ def test_cli_argument_errors(tmp_path):
         main(["reconcile", str(events), "--usage", str(events)])
     with pytest.raises(SystemExit):
         main(["reconcile", str(events), "--invoice", str(tmp_path / "missing.csv")])
+
+
+def test_dated_snapshots_and_prefixes_match_the_base_model(tmp_path):
+    events = [
+        _ev("2026-11-01T09:00:00Z", "gpt-4o-2024-08-06", 6.0),
+        _ev("2026-11-01T10:00:00Z", "gpt-4o", 4.0),
+        _ev("2026-11-01T11:00:00Z", "us.anthropic.claude-sonnet-4-v1:0", 2.0, vendor="bedrock"),
+    ]
+    report = _report(tmp_path, events, [
+        {"date": "2026-11-01", "provider": "openai", "model": "openai/GPT-4o-2024-11-20",
+         "amount_usd": "10"},
+        {"date": "2026-11-01", "provider": "bedrock", "model": "anthropic.claude-sonnet-4-v1:0",
+         "amount_usd": "2"},
+    ])
+    assert report["status"] == RECONCILED
+    assert [(r["model"], r["status"]) for r in report["rows"]] == [
+        ("anthropic.claude-sonnet-4-v1:0", RECONCILED), ("gpt-4o", RECONCILED)]
+
+
+def test_invoice_labels_cannot_break_the_markdown(tmp_path):
+    from prompt_shields.teardown.reconcile import render_markdown
+
+    report = _report(tmp_path, [], [
+        {"date": "2026-11-01", "provider": "evil\n# injected|x", "model": "m|odel\r\nrow",
+         "amount_usd": "1"},
+    ])
+    text = render_markdown(report)
+    assert "\n# injected" not in text
+    assert "evil # injected\\|x" in text and "m\\|odel row" in text
+
+
+def test_oversized_invoice_is_not_read(tmp_path, monkeypatch):
+    import prompt_shields.teardown.reconcile as rec
+
+    path = _invoice(tmp_path, [
+        {"date": "2026-11-01", "provider": "openai", "model": "gpt-4o", "amount_usd": "1"},
+        {"date": "2026-11-02", "provider": "openai", "model": "gpt-4o", "amount_usd": "1"},
+    ])
+    monkeypatch.setattr(rec, "MAX_INVOICE_ROWS", 1)
+    side = read_invoice_csv(path)
+    assert len(side.lines) == 1 and side.sources[0].dropped["too_many_rows"] == 1
+    monkeypatch.setattr(rec, "MAX_INVOICE_BYTES", 10)
+    side = read_invoice_csv(path)
+    assert side.lines == [] and side.sources[0].dropped["too_large"] == 1
