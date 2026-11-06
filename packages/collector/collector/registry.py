@@ -8,7 +8,8 @@ from db.models import AIAsset, DataFlow, RiskMapping
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import and_, case, func, or_, select
 
-from collector.attestation import add_attestation_summaries
+from collector import attestation
+from collector.attestation import AttestationState, add_attestation_summaries
 from collector.audit import record_read
 from collector.auth import resolve_tenant
 from collector.embeddings import get_embedding, mock_embedding
@@ -28,12 +29,30 @@ async def list_assets(
     discovery_source: str | None = None,
     since: str | None = None,
     after: str | None = None,
+    attestation_field: str | None = Query(
+        default=None,
+        description="With attestation_state: only assets whose current attestation "
+        "of this field (asset, owner, data_classification) is in that state",
+    ),
+    attestation_state: AttestationState | None = Query(  # noqa: B008 - FastAPI marker
+        default=None,
+        description="With attestation_field. `unreviewed` includes never-attested fields",
+    ),
     limit: int = Query(default=50, le=200),
 ):
     tenant_id = await resolve_tenant(request)
     db = request.state.db
 
     conditions = [AIAsset.tenant_id == tenant_id]
+    try:
+        review = attestation.list_filter(tenant_id, attestation_field, attestation_state)
+    except ValueError as exc:
+        await record_read(request, tenant_id=tenant_id, status_code=400, response_count=0)
+        raise HTTPException(status_code=400, detail={
+            "type": "about:blank", "title": "Bad Request", "status": 400, "detail": str(exc)
+        }) from exc
+    if review is not None:
+        conditions.append(review)
     if business_unit:
         conditions.append(AIAsset.business_unit == business_unit)
     if status:
@@ -202,10 +221,13 @@ async def semantic_search(
     result = await db.execute(stmt)
 
     data = []
+    assets = []
     for a, dist in result.all():
         serialized = _serialize_asset(a)
         serialized["similarity"] = round(1.0 - float(dist), 4)
         data.append(serialized)
+        assets.append(a)
+    await add_attestation_summaries(db, tenant_id, assets, data)
 
     # `q` is stored hashed, never as text (see collector.audit).
     await record_read(
@@ -252,10 +274,13 @@ async def _keyword_search(db, tenant_id, q: str, limit: int) -> list[dict]:
     )
     result = await db.execute(stmt)
     data = []
+    assets = []
     for a, matched in result.all():
         serialized = _serialize_asset(a)
         serialized["score"] = round(matched / len(terms), 4)
         data.append(serialized)
+        assets.append(a)
+    await add_attestation_summaries(db, tenant_id, assets, data)
     return data
 
 

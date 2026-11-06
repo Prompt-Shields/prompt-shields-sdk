@@ -154,8 +154,8 @@ jobs:
       - uses: actions/setup-node@v5.0.0
         with:
           # gateway/package.json has no engines field and there is no .nvmrc;
-          # this matches gateway/Dockerfile (node:20-alpine).
-          node-version: "20"
+          # this matches the major of gateway/Dockerfile (node:24.22.2-alpine3.24).
+          node-version: "24"
           cache: npm
           cache-dependency-path: gateway/package-lock.json
       - run: npm ci
