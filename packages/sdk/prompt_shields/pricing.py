@@ -20,9 +20,12 @@ vendor defaults below, `(input_per_1k, output_per_1k, cached_input_per_1k)`,
 `(..., cache_write_per_1k, cache_write_1h_per_1k)`.
 
 Further pricing dimensions (#71):
-- `service_tier`: batch and flex traffic is discounted (`SERVICE_TIER_MULTIPLIER`).
-  A tier with no known price (e.g. OpenAI `priority`, `scale`) returns None
-  rather than a wrong standard-rate number.
+- `service_tier`: a model's own tier rates from the catalog
+  (`SERVICE_TIER_PRICING`: batch, flex and priority input / output / cache
+  read) win; otherwise batch and flex traffic is discounted by
+  `SERVICE_TIER_MULTIPLIER`. A tier with no known price (e.g. OpenAI
+  `priority` on a model the catalog has no priority rates for, `scale`)
+  returns None rather than a wrong standard-rate number.
 - 1-hour cache writes (`tokens_cache_write_1h`, a subset of
   `tokens_cache_write`) at their own rate.
 - Long-context bands (`LONG_CONTEXT_PRICING`): prompts above a threshold are
@@ -85,6 +88,19 @@ WEB_SEARCH_FEE: dict[str, float] = {
 # Sonnet 4 / 4.5 above 200k prompt tokens.
 LONG_CONTEXT_PRICING: dict[tuple[str, str], tuple[int, tuple[float, ...]]] = (
     _catalog.long_context_pricing()
+)
+
+# Per-model service-tier rates, {(vendor, model): {tier: (input_per_1k,
+# output_per_1k[, cached_input_per_1k])}}, from the catalog's `*_batches`,
+# `*_flex` and `*_priority` prices (e.g. OpenAI priority processing). When a
+# tier has its own rates they replace the standard input / output / cache
+# read rates; the rates a tier does not give (cache read, cache writes,
+# audio) are the standard ones scaled by tier input / standard input.
+# Applies to the default table, at standard context, and to a vendor's own
+# models only (not through PRICING_VENDOR_FALLBACK); otherwise the tier is
+# priced by SERVICE_TIER_MULTIPLIER.
+SERVICE_TIER_PRICING: dict[tuple[str, str], dict[str, tuple[float, ...]]] = (
+    _catalog.service_tier_pricing()
 )
 
 # Audio token rates (input_per_1k, output_per_1k) in USD, for models that
@@ -223,6 +239,29 @@ def resolve_pricing_model(
     return candidates[-1] if candidates else None
 
 
+def _full_rates(
+    vendor: str, rates: tuple[float, ...]
+) -> tuple[float, float, float, float, float]:
+    """`(input, output, cache_read, cache_write, cache_write_1h)` per 1k,
+    filling the rates a table entry leaves out from the vendor multipliers."""
+    in_rate, out_rate = rates[0], rates[1]
+    cached_rate = (
+        rates[2] if len(rates) > 2
+        else in_rate * CACHE_READ_MULTIPLIER.get(vendor, 1.0)
+    )
+    write_rate = (
+        rates[3] if len(rates) > 3
+        else in_rate * CACHE_WRITE_MULTIPLIER.get(vendor, 1.0)
+    )
+    if len(rates) > 4:
+        write_1h_rate = rates[4]
+    elif vendor in CACHE_WRITE_1H_MULTIPLIER:
+        write_1h_rate = in_rate * CACHE_WRITE_1H_MULTIPLIER[vendor]
+    else:
+        write_1h_rate = write_rate
+    return in_rate, out_rate, cached_rate, write_rate, write_1h_rate
+
+
 def _tier_multiplier(vendor: str, service_tier: str | None) -> float | None:
     if service_tier is None or service_tier in STANDARD_SERVICE_TIERS:
         return 1.0
@@ -258,41 +297,46 @@ def estimate_cost(
     found = _lookup_rates(vendor, model, pricing_table)
     if found is None:
         return None
-    vendor, rates = found
+    pricing_vendor, rates = found
 
-    tier = _tier_multiplier(vendor, service_tier)
-    if tier is None:
-        return None
-
+    long_context = False
     if pricing_table is None:
-        band = LONG_CONTEXT_PRICING.get((vendor, model))
+        band = LONG_CONTEXT_PRICING.get((pricing_vendor, model))
         if band is not None and tokens_in > band[0]:
             rates = band[1]
+            long_context = True
+    in_rate, out_rate, cached_rate, write_rate, write_1h_rate = _full_rates(
+        pricing_vendor, rates
+    )
+
+    # A model's own tier rates replace the standard ones; what the tier does
+    # not price is scaled by tier input / standard input. Else a multiplier.
+    tier_rates = None
+    if pricing_table is None and not long_context and pricing_vendor == vendor:
+        tier_rates = SERVICE_TIER_PRICING.get((vendor, model), {}).get(service_tier)
+    scale = 1.0
+    if tier_rates is not None:
+        tier = 1.0
+        scale = tier_rates[0] / in_rate if in_rate else 1.0
+        in_rate, out_rate = tier_rates[0], tier_rates[1]
+        cached_rate = tier_rates[2] if len(tier_rates) > 2 else cached_rate * scale
+        write_rate *= scale
+        write_1h_rate *= scale
+    else:
+        tier = _tier_multiplier(pricing_vendor, service_tier)
+        if tier is None:
+            return None
 
     audio_in = tokens_audio_in or 0
     audio_out = tokens_audio_out or 0
     audio_in_rate = audio_out_rate = 0.0
     if audio_in or audio_out:
-        audio_rates = AUDIO_PRICING.get((vendor, model))
+        audio_rates = AUDIO_PRICING.get((pricing_vendor, model))
         if audio_rates is None:
             return None
-        audio_in_rate, audio_out_rate = audio_rates
+        audio_in_rate = audio_rates[0] * scale
+        audio_out_rate = audio_rates[1] * scale
 
-    in_rate, out_rate = rates[0], rates[1]
-    cached_rate = (
-        rates[2] if len(rates) > 2
-        else in_rate * CACHE_READ_MULTIPLIER.get(vendor, 1.0)
-    )
-    write_rate = (
-        rates[3] if len(rates) > 3
-        else in_rate * CACHE_WRITE_MULTIPLIER.get(vendor, 1.0)
-    )
-    if len(rates) > 4:
-        write_1h_rate = rates[4]
-    elif vendor in CACHE_WRITE_1H_MULTIPLIER:
-        write_1h_rate = in_rate * CACHE_WRITE_1H_MULTIPLIER[vendor]
-    else:
-        write_1h_rate = write_rate
     cached = tokens_cached or 0
     cache_write = tokens_cache_write or 0
     write_1h = min(tokens_cache_write_1h or 0, cache_write)
@@ -308,7 +352,7 @@ def estimate_cost(
         + text_out * out_rate
         + audio_out * audio_out_rate
     ) / 1000.0
-    fees = (web_search_requests or 0) * WEB_SEARCH_FEE.get(vendor, 0.0)
+    fees = (web_search_requests or 0) * WEB_SEARCH_FEE.get(pricing_vendor, 0.0)
     return round(token_cost * tier + fees, 6)
 
 

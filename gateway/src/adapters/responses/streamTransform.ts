@@ -3,22 +3,41 @@
  *
  * Transforms Chat Completions SSE chunks to Responses API SSE chunks in real-time.
  * This enables streaming support for providers that only support Chat Completions.
+ *
+ * PS fork (#73): output items are opened lazily in the order their content
+ * arrives (reasoning, message, function calls), so `output_index` matches
+ * the non-streaming output and an item exists only when it has content, as
+ * with the native Responses API. Reasoning streams as a `reasoning` item
+ * with `reasoning_summary_*` events, each item is closed with its `.done`
+ * events and `response.output_item.done`, and a mid-stream provider error
+ * ends the stream with `response.failed`.
  */
 
 import { randomUUID } from 'crypto';
-import { normalizeUsage, toResponsesUsage } from '../shared';
+import {
+  normalizeUsage,
+  plainReasoningText,
+  toResponsesUsage,
+} from '../shared';
 import { toResponsesStatus } from './responseTransform';
 
-interface FunctionCallItem {
+type OutputKind = 'message' | 'reasoning' | 'function_call';
+
+/** PS fork (#73): one output item of the streamed response. */
+interface OutputItem {
+  kind: OutputKind;
   id: string;
-  call_id: string;
-  name: string;
-  arguments: string;
   outputIndex: number;
+  /** Message text, reasoning summary text, or function call arguments */
+  text: string;
+  done: boolean;
+  call_id?: string;
+  name?: string;
 }
 
 interface StreamState {
   responseId: string;
+  /** Id of the (last) message output item; '' until text arrives */
   outputItemId: string;
   contentPartIndex: number;
   hasStarted: boolean;
@@ -28,6 +47,7 @@ interface StreamState {
   outputTokens: number;
   finishReason: string | null;
   sequenceNumber: number;
+  /** All message text so far */
   accumulatedText: string;
   createdAt: number;
   /** PS fork (#73): cached input tokens (input_tokens_details) */
@@ -36,21 +56,198 @@ interface StreamState {
   /** PS fork (#73): reasoning output tokens (output_tokens_details) */
   reasoningTokens: number;
   totalTokens: number;
-  /** PS fork (#73): function calls in order; message item is output 0 */
-  functionCalls: FunctionCallItem[];
-  /** Chat tool_call index → position in functionCalls */
-  toolCallByIndex: Record<number, number>;
+  /** PS fork (#73): output items in output_index order */
+  items: OutputItem[];
+  /** The message or reasoning item text is currently appended to */
+  openItem: OutputItem | null;
+  /** Chat tool_call index → function call item */
+  toolCallByIndex: Record<number, OutputItem>;
+  /** PS fork (#73): a mid-stream provider error */
+  error: { code: string; message: string } | null;
 }
 
-function functionCallOutput(fc: FunctionCallItem, status: string) {
-  return {
-    id: fc.id,
-    type: 'function_call',
-    call_id: fc.call_id,
-    name: fc.name,
-    arguments: fc.arguments,
-    status,
+function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
+  const final = status !== 'in_progress';
+  switch (item.kind) {
+    case 'message':
+      return {
+        id: item.id,
+        type: 'message',
+        role: 'assistant',
+        status,
+        content: final
+          ? [
+              {
+                type: 'output_text',
+                text: item.text,
+                annotations: [],
+                logprobs: [],
+              },
+            ]
+          : [],
+      };
+    case 'reasoning':
+      return {
+        id: item.id,
+        type: 'reasoning',
+        summary: final ? [{ type: 'summary_text', text: item.text }] : [],
+      };
+    case 'function_call':
+      return {
+        id: item.id,
+        type: 'function_call',
+        call_id: item.call_id,
+        name: item.name,
+        arguments: final ? item.text : '',
+        status,
+      };
+  }
+}
+
+function event(state: StreamState, type: string, data: object): string {
+  return `event: ${type}\ndata: ${JSON.stringify({
+    type,
+    sequence_number: state.sequenceNumber++,
+    ...data,
+  })}\n\n`;
+}
+
+const ID_PREFIX: Record<OutputKind, string> = {
+  message: 'msg',
+  reasoning: 'rs',
+  function_call: 'fc',
+};
+
+function openItem(
+  state: StreamState,
+  events: string[],
+  kind: OutputKind,
+  extra: Partial<OutputItem> = {}
+): OutputItem {
+  const item: OutputItem = {
+    kind,
+    id: `${ID_PREFIX[kind]}_${randomUUID()}`,
+    outputIndex: state.items.length,
+    text: '',
+    done: false,
+    ...extra,
   };
+  state.items.push(item);
+  events.push(
+    event(state, 'response.output_item.added', {
+      output_index: item.outputIndex,
+      item: itemJson(item, 'in_progress'),
+    })
+  );
+  const base = { item_id: item.id, output_index: item.outputIndex };
+  if (kind === 'message') {
+    state.outputItemId = item.id;
+    events.push(
+      event(state, 'response.content_part.added', {
+        ...base,
+        content_index: 0,
+        part: { type: 'output_text', text: '', annotations: [], logprobs: [] },
+      })
+    );
+  } else if (kind === 'reasoning') {
+    events.push(
+      event(state, 'response.reasoning_summary_part.added', {
+        ...base,
+        summary_index: 0,
+        part: { type: 'summary_text', text: '' },
+      })
+    );
+  }
+  return item;
+}
+
+function closeItem(state: StreamState, events: string[], item: OutputItem) {
+  if (item.done) return;
+  item.done = true;
+  if (state.openItem === item) state.openItem = null;
+  const base = { item_id: item.id, output_index: item.outputIndex };
+  if (item.kind === 'message') {
+    events.push(
+      event(state, 'response.output_text.done', {
+        ...base,
+        content_index: 0,
+        text: item.text,
+        logprobs: [],
+      }),
+      event(state, 'response.content_part.done', {
+        ...base,
+        content_index: 0,
+        part: {
+          type: 'output_text',
+          text: item.text,
+          annotations: [],
+          logprobs: [],
+        },
+      })
+    );
+  } else if (item.kind === 'reasoning') {
+    events.push(
+      event(state, 'response.reasoning_summary_text.done', {
+        ...base,
+        summary_index: 0,
+        text: item.text,
+      }),
+      event(state, 'response.reasoning_summary_part.done', {
+        ...base,
+        summary_index: 0,
+        part: { type: 'summary_text', text: item.text },
+      })
+    );
+  } else {
+    events.push(
+      event(state, 'response.function_call_arguments.done', {
+        ...base,
+        arguments: item.text,
+      })
+    );
+  }
+  events.push(
+    event(state, 'response.output_item.done', {
+      output_index: item.outputIndex,
+      item: itemJson(item, 'completed'),
+    })
+  );
+}
+
+/** Append text to the open message or reasoning item, opening one. */
+function appendText(
+  state: StreamState,
+  events: string[],
+  kind: 'message' | 'reasoning',
+  text: string
+) {
+  let item = state.openItem;
+  if (item?.kind !== kind) {
+    if (item) closeItem(state, events, item);
+    item = openItem(state, events, kind);
+    state.openItem = item;
+  }
+  item.text += text;
+  const base = { item_id: item.id, output_index: item.outputIndex };
+  if (kind === 'message') {
+    state.accumulatedText += text;
+    events.push(
+      event(state, 'response.output_text.delta', {
+        ...base,
+        content_index: 0,
+        delta: text,
+        logprobs: [],
+      })
+    );
+  } else {
+    events.push(
+      event(state, 'response.reasoning_summary_text.delta', {
+        ...base,
+        summary_index: 0,
+        delta: text,
+      })
+    );
+  }
 }
 
 /**
@@ -58,33 +255,13 @@ function functionCallOutput(fc: FunctionCallItem, status: string) {
  */
 function buildResponseSnapshot(
   state: StreamState,
-  status: 'in_progress' | 'completed' | 'incomplete',
-  includeOutput: boolean = false,
-  finalText?: string
+  status: 'in_progress' | 'completed' | 'incomplete' | 'failed',
+  includeOutput: boolean = false
 ): any {
   const output = includeOutput
-    ? [
-        {
-          id: state.outputItemId,
-          type: 'message',
-          role: 'assistant',
-          status: status === 'in_progress' ? 'in_progress' : 'completed',
-          content: [
-            {
-              type: 'output_text',
-              text: finalText ?? state.accumulatedText,
-              annotations: [],
-              logprobs: [],
-            },
-          ],
-        },
-        ...state.functionCalls.map((fc) =>
-          functionCallOutput(
-            fc,
-            status === 'in_progress' ? 'in_progress' : 'completed'
-          )
-        ),
-      ]
+    ? state.items.map((item) =>
+        itemJson(item, status === 'in_progress' ? 'in_progress' : 'completed')
+      )
     : [];
 
   return {
@@ -105,7 +282,7 @@ function buildResponseSnapshot(
     previous_response_id: null,
     instructions: null,
     output,
-    error: null,
+    error: status === 'failed' ? state.error : null,
     tools: [],
     tool_choice: 'auto',
     truncation: 'disabled',
@@ -128,7 +305,8 @@ function buildResponseSnapshot(
       },
       output_tokens: state.outputTokens,
       output_tokens_details: { reasoning_tokens: state.reasoningTokens },
-      total_tokens: state.totalTokens || state.inputTokens + state.outputTokens,
+      // PS fork (#73): always input + output, as the Responses API reports
+      total_tokens: state.inputTokens + state.outputTokens,
     },
     max_output_tokens: null,
     max_tool_calls: null,
@@ -139,6 +317,28 @@ function buildResponseSnapshot(
     safety_identifier: null,
     prompt_cache_key: null,
   };
+}
+
+/** Close every open item and emit the terminal response event. */
+function finish(state: StreamState): string {
+  state.completed = true;
+  const events: string[] = [];
+  for (const item of state.items) closeItem(state, events, item);
+  const status = state.error
+    ? 'failed'
+    : toResponsesStatus(state.finishReason).status;
+  const type =
+    status === 'failed'
+      ? 'response.failed'
+      : status === 'incomplete'
+        ? 'response.incomplete'
+        : 'response.completed';
+  events.push(
+    event(state, type, {
+      response: buildResponseSnapshot(state, status as any, true),
+    })
+  );
+  return events.join('');
 }
 
 /**
@@ -152,81 +352,7 @@ export function transformStreamChunk(
   const trimmed = chunk.trim();
   if (!trimmed || trimmed === 'data: [DONE]') {
     if (trimmed === 'data: [DONE]' && state.hasStarted && !state.completed) {
-      state.completed = true;
-      // Send completion events with accumulated output
-      const finalText = state.accumulatedText;
-      // PS fork (#73): truncated or filtered output ends as incomplete
-      const finalStatus = toResponsesStatus(state.finishReason).status;
-      const finalEvent =
-        finalStatus === 'incomplete'
-          ? 'response.incomplete'
-          : 'response.completed';
-      return [
-        `event: response.output_text.done\ndata: ${JSON.stringify({
-          type: 'response.output_text.done',
-          sequence_number: state.sequenceNumber++,
-          item_id: state.outputItemId,
-          output_index: 0,
-          content_index: state.contentPartIndex,
-          text: finalText,
-          logprobs: [],
-        })}\n\n`,
-        `event: response.content_part.done\ndata: ${JSON.stringify({
-          type: 'response.content_part.done',
-          sequence_number: state.sequenceNumber++,
-          item_id: state.outputItemId,
-          output_index: 0,
-          content_index: state.contentPartIndex,
-          part: {
-            type: 'output_text',
-            text: finalText,
-            annotations: [],
-            logprobs: [],
-          },
-        })}\n\n`,
-        `event: response.output_item.done\ndata: ${JSON.stringify({
-          type: 'response.output_item.done',
-          sequence_number: state.sequenceNumber++,
-          output_index: 0,
-          item: {
-            id: state.outputItemId,
-            type: 'message',
-            role: 'assistant',
-            status: 'completed',
-            content: [
-              {
-                type: 'output_text',
-                text: finalText,
-                annotations: [],
-                logprobs: [],
-              },
-            ],
-          },
-        })}\n\n`,
-        // PS fork (#73): close each function call item
-        ...state.functionCalls.flatMap((fc) => [
-          `event: response.function_call_arguments.done\ndata: ${JSON.stringify(
-            {
-              type: 'response.function_call_arguments.done',
-              sequence_number: state.sequenceNumber++,
-              item_id: fc.id,
-              output_index: fc.outputIndex,
-              arguments: fc.arguments,
-            }
-          )}\n\n`,
-          `event: response.output_item.done\ndata: ${JSON.stringify({
-            type: 'response.output_item.done',
-            sequence_number: state.sequenceNumber++,
-            output_index: fc.outputIndex,
-            item: functionCallOutput(fc, 'completed'),
-          })}\n\n`,
-        ]),
-        `event: ${finalEvent}\ndata: ${JSON.stringify({
-          type: finalEvent,
-          sequence_number: state.sequenceNumber++,
-          response: buildResponseSnapshot(state, finalStatus, true, finalText),
-        })}\n\n`,
-      ].join('');
+      return finish(state);
     }
     return undefined;
   }
@@ -241,6 +367,7 @@ export function transformStreamChunk(
   } catch {
     return undefined;
   }
+  if (state.completed) return undefined;
 
   const events: string[] = [];
 
@@ -248,104 +375,77 @@ export function transformStreamChunk(
   if (!state.hasStarted) {
     state.hasStarted = true;
     state.responseId = `resp_${randomUUID()}`;
-    state.outputItemId = `msg_${randomUUID()}`;
     state.contentPartIndex = 0;
     state.model = parsed.model || '';
     state.createdAt = Math.floor(Date.now() / 1000);
 
     events.push(
-      `event: response.created\ndata: ${JSON.stringify({
-        type: 'response.created',
-        sequence_number: state.sequenceNumber++,
-        response: buildResponseSnapshot(state, 'in_progress', false),
-      })}\n\n`,
-      `event: response.in_progress\ndata: ${JSON.stringify({
-        type: 'response.in_progress',
-        sequence_number: state.sequenceNumber++,
-        response: buildResponseSnapshot(state, 'in_progress', false),
-      })}\n\n`,
-      `event: response.output_item.added\ndata: ${JSON.stringify({
-        type: 'response.output_item.added',
-        sequence_number: state.sequenceNumber++,
-        output_index: 0,
-        item: {
-          id: state.outputItemId,
-          type: 'message',
-          role: 'assistant',
-          status: 'in_progress',
-          content: [],
-        },
-      })}\n\n`,
-      `event: response.content_part.added\ndata: ${JSON.stringify({
-        type: 'response.content_part.added',
-        sequence_number: state.sequenceNumber++,
-        item_id: state.outputItemId,
-        output_index: 0,
-        content_index: 0,
-        part: { type: 'output_text', text: '', annotations: [], logprobs: [] },
-      })}\n\n`
+      event(state, 'response.created', {
+        response: buildResponseSnapshot(state, 'in_progress'),
+      }),
+      event(state, 'response.in_progress', {
+        response: buildResponseSnapshot(state, 'in_progress'),
+      })
     );
+  }
+
+  // PS fork (#73): a mid-stream provider error ends the response as failed
+  if (parsed?.error) {
+    const err = parsed.error;
+    state.error = {
+      code:
+        (typeof err === 'object' && (err.code || err.type)) || 'server_error',
+      message: (typeof err === 'string' ? err : err?.message) || 'Stream error',
+    };
+    return events.join('') + finish(state);
+  }
+
+  const delta = parsed.choices?.[0]?.delta;
+
+  // PS fork (#73): reasoning, from content_blocks (Anthropic, Gemini,
+  // OpenRouter transforms) or reasoning_content / reasoning strings
+  let sawBlockThinking = false;
+  for (const block of delta?.content_blocks || []) {
+    const thinking = block?.delta?.thinking;
+    if (typeof thinking === 'string' && thinking) {
+      sawBlockThinking = true;
+      appendText(state, events, 'reasoning', thinking);
+    }
+  }
+  if (!sawBlockThinking) {
+    const reasoning = plainReasoningText(delta);
+    if (reasoning) appendText(state, events, 'reasoning', reasoning);
   }
 
   // Handle content delta
-  const delta = parsed.choices?.[0]?.delta;
-  if (delta?.content) {
-    state.accumulatedText += delta.content;
-    events.push(
-      `event: response.output_text.delta\ndata: ${JSON.stringify({
-        type: 'response.output_text.delta',
-        sequence_number: state.sequenceNumber++,
-        item_id: state.outputItemId,
-        output_index: 0,
-        content_index: 0,
-        delta: delta.content,
-        logprobs: [],
-      })}\n\n`
-    );
+  if (typeof delta?.content === 'string' && delta.content) {
+    appendText(state, events, 'message', delta.content);
   }
 
-  // Handle tool calls. PS fork (#73): each call is its own output item
-  // after the message (output_index 1..n) with a stable item id, and
-  // argument deltas reference that item.
+  // Handle tool calls. PS fork (#73): each call is its own output item with
+  // a stable item id, and argument deltas reference that item.
   if (Array.isArray(delta?.tool_calls)) {
     for (const tc of delta.tool_calls) {
       if (!tc) continue;
       const toolIdx = tc.index ?? 0;
-      const knownPos = state.toolCallByIndex[toolIdx];
-      let fc =
-        knownPos === undefined ? undefined : state.functionCalls[knownPos];
+      let fc: OutputItem | undefined = state.toolCallByIndex[toolIdx];
       // A new id on a known index is a new call (Gemini restarts at 0)
       if (!fc || (tc.id && tc.id !== fc.call_id)) {
-        fc = {
-          id: `fc_${randomUUID()}`,
+        if (state.openItem) closeItem(state, events, state.openItem);
+        fc = openItem(state, events, 'function_call', {
           call_id: tc.id || `call_${randomUUID()}`,
           name: tc.function?.name || '',
-          arguments: '',
-          outputIndex: state.functionCalls.length + 1,
-        };
-        state.toolCallByIndex[toolIdx] = state.functionCalls.length;
-        state.functionCalls.push(fc);
-        events.push(
-          `event: response.output_item.added\ndata: ${JSON.stringify({
-            type: 'response.output_item.added',
-            sequence_number: state.sequenceNumber++,
-            output_index: fc.outputIndex,
-            item: functionCallOutput(fc, 'in_progress'),
-          })}\n\n`
-        );
+        });
+        state.toolCallByIndex[toolIdx] = fc;
       }
       if (tc.function?.arguments) {
-        fc.arguments += tc.function.arguments;
+        fc.text += tc.function.arguments;
         events.push(
-          `event: response.function_call_arguments.delta\ndata: ${JSON.stringify(
-            {
-              type: 'response.function_call_arguments.delta',
-              sequence_number: state.sequenceNumber++,
-              item_id: fc.id,
-              output_index: fc.outputIndex,
-              delta: tc.function.arguments,
-            }
-          )}\n\n`
+          event(state, 'response.function_call_arguments.delta', {
+            item_id: fc.id,
+            output_index: fc.outputIndex,
+            delta: tc.function.arguments,
+          })
         );
       }
     }
@@ -393,7 +493,9 @@ export function createStreamState(): StreamState {
     cacheCreationTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
-    functionCalls: [],
+    items: [],
+    openItem: null,
     toolCallByIndex: {},
+    error: null,
   };
 }
