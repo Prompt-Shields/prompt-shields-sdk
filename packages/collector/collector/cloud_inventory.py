@@ -1288,11 +1288,12 @@ async def _bedrock_list(
 def bedrock_tag_map(body) -> dict[str, str]:
     """Tags from a ``ListTagsForResource`` response (``{"tags": [{"key",
     "value"}]}``)."""
-    if not isinstance(body, dict):
+    tags = body.get("tags") if isinstance(body, dict) else None
+    if not isinstance(tags, list):
         return {}
     return {
         str(t["key"]): str(t["value"])
-        for t in body.get("tags") or []
+        for t in tags
         if isinstance(t, dict) and t.get("key") and t.get("value") is not None
     }
 
@@ -1390,7 +1391,8 @@ def bedrock_resources(
         arn = _bedrock_arn(p.get("provisionedModelArn"), region, "provisioned-model")
         if arn is None or not _active(p, "status"):
             continue
-        parent = p.get("modelArn") if p.get("modelArn") in custom else None
+        parent = p.get("modelArn")
+        parent = parent if isinstance(parent, str) and parent in custom else None
         model = _model_id(p.get("foundationModelArn")) or custom.get(parent)
         found.append((arn, model, "provisioned", parent))
 
@@ -1401,8 +1403,11 @@ def bedrock_resources(
         )
         if arn is None or not _active(p, "status"):
             continue
+        listed = p.get("models")
         models = [
-            m.get("modelArn") for m in p.get("models") or [] if isinstance(m, dict)
+            m.get("modelArn")
+            for m in (listed if isinstance(listed, list) else [])
+            if isinstance(m, dict)
         ]
         model = next((i for i in map(_model_id, models) if i), None)
         found.append((arn, model, "inference_profile", None))
