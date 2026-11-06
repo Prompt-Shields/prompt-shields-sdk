@@ -5992,6 +5992,49 @@ paths:
         '404':
           $ref: '#/components/responses/OperatorNotFound'
 
+  /api/v1/admin/cloud-inventory/import:
+    post:
+      operationId: importCloudInventory
+      tags: [Operator]
+      summary: Import a cloud AI inventory export for a tenant, with no cloud credentials (operator)
+      description: >-
+        Stores the AI model deployments in an export made with the cloud's own
+        read-only CLI (AWS Bedrock so far; see the discovery sources guide).
+        The collector makes no cloud call. An export that contains a
+        credential field is refused with 400, naming the field but not its
+        value.
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+                export:
+                  type: object
+                  description: '{"cloud": "aws", "account_id"?: "...", "regions": {"<region>": {...}}}'
+              required: [tenant_id, export]
+      responses:
+        '200':
+          description: Import result (deployments, assets created and updated)
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Malformed export, unsupported cloud, or credential fields present
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+        '413':
+          description: Request body over 32 MiB
+
   /api/v1/admin/connectors/leanix/sync:
     post:
       operationId: syncLeanix

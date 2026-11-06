@@ -1158,6 +1158,40 @@ async def test_vertex_inventory_pull_runs_as_the_target_tenant_under_rls(rls_db)
         assert hidden.first() is None
 
 
+async def test_cloud_inventory_import_route_runs_as_the_target_tenant_under_rls(
+    rls_db, monkeypatch
+):
+    """The offline import (#94) is scoped to its target tenant (no bypass):
+    tenant B's import writes B's assets, which tenant A cannot see."""
+    from tests.test_cloud_inventory_import import EXPECTED, fixture_export
+
+    a, b = rls_db["a"], rls_db["b"]
+    monkeypatch.setenv("PS_ADMIN_TOKEN", TOKEN)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/admin/cloud-inventory/import",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"tenant_id": str(b), "export": fixture_export()},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["assets_created"] == len(EXPECTED)
+    services = [f"aws:{arn}" for arn in EXPECTED]
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        rows = (
+            await s.execute(
+                select(AIAsset.tenant_id).where(AIAsset.calling_service.in_(services))
+            )
+        ).scalars().all()
+        assert rows == [b] * len(EXPECTED)
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        hidden = await s.execute(
+            select(AIAsset.id).where(AIAsset.calling_service.in_(services))
+        )
+        assert hidden.first() is None
+
+
 async def test_inventoried_region_reaches_registry_partner_api_and_ai_bom(rls_db):
     """Region is captured for sovereignty reporting (#94): an Azure, AWS
     and GCP pull for tenant B (under RLS) shows each asset's region in the
