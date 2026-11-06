@@ -2,8 +2,12 @@ import { APIConnectionError, PartnerError } from './errors';
 import type { FocusCostRow, FocusExportFormat } from './types';
 
 /** The parts of Node's `fs` and `stream/promises` that `saveTo()` uses. */
+interface NodeWriteStream {
+  closed?: boolean;
+  once(event: 'close', listener: () => void): unknown;
+}
 interface NodeFs {
-  createWriteStream(path: string, options: { flags: string }): unknown;
+  createWriteStream(path: string, options: { flags: string }): NodeWriteStream;
   promises: { unlink(path: string): Promise<void>; rename(from: string, to: string): Promise<void> };
 }
 interface NodeStreamPromises {
@@ -158,11 +162,16 @@ export class Download implements AsyncIterable<Uint8Array> {
       }
     };
     const tmp = `${path}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.partial`;
+    // `wx`: never write through an existing file or symlink.
+    const out = fs.createWriteStream(tmp, { flags: 'wx' });
     try {
-      // `wx`: never write through an existing file or symlink.
-      await pipeline(counted(this.chunks()), fs.createWriteStream(tmp, { flags: 'wx' }));
+      await pipeline(counted(this.chunks()), out);
       await fs.promises.rename(tmp, path);
     } catch (err) {
+      // The file is opened asynchronously: if the body fails before the open
+      // finishes, unlinking now would race the open and leave the file
+      // behind. Wait for the stream to close (pipeline destroys it on error).
+      if (!out.closed) await new Promise<void>((resolve) => out.once('close', resolve));
       await fs.promises.unlink(tmp).catch(() => undefined);
       throw err;
     }
