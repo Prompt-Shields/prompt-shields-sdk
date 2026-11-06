@@ -1,0 +1,36 @@
+{
+  "description": "Counter keys and TTLs every BudgetStore implementation must produce (SDK and gateway), per schemas/budget/README.md. 'now' is the call time in UTC; 'subject' is the attribute value ('_' for a global budget).",
+  "vectors": [
+    {
+      "id": "day-use-case",
+      "input": { "namespace": "default", "scope": "use_case", "subject": "support-bot", "window": "day", "now": "2026-11-06T13:45:30Z" },
+      "expected": { "key": "ps:budget:v1:default:use_case:support-bot:day:2026-11-06", "ttl_seconds": 123270 }
+    },
+    {
+      "id": "iso-week-starts-monday",
+      "input": { "namespace": "default", "scope": "use_case", "subject": "support-bot", "window": "week", "now": "2026-11-06T13:45:30Z" },
+      "expected": { "key": "ps:budget:v1:default:use_case:support-bot:week:2026-W45", "ttl_seconds": 296070 }
+    },
+    {
+      "id": "month-december-rollover-rounds-ttl-up",
+      "input": { "namespace": "default", "scope": "use_case", "subject": "support-bot", "window": "month", "now": "2026-12-31T23:59:59.500Z" },
+      "expected": { "key": "ps:budget:v1:default:use_case:support-bot:month:2026-12", "ttl_seconds": 86401 }
+    },
+    {
+      "id": "iso-week-year-differs-from-calendar-year",
+      "input": { "namespace": "default", "scope": "business_unit", "subject": "finance", "window": "week", "now": "2027-01-01T08:00:00Z" },
+      "expected": { "key": "ps:budget:v1:default:business_unit:finance:week:2026-W53", "ttl_seconds": 316800 }
+    },
+    {
+      "id": "subject-percent-encoded",
+      "description": "Every UTF-8 byte outside [A-Za-z0-9._~-] becomes %XX (uppercase), including ! and * which encodeURIComponent leaves alone.",
+      "input": { "namespace": "acme.prod", "scope": "owner", "subject": "Team A:ops/é!*", "window": "day", "now": "2026-11-06T00:00:00Z" },
+      "expected": { "key": "ps:budget:v1:acme.prod:owner:Team%20A%3Aops%2F%C3%A9%21%2A:day:2026-11-06", "ttl_seconds": 172800 }
+    },
+    {
+      "id": "global-february",
+      "input": { "namespace": "acme", "scope": "global", "subject": "_", "window": "month", "now": "2026-02-14T12:00:00Z" },
+      "expected": { "key": "ps:budget:v1:acme:global:_:month:2026-02", "ttl_seconds": 1339200 }
+    }
+  ]
+}

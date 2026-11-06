@@ -76,7 +76,8 @@
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",
-        "guides/routing-learner"
+        "guides/routing-learner",
+        "guides/spend-anomaly-alerts"
       ]
     },
     {
@@ -115,6 +116,7 @@
       "pages": [
         "api-reference/sync/get-changes",
         "api-reference/sync/export",
+        "api-reference/sync/focus-export",
         "api-reference/sync/webhooks"
       ]
     },

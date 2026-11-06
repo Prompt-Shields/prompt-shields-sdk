@@ -1,23 +1,8 @@
-import { ProviderAPIConfig } from '../types';
+import { openAICompatibleAPIConfig } from '../openAICompatible';
 
 // Regolo.ai by Seeweb, Italy (OpenAI-compatible). The base URL is a fixed vendor host.
 export const REGOLO_BASE_URL = 'https://api.regolo.ai/v1';
 
-const RegoloAPIConfig: ProviderAPIConfig = {
-  getBaseURL: () => REGOLO_BASE_URL,
-  headers: ({ providerOptions }) => {
-    return { Authorization: `Bearer ${providerOptions.apiKey}` };
-  },
-  getEndpoint: ({ fn }) => {
-    switch (fn) {
-      case 'chatComplete':
-        return '/chat/completions';
-      case 'embed':
-        return '/embeddings';
-      default:
-        return '';
-    }
-  },
-};
+const RegoloAPIConfig = openAICompatibleAPIConfig(REGOLO_BASE_URL, true);
 
 export default RegoloAPIConfig;

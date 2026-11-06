@@ -77,6 +77,7 @@ token or an API key. Scopes not granted are denied.
 | `risks:review` | `POST /assets/{id}/risks/{risk_id}/review`: confirm or reject a risk mapping, with the reviewer and an optional comment. Never granted unless asked for |
 | `learner:read` | `/learner/snapshots`, `/learner/recommendations` (routing learner snapshots and recommendations, with projected and realised savings). Never granted unless asked for |
 | `learner:review` | `POST /learner/recommendations/{id}/review`: accept or reject a routing learner recommendation, with the reviewer and an optional comment. Never granted unless asked for |
+| `usage:export` | `/usage/focus-export`: AI usage cost in the FinOps FOCUS format (CSV or JSON Lines). Never granted unless asked for |
 | `provider-credentials:manage` | `/provider-credentials`, `/provider-key-fingerprints` (provider admin keys for the org usage pull, write-only). Never granted unless asked for |
 
 New credentials get the six read scopes unless the tenant admin picks fewer.

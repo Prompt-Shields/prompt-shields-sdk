@@ -404,3 +404,17 @@ def test_tenant_schema_matches_serializer():
     keys = set(operator_admin._tenant_dict(tenant))
     assert _props("Tenant") == keys == set(SCHEMAS["Tenant"]["required"])
     assert _props("TenantCreated") == keys | {"api_key", "warning"}
+
+
+def test_focus_cost_row_schema_matches_the_export_columns():
+    from collector import focus_export
+
+    assert list(SCHEMAS["FocusCostRow"]["properties"]) == list(focus_export.COLUMNS)
+    assert SCHEMAS["FocusCostRow"]["required"] == list(focus_export.COLUMNS)
+    op = SPEC["paths"]["/partner/v1/usage/focus-export"]["get"]
+    assert op["security"][0] == {"OAuth2": ["usage:export"]}
+    params = {p["name"]: p["schema"] for p in op["parameters"]}
+    assert params["format"]["enum"] == ["csv", "jsonl"]
+    assert params["granularity"]["enum"] == ["hour", "day"]
+    assert params["cost_mode"]["enum"] == ["estimated", "merge_safe"]
+    assert set(focus_export.MEDIA_TYPES) == set(params["format"]["enum"])

@@ -87,6 +87,7 @@ import ScalewayConfig from './scaleway';
 import RegoloConfig from './regolo';
 import IONOSConfig from './ionos';
 import STACKITConfig from './stackit';
+import InfercomConfig from './infercom';
 import MetaConfig from './meta';
 import SCXAIConfig from './scx-ai';
 import ClaudePlatformAwsConfig from './claude-platform-aws';
@@ -179,6 +180,7 @@ const Providers: { [key: string]: ProviderConfigs } = {
   regolo: RegoloConfig,
   ionos: IONOSConfig,
   stackit: STACKITConfig,
+  infercom: InfercomConfig,
   meta: MetaConfig,
   'scx-ai': SCXAIConfig,
   'claude-platform-aws': ClaudePlatformAwsConfig,

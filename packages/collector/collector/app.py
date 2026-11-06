@@ -189,6 +189,10 @@ from collector.learner import partner_router as learner_partner_router
 
 app.include_router(learner_ingest_router)
 app.include_router(learner_partner_router)
+# Spend anomaly alerts: Partner API list and acknowledge (#30)
+from collector.spend_anomalies import partner_router as spend_alerts_partner_router
+
+app.include_router(spend_alerts_partner_router)
 
 # Platform signal: provider org usage pull (admin trigger)
 from collector.provider_usage_admin import router as provider_usage_router

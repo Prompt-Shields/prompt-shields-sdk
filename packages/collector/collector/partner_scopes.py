@@ -60,6 +60,15 @@ SCOPES: dict[str, str] = {
         "Accept or reject a routing learner recommendation, with the "
         "reviewer's name and comment"
     ),
+    "spend-alerts:read": (
+        "List spend anomaly alerts and receive them as `spend.anomaly` "
+        "webhook events"
+    ),
+    "spend-alerts:acknowledge": "Acknowledge spend anomaly alerts",
+    "usage:export": (
+        "Bulk export AI usage cost in the FinOps FOCUS format "
+        "(CSV or JSON Lines, per asset, model and provider)"
+    ),
     "audit:read": (
         "Receive the tenant's admin audit trail as `audit.*` webhook events "
         "(credential, scope, webhook, retention and registry changes)"

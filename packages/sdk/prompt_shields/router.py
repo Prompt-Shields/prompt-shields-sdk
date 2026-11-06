@@ -38,6 +38,16 @@ When every candidate failed or was skipped, ``NoCompliantCandidate`` (a
 ``PolicyViolation``) is raised. Per-provider circuit breakers are shared by
 every router in the process unless ``breakers=`` / ``breaker_config=`` say
 otherwise.
+
+Spend budgets (``budgets=``, a budget.v1 document, #29) are checked before
+each call in local mode: an exhausted ``block`` budget raises
+``BudgetExceeded`` before any attempt; a ``downgrade`` budget's remaining
+amount becomes the ``max_cost`` clamp, so it narrows both the chosen model
+and the failover candidates, within the policy's constraints. The cost of
+the attempt that served the call is recorded once afterwards in
+``budget_store`` (default: in-process, per-process counters; use
+``RedisBudgetStore`` to share them); failed attempts record nothing. See
+``prompt_shields.budgets``.
 """
 
 from __future__ import annotations
@@ -51,6 +61,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from prompt_shields.baseline import Baseline, BaselineError, load_baseline
+from prompt_shields.budgets import (
+    BudgetCheck,
+    BudgetError,
+    BudgetStore,
+    make_enforcer,
+)
 from prompt_shields.failover import (
     BreakerConfig,
     BreakerRegistry,
@@ -63,6 +79,11 @@ from prompt_shields.failover import (
     default_registry,
 )
 from prompt_shields.pii import detect_pii_categories
+from prompt_shields.pricing import (
+    COST_SOURCE_PRICING_TABLE,
+    COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
+    estimate_cost,
+)
 from prompt_shields.route_policy import (
     DEFAULT_OUTPUT_TOKENS,
     PolicyViolation,
@@ -75,6 +96,11 @@ from prompt_shields.route_policy import (
     parse_route_headers,
     resolve_policy_route,
     tier_complies,
+)
+from prompt_shields.sovereign import (
+    SovereignProviderError,
+    get_openai_compatible,
+    resolve_base_url,
 )
 from prompt_shields.types import PSMetadata, RouteHint
 
@@ -164,6 +190,17 @@ class Attempt:
 
 
 @dataclass(frozen=True)
+class BudgetInfo:
+    """The call's spend budgets (#29): the worst ``state`` among matching
+    budgets (``ok`` / ``warn`` / ``unknown`` / ``exceeded``), the budget in
+    that state, and ``action`` (``none`` or ``downgraded``)."""
+
+    state: str
+    budget_id: str | None
+    action: str
+
+
+@dataclass(frozen=True)
 class PSResult:
     """``fallback_chain`` is the error class of each failed attempt, in
     order: empty when the first attempt succeeded."""
@@ -171,6 +208,7 @@ class PSResult:
     route: RouteInfo
     cost: CostInfo
     attempts: tuple[Attempt, ...]
+    budget: BudgetInfo | None = None
     fallback_chain: tuple[str, ...] = ()
 
 
@@ -495,6 +533,18 @@ class _Provider:
     vendor: str
     api_key: str
     options: dict
+    #: Catalog provider id behind an OpenAI-compatible entry, if known.
+    catalog: str | None = None
+
+    @property
+    def openai_compatible(self) -> bool:
+        """Reached through the OpenAI SDK at another provider's base URL, so
+        the OpenAI price table does not apply to its model ids."""
+        return (
+            self.vendor == "openai"
+            and self.name != "openai"
+            and bool(self.options.get("base_url"))
+        )
 
 
 def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _Provider]:
@@ -513,7 +563,35 @@ def _parse_providers(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, _P
                 f"got {vendor!r} (use 'openai' with a base_url for "
                 "OpenAI-compatible APIs)"
             )
-        out[name] = _Provider(name, vendor, api_key, config)
+        # A named OpenAI-compatible provider (catalog id, #20) gets its base
+        # URL from the catalog unless the entry sets one.
+        catalog_provider = config.pop("catalog_provider", None)
+        region = config.pop("region", None)
+        catalog_id = catalog_provider or (
+            name if get_openai_compatible(name) is not None else None
+        )
+        if vendor == "openai" and not config.get("base_url"):
+            known = catalog_provider or name
+            if known != "openai":
+                if catalog_provider is None and get_openai_compatible(name) is None:
+                    # Never send this provider's key to api.openai.com.
+                    raise RouterError(
+                        f"provider {name!r} has no base_url and is not a known "
+                        "OpenAI-compatible provider; set base_url or "
+                        "catalog_provider"
+                    )
+                try:
+                    config["base_url"] = resolve_base_url(known, region)
+                except SovereignProviderError as exc:
+                    raise RouterError(f"provider {name!r}: {exc}") from exc
+            elif region is not None:
+                raise RouterError(f"provider {name!r}: region needs a catalog provider")
+        elif region is not None:
+            raise RouterError(
+                f"provider {name!r}: region selects a catalog base URL; "
+                "it cannot be combined with base_url"
+            )
+        out[name] = _Provider(name, vendor, api_key, config, catalog_id)
     return out
 
 
@@ -527,6 +605,8 @@ class _Plan:
     requested_model: str
     data_classification: str | None
     use_case: str | None
+    budget: BudgetCheck | None = None
+    budget_action: str = "none"
     request: RouteRequest | None = None
 
 
@@ -581,6 +661,8 @@ class _RouterCore:
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
         baseline: Baseline | Mapping[str, Any] | str | os.PathLike | None = None,
+        budgets: Any = None,
+        budget_store: BudgetStore | None = None,
         failover: bool = True,
         breakers: BreakerRegistry | None = None,
         breaker_config: BreakerConfig | None = None,
@@ -612,8 +694,15 @@ class _RouterCore:
         self.policy: dict | None = None
         self._providers: dict[str, _Provider] = {}
         self.baseline: Baseline | None = None
+        self.budgets = None
+        self._budget_attrs = {"business_unit": business_unit, "owner": owner}
 
         if mode == "gateway":
+            if budgets is not None or budget_store is not None:
+                raise RouterError(
+                    "mode='gateway': the gateway enforces spend budgets with "
+                    "its shared store"
+                )
             if baseline is not None:
                 raise RouterError(
                     "mode='gateway': the gateway adds the counterfactual cost; "
@@ -662,6 +751,10 @@ class _RouterCore:
                 self.baseline = load_baseline(baseline)
             except BaselineError as exc:
                 raise RouterError(f"invalid baseline: {exc}") from exc
+        try:
+            self.budgets = make_enforcer(budgets, budget_store)
+        except BudgetError as exc:
+            raise RouterError(f"invalid budgets: {exc}") from exc
         self._reachable = self._reachable_policy(self.policy)
         if not any(self._reachable["groups"].values()):
             raise RouterError(
@@ -858,12 +951,58 @@ class _RouterCore:
 
         ``pii_detected`` adds categories found elsewhere (a DLP scan) to the
         ones the local scanner finds. Raises ``PolicyViolation`` when the call
-        would fail closed.
+        would fail closed, ``BudgetExceeded`` when a block budget is
+        exhausted. Spend budgets are read but nothing is recorded.
         """
         return self._plan(
             messages, model, route, max_tokens, data_classification, use_case,
-            pii_detected,
+            pii_detected, budget=self._budget_check(use_case),
         ).decision
+
+    # --- budgets --------------------------------------------------------------
+
+    def _budget_attributes(self, use_case: str | None) -> dict:
+        return {**self._budget_attrs, "use_case": use_case or self._use_case}
+
+    def _budget_check(self, use_case: str | None) -> BudgetCheck | None:
+        if self.budgets is None:
+            return None
+        return self.budgets.check(self._budget_attributes(use_case))
+
+    async def _abudget_check(self, use_case: str | None) -> BudgetCheck | None:
+        if self.budgets is None:
+            return None
+        return await self.budgets.acheck(self._budget_attributes(use_case))
+
+    def _apply_budget(
+        self, decision: RouteDecision, req: RouteRequest, check: BudgetCheck
+    ) -> tuple[RouteDecision, str, RouteRequest]:
+        """Block, or downgrade ``decision`` to fit the remaining budget; also
+        returns the request with the budget's ``max_cost`` clamp.
+
+        A downgrade budget's remaining amount is a cost ceiling, applied as
+        the ``max_cost`` clamp over the allowed candidates (the data policy
+        still applies, so a budget never downgrades to a non-compliant
+        model). Nothing fits: the cheapest allowed candidate.
+        """
+        assert self.budgets is not None
+        self.budgets.raise_if_blocked(check)
+        ceiling = check.ceiling_usd
+        if ceiling is None:
+            return decision, "none", req
+        # The clamped request also bounds the failover candidates
+        # (``_fallback_plans`` reads ``plan.request.max_cost``).
+        req = replace(
+            req,
+            max_cost=ceiling if req.max_cost is None else min(req.max_cost, ceiling),
+        )
+        if decision.est_cost <= ceiling:
+            return decision, "none", req
+        cheaper = resolve_policy_route(req, self._reachable)
+        if cheaper.est_cost >= decision.est_cost:
+            return decision, "none", req
+        return (replace(cheaper, reason=cheaper.reason + "+budget-downgrade"),
+                "downgraded", req)
 
     def _plan(
         self,
@@ -874,6 +1013,7 @@ class _RouterCore:
         data_classification: str | None,
         use_case: str | None,
         pii_detected: list[str] | None = None,
+        budget: BudgetCheck | None = None,
     ) -> _Plan:
         if self.mode != "local":
             raise RouterError("route() decides locally; this router delegates to the gateway")
@@ -883,9 +1023,13 @@ class _RouterCore:
             messages, model, route, max_tokens, declared, use_case, pii_detected
         )
         decision = self._decide(req)
+        budget_action = "none"
+        if budget is not None:
+            decision, budget_action, req = self._apply_budget(decision, req, budget)
         tier = self._find_tier(decision, req)
         provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
-        return _Plan(decision, tier, provider, model, declared, use_case, req)
+        return _Plan(decision, tier, provider, model, declared, use_case,
+                     budget, budget_action, req)
 
     # --- failover -------------------------------------------------------------
 
@@ -1062,6 +1206,33 @@ class _RouterCore:
                 event["data_classification"] = plan.data_classification
             if plan.use_case is not None:
                 event["use_case_name"] = plan.use_case
+            # An OpenAI-compatible provider is dispatched as vendor "openai";
+            # a price from OpenAI's table would be the wrong vendor's rate
+            # for its model id. Use the catalog's USD rate for the provider
+            # instead, else the tier's rates below. A provider-reported cost
+            # is kept.
+            if plan.provider.openai_compatible and event.get("cost_source") in (
+                COST_SOURCE_PRICING_TABLE, COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
+            ):
+                event["cost"] = None
+                event.pop("cost_source", None)
+            if (
+                plan.provider.openai_compatible
+                and plan.provider.catalog is not None
+                and event.get("cost") is None
+            ):
+                cost = estimate_cost(
+                    plan.provider.catalog,
+                    event.get("served_model") or decision.model,
+                    event.get("tokens_in"),
+                    event.get("tokens_out"),
+                    tokens_cached=event.get("tokens_cached"),
+                )
+                if cost is not None:
+                    event["cost"] = cost
+                    event["cost_source"] = COST_SOURCE_PRICING_TABLE
+            if plan.budget is not None:
+                event.update(plan.budget.telemetry(plan.budget_action))
             # No provider-reported cost and no pricing-table entry (an
             # OpenAI-compatible provider's own model id): price the actual
             # tokens at the policy tier's rates.
@@ -1155,6 +1326,11 @@ class _RouterCore:
             fallback_chain=tuple(
                 a.error_class for a in attempts if not a.ok and a.error_class
             ),
+            budget=(
+                BudgetInfo(plan.budget.state, plan.budget.budget_id, plan.budget_action)
+                if plan.budget is not None and plan.budget.state is not None
+                else None
+            ),
         )
         return out
 
@@ -1164,6 +1340,23 @@ class _RouterCore:
             candidate.data[0], response, captured, attempts,
             (self.policy or {}).get("policy_version"),
         )
+
+    @staticmethod
+    def _budget_cost(plan: _Plan, event: dict) -> float | None:
+        """The cost recorded against the budgets: the event's, else the
+        router's estimate."""
+        cost = event.get("cost")
+        return cost if cost is not None else plan.decision.est_cost
+
+    def _record_spend(self, plan: _Plan, captured: dict) -> None:
+        """Records the cost of the attempt that served the call (``plan`` is
+        that candidate's), once; failed attempts are never recorded."""
+        if plan.budget is not None and self.budgets is not None:
+            self.budgets.commit(plan.budget, self._budget_cost(plan, captured))
+
+    async def _arecord_spend(self, plan: _Plan, captured: dict) -> None:
+        if plan.budget is not None and self.budgets is not None:
+            await self.budgets.acommit(plan.budget, self._budget_cost(plan, captured))
 
     @staticmethod
     def _gateway_result(model: str, response: Any, event: dict,
@@ -1200,8 +1393,12 @@ class ShieldsRouter(_RouterCore):
     ``providers`` maps a provider name, as policy tiers name it in
     ``provider``, to ``{"api_key": ..., "vendor": "openai" | "anthropic",
     **client options}``. ``vendor`` defaults to ``anthropic`` for the
-    ``anthropic`` provider and to ``openai`` (OpenAI-compatible, set
-    ``base_url``) for every other. Tiers without ``provider`` go to
+    ``anthropic`` provider and to ``openai`` (OpenAI-compatible) for every
+    other. A provider named after a catalog OpenAI-compatible provider
+    (``mistral``, ``berget``, ``infercom``, ``regolo``, ``ionos``,
+    ``stackit``, ``scaleway``, ``ovhcloud``; see ``prompt_shields.sovereign``)
+    gets its base URL from the catalog; any other name needs ``base_url`` or
+    ``catalog_provider``. ``region`` picks a catalogued region. Tiers without ``provider`` go to
     ``default_provider`` (the only provider when there is one).
 
     ``client.chat.completions.create(model="auto", messages=[...],
@@ -1301,6 +1498,7 @@ class _RouterCompletions:
             max_tokens if max_tokens is not None
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
+            budget=r._budget_check(use_case),
         )
         candidates = r._candidates(plan, messages, max_tokens, kwargs)
         tracker = _AttemptTracker()
@@ -1327,6 +1525,7 @@ class _RouterCompletions:
             response = call(candidates[0])
             attempt = Attempt(candidates[0].provider, candidates[0].model, True,
                               int((time.monotonic() - start) * 1000))
+            r._record_spend(candidates[0].data[0], captured)
             return r._routed(candidates[0], response, captured, (attempt,))
         try:
             result = r._engine.run(
@@ -1334,6 +1533,7 @@ class _RouterCompletions:
             )
         except _AttemptLimit:
             raise r._attempt_limit(tracker) from tracker.last
+        r._record_spend(result.candidate.data[0], captured)
         return r._routed(result.candidate, result.response, captured,
                          r._attempts(result.attempts, tracker))
 
@@ -1377,6 +1577,7 @@ class _AsyncRouterCompletions:
             max_tokens if max_tokens is not None
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
+            budget=await r._abudget_check(use_case),
         )
         candidates = r._candidates(plan, messages, max_tokens, kwargs)
         tracker = _AttemptTracker()
@@ -1403,6 +1604,7 @@ class _AsyncRouterCompletions:
             response = await call(candidates[0])
             attempt = Attempt(candidates[0].provider, candidates[0].model, True,
                               int((time.monotonic() - start) * 1000))
+            await r._arecord_spend(candidates[0].data[0], captured)
             return r._routed(candidates[0], response, captured, (attempt,))
         try:
             result = await r._engine.arun(
@@ -1410,5 +1612,6 @@ class _AsyncRouterCompletions:
             )
         except _AttemptLimit:
             raise r._attempt_limit(tracker) from tracker.last
+        await r._arecord_spend(result.candidate.data[0], captured)
         return r._routed(result.candidate, result.response, captured,
                          r._attempts(result.attempts, tracker))

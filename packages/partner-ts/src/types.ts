@@ -42,7 +42,7 @@ export type AttestationState = OpenString<'unreviewed' | 'attested' | 'disputed'
 export type AttestableField = OpenString<'asset' | 'owner' | 'data_classification'>;
 export type AttestationActorType = OpenString<'tenant' | 'partner'>;
 export type WebhookEventType = OpenString<
-  'asset.created' | 'asset.changed' | 'asset.retired' | 'asset.attested' | 'audit.*'
+  'asset.created' | 'asset.changed' | 'asset.retired' | 'asset.attested' | 'audit.*' | 'spend.anomaly'
 >;
 export type WebhookDeliveryStatus = OpenString<'pending' | 'succeeded' | 'dead'>;
 
@@ -228,6 +228,17 @@ export interface UsageSummary {
    * stated by the route policy), not a US CLOUD Act assessment.
    */
   sovereignShare: number | null;
+  /**
+   * Events that reported implicit outcome signals (#44), including those that
+   * reported none happened.
+   */
+  outcomeSignalsReported: number;
+  /**
+   * Events per outcome class, keyed by class name as sent (`max_tokens`,
+   * `refusal`, `fallback`, ...; every class listed, 0 when none carried it).
+   * `null` when no event reported outcome signals.
+   */
+  outcomeSignalCounts: Record<string, number> | null;
   period: UsagePeriod;
 }
 

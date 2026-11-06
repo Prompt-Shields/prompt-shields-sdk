@@ -420,7 +420,7 @@ function adaptStreamingResponse(
       }
     })();
   } else if (originalFn === 'messages') {
-    const state = messagesCreateStreamState();
+    const state = messagesCreateStreamState(adapterCtx.originalRequest?.model);
 
     (async () => {
       try {
