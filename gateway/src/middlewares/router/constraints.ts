@@ -237,6 +237,8 @@ export function fromRoutePolicyDoc(doc: any): RoutePolicy {
     qualityToGroup: doc.quality_to_group,
     groups,
   };
+  if (doc.policy_version !== undefined)
+    policy.policyVersion = String(doc.policy_version);
   if (doc.group_order) policy.groupOrder = doc.group_order;
   if (doc.strategy) policy.strategy = doc.strategy;
   if (doc.sensitivity) {

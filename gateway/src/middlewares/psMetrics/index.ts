@@ -12,6 +12,13 @@ import {
 import { isMetricsEnabled, labelValue, routeOf } from './labels';
 // Security and telemetry-health metrics register in the same registry.
 import './security';
+import {
+  cacheResponsesTotal,
+  cacheSavedCostTotal,
+  cacheStatusLabel,
+} from './cache';
+import { costFields } from '../psPricing';
+import { RESPONSE_HEADER_KEYS } from '../../globals';
 import { reportAuthFailure } from '../psSecurityEvents';
 
 /**
@@ -124,6 +131,13 @@ export function psMetrics() {
           );
       };
 
+      // Cache outcome (#33), from the status the response carries.
+      const cacheStatus =
+        c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
+      if (cacheStatus && cacheStatus !== 'DISABLED') {
+        cacheResponsesTotal.inc({ status: cacheStatusLabel(cacheStatus) });
+      }
+
       // Streamed responses: usage and outcome are known only once the stream
       // ends, so they are recorded then, without holding the response.
       // MCP streams carry no tokens and no terminal event (ps_gateway_mcp_*).
@@ -158,6 +172,23 @@ export function psMetrics() {
           .catch(() => undefined);
         const { input, output } = usageOf(body);
         countTokens(labelValue(body?.model, 'unknown'), input, output);
+        if (cacheStatus.endsWith('HIT')) {
+          const { cost } = costFields(
+            providerFromHeaders(headers) || '',
+            body?.model,
+            undefined,
+            { tokens_in: input, tokens_out: output }
+          );
+          if (cost)
+            cacheSavedCostTotal.inc(
+              {
+                provider,
+                model: labelValue(body?.model, 'unknown'),
+                status: cacheStatusLabel(cacheStatus),
+              },
+              cost
+            );
+        }
       }
     } catch {
       // Metrics are best-effort and must never affect the response.
