@@ -6,10 +6,13 @@ import { Hono } from 'hono';
 import { requestValidator } from '../middlewares/requestValidator';
 import { hooks } from '../middlewares/hooks';
 import {
+  extractModel,
   extractModels,
+  normaliseModelResponse,
   normaliseModelsResponse,
   toAnthropicModelList,
   toOpenAIModelList,
+  unifiedModelHandler,
   unifiedModelsHandler,
 } from './unifiedModelsHandler';
 
@@ -133,10 +136,79 @@ describe('normaliseModelsResponse', () => {
   });
 });
 
+describe('normaliseModelResponse (single model)', () => {
+  const openAIModel = {
+    id: 'model-a',
+    object: 'model',
+    created: 1700000000,
+    owned_by: 'org',
+  };
+  const anthropicModel = {
+    type: 'model',
+    id: 'model-a',
+    display_name: 'Model A',
+    created_at: '2025-01-01T00:00:00Z',
+  };
+
+  test('extractModel accepts OpenAI, Anthropic and Gemini objects', () => {
+    expect(extractModel(openAIModel)).toEqual({
+      id: 'model-a',
+      created: 1700000000,
+      ownedBy: 'org',
+      displayName: 'model-a',
+    });
+    expect(extractModel(anthropicModel)?.displayName).toBe('Model A');
+    expect(
+      extractModel({ name: 'models/model-g', displayName: 'Model G' })
+    ).toEqual(
+      expect.objectContaining({ id: 'models/model-g', displayName: 'Model G' })
+    );
+    expect(extractModel({ foo: 1 })).toBeNull();
+    expect(extractModel([openAIModel])).toBeNull();
+  });
+
+  test('OpenAI object to Anthropic shape for Anthropic callers', async () => {
+    const out = await normaliseModelResponse(jsonResponse(openAIModel), true);
+    expect(await out.json()).toEqual({
+      type: 'model',
+      id: 'model-a',
+      display_name: 'model-a',
+      created_at: new Date(1700000000 * 1000).toISOString(),
+    });
+  });
+
+  test('Anthropic object to OpenAI shape for everyone else', async () => {
+    const out = await normaliseModelResponse(
+      jsonResponse(anthropicModel),
+      false
+    );
+    expect(await out.json()).toEqual({
+      id: 'model-a',
+      object: 'model',
+      created: Date.parse('2025-01-01T00:00:00Z') / 1000,
+      owned_by: 'system',
+    });
+  });
+
+  test('objects already in the caller shape, errors and non-JSON pass through', async () => {
+    const a = jsonResponse(anthropicModel);
+    expect(await normaliseModelResponse(a, true)).toBe(a);
+    const o = jsonResponse(openAIModel);
+    expect(await normaliseModelResponse(o, false)).toBe(o);
+    const err = jsonResponse({ error: 'not found' }, 404);
+    expect(await normaliseModelResponse(err, true)).toBe(err);
+    const text = new Response('not json', { status: 200 });
+    expect(await normaliseModelResponse(text, true)).toBe(text);
+    const unknown = jsonResponse({ foo: 1 });
+    expect(await normaliseModelResponse(unknown, true)).toBe(unknown);
+  });
+});
+
 describe('GET /v1/models route', () => {
   const app = new Hono();
   app.use('*', hooks);
   app.get('/v1/models', requestValidator, unifiedModelsHandler);
+  app.get('/v1/models/:id{.+}', requestValidator, unifiedModelHandler);
 
   const fetchMock = jest.fn();
   const realFetch = global.fetch;
@@ -192,5 +264,41 @@ describe('GET /v1/models route', () => {
     expect(body.data[0]).toEqual(
       expect.objectContaining({ id: 'claude-sonnet-4-5', object: 'model' })
     );
+  });
+
+  test('retrieve: proxies the id (slashes kept) and reshapes the object', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'org/model-a',
+        object: 'model',
+        created: 1700000000,
+        owned_by: 'org',
+      })
+    );
+    const res = await app.request('/v1/models/org/model-a', {
+      headers: {
+        'x-portkey-provider': 'openai',
+        authorization: 'Bearer sk-test',
+        'anthropic-version': '2023-06-01',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      'api.openai.com/v1/models/org/model-a'
+    );
+    expect(await res.json()).toEqual({
+      type: 'model',
+      id: 'org/model-a',
+      display_name: 'org/model-a',
+      created_at: new Date(1700000000 * 1000).toISOString(),
+    });
+  });
+
+  test('retrieve requires a provider or config header', async () => {
+    const res = await app.request('/v1/models/model-a', {
+      headers: { 'anthropic-version': '2023-06-01' },
+    });
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

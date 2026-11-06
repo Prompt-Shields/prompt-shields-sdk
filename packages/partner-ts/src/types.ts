@@ -42,7 +42,7 @@ export type AttestationState = OpenString<'unreviewed' | 'attested' | 'disputed'
 export type AttestableField = OpenString<'asset' | 'owner' | 'data_classification'>;
 export type AttestationActorType = OpenString<'tenant' | 'partner'>;
 export type WebhookEventType = OpenString<
-  'asset.created' | 'asset.changed' | 'asset.retired' | 'asset.attested' | 'audit.*'
+  'asset.created' | 'asset.changed' | 'asset.retired' | 'asset.attested' | 'audit.*' | 'spend.anomaly'
 >;
 export type WebhookDeliveryStatus = OpenString<'pending' | 'succeeded' | 'dead'>;
 
@@ -427,6 +427,13 @@ export interface ListAssetsParams extends PaginationParams {
   /** Minimum confidence level. */
   confidence?: Confidence;
   dataClassification?: DataClassification;
+  /**
+   * With `attestationState`: only assets whose current attestation of this
+   * field is in that state (a review queue). Send both or neither.
+   */
+  attestationField?: AttestableField;
+  /** With `attestationField`. `unreviewed` includes fields nobody has attested. */
+  attestationState?: AttestationState;
 }
 
 export interface ListChangesParams extends PaginationParams {

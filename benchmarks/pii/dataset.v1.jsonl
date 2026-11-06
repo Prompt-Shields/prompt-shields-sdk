@@ -1,0 +1,716 @@
+{"id": "se-email-001", "kind": "positive", "labels": ["email"], "lang": "sv", "locale": "se", "text": "Hej! Du når mig på johan+news@sub.example.co.uk."}
+{"id": "se-email-002", "kind": "positive", "labels": ["email"], "lang": "sv", "locale": "se", "text": "Skicka kvittot till karin.berg@mail.example tack."}
+{"id": "se-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "sv", "locale": "se", "text": "Ny kontakt: Lars Andersson, e-post lars+news@sub.example.co.uk"}
+{"id": "se-email-004", "kind": "positive", "labels": ["email"], "lang": "sv", "locale": "se", "text": "Hej! Du når mig på erik+news@example.org."}
+{"id": "se-email-005", "kind": "positive", "labels": ["email"], "lang": "sv", "locale": "se", "text": "Skicka kvittot till anna+news@mail.example tack."}
+{"id": "se-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "sv", "locale": "se", "text": "Ny kontakt: Maria Andersson, e-post mandersson47@sub.example.co.uk"}
+{"id": "se-phone-001", "kind": "positive", "labels": ["phone"], "lang": "sv", "locale": "se", "text": "Ring mig på 070-174 06 33 efter lunch."}
+{"id": "se-phone-002", "kind": "positive", "labels": ["phone"], "lang": "sv", "locale": "se", "text": "Mitt mobilnummer är +46701740683."}
+{"id": "se-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "sv", "locale": "se", "text": "Lars Lindqvist nås på tel. +46 70 174 06 61"}
+{"id": "se-phone-004", "kind": "positive", "labels": ["phone"], "lang": "sv", "locale": "se", "text": "Ring mig på 070-174 06 18 efter lunch."}
+{"id": "se-phone-005", "kind": "positive", "labels": ["phone"], "lang": "sv", "locale": "se", "text": "Mitt mobilnummer är 070-174 06 98."}
+{"id": "se-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "sv", "locale": "se", "text": "Johan Nyström nås på tel. 070-174 06 84"}
+{"id": "se-phone-007", "kind": "positive", "labels": ["phone"], "lang": "sv", "locale": "se", "text": "Ring mig på +46701740680 efter lunch."}
+{"id": "se-phone-008", "kind": "positive", "labels": ["phone"], "lang": "sv", "locale": "se", "text": "Mitt mobilnummer är +46 70 174 06 09."}
+{"id": "se-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "sv", "locale": "se", "text": "Maria Berg nås på tel. +46 70 174 06 32"}
+{"id": "se-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "sv", "locale": "se", "text": "Betala till mitt IBAN SE79 3346 9809 9268 3642 5619."}
+{"id": "se-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "sv", "locale": "se", "text": "Kontonummer (IBAN): SE5984248757668063200467"}
+{"id": "se-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "sv", "locale": "se", "text": "Pengarna ska sättas in på SE6044302364096859083385."}
+{"id": "se-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "sv", "locale": "se", "text": "Betala till mitt IBAN SE11 1325 0988 9248 4905 7250."}
+{"id": "se-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "sv", "locale": "se", "text": "Kontonummer (IBAN): SE18 8945 0046 7352 1201 1981"}
+{"id": "se-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "sv", "locale": "se", "text": "Pengarna ska sättas in på SE94 3642 1395 4104 8745 0174."}
+{"id": "se-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "sv", "locale": "se", "text": "Kortnummer 4722152602756478, giltigt till 08/29."}
+{"id": "se-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "sv", "locale": "se", "text": "Debitera kortet 4095 8069 2580 1696."}
+{"id": "se-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "sv", "locale": "se", "text": "Kortnummer 5340269806743356, giltigt till 08/29."}
+{"id": "se-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "sv", "locale": "se", "text": "Debitera kortet 5387-7893-9219-9600."}
+{"id": "se-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "sv", "locale": "se", "text": "Inloggningen kom från 198.51.100.126."}
+{"id": "se-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "sv", "locale": "se", "text": "Servern svarar inte på 203.0.113.66."}
+{"id": "se-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "sv", "locale": "se", "text": "Inloggningen kom från 203.0.113.35."}
+{"id": "se-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "sv", "locale": "se", "text": "Servern svarar inte på 2001:db8:6e03::d804."}
+{"id": "se-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Mitt personnummer är 19590423-8754."}
+{"id": "se-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Personnr: 199408209865"}
+{"id": "se-nid-003", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "sv", "locale": "se", "text": "Patienten Anna Berg (19880923-5404) är inskriven."}
+{"id": "se-nid-004", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Mitt personnummer är 194411254099."}
+{"id": "se-nid-005", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Personnr: 19740503-2942"}
+{"id": "se-nid-006", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "sv", "locale": "se", "text": "Patienten Oskar Lindqvist (560282-2883) är inskriven."}
+{"id": "se-nid-007", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Mitt personnummer är 19780618-4243."}
+{"id": "se-nid-008", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Personnr: 20020918-8382"}
+{"id": "se-nid-009", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "sv", "locale": "se", "text": "Patienten Maria Berg (199305234974) är inskriven."}
+{"id": "se-nid-010", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Mitt personnummer är 194705063784."}
+{"id": "se-nid-011", "kind": "positive", "labels": ["national_id"], "lang": "sv", "locale": "se", "text": "Personnr: 711167-9713"}
+{"id": "se-nid-012", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "sv", "locale": "se", "text": "Patienten Karin Nyström (19640224-7792) är inskriven."}
+{"id": "se-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "sv", "locale": "se", "text": "Oskar Berg har fått diagnosen typ 2-diabetes och behandlas med metformin."}
+{"id": "se-health-002", "kind": "positive", "labels": ["health_data"], "lang": "sv", "locale": "se", "text": "Blodtrycket var 150/95 vid besöket, läkaren skrev ut ny medicin."}
+{"id": "se-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "sv", "locale": "se", "text": "Uppdatera kontonumret i lönesystemet innan den 25:e."}
+{"id": "se-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "sv", "locale": "se", "text": "Vilket clearingnummer har banken?"}
+{"id": "se-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "sv", "locale": "se", "text": "Karin Lindqvist, Kungsgatan 119, 411 19 Göteborg"}
+{"id": "se-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "sv", "locale": "se", "text": "Leverans till Elin Holm, Storgatan 106, 114 55 Stockholm."}
+{"id": "se-mixed-001", "kind": "positive", "labels": ["email", "financial_data", "iban", "national_id", "phone"], "lang": "sv", "locale": "se", "text": "Skicka kvittot till jlindqvist90@example.com tack. Mitt mobilnummer är 070 174 06 68. Personnr: 197309024102 Kontonummer (IBAN): SE8768934912438429353735"}
+{"id": "se-mixed-002", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "sv", "locale": "se", "text": "Skicka kvittot till johan.holm@example.org tack. Mitt mobilnummer är +46701740621. Personnr: 19520504-3267"}
+{"id": "se-mixed-003", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "sv", "locale": "se", "text": "Skicka kvittot till LARS.JOHANSSON@EXAMPLE.COM tack. Mitt mobilnummer är +46701740653. Personnr: 19880628-7069"}
+{"id": "se-neutral-001", "kind": "negative", "labels": [], "lang": "sv", "locale": "se", "text": "Kan du sammanfatta mötet i tre punkter?"}
+{"id": "se-neutral-002", "kind": "negative", "labels": [], "lang": "sv", "locale": "se", "text": "Översätt texten till engelska."}
+{"id": "se-neutral-003", "kind": "negative", "labels": [], "lang": "sv", "locale": "se", "text": "Skriv ett vänligt svar till kunden om leveransen."}
+{"id": "se-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Datum: 2021-04-27"}
+{"id": "se-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Datum: 27.04.2021"}
+{"id": "se-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Ordernummer 764123180475"}
+{"id": "se-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Ordernummer ORD-2021-420546"}
+{"id": "se-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Faktura nr 20210427-7239"}
+{"id": "se-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Faktura nr 210427-7891"}
+{"id": "se-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Kundnummer 55626675687"}
+{"id": "se-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Kundnummer 377 249 587"}
+{"id": "se-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Spårningsnummer 83407398211686619999"}
+{"id": "se-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Spårningsnummer JJD0009851311434352"}
+{"id": "se-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "EAN 9913887733874"}
+{"id": "se-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Belopp: 909 746,67"}
+{"id": "se-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Org.nr 909446-9114"}
+{"id": "se-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Org.nr SE5304576785"}
+{"id": "se-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Firmware 4.2.4.84"}
+{"id": "se-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Build 20210427000000"}
+{"id": "se-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "ref 4b1e4657-9c2a-4f1d-8e7b-065133323843"}
+{"id": "se-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "@elin-team, 14:30–16:00"}
+{"id": "se-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "ISBN 978-91-71-00069-4"}
+{"id": "no-email-001", "kind": "positive", "labels": ["email"], "lang": "nb", "locale": "no", "text": "Send svaret til henrik+news@example.com."}
+{"id": "no-email-002", "kind": "positive", "labels": ["email"], "lang": "nb", "locale": "no", "text": "E-posten min er MARIT.JOHANSEN@SUB.EXAMPLE.CO.UK."}
+{"id": "no-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "nb", "locale": "no", "text": "Kontakt Henrik Johansen på henrik.johansen@example.net"}
+{"id": "no-email-004", "kind": "positive", "labels": ["email"], "lang": "nb", "locale": "no", "text": "Send svaret til HENRIK.OLSEN@SUB.EXAMPLE.CO.UK."}
+{"id": "no-email-005", "kind": "positive", "labels": ["email"], "lang": "nb", "locale": "no", "text": "E-posten min er INGRID.OLSEN@EXAMPLE.COM."}
+{"id": "no-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "nb", "locale": "no", "text": "Kontakt Sindre Hansen på sindre.hansen@firma.example"}
+{"id": "no-phone-001", "kind": "positive", "labels": ["phone"], "lang": "nb", "locale": "no", "text": "Du kan ringe meg på 991 48 379."}
+{"id": "no-phone-002", "kind": "positive", "labels": ["phone"], "lang": "nb", "locale": "no", "text": "Mobil: +47 427 72 992"}
+{"id": "no-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "nb", "locale": "no", "text": "Henrik Solberg har telefon +4793404379"}
+{"id": "no-phone-004", "kind": "positive", "labels": ["phone"], "lang": "nb", "locale": "no", "text": "Du kan ringe meg på 983 07 039."}
+{"id": "no-phone-005", "kind": "positive", "labels": ["phone"], "lang": "nb", "locale": "no", "text": "Mobil: 918 35 944"}
+{"id": "no-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "nb", "locale": "no", "text": "Henrik Solberg har telefon 45 34 98 94"}
+{"id": "no-phone-007", "kind": "positive", "labels": ["phone"], "lang": "nb", "locale": "no", "text": "Du kan ringe meg på 41 15 51 25."}
+{"id": "no-phone-008", "kind": "positive", "labels": ["phone"], "lang": "nb", "locale": "no", "text": "Mobil: +4797542900"}
+{"id": "no-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "nb", "locale": "no", "text": "Ola Johansen har telefon +4790879105"}
+{"id": "no-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nb", "locale": "no", "text": "Overfør beløpet til IBAN NO51 4117 7458 258."}
+{"id": "no-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nb", "locale": "no", "text": "Kontoen min: NO06 9259 3053 446"}
+{"id": "no-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nb", "locale": "no", "text": "Utbetaling til NO4926956586278"}
+{"id": "no-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nb", "locale": "no", "text": "Overfør beløpet til IBAN NO7402265629648."}
+{"id": "no-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nb", "locale": "no", "text": "Kontoen min: NO1446535378763"}
+{"id": "no-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nb", "locale": "no", "text": "Utbetaling til NO24 9682 0224 852"}
+{"id": "no-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "nb", "locale": "no", "text": "Kortnummeret er 5537418008419751."}
+{"id": "no-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "nb", "locale": "no", "text": "Belast 4199-9919-5552-3736 for abonnementet."}
+{"id": "no-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "nb", "locale": "no", "text": "Kortnummeret er 3466 692320 07968."}
+{"id": "no-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "nb", "locale": "no", "text": "Belast 4226501135263041 for abonnementet."}
+{"id": "no-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "nb", "locale": "no", "text": "Forespørselen kom fra 192.0.2.129."}
+{"id": "no-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "nb", "locale": "no", "text": "Blokker adressen 192.0.2.200."}
+{"id": "no-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "nb", "locale": "no", "text": "Forespørselen kom fra 198.51.100.19."}
+{"id": "no-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "nb", "locale": "no", "text": "Blokker adressen 192.0.2.116."}
+{"id": "no-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fødselsnummeret mitt er 24109528982."}
+{"id": "no-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fnr. 26049036425"}
+{"id": "no-nid-003", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "nb", "locale": "no", "text": "Ingrid Berntsen, fødselsnummer 28036412617"}
+{"id": "no-nid-004", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fødselsnummeret mitt er 45077229144."}
+{"id": "no-nid-005", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fnr. 150500 94941"}
+{"id": "no-nid-006", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "nb", "locale": "no", "text": "Sindre Hansen, fødselsnummer 19026802434"}
+{"id": "no-nid-007", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fødselsnummeret mitt er 42099142442."}
+{"id": "no-nid-008", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fnr. 24010489578"}
+{"id": "no-nid-009", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "nb", "locale": "no", "text": "Kari Haugen, fødselsnummer 14085544803"}
+{"id": "no-nid-010", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fødselsnummeret mitt er 24059713805."}
+{"id": "no-nid-011", "kind": "positive", "labels": ["national_id"], "lang": "nb", "locale": "no", "text": "Fnr. 17059043994"}
+{"id": "no-nid-012", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "nb", "locale": "no", "text": "Ingrid Berntsen, fødselsnummer 16098913452"}
+{"id": "no-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "nb", "locale": "no", "text": "Marit Berntsen ble diagnostisert med astma og fikk resept på inhalator."}
+{"id": "no-health-002", "kind": "positive", "labels": ["health_data"], "lang": "nb", "locale": "no", "text": "Legen noterte høyt blodtrykk og endret medisinen."}
+{"id": "no-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "nb", "locale": "no", "text": "Husk å oppgi kontonummeret ved utbetaling."}
+{"id": "no-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "nb", "locale": "no", "text": "Hva er kontonummeret til regnskapsavdelingen?"}
+{"id": "no-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "nb", "locale": "no", "text": "Ola Haugen, Kongens gate 44, 7011 Trondheim"}
+{"id": "no-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "nb", "locale": "no", "text": "Pakken sendes til Ingrid Johansen, Kongens gate 69, 7011 Trondheim."}
+{"id": "no-mixed-001", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "nb", "locale": "no", "text": "E-posten min er KARI.HANSEN@SUB.EXAMPLE.CO.UK. Mobil: +47 403 14 909 Fnr. 23049239092"}
+{"id": "no-mixed-002", "kind": "positive", "labels": ["email", "financial_data", "iban", "national_id", "phone"], "lang": "nb", "locale": "no", "text": "E-posten min er kolsen62@example.com. Mobil: +4795285287 Fnr. 14016117200 Kontoen min: NO5809270091310"}
+{"id": "no-mixed-003", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "nb", "locale": "no", "text": "E-posten min er HENRIK.HAUGEN@EXAMPLE.COM. Mobil: +4793675762 Fnr. 090577 34288"}
+{"id": "no-neutral-001", "kind": "negative", "labels": [], "lang": "nb", "locale": "no", "text": "Kan du oppsummere møtet?"}
+{"id": "no-neutral-002", "kind": "negative", "labels": [], "lang": "nb", "locale": "no", "text": "Oversett dette til engelsk."}
+{"id": "no-neutral-003", "kind": "negative", "labels": [], "lang": "nb", "locale": "no", "text": "Skriv et kort svar om leveringstiden."}
+{"id": "no-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Dato: 2021-05-12"}
+{"id": "no-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Dato: 12.05.2021"}
+{"id": "no-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Ordrenummer 217948273960"}
+{"id": "no-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Ordrenummer ORD-2021-491560"}
+{"id": "no-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Fakturanr. 20210512-3703"}
+{"id": "no-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Fakturanr. 210512-3250"}
+{"id": "no-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Kundenummer 86832954226"}
+{"id": "no-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Kundenummer 783 087 661"}
+{"id": "no-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Sporingsnummer 30135447403106276678"}
+{"id": "no-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Sporingsnummer JJD0017399643445227"}
+{"id": "no-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "EAN 0118534937400"}
+{"id": "no-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Beløp: 473 763,71"}
+{"id": "no-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Org.nr. 429528-4848"}
+{"id": "no-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Org.nr. NO8997972385"}
+{"id": "no-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Firmware 4.6.5.93"}
+{"id": "no-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Build 20210512000000"}
+{"id": "no-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "ref 4b1e0274-9c2a-4f1d-8e7b-164044143504"}
+{"id": "no-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "@marit-team, 14:30–16:00"}
+{"id": "no-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "ISBN 978-91-58-99492-2"}
+{"id": "dk-email-001", "kind": "positive", "labels": ["email"], "lang": "da", "locale": "dk", "text": "Skriv til mig på ida+news@example.com."}
+{"id": "dk-email-002", "kind": "positive", "labels": ["email"], "lang": "da", "locale": "dk", "text": "Min mail er imikkelsen92@example.com."}
+{"id": "dk-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "da", "locale": "dk", "text": "Kontaktperson: Mads Jensen (mads+news@mail.example)"}
+{"id": "dk-email-004", "kind": "positive", "labels": ["email"], "lang": "da", "locale": "dk", "text": "Skriv til mig på FREJA.NIELSEN@EXAMPLE.ORG."}
+{"id": "dk-email-005", "kind": "positive", "labels": ["email"], "lang": "da", "locale": "dk", "text": "Min mail er rasmus+news@firma.example."}
+{"id": "dk-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "da", "locale": "dk", "text": "Kontaktperson: Rasmus Pedersen (rasmus+news@mail.example)"}
+{"id": "dk-phone-001", "kind": "positive", "labels": ["phone"], "lang": "da", "locale": "dk", "text": "Ring på +45 26 73 64 47 i dag."}
+{"id": "dk-phone-002", "kind": "positive", "labels": ["phone"], "lang": "da", "locale": "dk", "text": "Telefon: 32 96 61 46"}
+{"id": "dk-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "da", "locale": "dk", "text": "Ida Nielsen kan træffes på +45 27 90 15 21"}
+{"id": "dk-phone-004", "kind": "positive", "labels": ["phone"], "lang": "da", "locale": "dk", "text": "Ring på 34 85 90 02 i dag."}
+{"id": "dk-phone-005", "kind": "positive", "labels": ["phone"], "lang": "da", "locale": "dk", "text": "Telefon: +45 21 40 54 22"}
+{"id": "dk-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "da", "locale": "dk", "text": "Freja Kristensen kan træffes på +45 5374 2336"}
+{"id": "dk-phone-007", "kind": "positive", "labels": ["phone"], "lang": "da", "locale": "dk", "text": "Ring på +45 23 21 95 64 i dag."}
+{"id": "dk-phone-008", "kind": "positive", "labels": ["phone"], "lang": "da", "locale": "dk", "text": "Telefon: +4529461183"}
+{"id": "dk-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "da", "locale": "dk", "text": "Ida Kristensen kan træffes på 30 57 93 28"}
+{"id": "dk-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "da", "locale": "dk", "text": "Indbetal til IBAN DK7406341371900424."}
+{"id": "dk-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "da", "locale": "dk", "text": "Kontonummer: DK0529940581979628"}
+{"id": "dk-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "da", "locale": "dk", "text": "Refusion til DK76 6099 7898 9431 20"}
+{"id": "dk-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "da", "locale": "dk", "text": "Indbetal til IBAN DK41 8201 0476 7214 34."}
+{"id": "dk-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "da", "locale": "dk", "text": "Kontonummer: DK96 2985 1020 4522 84"}
+{"id": "dk-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "da", "locale": "dk", "text": "Refusion til DK2669365498688835"}
+{"id": "dk-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "da", "locale": "dk", "text": "Kortnummer 4785-7563-2036-1421."}
+{"id": "dk-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "da", "locale": "dk", "text": "Træk beløbet på kortet 3745 447339 85571."}
+{"id": "dk-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "da", "locale": "dk", "text": "Kortnummer 3425 964322 19321."}
+{"id": "dk-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "da", "locale": "dk", "text": "Træk beløbet på kortet 5319 5075 2427 4668."}
+{"id": "dk-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "da", "locale": "dk", "text": "Login fra 192.0.2.101 blev afvist."}
+{"id": "dk-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "da", "locale": "dk", "text": "Klienten bruger 203.0.113.116."}
+{"id": "dk-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "da", "locale": "dk", "text": "Login fra 198.51.100.41 blev afvist."}
+{"id": "dk-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "da", "locale": "dk", "text": "Klienten bruger 2001:db8:8b26::fa33."}
+{"id": "dk-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "Mit CPR-nummer er 0603731662."}
+{"id": "dk-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "CPR: 270657-0543"}
+{"id": "dk-nid-003", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "da", "locale": "dk", "text": "Mads Jensen, cpr.nr. 030450-1026"}
+{"id": "dk-nid-004", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "Mit CPR-nummer er 080445-2338."}
+{"id": "dk-nid-005", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "CPR: 070588-2980"}
+{"id": "dk-nid-006", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "da", "locale": "dk", "text": "Rasmus Nielsen, cpr.nr. 271242-1022"}
+{"id": "dk-nid-007", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "Mit CPR-nummer er 0111731209."}
+{"id": "dk-nid-008", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "CPR: 210555-2686"}
+{"id": "dk-nid-009", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "da", "locale": "dk", "text": "Freja Nielsen, cpr.nr. 1907873516"}
+{"id": "dk-nid-010", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "Mit CPR-nummer er 0912770710."}
+{"id": "dk-nid-011", "kind": "positive", "labels": ["national_id"], "lang": "da", "locale": "dk", "text": "CPR: 211265-2414"}
+{"id": "dk-nid-012", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "da", "locale": "dk", "text": "Søren Nielsen, cpr.nr. 020141-1030"}
+{"id": "dk-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "da", "locale": "dk", "text": "Ida Pedersen fik stillet diagnosen migræne og fik ordineret medicin."}
+{"id": "dk-health-002", "kind": "positive", "labels": ["health_data"], "lang": "da", "locale": "dk", "text": "Blodtrykket var forhøjet ved sidste kontrol hos lægen."}
+{"id": "dk-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "da", "locale": "dk", "text": "Opdater kontonummeret til lønudbetaling."}
+{"id": "dk-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "da", "locale": "dk", "text": "Send mig dit reg.nr. og kontonummer."}
+{"id": "dk-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "da", "locale": "dk", "text": "Mette Mikkelsen, Søndergade 24, 8000 Aarhus C"}
+{"id": "dk-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "da", "locale": "dk", "text": "Levering til Rasmus Jensen, Søndergade 58, 8000 Aarhus C."}
+{"id": "dk-mixed-001", "kind": "positive", "labels": ["email", "financial_data", "iban", "national_id", "phone"], "lang": "da", "locale": "dk", "text": "Min mail er RASMUS.NIELSEN@FIRMA.EXAMPLE. Telefon: +4529749256 CPR: 200593-0488 Kontonummer: DK30 2658 3710 9428 78"}
+{"id": "dk-mixed-002", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "da", "locale": "dk", "text": "Min mail er rasmus.kristensen@sub.example.co.uk. Telefon: +45 21 61 90 65 CPR: 210551-2352"}
+{"id": "dk-mixed-003", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "da", "locale": "dk", "text": "Min mail er freja+news@example.net. Telefon: +45 4742 8366 CPR: 1711672172"}
+{"id": "dk-neutral-001", "kind": "negative", "labels": [], "lang": "da", "locale": "dk", "text": "Kan du opsummere mødet?"}
+{"id": "dk-neutral-002", "kind": "negative", "labels": [], "lang": "da", "locale": "dk", "text": "Oversæt teksten til engelsk."}
+{"id": "dk-neutral-003", "kind": "negative", "labels": [], "lang": "da", "locale": "dk", "text": "Skriv et venligt svar om leveringen."}
+{"id": "dk-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Dato: 2018-09-07"}
+{"id": "dk-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Dato: 07.09.2018"}
+{"id": "dk-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Ordrenummer 86847425"}
+{"id": "dk-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Ordrenummer ORD-2018-130495"}
+{"id": "dk-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Fakturanr. 20180907-9272"}
+{"id": "dk-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Fakturanr. 180907-6593"}
+{"id": "dk-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Kundenummer 70506757531"}
+{"id": "dk-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Kundenummer 239 178 821"}
+{"id": "dk-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Trackingnummer 70220133076564347077"}
+{"id": "dk-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Trackingnummer JJD0010515009575321"}
+{"id": "dk-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "EAN 6784088698607"}
+{"id": "dk-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Beløb: 203 231,98"}
+{"id": "dk-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "CVR 941040-2080"}
+{"id": "dk-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "CVR DK0466822260"}
+{"id": "dk-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Firmware 4.5.3.189"}
+{"id": "dk-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Build 20180907000000"}
+{"id": "dk-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "ref 4b1e4484-9c2a-4f1d-8e7b-605076067996"}
+{"id": "dk-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "@rasmus-team, 14:30–16:00"}
+{"id": "dk-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "ISBN 978-91-74-57833-9"}
+{"id": "fi-email-001", "kind": "positive", "labels": ["email"], "lang": "fi", "locale": "fi", "text": "Lähetä vastaus osoitteeseen AINO.LAINE@MAIL.EXAMPLE."}
+{"id": "fi-email-002", "kind": "positive", "labels": ["email"], "lang": "fi", "locale": "fi", "text": "Sähköpostini on eeva.virtanen@example.net."}
+{"id": "fi-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "fi", "locale": "fi", "text": "Yhteyshenkilö Sanna Laine, slaine42@sub.example.co.uk"}
+{"id": "fi-email-004", "kind": "positive", "labels": ["email"], "lang": "fi", "locale": "fi", "text": "Lähetä vastaus osoitteeseen EEVA.KORHONEN@FIRMA.EXAMPLE."}
+{"id": "fi-email-005", "kind": "positive", "labels": ["email"], "lang": "fi", "locale": "fi", "text": "Sähköpostini on mkorhonen42@mail.example."}
+{"id": "fi-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "fi", "locale": "fi", "text": "Yhteyshenkilö Ville Nieminen, ville+news@example.org"}
+{"id": "fi-phone-001", "kind": "positive", "labels": ["phone"], "lang": "fi", "locale": "fi", "text": "Soita minulle numeroon +358 40 475 2295."}
+{"id": "fi-phone-002", "kind": "positive", "labels": ["phone"], "lang": "fi", "locale": "fi", "text": "Puhelin: 050-990 4492"}
+{"id": "fi-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "fi", "locale": "fi", "text": "Mikko Nieminen vastaa numerossa 050-780 5172"}
+{"id": "fi-phone-004", "kind": "positive", "labels": ["phone"], "lang": "fi", "locale": "fi", "text": "Soita minulle numeroon 050-433 5448."}
+{"id": "fi-phone-005", "kind": "positive", "labels": ["phone"], "lang": "fi", "locale": "fi", "text": "Puhelin: 050-549 1265"}
+{"id": "fi-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "fi", "locale": "fi", "text": "Aino Mäkinen vastaa numerossa 040 567 3962"}
+{"id": "fi-phone-007", "kind": "positive", "labels": ["phone"], "lang": "fi", "locale": "fi", "text": "Soita minulle numeroon 050-303 4601."}
+{"id": "fi-phone-008", "kind": "positive", "labels": ["phone"], "lang": "fi", "locale": "fi", "text": "Puhelin: +358503077646"}
+{"id": "fi-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "fi", "locale": "fi", "text": "Ville Korhonen vastaa numerossa 050-193 0951"}
+{"id": "fi-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fi", "locale": "fi", "text": "Maksa tilille IBAN FI58 0782 5812 5837 02."}
+{"id": "fi-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fi", "locale": "fi", "text": "Tilinumero: FI7305927082991557"}
+{"id": "fi-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fi", "locale": "fi", "text": "Palautus tilille FI3651946304596641"}
+{"id": "fi-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fi", "locale": "fi", "text": "Maksa tilille IBAN FI37 9333 7608 1012 63."}
+{"id": "fi-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fi", "locale": "fi", "text": "Tilinumero: FI61 3793 3356 8328 03"}
+{"id": "fi-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fi", "locale": "fi", "text": "Palautus tilille FI07 4808 6799 3199 57"}
+{"id": "fi-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "fi", "locale": "fi", "text": "Kortin numero 4080 5098 7031 1409."}
+{"id": "fi-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "fi", "locale": "fi", "text": "Veloita kortilta 4583-7960-3928-1134."}
+{"id": "fi-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "fi", "locale": "fi", "text": "Kortin numero 3407 502507 72950."}
+{"id": "fi-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "fi", "locale": "fi", "text": "Veloita kortilta 3722 527483 33496."}
+{"id": "fi-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "fi", "locale": "fi", "text": "Kirjautuminen osoitteesta 2001:db8:3223::76da."}
+{"id": "fi-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "fi", "locale": "fi", "text": "Estä osoite 203.0.113.194."}
+{"id": "fi-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "fi", "locale": "fi", "text": "Kirjautuminen osoitteesta 192.0.2.24."}
+{"id": "fi-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "fi", "locale": "fi", "text": "Estä osoite 198.51.100.238."}
+{"id": "fi-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Henkilötunnukseni on 010590Y462T."}
+{"id": "fi-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Hetu: 050753Y365A"}
+{"id": "fi-nid-003", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "fi", "locale": "fi", "text": "Juha Nieminen, henkilötunnus 250972-0718"}
+{"id": "fi-nid-004", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Henkilötunnukseni on 230854-0328."}
+{"id": "fi-nid-005", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Hetu: 040676U742Y"}
+{"id": "fi-nid-006", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "fi", "locale": "fi", "text": "Juha Laine, henkilötunnus 110880X1888"}
+{"id": "fi-nid-007", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Henkilötunnukseni on 021251X304X."}
+{"id": "fi-nid-008", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Hetu: 140446X201L"}
+{"id": "fi-nid-009", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "fi", "locale": "fi", "text": "Mikko Mäkinen, henkilötunnus 070868U256S"}
+{"id": "fi-nid-010", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Henkilötunnukseni on 151087-517V."}
+{"id": "fi-nid-011", "kind": "positive", "labels": ["national_id"], "lang": "fi", "locale": "fi", "text": "Hetu: 260955V1812"}
+{"id": "fi-nid-012", "kind": "positive", "labels": ["national_id", "person_name"], "lang": "fi", "locale": "fi", "text": "Mikko Korhonen, henkilötunnus 041166-5463"}
+{"id": "fi-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "fi", "locale": "fi", "text": "Sanna Virtanen sai diagnoosin kakkostyypin diabetes ja lääkityksen."}
+{"id": "fi-health-002", "kind": "positive", "labels": ["health_data"], "lang": "fi", "locale": "fi", "text": "Verenpaine oli koholla, lääkäri määräsi uuden lääkkeen."}
+{"id": "fi-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "fi", "locale": "fi", "text": "Päivitä tilinumero palkanmaksua varten."}
+{"id": "fi-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "fi", "locale": "fi", "text": "Mikä on yrityksen tilinumero?"}
+{"id": "fi-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "fi", "locale": "fi", "text": "Juha Korhonen, Mannerheimintie 91 A 5, 00100 Helsinki"}
+{"id": "fi-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "fi", "locale": "fi", "text": "Toimitus: Juha Nieminen, Hämeenkatu 15, 33100 Tampere."}
+{"id": "fi-mixed-001", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "fi", "locale": "fi", "text": "Sähköpostini on sanna.makinen@mail.example. Puhelin: +358507310940 Hetu: 150350Y7163"}
+{"id": "fi-mixed-002", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "fi", "locale": "fi", "text": "Sähköpostini on mmakinen87@example.net. Puhelin: 050-812 6016 Hetu: 130958W536W"}
+{"id": "fi-mixed-003", "kind": "positive", "labels": ["email", "national_id", "phone"], "lang": "fi", "locale": "fi", "text": "Sähköpostini on eeva+news@firma.example. Puhelin: 050-512 4456 Hetu: 031255V841X"}
+{"id": "fi-neutral-001", "kind": "negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Voitko tiivistää kokouksen?"}
+{"id": "fi-neutral-002", "kind": "negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Käännä teksti englanniksi."}
+{"id": "fi-neutral-003", "kind": "negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Kirjoita ystävällinen vastaus asiakkaalle."}
+{"id": "fi-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Päivämäärä: 2022-10-26"}
+{"id": "fi-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Päivämäärä: 26.10.2022"}
+{"id": "fi-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Tilausnumero 5230257134"}
+{"id": "fi-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Tilausnumero ORD-2022-669028"}
+{"id": "fi-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Laskun numero 20221026-7291"}
+{"id": "fi-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Laskun numero 221026-4144"}
+{"id": "fi-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Asiakasnumero 22349487447"}
+{"id": "fi-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Asiakasnumero 625 407 096"}
+{"id": "fi-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Seurantakoodi 94496552565299469510"}
+{"id": "fi-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Seurantakoodi JJD0079931125910326"}
+{"id": "fi-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "EAN 8044174169077"}
+{"id": "fi-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Summa: 952 484,77"}
+{"id": "fi-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Y-tunnus 843758-1884"}
+{"id": "fi-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Y-tunnus FI2947012594"}
+{"id": "fi-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Firmware 4.16.7.173"}
+{"id": "fi-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Build 20221026000000"}
+{"id": "fi-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "ref 4b1e8972-9c2a-4f1d-8e7b-532904410197"}
+{"id": "fi-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "@mikko-team, 14:30–16:00"}
+{"id": "fi-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "ISBN 978-91-91-76467-7"}
+{"id": "de-email-001", "kind": "positive", "labels": ["email"], "lang": "de", "locale": "de", "text": "Bitte schreiben Sie an jschmidt36@sub.example.co.uk."}
+{"id": "de-email-002", "kind": "positive", "labels": ["email"], "lang": "de", "locale": "de", "text": "Meine E-Mail-Adresse: lukas.weber@firma.example"}
+{"id": "de-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "de", "locale": "de", "text": "Ansprechpartner: Anna Fischer, anna.fischer@sub.example.co.uk"}
+{"id": "de-email-004", "kind": "positive", "labels": ["email"], "lang": "de", "locale": "de", "text": "Bitte schreiben Sie an sschneider68@example.net."}
+{"id": "de-email-005", "kind": "positive", "labels": ["email"], "lang": "de", "locale": "de", "text": "Meine E-Mail-Adresse: LUKAS.MULLER@MAIL.EXAMPLE"}
+{"id": "de-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "de", "locale": "de", "text": "Ansprechpartner: Lea Schneider, lea.schneider@sub.example.co.uk"}
+{"id": "de-phone-001", "kind": "positive", "labels": ["phone"], "lang": "de", "locale": "de", "text": "Rufen Sie mich unter 0151/31524677 an."}
+{"id": "de-phone-002", "kind": "positive", "labels": ["phone"], "lang": "de", "locale": "de", "text": "Tel.: 030 60375435"}
+{"id": "de-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "de", "locale": "de", "text": "Lukas Müller ist unter 030 19436473 erreichbar"}
+{"id": "de-phone-004", "kind": "positive", "labels": ["phone"], "lang": "de", "locale": "de", "text": "Rufen Sie mich unter +49 30 3406842 an."}
+{"id": "de-phone-005", "kind": "positive", "labels": ["phone"], "lang": "de", "locale": "de", "text": "Tel.: 0151/01282831"}
+{"id": "de-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "de", "locale": "de", "text": "Jonas Schmidt ist unter +49 30 1834509 erreichbar"}
+{"id": "de-phone-007", "kind": "positive", "labels": ["phone"], "lang": "de", "locale": "de", "text": "Rufen Sie mich unter 0151/84151053 an."}
+{"id": "de-phone-008", "kind": "positive", "labels": ["phone"], "lang": "de", "locale": "de", "text": "Tel.: 030 31804935"}
+{"id": "de-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "de", "locale": "de", "text": "Lukas Fischer ist unter 0151/55146059 erreichbar"}
+{"id": "de-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "de", "locale": "de", "text": "Bitte überweisen Sie auf IBAN DE35 9169 6658 6370 5950 86."}
+{"id": "de-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "de", "locale": "de", "text": "Bankverbindung: DE21 1784 0965 5311 8649 71"}
+{"id": "de-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "de", "locale": "de", "text": "Erstattung auf das Konto DE60220891879631932991"}
+{"id": "de-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "de", "locale": "de", "text": "Bitte überweisen Sie auf IBAN DE17284568143742600268."}
+{"id": "de-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "de", "locale": "de", "text": "Bankverbindung: DE60825531072360049534"}
+{"id": "de-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "de", "locale": "de", "text": "Erstattung auf das Konto DE64 7021 7375 2618 6880 55"}
+{"id": "de-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "de", "locale": "de", "text": "Kreditkartennummer 4900-9041-8207-2849."}
+{"id": "de-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "de", "locale": "de", "text": "Bitte die Karte 4410 4645 6568 3640 belasten."}
+{"id": "de-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "de", "locale": "de", "text": "Kreditkartennummer 5407956212377650."}
+{"id": "de-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "de", "locale": "de", "text": "Bitte die Karte 4548 5189 6269 8603 belasten."}
+{"id": "de-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "de", "locale": "de", "text": "Zugriff von 198.51.100.156 wurde blockiert."}
+{"id": "de-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "de", "locale": "de", "text": "Der Server unter 198.51.100.81 ist offline."}
+{"id": "de-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "de", "locale": "de", "text": "Zugriff von 198.51.100.214 wurde blockiert."}
+{"id": "de-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "de", "locale": "de", "text": "Der Server unter 192.0.2.49 ist offline."}
+{"id": "de-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "de", "locale": "de", "text": "Bei Felix Schneider wurde Diabetes Typ 2 festgestellt, Metformin verordnet."}
+{"id": "de-health-002", "kind": "positive", "labels": ["health_data"], "lang": "de", "locale": "de", "text": "Der Blutdruck war erhöht, die Ärztin passte das Rezept an."}
+{"id": "de-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "de", "locale": "de", "text": "Bitte die Kontonummer in der Gehaltsabrechnung ändern."}
+{"id": "de-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "de", "locale": "de", "text": "Wie lautet die Steuernummer der Firma?"}
+{"id": "de-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "de", "locale": "de", "text": "Lea Schneider, Bahnhofstraße 15, 80335 München"}
+{"id": "de-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "de", "locale": "de", "text": "Lieferung an Lukas Schneider, Bahnhofstraße 112, 80335 München."}
+{"id": "de-mixed-001", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "de", "locale": "de", "text": "Meine E-Mail-Adresse: jonas.muller@mail.example Tel.: 0151/64426495 Bankverbindung: DE31 5660 0512 3499 2404 40"}
+{"id": "de-mixed-002", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "de", "locale": "de", "text": "Meine E-Mail-Adresse: LUKAS.SCHNEIDER@EXAMPLE.NET Tel.: +49 151 51164197 Bankverbindung: DE91528724808125351299"}
+{"id": "de-mixed-003", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "de", "locale": "de", "text": "Meine E-Mail-Adresse: SOPHIE.FISCHER@EXAMPLE.NET Tel.: +49 151 24384656 Bankverbindung: DE39874157537484729838"}
+{"id": "de-neutral-001", "kind": "negative", "labels": [], "lang": "de", "locale": "de", "text": "Fasse das Meeting in drei Punkten zusammen."}
+{"id": "de-neutral-002", "kind": "negative", "labels": [], "lang": "de", "locale": "de", "text": "Übersetze den Text ins Englische."}
+{"id": "de-neutral-003", "kind": "negative", "labels": [], "lang": "de", "locale": "de", "text": "Schreibe eine freundliche Antwort zur Lieferung."}
+{"id": "de-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Datum: 2024-07-18"}
+{"id": "de-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Datum: 18.07.2024"}
+{"id": "de-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Bestellnummer 0655134623"}
+{"id": "de-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Bestellnummer ORD-2024-863378"}
+{"id": "de-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Rechnungsnr. 20240718-9188"}
+{"id": "de-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Rechnungsnr. 240718-2819"}
+{"id": "de-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Kundennummer 98996538805"}
+{"id": "de-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Kundennummer 022 254 573"}
+{"id": "de-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Sendungsnummer 35921745760251493509"}
+{"id": "de-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Sendungsnummer JJD0029814070960741"}
+{"id": "de-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "EAN 1379951614306"}
+{"id": "de-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Betrag: 103 473,70"}
+{"id": "de-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "USt-IdNr. 458513-0798"}
+{"id": "de-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "USt-IdNr. DE1416686335"}
+{"id": "de-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Firmware 4.1.0.164"}
+{"id": "de-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Build 20240718000000"}
+{"id": "de-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "ref 4b1e0314-9c2a-4f1d-8e7b-847314665525"}
+{"id": "de-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "@jonas-team, 14:30–16:00"}
+{"id": "de-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "ISBN 978-91-82-96080-5"}
+{"id": "fr-email-001", "kind": "positive", "labels": ["email"], "lang": "fr", "locale": "fr", "text": "Écrivez-moi à hugo.moreau@mail.example."}
+{"id": "fr-email-002", "kind": "positive", "labels": ["email"], "lang": "fr", "locale": "fr", "text": "Mon adresse e-mail : manon+news@example.com"}
+{"id": "fr-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "fr", "locale": "fr", "text": "Contact : Camille Moreau, camille.moreau@sub.example.co.uk"}
+{"id": "fr-email-004", "kind": "positive", "labels": ["email"], "lang": "fr", "locale": "fr", "text": "Écrivez-moi à cmoreau89@example.com."}
+{"id": "fr-email-005", "kind": "positive", "labels": ["email"], "lang": "fr", "locale": "fr", "text": "Mon adresse e-mail : manon+news@example.net"}
+{"id": "fr-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "fr", "locale": "fr", "text": "Contact : Camille Moreau, cmoreau23@sub.example.co.uk"}
+{"id": "fr-phone-001", "kind": "positive", "labels": ["phone"], "lang": "fr", "locale": "fr", "text": "Appelez-moi au +33 6 39 98 43 15."}
+{"id": "fr-phone-002", "kind": "positive", "labels": ["phone"], "lang": "fr", "locale": "fr", "text": "Tél. : +33 6 39 98 33 20"}
+{"id": "fr-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "fr", "locale": "fr", "text": "Manon Bernard est joignable au 06 39 98 22 48"}
+{"id": "fr-phone-004", "kind": "positive", "labels": ["phone"], "lang": "fr", "locale": "fr", "text": "Appelez-moi au 06 39 98 58 12."}
+{"id": "fr-phone-005", "kind": "positive", "labels": ["phone"], "lang": "fr", "locale": "fr", "text": "Tél. : 06 39 98 98 80"}
+{"id": "fr-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "fr", "locale": "fr", "text": "Lucas Dubois est joignable au +33 6 39 98 46 23"}
+{"id": "fr-phone-007", "kind": "positive", "labels": ["phone"], "lang": "fr", "locale": "fr", "text": "Appelez-moi au 06.39.98.49.17."}
+{"id": "fr-phone-008", "kind": "positive", "labels": ["phone"], "lang": "fr", "locale": "fr", "text": "Tél. : 06.39.98.16.52"}
+{"id": "fr-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "fr", "locale": "fr", "text": "Lucas Martin est joignable au +33639 986862"}
+{"id": "fr-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fr", "locale": "fr", "text": "Virement sur l'IBAN FR78 6869 7395 0756 0834 9566 596."}
+{"id": "fr-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fr", "locale": "fr", "text": "RIB : FR96 2699 8228 8841 2090 0591 303"}
+{"id": "fr-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fr", "locale": "fr", "text": "Remboursement sur le compte FR60 0066 8897 3233 1252 0695 910"}
+{"id": "fr-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fr", "locale": "fr", "text": "Virement sur l'IBAN FR9740924073787113035267467."}
+{"id": "fr-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fr", "locale": "fr", "text": "RIB : FR72 0275 9833 4091 0242 6430 165"}
+{"id": "fr-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "fr", "locale": "fr", "text": "Remboursement sur le compte FR41 3553 0637 8774 2742 3408 449"}
+{"id": "fr-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "fr", "locale": "fr", "text": "Numéro de carte 5125-3503-9235-5705."}
+{"id": "fr-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "fr", "locale": "fr", "text": "Débitez la carte 5376 2769 5491 9826."}
+{"id": "fr-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "fr", "locale": "fr", "text": "Numéro de carte 3709 078818 78357."}
+{"id": "fr-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "fr", "locale": "fr", "text": "Débitez la carte 4769-3257-0827-6500."}
+{"id": "fr-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "fr", "locale": "fr", "text": "Connexion depuis 198.51.100.247."}
+{"id": "fr-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "fr", "locale": "fr", "text": "Le serveur 192.0.2.222 ne répond plus."}
+{"id": "fr-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "fr", "locale": "fr", "text": "Connexion depuis 198.51.100.175."}
+{"id": "fr-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "fr", "locale": "fr", "text": "Le serveur 198.51.100.135 ne répond plus."}
+{"id": "fr-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "fr", "locale": "fr", "text": "Mon numéro de sécurité sociale : 2 62 10 76 817 163 76"}
+{"id": "fr-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "fr", "locale": "fr", "text": "Mon numéro de sécurité sociale : 2 78 10 84 929 428 10"}
+{"id": "fr-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "fr", "locale": "fr", "text": "Manon Martin a reçu un diagnostic d'asthme et une ordonnance."}
+{"id": "fr-health-002", "kind": "positive", "labels": ["health_data"], "lang": "fr", "locale": "fr", "text": "La tension artérielle était élevée, le médecin a changé le traitement."}
+{"id": "fr-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "fr", "locale": "fr", "text": "Merci de mettre à jour le numéro de compte pour la paie."}
+{"id": "fr-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "fr", "locale": "fr", "text": "Quel est le numéro fiscal de l'entreprise ?"}
+{"id": "fr-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "fr", "locale": "fr", "text": "Louis Martin, 42 avenue Victor Hugo, 75016 Paris"}
+{"id": "fr-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "fr", "locale": "fr", "text": "Livraison à Manon Moreau, 113 rue de la République, 69002 Lyon."}
+{"id": "fr-mixed-001", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "fr", "locale": "fr", "text": "Mon adresse e-mail : clefevre36@example.org Tél. : 06.39.98.57.03 RIB : FR3631663102475352145546973"}
+{"id": "fr-mixed-002", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "fr", "locale": "fr", "text": "Mon adresse e-mail : cdubois78@example.org Tél. : +33 6 39 98 85 99 RIB : FR7677651569033533186387479"}
+{"id": "fr-mixed-003", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "fr", "locale": "fr", "text": "Mon adresse e-mail : HUGO.DUBOIS@SUB.EXAMPLE.CO.UK Tél. : +33 6 39 98 21 63 RIB : FR44 6256 0988 3535 8796 1947 978"}
+{"id": "fr-neutral-001", "kind": "negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Résume la réunion en trois points."}
+{"id": "fr-neutral-002", "kind": "negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Traduis ce texte en anglais."}
+{"id": "fr-neutral-003", "kind": "negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Rédige une réponse polie au client."}
+{"id": "fr-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Date: 2019-12-14"}
+{"id": "fr-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Date: 14.12.2019"}
+{"id": "fr-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Commande n° 56924622"}
+{"id": "fr-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Commande n° ORD-2019-366087"}
+{"id": "fr-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Facture n° 20191214-8067"}
+{"id": "fr-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Facture n° 191214-7728"}
+{"id": "fr-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Client n° 64047661034"}
+{"id": "fr-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Client n° 864 862 646"}
+{"id": "fr-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Suivi colis 28243529565887213210"}
+{"id": "fr-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Suivi colis JJD0074368081926653"}
+{"id": "fr-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "EAN 1864789571606"}
+{"id": "fr-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Montant: 896 697,44"}
+{"id": "fr-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "SIREN 654257-9113"}
+{"id": "fr-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "SIREN FR2063536201"}
+{"id": "fr-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Firmware 4.13.6.33"}
+{"id": "fr-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Build 20191214000000"}
+{"id": "fr-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "ref 4b1e2120-9c2a-4f1d-8e7b-809460503187"}
+{"id": "fr-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "@camille-team, 14:30–16:00"}
+{"id": "fr-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "ISBN 978-91-32-95388-6"}
+{"id": "nl-email-001", "kind": "positive", "labels": ["email"], "lang": "nl", "locale": "nl", "text": "Mail me op emma.dejong@example.com."}
+{"id": "nl-email-002", "kind": "positive", "labels": ["email"], "lang": "nl", "locale": "nl", "text": "Mijn e-mailadres is emma.jansen@example.com."}
+{"id": "nl-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "nl", "locale": "nl", "text": "Contactpersoon: Emma de Jong, emma.dejong@firma.example"}
+{"id": "nl-email-004", "kind": "positive", "labels": ["email"], "lang": "nl", "locale": "nl", "text": "Mail me op emma+news@example.org."}
+{"id": "nl-email-005", "kind": "positive", "labels": ["email"], "lang": "nl", "locale": "nl", "text": "Mijn e-mailadres is sanne+news@firma.example."}
+{"id": "nl-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "nl", "locale": "nl", "text": "Contactpersoon: Daan Jansen, djansen78@example.net"}
+{"id": "nl-phone-001", "kind": "positive", "labels": ["phone"], "lang": "nl", "locale": "nl", "text": "Bel me op +31 6 20210119."}
+{"id": "nl-phone-002", "kind": "positive", "labels": ["phone"], "lang": "nl", "locale": "nl", "text": "Telefoon: +31638290767"}
+{"id": "nl-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "nl", "locale": "nl", "text": "Julia de Vries is bereikbaar op 020 452 6530"}
+{"id": "nl-phone-004", "kind": "positive", "labels": ["phone"], "lang": "nl", "locale": "nl", "text": "Bel me op 020 193 9934."}
+{"id": "nl-phone-005", "kind": "positive", "labels": ["phone"], "lang": "nl", "locale": "nl", "text": "Telefoon: +31 6 04784283"}
+{"id": "nl-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "nl", "locale": "nl", "text": "Sem Bakker is bereikbaar op 06-54419149"}
+{"id": "nl-phone-007", "kind": "positive", "labels": ["phone"], "lang": "nl", "locale": "nl", "text": "Bel me op 020 447 7112."}
+{"id": "nl-phone-008", "kind": "positive", "labels": ["phone"], "lang": "nl", "locale": "nl", "text": "Telefoon: 06-73099362"}
+{"id": "nl-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "nl", "locale": "nl", "text": "Daan van Dijk is bereikbaar op 06-18711900"}
+{"id": "nl-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nl", "locale": "nl", "text": "Maak het bedrag over naar IBAN NL76 ITTX 1173 3784 46."}
+{"id": "nl-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nl", "locale": "nl", "text": "Rekeningnummer: NL97 RPYG 4387 5249 09"}
+{"id": "nl-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nl", "locale": "nl", "text": "Terugbetaling naar NL32JIRX5381287971"}
+{"id": "nl-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nl", "locale": "nl", "text": "Maak het bedrag over naar IBAN NL49UMHQ6644225868."}
+{"id": "nl-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nl", "locale": "nl", "text": "Rekeningnummer: NL12 KLQZ 3125 1265 53"}
+{"id": "nl-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "nl", "locale": "nl", "text": "Terugbetaling naar NL71 ZXDG 3078 0663 44"}
+{"id": "nl-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "nl", "locale": "nl", "text": "Creditcardnummer 5424674330803395."}
+{"id": "nl-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "nl", "locale": "nl", "text": "Schrijf af van kaart 4497441104066095."}
+{"id": "nl-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "nl", "locale": "nl", "text": "Creditcardnummer 3769 899592 77476."}
+{"id": "nl-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "nl", "locale": "nl", "text": "Schrijf af van kaart 5388-6016-7613-3966."}
+{"id": "nl-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "nl", "locale": "nl", "text": "Inlog vanaf 2001:db8:ed25::bf5b."}
+{"id": "nl-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "nl", "locale": "nl", "text": "Blokkeer 203.0.113.249 in de firewall."}
+{"id": "nl-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "nl", "locale": "nl", "text": "Inlog vanaf 192.0.2.208."}
+{"id": "nl-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "nl", "locale": "nl", "text": "Blokkeer 198.51.100.221 in de firewall."}
+{"id": "nl-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "nl", "locale": "nl", "text": "Mijn BSN is 154759363."}
+{"id": "nl-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "nl", "locale": "nl", "text": "Mijn BSN is 965629077."}
+{"id": "nl-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "nl", "locale": "nl", "text": "Bij Bram de Jong is diabetes vastgesteld; de huisarts schreef medicatie voor."}
+{"id": "nl-health-002", "kind": "positive", "labels": ["health_data"], "lang": "nl", "locale": "nl", "text": "De bloeddruk was te hoog bij de laatste controle."}
+{"id": "nl-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "nl", "locale": "nl", "text": "Pas het rekeningnummer aan in de salarisadministratie."}
+{"id": "nl-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "nl", "locale": "nl", "text": "Wat is het btw-nummer van de leverancier?"}
+{"id": "nl-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "nl", "locale": "nl", "text": "Emma de Jong, Dorpsstraat 29, 3511 LK Utrecht"}
+{"id": "nl-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "nl", "locale": "nl", "text": "Bezorgen bij Julia de Vries, Dorpsstraat 28, 3511 LK Utrecht."}
+{"id": "nl-mixed-001", "kind": "positive", "labels": ["email", "phone"], "lang": "nl", "locale": "nl", "text": "Mijn e-mailadres is bram.jansen@sub.example.co.uk. Telefoon: +31 6 57175443"}
+{"id": "nl-mixed-002", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "nl", "locale": "nl", "text": "Mijn e-mailadres is daan+news@firma.example. Telefoon: +31625947994 Rekeningnummer: NL19WRMO9109416556"}
+{"id": "nl-mixed-003", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "nl", "locale": "nl", "text": "Mijn e-mailadres is bvandijk12@example.com. Telefoon: 020 413 1282 Rekeningnummer: NL18AUSQ5040512597"}
+{"id": "nl-neutral-001", "kind": "negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Vat de vergadering samen."}
+{"id": "nl-neutral-002", "kind": "negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Vertaal de tekst naar het Engels."}
+{"id": "nl-neutral-003", "kind": "negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Schrijf een vriendelijk antwoord over de levering."}
+{"id": "nl-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Datum: 2020-01-10"}
+{"id": "nl-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Datum: 10.01.2020"}
+{"id": "nl-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Bestelnummer 570626559013"}
+{"id": "nl-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Bestelnummer ORD-2020-830761"}
+{"id": "nl-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Factuurnr. 20200110-4142"}
+{"id": "nl-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Factuurnr. 200110-9132"}
+{"id": "nl-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Klantnummer 10944257201"}
+{"id": "nl-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Klantnummer 159 949 556"}
+{"id": "nl-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Trackingcode 41475195882870434182"}
+{"id": "nl-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Trackingcode JJD0083218183131034"}
+{"id": "nl-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "EAN 1936425886364"}
+{"id": "nl-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Bedrag: 855 972,18"}
+{"id": "nl-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "KvK 352406-0359"}
+{"id": "nl-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "KvK NL7976797086"}
+{"id": "nl-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Firmware 4.16.8.49"}
+{"id": "nl-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Build 20200110000000"}
+{"id": "nl-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "ref 4b1e0719-9c2a-4f1d-8e7b-526308825780"}
+{"id": "nl-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "@bram-team, 14:30–16:00"}
+{"id": "nl-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "ISBN 978-91-51-37592-4"}
+{"id": "es-email-001", "kind": "positive", "labels": ["email"], "lang": "es", "locale": "es", "text": "Escríbeme a LUCIA.LOPEZ@MAIL.EXAMPLE."}
+{"id": "es-email-002", "kind": "positive", "labels": ["email"], "lang": "es", "locale": "es", "text": "Mi correo es pfernandez35@example.net."}
+{"id": "es-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "es", "locale": "es", "text": "Contacto: Carmen Martínez, carmen.martinez@sub.example.co.uk"}
+{"id": "es-email-004", "kind": "positive", "labels": ["email"], "lang": "es", "locale": "es", "text": "Escríbeme a pablo.fernandez@example.com."}
+{"id": "es-email-005", "kind": "positive", "labels": ["email"], "lang": "es", "locale": "es", "text": "Mi correo es pablo.garcia@example.net."}
+{"id": "es-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "es", "locale": "es", "text": "Contacto: Javier Fernández, javier+news@firma.example"}
+{"id": "es-phone-001", "kind": "positive", "labels": ["phone"], "lang": "es", "locale": "es", "text": "Llámame al +34659879791."}
+{"id": "es-phone-002", "kind": "positive", "labels": ["phone"], "lang": "es", "locale": "es", "text": "Teléfono: 683 10 46 17"}
+{"id": "es-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "es", "locale": "es", "text": "Pablo Fernández está en el 91 709 35 60"}
+{"id": "es-phone-004", "kind": "positive", "labels": ["phone"], "lang": "es", "locale": "es", "text": "Llámame al +34651542783."}
+{"id": "es-phone-005", "kind": "positive", "labels": ["phone"], "lang": "es", "locale": "es", "text": "Teléfono: 91 226 80 97"}
+{"id": "es-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "es", "locale": "es", "text": "Pablo Fernández está en el +34 671 776 055"}
+{"id": "es-phone-007", "kind": "positive", "labels": ["phone"], "lang": "es", "locale": "es", "text": "Llámame al +34 672 832 246."}
+{"id": "es-phone-008", "kind": "positive", "labels": ["phone"], "lang": "es", "locale": "es", "text": "Teléfono: +34 699 420 023"}
+{"id": "es-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "es", "locale": "es", "text": "Javier López está en el 91 728 29 02"}
+{"id": "es-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "es", "locale": "es", "text": "Transfiere a la cuenta IBAN ES2760133210659700110034."}
+{"id": "es-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "es", "locale": "es", "text": "Cuenta: ES08 8392 2687 4970 4281 9245"}
+{"id": "es-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "es", "locale": "es", "text": "Reembolso a ES6157727543678492603421"}
+{"id": "es-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "es", "locale": "es", "text": "Transfiere a la cuenta IBAN ES4036260736601999542039."}
+{"id": "es-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "es", "locale": "es", "text": "Cuenta: ES5583060489987587476135"}
+{"id": "es-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "es", "locale": "es", "text": "Reembolso a ES2555694616457537161502"}
+{"id": "es-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "es", "locale": "es", "text": "Número de tarjeta 4223637326021518."}
+{"id": "es-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "es", "locale": "es", "text": "Cargar en la tarjeta 5482654232043075."}
+{"id": "es-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "es", "locale": "es", "text": "Número de tarjeta 5590979545775736."}
+{"id": "es-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "es", "locale": "es", "text": "Cargar en la tarjeta 3783 462166 11559."}
+{"id": "es-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "es", "locale": "es", "text": "Acceso desde 203.0.113.238."}
+{"id": "es-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "es", "locale": "es", "text": "Bloquear la IP 198.51.100.81."}
+{"id": "es-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "es", "locale": "es", "text": "Acceso desde 198.51.100.190."}
+{"id": "es-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "es", "locale": "es", "text": "Bloquear la IP 192.0.2.142."}
+{"id": "es-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "es", "locale": "es", "text": "Mi DNI es 89444034R."}
+{"id": "es-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "es", "locale": "es", "text": "Mi DNI es 13378065T."}
+{"id": "es-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "es", "locale": "es", "text": "Carmen López fue diagnosticada con asma y recibió una receta."}
+{"id": "es-health-002", "kind": "positive", "labels": ["health_data"], "lang": "es", "locale": "es", "text": "La presión arterial estaba alta en la última consulta."}
+{"id": "es-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "es", "locale": "es", "text": "Actualiza el número de cuenta para la nómina."}
+{"id": "es-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "es", "locale": "es", "text": "¿Cuál es el NIF de la empresa?"}
+{"id": "es-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "es", "locale": "es", "text": "Carmen López, Calle Mayor 91, 28013 Madrid"}
+{"id": "es-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "es", "locale": "es", "text": "Envío a Pablo Martínez, Calle Mayor 11, 28013 Madrid."}
+{"id": "es-mixed-001", "kind": "positive", "labels": ["email", "phone"], "lang": "es", "locale": "es", "text": "Mi correo es PABLO.GARCIA@EXAMPLE.NET. Teléfono: +34643644657"}
+{"id": "es-mixed-002", "kind": "positive", "labels": ["email", "phone"], "lang": "es", "locale": "es", "text": "Mi correo es carmen+news@mail.example. Teléfono: 615 82 40 72"}
+{"id": "es-mixed-003", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "es", "locale": "es", "text": "Mi correo es JAVIER.LOPEZ@EXAMPLE.ORG. Teléfono: +34 683 828 844 Cuenta: ES2389453092203361946339"}
+{"id": "es-neutral-001", "kind": "negative", "labels": [], "lang": "es", "locale": "es", "text": "Resume la reunión en tres puntos."}
+{"id": "es-neutral-002", "kind": "negative", "labels": [], "lang": "es", "locale": "es", "text": "Traduce el texto al inglés."}
+{"id": "es-neutral-003", "kind": "negative", "labels": [], "lang": "es", "locale": "es", "text": "Escribe una respuesta amable al cliente."}
+{"id": "es-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Fecha: 2025-01-07"}
+{"id": "es-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Fecha: 07.01.2025"}
+{"id": "es-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Pedido n.º 66542651"}
+{"id": "es-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Pedido n.º ORD-2025-199091"}
+{"id": "es-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Factura n.º 20250107-0162"}
+{"id": "es-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Factura n.º 250107-0659"}
+{"id": "es-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Cliente n.º 89412143510"}
+{"id": "es-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Cliente n.º 545 016 513"}
+{"id": "es-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Seguimiento 85944825019856596594"}
+{"id": "es-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Seguimiento JJD0054260701909115"}
+{"id": "es-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "EAN 2147744347465"}
+{"id": "es-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Importe: 267 274,86"}
+{"id": "es-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "CIF 805186-6116"}
+{"id": "es-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "CIF ES7906441513"}
+{"id": "es-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Firmware 4.17.1.116"}
+{"id": "es-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "Build 20250107000000"}
+{"id": "es-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "ref 4b1e7145-9c2a-4f1d-8e7b-797402446345"}
+{"id": "es-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "@carmen-team, 14:30–16:00"}
+{"id": "es-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "ISBN 978-91-06-97207-8"}
+{"id": "it-email-001", "kind": "positive", "labels": ["email"], "lang": "it", "locale": "it", "text": "Scrivimi a luca+news@example.com."}
+{"id": "it-email-002", "kind": "positive", "labels": ["email"], "lang": "it", "locale": "it", "text": "La mia email è mcolombo83@example.org."}
+{"id": "it-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "it", "locale": "it", "text": "Referente: Giulia Colombo, GIULIA.COLOMBO@EXAMPLE.ORG"}
+{"id": "it-email-004", "kind": "positive", "labels": ["email"], "lang": "it", "locale": "it", "text": "Scrivimi a gbianchi79@firma.example."}
+{"id": "it-email-005", "kind": "positive", "labels": ["email"], "lang": "it", "locale": "it", "text": "La mia email è mcolombo79@firma.example."}
+{"id": "it-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "it", "locale": "it", "text": "Referente: Marco Rossi, mrossi95@example.com"}
+{"id": "it-phone-001", "kind": "positive", "labels": ["phone"], "lang": "it", "locale": "it", "text": "Chiamami al +393826810825."}
+{"id": "it-phone-002", "kind": "positive", "labels": ["phone"], "lang": "it", "locale": "it", "text": "Tel.: +39 364 594 3672"}
+{"id": "it-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "it", "locale": "it", "text": "Luca Bianchi risponde al +393935007646"}
+{"id": "it-phone-004", "kind": "positive", "labels": ["phone"], "lang": "it", "locale": "it", "text": "Chiamami al +39 391 639 4036."}
+{"id": "it-phone-005", "kind": "positive", "labels": ["phone"], "lang": "it", "locale": "it", "text": "Tel.: +393478829010"}
+{"id": "it-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "it", "locale": "it", "text": "Marco Colombo risponde al 06 4893 6161"}
+{"id": "it-phone-007", "kind": "positive", "labels": ["phone"], "lang": "it", "locale": "it", "text": "Chiamami al +39 310 709 7395."}
+{"id": "it-phone-008", "kind": "positive", "labels": ["phone"], "lang": "it", "locale": "it", "text": "Tel.: +39 387 332 4803"}
+{"id": "it-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "it", "locale": "it", "text": "Francesca Rossi risponde al 371 215 3778"}
+{"id": "it-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "it", "locale": "it", "text": "Bonifico sull'IBAN IT08 X613 2476 3645 8137 7775 678."}
+{"id": "it-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "it", "locale": "it", "text": "Conto corrente: IT94 K689 6355 6465 9174 3757 616"}
+{"id": "it-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "it", "locale": "it", "text": "Rimborso su IT37C7339706804618795783317"}
+{"id": "it-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "it", "locale": "it", "text": "Bonifico sull'IBAN IT05 X369 3513 9499 1466 1804 770."}
+{"id": "it-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "it", "locale": "it", "text": "Conto corrente: IT17 G659 4225 0262 7747 4179 326"}
+{"id": "it-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "it", "locale": "it", "text": "Rimborso su IT67 G369 9071 7134 9393 8653 114"}
+{"id": "it-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "it", "locale": "it", "text": "Numero della carta 4134777556112245."}
+{"id": "it-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "it", "locale": "it", "text": "Addebita sulla carta 5123-3844-8686-7681."}
+{"id": "it-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "it", "locale": "it", "text": "Numero della carta 4110036483069426."}
+{"id": "it-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "it", "locale": "it", "text": "Addebita sulla carta 4733 1814 7652 4958."}
+{"id": "it-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "it", "locale": "it", "text": "Accesso da 192.0.2.204."}
+{"id": "it-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "it", "locale": "it", "text": "Blocca l'indirizzo 203.0.113.67."}
+{"id": "it-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "it", "locale": "it", "text": "Accesso da 198.51.100.59."}
+{"id": "it-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "it", "locale": "it", "text": "Blocca l'indirizzo 203.0.113.86."}
+{"id": "it-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "it", "locale": "it", "text": "A Francesca Rossi è stata diagnosticata l'asma, con prescrizione di farmaci."}
+{"id": "it-health-002", "kind": "positive", "labels": ["health_data"], "lang": "it", "locale": "it", "text": "La pressione era alta durante l'ultima visita."}
+{"id": "it-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "it", "locale": "it", "text": "Aggiorna il numero di conto per lo stipendio."}
+{"id": "it-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "it", "locale": "it", "text": "Qual è la partita IVA del fornitore?"}
+{"id": "it-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "it", "locale": "it", "text": "Francesca Colombo, Corso Italia 29, 20122 Milano"}
+{"id": "it-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "it", "locale": "it", "text": "Consegna a Luca Rossi, Via Roma 108, 00184 Roma."}
+{"id": "it-mixed-001", "kind": "positive", "labels": ["email", "phone"], "lang": "it", "locale": "it", "text": "La mia email è gromano61@example.org. Tel.: +39 363 071 2454"}
+{"id": "it-mixed-002", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "it", "locale": "it", "text": "La mia email è MARCO.BIANCHI@EXAMPLE.NET. Tel.: 06 8525 9594 Conto corrente: IT88 O102 2262 7408 8368 0935 757"}
+{"id": "it-mixed-003", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "it", "locale": "it", "text": "La mia email è LUCA.COLOMBO@EXAMPLE.COM. Tel.: 06 6911 5131 Conto corrente: IT94Y4502963056092543171599"}
+{"id": "it-neutral-001", "kind": "negative", "labels": [], "lang": "it", "locale": "it", "text": "Riassumi la riunione in tre punti."}
+{"id": "it-neutral-002", "kind": "negative", "labels": [], "lang": "it", "locale": "it", "text": "Traduci il testo in inglese."}
+{"id": "it-neutral-003", "kind": "negative", "labels": [], "lang": "it", "locale": "it", "text": "Scrivi una risposta cortese al cliente."}
+{"id": "it-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Data: 2021-12-04"}
+{"id": "it-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Data: 04.12.2021"}
+{"id": "it-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Ordine n. 62728800"}
+{"id": "it-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Ordine n. ORD-2021-951647"}
+{"id": "it-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Fattura n. 20211204-2507"}
+{"id": "it-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Fattura n. 211204-8383"}
+{"id": "it-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Codice cliente 54737573334"}
+{"id": "it-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Codice cliente 439 786 123"}
+{"id": "it-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Tracking 31255600795139229549"}
+{"id": "it-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Tracking JJD0045698956266572"}
+{"id": "it-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "EAN 7400226366086"}
+{"id": "it-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Importo: 168 453,79"}
+{"id": "it-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "P.IVA 784305-1013"}
+{"id": "it-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "P.IVA IT5915656065"}
+{"id": "it-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Firmware 4.10.8.199"}
+{"id": "it-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Build 20211204000000"}
+{"id": "it-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "ref 4b1e4343-9c2a-4f1d-8e7b-912582578453"}
+{"id": "it-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "@francesca-team, 14:30–16:00"}
+{"id": "it-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "ISBN 978-91-79-74421-4"}
+{"id": "pl-email-001", "kind": "positive", "labels": ["email"], "lang": "pl", "locale": "pl", "text": "Napisz do mnie na awisniewska30@sub.example.co.uk."}
+{"id": "pl-email-002", "kind": "positive", "labels": ["email"], "lang": "pl", "locale": "pl", "text": "Mój e-mail to ZOFIA.WOJCIK@MAIL.EXAMPLE."}
+{"id": "pl-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "pl", "locale": "pl", "text": "Kontakt: Jakub Kowalski, JAKUB.KOWALSKI@SUB.EXAMPLE.CO.UK"}
+{"id": "pl-email-004", "kind": "positive", "labels": ["email"], "lang": "pl", "locale": "pl", "text": "Napisz do mnie na jwisniewska83@sub.example.co.uk."}
+{"id": "pl-email-005", "kind": "positive", "labels": ["email"], "lang": "pl", "locale": "pl", "text": "Mój e-mail to awojcik25@example.com."}
+{"id": "pl-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "pl", "locale": "pl", "text": "Kontakt: Zofia Wójcik, zwojcik17@mail.example"}
+{"id": "pl-phone-001", "kind": "positive", "labels": ["phone"], "lang": "pl", "locale": "pl", "text": "Zadzwoń pod 569 605 158."}
+{"id": "pl-phone-002", "kind": "positive", "labels": ["phone"], "lang": "pl", "locale": "pl", "text": "Tel.: 565 316 165"}
+{"id": "pl-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "pl", "locale": "pl", "text": "Piotr Kowalski, telefon 575 884 469"}
+{"id": "pl-phone-004", "kind": "positive", "labels": ["phone"], "lang": "pl", "locale": "pl", "text": "Zadzwoń pod 571 763 369."}
+{"id": "pl-phone-005", "kind": "positive", "labels": ["phone"], "lang": "pl", "locale": "pl", "text": "Tel.: 581-248-840"}
+{"id": "pl-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "pl", "locale": "pl", "text": "Piotr Wójcik, telefon 564 709 619"}
+{"id": "pl-phone-007", "kind": "positive", "labels": ["phone"], "lang": "pl", "locale": "pl", "text": "Zadzwoń pod +48587935581."}
+{"id": "pl-phone-008", "kind": "positive", "labels": ["phone"], "lang": "pl", "locale": "pl", "text": "Tel.: 514-217-373"}
+{"id": "pl-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "pl", "locale": "pl", "text": "Piotr Wiśniewska, telefon +48 575 113 027"}
+{"id": "pl-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "pl", "locale": "pl", "text": "Przelew na IBAN PL72569280001393527360881375."}
+{"id": "pl-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "pl", "locale": "pl", "text": "Numer rachunku: PL94 5675 2019 9152 6974 5311 6206"}
+{"id": "pl-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "pl", "locale": "pl", "text": "Zwrot na konto PL42 2131 1750 6373 1516 4418 9675"}
+{"id": "pl-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "pl", "locale": "pl", "text": "Przelew na IBAN PL68698005945927107402980952."}
+{"id": "pl-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "pl", "locale": "pl", "text": "Numer rachunku: PL95 6808 6794 9815 2177 5416 6238"}
+{"id": "pl-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "pl", "locale": "pl", "text": "Zwrot na konto PL18461206536237115316037240"}
+{"id": "pl-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "pl", "locale": "pl", "text": "Numer karty 5540 8408 1320 2426."}
+{"id": "pl-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "pl", "locale": "pl", "text": "Obciąż kartę 3451 086725 39959."}
+{"id": "pl-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "pl", "locale": "pl", "text": "Numer karty 3435 791102 46021."}
+{"id": "pl-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "pl", "locale": "pl", "text": "Obciąż kartę 4688395381779367."}
+{"id": "pl-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "pl", "locale": "pl", "text": "Logowanie z 203.0.113.152."}
+{"id": "pl-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "pl", "locale": "pl", "text": "Zablokuj adres 203.0.113.74."}
+{"id": "pl-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "pl", "locale": "pl", "text": "Logowanie z 198.51.100.133."}
+{"id": "pl-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "pl", "locale": "pl", "text": "Zablokuj adres 2001:db8:dab8::d576."}
+{"id": "pl-nid-001", "kind": "positive", "labels": ["national_id"], "lang": "pl", "locale": "pl", "text": "Mój PESEL to 41030240866."}
+{"id": "pl-nid-002", "kind": "positive", "labels": ["national_id"], "lang": "pl", "locale": "pl", "text": "Mój PESEL to 46080162669."}
+{"id": "pl-health-001", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "pl", "locale": "pl", "text": "U Anna Wiśniewska zdiagnozowano astmę i wypisano receptę."}
+{"id": "pl-health-002", "kind": "positive", "labels": ["health_data"], "lang": "pl", "locale": "pl", "text": "Ciśnienie krwi było podwyższone podczas wizyty."}
+{"id": "pl-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "pl", "locale": "pl", "text": "Zaktualizuj numer rachunku do wypłaty."}
+{"id": "pl-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "pl", "locale": "pl", "text": "Jaki jest NIP firmy?"}
+{"id": "pl-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "pl", "locale": "pl", "text": "Anna Wójcik, ul. Długa 98, 00-238 Warszawa"}
+{"id": "pl-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "pl", "locale": "pl", "text": "Dostawa do Piotr Wójcik, ul. Długa 45, 00-238 Warszawa."}
+{"id": "pl-mixed-001", "kind": "positive", "labels": ["email", "phone"], "lang": "pl", "locale": "pl", "text": "Mój e-mail to JAKUB.WOJCIK@FIRMA.EXAMPLE. Tel.: 568-088-490"}
+{"id": "pl-mixed-002", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "pl", "locale": "pl", "text": "Mój e-mail to ANNA.WOJCIK@EXAMPLE.NET. Tel.: 538-249-365 Numer rachunku: PL16 9706 7235 5052 2310 0315 5093"}
+{"id": "pl-mixed-003", "kind": "positive", "labels": ["email", "financial_data", "iban", "phone"], "lang": "pl", "locale": "pl", "text": "Mój e-mail to piotr.wojcik@example.com. Tel.: 568-015-982 Numer rachunku: PL49005231236176314860967034"}
+{"id": "pl-neutral-001", "kind": "negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Podsumuj spotkanie w trzech punktach."}
+{"id": "pl-neutral-002", "kind": "negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Przetłumacz tekst na angielski."}
+{"id": "pl-neutral-003", "kind": "negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Napisz uprzejmą odpowiedź do klienta."}
+{"id": "pl-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Data: 2021-02-01"}
+{"id": "pl-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Data: 01.02.2021"}
+{"id": "pl-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Zamówienie nr 46983018"}
+{"id": "pl-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Zamówienie nr ORD-2021-936610"}
+{"id": "pl-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Faktura nr 20210201-4507"}
+{"id": "pl-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Faktura nr 210201-0324"}
+{"id": "pl-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Nr klienta 94956506630"}
+{"id": "pl-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Nr klienta 192 707 678"}
+{"id": "pl-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Nr przesyłki 44575310728498613355"}
+{"id": "pl-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Nr przesyłki JJD0082345183424450"}
+{"id": "pl-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "EAN 1515039059973"}
+{"id": "pl-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Kwota: 995 883,05"}
+{"id": "pl-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "REGON 269865-9107"}
+{"id": "pl-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "REGON PL8465316427"}
+{"id": "pl-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Firmware 4.9.3.100"}
+{"id": "pl-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Build 20210201000000"}
+{"id": "pl-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "ref 4b1e6740-9c2a-4f1d-8e7b-672304541306"}
+{"id": "pl-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "@zofia-team, 14:30–16:00"}
+{"id": "pl-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "ISBN 978-91-20-07375-2"}
+{"id": "gb-email-001", "kind": "positive", "labels": ["email"], "lang": "en", "locale": "gb", "text": "Please reply to ijones13@mail.example."}
+{"id": "gb-email-002", "kind": "positive", "labels": ["email"], "lang": "en", "locale": "gb", "text": "My email is ISLA.BROWN@EXAMPLE.NET."}
+{"id": "gb-email-003", "kind": "positive", "labels": ["email", "person_name"], "lang": "en", "locale": "gb", "text": "Contact Isla Jones at isla.jones@example.com"}
+{"id": "gb-email-004", "kind": "positive", "labels": ["email"], "lang": "en", "locale": "gb", "text": "Please reply to jjones2@example.net."}
+{"id": "gb-email-005", "kind": "positive", "labels": ["email"], "lang": "en", "locale": "gb", "text": "My email is amelia.taylor@firma.example."}
+{"id": "gb-email-006", "kind": "positive", "labels": ["email", "person_name"], "lang": "en", "locale": "gb", "text": "Contact Isla Jones at ijones88@example.com"}
+{"id": "gb-phone-001", "kind": "positive", "labels": ["phone"], "lang": "en", "locale": "gb", "text": "Call me on 07700 900525."}
+{"id": "gb-phone-002", "kind": "positive", "labels": ["phone"], "lang": "en", "locale": "gb", "text": "Mobile: +44 7700 900976"}
+{"id": "gb-phone-003", "kind": "positive", "labels": ["person_name", "phone"], "lang": "en", "locale": "gb", "text": "Jack Jones can be reached on +44 7700 900335"}
+{"id": "gb-phone-004", "kind": "positive", "labels": ["phone"], "lang": "en", "locale": "gb", "text": "Call me on (07700) 900 290."}
+{"id": "gb-phone-005", "kind": "positive", "labels": ["phone"], "lang": "en", "locale": "gb", "text": "Mobile: (07700) 900 293"}
+{"id": "gb-phone-006", "kind": "positive", "labels": ["person_name", "phone"], "lang": "en", "locale": "gb", "text": "Amelia Brown can be reached on +447700900255"}
+{"id": "gb-phone-007", "kind": "positive", "labels": ["phone"], "lang": "en", "locale": "gb", "text": "Call me on +447700900444."}
+{"id": "gb-phone-008", "kind": "positive", "labels": ["phone"], "lang": "en", "locale": "gb", "text": "Mobile: 07700 900352"}
+{"id": "gb-phone-009", "kind": "positive", "labels": ["person_name", "phone"], "lang": "en", "locale": "gb", "text": "Isla Taylor can be reached on (07700) 900 789"}
+{"id": "gb-iban-001", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "en", "locale": "gb", "text": "Please pay into IBAN GB63ONYH10713963616080."}
+{"id": "gb-iban-002", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "en", "locale": "gb", "text": "Account: GB72 VVFI 3591 9198 3570 09"}
+{"id": "gb-iban-003", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "en", "locale": "gb", "text": "Refund to GB30 TJVK 6043 3605 2539 14"}
+{"id": "gb-iban-004", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "en", "locale": "gb", "text": "Please pay into IBAN GB88WJGA66094889835207."}
+{"id": "gb-iban-005", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "en", "locale": "gb", "text": "Account: GB72 UIMR 0042 5408 8551 07"}
+{"id": "gb-iban-006", "kind": "positive", "labels": ["financial_data", "iban"], "lang": "en", "locale": "gb", "text": "Refund to GB31GRYO49499212288939"}
+{"id": "gb-card-001", "kind": "positive", "labels": ["credit_card"], "lang": "en", "locale": "gb", "text": "Card number 5196650568608819, expiry 08/29."}
+{"id": "gb-card-002", "kind": "positive", "labels": ["credit_card"], "lang": "en", "locale": "gb", "text": "Charge the card 3749 721487 75552."}
+{"id": "gb-card-003", "kind": "positive", "labels": ["credit_card"], "lang": "en", "locale": "gb", "text": "Card number 4106072503816054, expiry 08/29."}
+{"id": "gb-card-004", "kind": "positive", "labels": ["credit_card"], "lang": "en", "locale": "gb", "text": "Charge the card 4776-6333-3182-3221."}
+{"id": "gb-ip-001", "kind": "positive", "labels": ["ip_address"], "lang": "en", "locale": "gb", "text": "Login attempt from 2001:db8:b7bd::e75b."}
+{"id": "gb-ip-002", "kind": "positive", "labels": ["ip_address"], "lang": "en", "locale": "gb", "text": "Block 192.0.2.246 at the firewall."}
+{"id": "gb-ip-003", "kind": "positive", "labels": ["ip_address"], "lang": "en", "locale": "gb", "text": "Login attempt from 198.51.100.202."}
+{"id": "gb-ip-004", "kind": "positive", "labels": ["ip_address"], "lang": "en", "locale": "gb", "text": "Block 192.0.2.235 at the firewall."}
+{"id": "gb-health-001", "kind": "positive", "labels": ["health_data"], "lang": "en", "locale": "gb", "text": "Patient ID 4471: diagnosis of type 2 diabetes, medication adjusted."}
+{"id": "gb-health-002", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "en", "locale": "gb", "text": "Amelia Brown's lab result came back and the prescription was renewed."}
+{"id": "gb-financial-001", "kind": "positive", "labels": ["financial_data"], "lang": "en", "locale": "gb", "text": "Please update the account number used for payroll."}
+{"id": "gb-financial-002", "kind": "positive", "labels": ["financial_data"], "lang": "en", "locale": "gb", "text": "What is the routing number for the supplier?"}
+{"id": "gb-contact-001", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "en", "locale": "gb", "text": "Amelia Taylor, 114 High Street, Bristol BS1 2AW"}
+{"id": "gb-contact-002", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "en", "locale": "gb", "text": "Deliver to Amelia Taylor, 71 Station Road, Leeds LS1 4DY."}
+{"id": "gb-mixed-001", "kind": "positive", "labels": ["email", "phone"], "lang": "en", "locale": "gb", "text": "My email is asmith71@example.com. Mobile: 07700 900304"}
+{"id": "gb-mixed-002", "kind": "positive", "labels": ["email", "phone"], "lang": "en", "locale": "gb", "text": "My email is OLIVER.TAYLOR@MAIL.EXAMPLE. Mobile: +44 7700 900347"}
+{"id": "gb-mixed-003", "kind": "positive", "labels": ["email", "phone"], "lang": "en", "locale": "gb", "text": "My email is amelia.smith@sub.example.co.uk. Mobile: +44 7700 900166"}
+{"id": "gb-neutral-001", "kind": "negative", "labels": [], "lang": "en", "locale": "gb", "text": "Summarise the meeting in three bullet points."}
+{"id": "gb-neutral-002", "kind": "negative", "labels": [], "lang": "en", "locale": "gb", "text": "Translate this into Swedish."}
+{"id": "gb-neutral-003", "kind": "negative", "labels": [], "lang": "en", "locale": "gb", "text": "Write a friendly reply about the delivery date."}
+{"id": "gb-lookalike-001", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Date: 2021-03-12"}
+{"id": "gb-lookalike-002", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Date: 12.03.2021"}
+{"id": "gb-lookalike-003", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Order no. 9981219988"}
+{"id": "gb-lookalike-004", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Order no. ORD-2021-304722"}
+{"id": "gb-lookalike-005", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Invoice no. 20210312-6376"}
+{"id": "gb-lookalike-006", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Invoice no. 210312-3878"}
+{"id": "gb-lookalike-007", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Customer no. 35092378819"}
+{"id": "gb-lookalike-008", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Customer no. 692 531 897"}
+{"id": "gb-lookalike-009", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Tracking no. 23243855808607857307"}
+{"id": "gb-lookalike-010", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Tracking no. JJD0008185379053819"}
+{"id": "gb-lookalike-011", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "EAN 2335522641993"}
+{"id": "gb-lookalike-012", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Amount: 246 120,92"}
+{"id": "gb-lookalike-013", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Company no. 735095-0987"}
+{"id": "gb-lookalike-014", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Company no. GB0939738573"}
+{"id": "gb-lookalike-015", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Firmware 4.2.3.142"}
+{"id": "gb-lookalike-016", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Build 20210312000000"}
+{"id": "gb-lookalike-017", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "ref 4b1e6180-9c2a-4f1d-8e7b-382905163075"}
+{"id": "gb-lookalike-018", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "@amelia-team, 14:30–16:00"}
+{"id": "gb-lookalike-019", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "ISBN 978-91-43-30679-1"}

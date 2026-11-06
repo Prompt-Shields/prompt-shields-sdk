@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from collector import attestation
 from collector.app import app
+from collector.embeddings import mock_embedding
 from collector.partner_auth import hash_secret, issue_access_token
 from db.models import (
     AIAsset,
@@ -366,3 +367,123 @@ def test_write_scope_is_opt_in():
     assert "attestations:write" in SCOPES
     assert "attestations:write" not in DEFAULT_SCOPES
     assert "attestations:write" not in expand_scopes(["registry:read"])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Review queue filter, search and AI-BOM (#98, second slice)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def _second_asset(env) -> uuid.UUID:
+    async with env.factory() as s:
+        other = AIAsset(
+            tenant_id=env.tenant_id, vendor="anthropic", owner_email="b@test.com",
+            confidence="verified", discovery_source=["sdk", "gateway"],
+            embedding=mock_embedding("contract review"),
+        )
+        s.add(other)
+        await s.commit()
+        return other.id
+
+
+@pytest.mark.asyncio
+async def test_list_filters_by_attestation_state(seeded_db):
+    env = await _seed(seeded_db)
+    second = await _second_asset(env)
+    attest_url = f"/api/v1/registry/assets/{env.asset_id}/attestations"
+
+    async def ids(c, path, headers, field, state):
+        r = await c.get(path, headers=headers,
+                        params={"attestation_field": field, "attestation_state": state})
+        assert r.status_code == 200, r.text
+        return {a["id"] for a in r.json()["data"]}, r.json()["meta"]["total"]
+
+    async with _client() as c:
+        await c.post(attest_url, headers=TENANT_KEY,
+                     json={"field": "owner", "state": "attested", "attested_by": "a@test.com"})
+        await c.post(attest_url, headers=TENANT_KEY,
+                     json={"field": "owner", "state": "disputed", "attested_by": "b@test.com",
+                           "comment": "left the company"})
+        for path, headers in (("/api/v1/registry/assets", TENANT_KEY),
+                              ("/partner/v1/assets", env.ro)):
+            # The newest decision counts: disputed, not attested.
+            assert await ids(c, path, headers, "owner", "disputed") == ({str(env.asset_id)}, 1)
+            assert await ids(c, path, headers, "owner", "attested") == (set(), 0)
+            # Never attested counts as unreviewed.
+            assert await ids(c, path, headers, "owner", "unreviewed") == ({str(second)}, 1)
+            assert (await ids(c, path, headers, "data_classification", "unreviewed"))[1] == 2
+
+        tenant_bad = [
+            await c.get("/api/v1/registry/assets", headers=TENANT_KEY, params=p)
+            for p in ({"attestation_field": "owner"},
+                      {"attestation_state": "attested"},
+                      {"attestation_field": "confidence", "attestation_state": "attested"})
+        ]
+        partner_bad = await c.get("/partner/v1/assets", headers=env.ro,
+                                  params={"attestation_field": "nope",
+                                          "attestation_state": "attested"})
+        bad_state = await c.get("/partner/v1/assets", headers=env.ro,
+                                params={"attestation_field": "owner",
+                                        "attestation_state": "verified"})
+    assert [r.status_code for r in tenant_bad] == [400, 400, 400]
+    assert "together" in tenant_bad[0].json()["detail"]["detail"]
+    assert partner_bad.status_code == 400
+    assert bad_state.status_code == 422
+    async with env.factory() as s:
+        refused = (
+            await s.execute(
+                select(PartnerAuditLog.endpoint).where(PartnerAuditLog.status_code == 400)
+            )
+        ).scalars().all()
+    assert "/partner/v1/assets" in refused
+
+
+async def _no_embedding(_text):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_search_results_carry_attestation(seeded_db, monkeypatch):
+    from collector import registry
+
+    env = await _seed(seeded_db)
+    second = await _second_asset(env)
+    async with _client() as c:
+        await c.post(f"/api/v1/registry/assets/{second}/attestations", headers=TENANT_KEY,
+                     json={"field": "owner", "state": "attested", "attested_by": "a@test.com"})
+        semantic = (await c.get("/api/v1/registry/search", headers=TENANT_KEY,
+                                params={"q": "contract review", "use_mock": "true"})).json()
+        monkeypatch.setattr(registry, "get_embedding", _no_embedding)
+        keyword = (await c.get("/api/v1/registry/search", headers=TENANT_KEY,
+                               params={"q": "anthropic"})).json()
+    assert semantic["meta"]["mode"] == "semantic"
+    hit = next(a for a in semantic["data"] if a["id"] == str(second))
+    assert hit["attestation"]["owner"]["state"] == "attested"
+    assert hit["confidence"] == "verified"
+    assert keyword["meta"]["mode"] == "keyword"
+    assert keyword["data"][0]["attestation"]["owner"]["attested_by"] == "a@test.com"
+    assert keyword["data"][0]["attestation"]["asset"]["state"] == "unreviewed"
+
+
+@pytest.mark.asyncio
+async def test_aibom_export_carries_attestation_next_to_confidence(seeded_db):
+    env = await _seed(seeded_db)
+    async with _client() as c:
+        await c.post(f"/partner/v1/assets/{env.asset_id}/attestations", headers=env.rw,
+                     json={"field": "owner", "state": "attested", "attested_by": "ciso@test.com",
+                           "comment": "not exported"})
+        r = await c.get("/partner/v1/export", headers=env.ro, params={"format": "cyclonedx"})
+    assert r.status_code == 200, r.text
+    comp = next(
+        c for c in r.json()["components"]
+        if c.get("bom-ref") == f"promptshields:asset:{env.asset_id}"
+    )
+    props = {p["name"]: p["value"] for p in comp["properties"]}
+    assert props["promptshields:confidence"] == "high"
+    assert props["promptshields:attestation:owner"] == "attested"
+    assert props["promptshields:attestation:owner:attested_by"] == "ciso@test.com"
+    assert props["promptshields:attestation:owner:value_changed"] == "false"
+    assert "promptshields:attestation:owner:attested_at" in props
+    assert props["promptshields:attestation:data_classification"] == "unreviewed"
+    assert "promptshields:attestation:data_classification:attested_at" not in props
+    assert "not exported" not in r.text

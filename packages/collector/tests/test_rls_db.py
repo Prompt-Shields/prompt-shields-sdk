@@ -13,11 +13,11 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
-from collector import audit_trail, rls
+from collector import audit_trail, learner, rls, spend_anomalies
 from collector.app import app
 from collector.config import settings
 from collector.partner_auth import hash_secret
@@ -33,6 +33,8 @@ from db.models import (
     Base,
     CallFeedback,
     DataFlow,
+    LearnerRecommendation,
+    LearnerSnapshot,
     McpToolUsage,
     PartnerAuditLog,
     PartnerCredential,
@@ -41,6 +43,7 @@ from db.models import (
     RetentionAuditLog,
     RiskMapping,
     RiskMappingReview,
+    SpendAlert,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
@@ -168,6 +171,19 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     score=1.0,
                     source="sdk",
                 ),
+                SpendAlert(
+                    tenant_id=tenant_id,
+                    group_by="use_case",
+                    group_key=f"seed-{name}",
+                    day=date(2026, 1, 1),
+                    observed_cost=10,
+                    baseline_cost=1.0,
+                    baseline_sigma=0.5,
+                    z_score=18.0,
+                    threshold_sigma=3.0,
+                    history_days=28,
+                    severity="critical",
+                ),
                 TenantApiKey(
                     tenant_id=tenant_id,
                     name="seed",
@@ -198,15 +214,39 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
         )
         s.add(sub)
         await s.flush()
-        s.add(
-            WebhookDelivery(
-                tenant_id=tenant_id,
-                subscription_id=sub.id,
-                event_id=uuid.uuid4(),
-                event_type="asset.created",
-                payload={},
-                status="succeeded",
-            )
+        snap = LearnerSnapshot(
+            tenant_id=tenant_id,
+            learner_version=f"lv1-seed{name:0>12}",
+            mode="recommend",
+            algorithm="linear-thompson.v1",
+            data_fingerprint="0" * 64,
+            training_rows=0,
+            scored_rows=0,
+            snapshot={},
+        )
+        s.add(snap)
+        await s.flush()
+        s.add_all(
+            [
+                WebhookDelivery(
+                    tenant_id=tenant_id,
+                    subscription_id=sub.id,
+                    event_id=uuid.uuid4(),
+                    event_type="asset.created",
+                    payload={},
+                    status="succeeded",
+                ),
+                LearnerRecommendation(
+                    tenant_id=tenant_id,
+                    snapshot_id=snap.id,
+                    learner_version=snap.learner_version,
+                    sensitivity_level="internal",
+                    current_model="openai:gpt-4o",
+                    recommended_model="mistral:mistral-small",
+                    candidates=["mistral:mistral-small"],
+                    projection={},
+                ),
+            ]
         )
         await s.commit()
 
@@ -583,6 +623,137 @@ async def test_call_feedback_under_rls(rls_db):
         await s.rollback()
 
 
+def _learner_snapshot() -> dict:
+    snap = {
+        "schema": "ps-learner-snapshot.v1",
+        "mode": "recommend",
+        "algorithm": "linear-thompson.v1",
+        "data": {"fingerprint": "1" * 64, "rows": 10, "scored_rows": 10},
+        "groups": [],
+        "recommendations": [
+            {
+                "use_case": "support",
+                "sensitivity": "internal",
+                "current_model": "openai:gpt-4o",
+                "recommended_model": "mistral:mistral-small",
+                "candidates": ["mistral:mistral-small", "openai:gpt-4o"],
+                "projection": {
+                    "calls": 10,
+                    "current": {"quality": 0.9, "cost_per_call": 0.01},
+                    "recommended": {"quality": 0.9, "cost_per_call": 0.002},
+                    "quality_delta": 0.0,
+                    "savings_per_call": 0.008,
+                    "savings_pct": 0.8,
+                    "prob_best": 0.95,
+                },
+            }
+        ],
+    }
+    snap["learner_version"] = learner.expected_version(snap)
+    return snap
+
+
+async def test_learner_snapshots_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    snap = _learner_snapshot()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key in (KEY_A, KEY_B):
+            # The same snapshot is a new row per tenant; nothing is superseded
+            # across tenants.
+            resp = await c.post(
+                "/ingest/learner-snapshots",
+                headers={"Authorization": f"Bearer {key}"},
+                json=snap,
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["created"] is True
+            assert resp.json()["superseded"] == 0
+
+    async with rls_db["admin"]() as s:
+        rows = (
+            await s.execute(
+                select(LearnerRecommendation.tenant_id, LearnerRecommendation.status).where(
+                    LearnerRecommendation.learner_version == snap["learner_version"]
+                )
+            )
+        ).all()
+    assert sorted(str(t) for t, _ in rows) == sorted([str(a), str(b)])
+    assert {st for _, st in rows} == {"pending"}
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        s.add(
+            LearnerSnapshot(
+                tenant_id=b,
+                learner_version="lv1-0000000000000bad",
+                mode="recommend",
+                algorithm="x",
+                data_fingerprint="0" * 64,
+                training_rows=0,
+                scored_rows=0,
+                snapshot={},
+            )
+        )
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+
+async def test_spend_anomaly_job_and_partner_api_under_rls(rls_db, caplog):
+    a, b = rls_db["a"], rls_db["b"]
+    day = date(2026, 2, 10)
+    async with rls_db["admin"]() as s:
+        for tenant_id, spike in ((a, 50), (b, 80)):
+            asset = AIAsset(tenant_id=tenant_id, vendor="openai", use_case_name="chat",
+                            discovery_source=["sdk"])
+            s.add(asset)
+            await s.flush()
+            for i in range(14, -1, -1):
+                ts = datetime(2026, 2, 10, 12, tzinfo=UTC) - timedelta(days=i)
+                s.add(AIUsageEvent(tenant_id=tenant_id, asset_id=asset.id, source="sdk",
+                                   timestamp=ts, cost=spike if i == 0 else 5))
+        p = (await s.execute(select(PartnerCredential).where(
+            PartnerCredential.tenant_id == a))).scalar_one()
+        p.scopes = ["spend-alerts:read", "spend-alerts:acknowledge"]
+        await s.commit()
+
+    # The real job: lists tenants through the logged bypass, then each
+    # tenant under its own context, with RLS enforced.
+    with caplog.at_level(logging.INFO, logger="collector.rls"):
+        summary = await spend_anomalies.run_all_tenants(
+            rls_db["plain"], day=day, now=datetime(2026, 2, 11, tzinfo=UTC))
+    assert "rls bypass granted reason=spend-anomaly-job" in caplog.text
+    assert summary["tenants"][str(a)][0]["alerts_created"] == 1
+    assert summary["tenants"][str(b)][0]["alerts_created"] == 1
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        rows = (await s.execute(text("SELECT tenant_id, group_key FROM spend_alerts"))).all()
+        assert sorted(r.group_key for r in rows) == ["chat", "seed-a"]
+        assert {r.tenant_id for r in rows} == {a}
+    async with rls_db["admin"]() as s:
+        alert_b = (await s.execute(select(SpendAlert.id).where(
+            SpendAlert.tenant_id == b, SpendAlert.group_key == "chat"))).scalar_one()
+        alert_a = (await s.execute(select(SpendAlert.id).where(
+            SpendAlert.tenant_id == a, SpendAlert.group_key == "chat"))).scalar_one()
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        s.add(SpendAlert(tenant_id=b, group_by="use_case", group_key="evil", day=day,
+                         observed_cost=1, baseline_cost=0, baseline_sigma=0, z_score=0,
+                         threshold_sigma=3, history_days=7, severity="warning"))
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+
+    head = {"Authorization": f"Bearer {PARTNER_KEY_A}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        listed = await c.get("/partner/v1/spend-alerts", headers=head)
+        assert listed.status_code == 200, listed.text
+        assert {x["group_key"] for x in listed.json()["data"]} == {"chat", "seed-a"}
+        acked = await c.post(f"/partner/v1/spend-alerts/{alert_a}/acknowledge", headers=head)
+        assert acked.status_code == 200, acked.text
+        cross = await c.post(f"/partner/v1/spend-alerts/{alert_b}/acknowledge", headers=head)
+        assert cross.status_code == 404
+
+
 async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, caplog):
     monkeypatch.setattr(settings, "admin_token", TOKEN)
     a, b = rls_db["a"], rls_db["b"]
@@ -605,6 +776,9 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         assert resp.json()["rows_deleted"]["webhook_subscriptions"] == 1
         assert resp.json()["rows_deleted"]["mcp_tool_usage"] == 1
         assert resp.json()["rows_deleted"]["call_feedback"] == 1
+        assert resp.json()["rows_deleted"]["learner_recommendations"] == 1
+        assert resp.json()["rows_deleted"]["learner_snapshots"] == 1
+        assert resp.json()["rows_deleted"]["spend_alerts"] == 1
 
     assert any(
         "rls bypass granted reason=operator:POST /api/v1/operator/retention/purge"

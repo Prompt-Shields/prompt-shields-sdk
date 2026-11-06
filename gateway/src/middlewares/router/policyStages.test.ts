@@ -278,7 +278,22 @@ describe('detectPiiCategories (port of the SDK detector)', () => {
   test.each<[string, string[]]>([
     ['nothing here', []],
     ['mail jane@acme.com', ['email']],
-    ['IBAN NO9386011117947', ['iban', 'financial_data', 'phone']],
+    // A checksum-valid IBAN is masked first: its digits are not a phone.
+    ['IBAN NO9386011117947', ['iban', 'financial_data']],
+    ['SE45 5000 0000 0583 9825 7466', ['iban']],
+    ['DE89 3704 0044 0532 0130 00', ['iban']],
+    // Card numbers are Luhn checked (the US-shaped phone pattern still
+    // matches a run of 4-digit groups).
+    ['Card 4111 1111 1111 1111', ['credit_card', 'phone']],
+    ['Card 4111 1111 1111 1112', ['phone']],
+    ['Ring 070-174 06 12 eller +46 70 174 06 13', ['phone']],
+    ['Ref 12 4111 1111 1111 1111', ['credit_card', 'phone']],
+    [
+      'SE45 5000 0000 0583 9825 7466 4111 1111 1111 1111',
+      ['credit_card', 'iban', 'phone'],
+    ],
+    ['call +1-555-123-4567x89', ['phone']],
+    ['Datum 05.03.2024 14.30', []],
     ['Mitt personnummer är 19121212-1212.', ['national_id', 'phone']],
     ['fødselsnummer 01818510078', ['national_id', 'phone']],
     ['the diagnosis was clear', ['health_data']],
@@ -504,17 +519,53 @@ describe('requestText / scanRequestBody', () => {
 });
 
 describe('PII detection stays linear on large bodies', () => {
+  // Checked by how the cost grows, not by a wall-clock limit, so a busy
+  // machine (parallel jest workers) can't fail it: 4x the input must cost
+  // under 8x as much. Linear scanning gives ~4x; the unanchored email pattern
+  // this guards against was quadratic (~16x; 100 KB of letters took ~8 s).
+  // Cost is this process's CPU time, which other processes don't inflate.
+  // Each sample does the same work (the quarter-size input four times vs the
+  // full input once), so both see the same timer and scheduler granularity,
+  // and the best of several interleaved samples is kept.
+  const cpuMs = (text: string, times: number) => {
+    const start = process.cpuUsage();
+    for (let i = 0; i < times; i++) detectPiiCategories(text);
+    const { user, system } = process.cpuUsage(start);
+    return (user + system) / 1000;
+  };
+  const growth = (small: string, large: string) => {
+    let bestSmall = Infinity;
+    let bestLarge = Infinity;
+    const deadline = performance.now() + 1000;
+    for (let i = 0; i < 5 && (i === 0 || performance.now() < deadline); i++) {
+      bestSmall = Math.min(bestSmall, cpuMs(small, 4));
+      bestLarge = Math.min(bestLarge, cpuMs(large, 1));
+    }
+    // bestSmall covers four quarter-size scans: the cost of one is a quarter.
+    return (4 * bestLarge) / Math.max(bestSmall, 0.01);
+  };
+
   test.each([
-    ['letters', 'a'.repeat(200_000)],
-    ['dotted', 'a.'.repeat(100_000)],
-    ['digits', '1'.repeat(200_000)],
-    ['local part then @', 'a'.repeat(200_000) + '@'],
-    ['many @', 'a@'.repeat(100_000)],
-  ])('%s', (_name, text) => {
-    const t = Date.now();
-    detectPiiCategories(text);
-    expect(Date.now() - t).toBeLessThan(1000);
-  });
+    ['letters', (n: number) => 'a'.repeat(n), 200_000],
+    ['dotted', (n: number) => 'a.'.repeat(n), 100_000],
+    ['digits', (n: number) => '1'.repeat(n), 200_000],
+    ['local part then @', (n: number) => 'a'.repeat(n) + '@', 200_000],
+    ['many @', (n: number) => 'a@'.repeat(n), 100_000],
+    ['digit-dash', (n: number) => '1-'.repeat(n), 100_000],
+    ['plus groups', (n: number) => '+1 '.repeat(n), 66_000],
+    ['zero groups', (n: number) => '0 '.repeat(n), 100_000],
+    ['iban heads', (n: number) => 'SE45 '.repeat(n), 40_000],
+  ])(
+    '%s',
+    (_name, make, n) => {
+      const large = make(n);
+      expect(large.length).toBeGreaterThanOrEqual(198_000);
+      expect(growth(make(n / 4), large)).toBeLessThan(8);
+    },
+    // A quadratic regression takes tens of seconds here; let it fail on the
+    // growth assertion rather than on the default timeout.
+    120_000
+  );
 
   test('the anchored email pattern still finds addresses mid-run', () => {
     expect(detectPiiCategories('xx..jane.doe+1@acme.co.uk')).toContain('email');

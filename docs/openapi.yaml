@@ -61,10 +61,18 @@ tags:
       stable UUID ids, secrets returned once, POST with a name an unrevoked
       row already has is 409, and DELETE revokes (204, the row stays
       readable by id with `status: revoked`, a repeated DELETE is 204).
+  - name: Learner
+    description: |
+      Routing learner (`recommend` mode, PRD 0001 §7.13): versioned
+      snapshots uploaded by the customer-side learner, and the route changes
+      they recommend, each with an off-policy projection, a human
+      accept/reject decision and, once accepted, realised vs. projected
+      savings. Nothing here routes traffic.
   - name: Ingest
     description: |
       Telemetry ingest routes the SDK and the gateway call with the tenant's
-      own API key. Only call feedback is documented here.
+      own API key. Only call feedback and learner snapshots are documented
+      here.
   - name: Operator
     description: |
       Cross-tenant operator routes (`PS_ADMIN_TOKEN`): tenants, retention,
@@ -92,6 +100,10 @@ components:
             risks:review: Confirm or reject risk mappings, with reviewer and comment (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
             audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
+            learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
+            learner:review: Accept or reject routing learner recommendations, with reviewer and comment (never granted by default)
+            spend-alerts:read: List spend anomaly alerts and receive them as `spend.anomaly` webhook events (never granted by default)
+            spend-alerts:acknowledge: Acknowledge spend anomaly alerts (never granted by default)
             usage:export: Bulk export AI usage cost in the FinOps FOCUS format (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
@@ -1302,6 +1314,287 @@ components:
           type: boolean
           description: Whether a usage event with this call_id has arrived for the tenant
 
+    LearnerSnapshotSummary:
+      type: object
+      description: |
+        One routing learner snapshot (#47, #48), without its state. The
+        learner runs in the customer's environment in `recommend` mode and
+        never routes traffic.
+      properties:
+        id:
+          type: string
+          format: uuid
+        learner_version:
+          type: string
+          pattern: '^lv1-[0-9a-f]{16}$'
+          description: Content hash of the snapshot (checked on upload), so a snapshot is reproducible from the same input and config
+        parent_version:
+          type: [string, 'null']
+          description: The snapshot this one was warm-started from
+        mode:
+          type: string
+          enum: [recommend]
+        algorithm:
+          type: string
+          example: linear-thompson.v1
+        feature_schema:
+          type: [string, 'null']
+          example: ps-prompt-features.v1
+        policy_version:
+          type: [string, 'null']
+          description: The route policy whose candidates constrained the learner
+        data_fingerprint:
+          type: string
+          description: SHA-256 of the training rows (as the learner parsed them)
+        training_rows:
+          type: integer
+        scored_rows:
+          type: integer
+          description: Rows with a quality signal (shadow eval, feedback, eval score or implicit outcome)
+        recommendations:
+          type: integer
+          description: Number of recommendations in the snapshot
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - learner_version
+        - parent_version
+        - mode
+        - algorithm
+        - feature_schema
+        - policy_version
+        - data_fingerprint
+        - training_rows
+        - scored_rows
+        - recommendations
+        - created_at
+
+    LearnerSnapshot:
+      allOf:
+        - $ref: '#/components/schemas/LearnerSnapshotSummary'
+        - type: object
+          properties:
+            snapshot:
+              type: object
+              description: |
+                The whole document as uploaded (`ps-learner-snapshot.v1`):
+                config, reward weights, per-group candidates and status,
+                per-arm ridge statistics over local prompt features
+                (aggregates only, never prompt text or embeddings), and the
+                recommendations.
+          required: [snapshot]
+
+    LearnerArmProjection:
+      type: object
+      description: Off-policy estimate of routing the group's logged traffic to one model
+      properties:
+        model:
+          type: string
+        quality:
+          type: number
+        cost_per_call:
+          type: number
+        latency_ms:
+          type: number
+        reward:
+          type: number
+          description: quality − λ·cost − μ·latency(s)
+        quality_method:
+          type: string
+          enum: [dm, dr]
+          description: Direct method (regression), or doubly robust when logged propensities exist
+        cost_method:
+          type: string
+          enum: [priced, regression]
+          description: Counterfactual price of the logged token counts, or the cost regression
+
+    LearnerRealised:
+      type: object
+      description: |
+        Realised vs. projected, for an accepted recommendation: usage
+        events of the recommendation's use case and sensitivity since the
+        decision.
+      properties:
+        since:
+          type: string
+          format: date-time
+        calls:
+          type: integer
+        calls_on_recommended:
+          type: integer
+        adoption:
+          type: [number, 'null']
+          description: Share of those calls served by the recommended model
+        cost_per_call:
+          type: [number, 'null']
+        savings_per_call:
+          type: [number, 'null']
+          description: Projected current cost per call minus realised cost per call
+        savings_pct:
+          type: [number, 'null']
+        projected_savings_pct:
+          type: [number, 'null']
+        delta_points:
+          type: [number, 'null']
+          description: (realised − projected savings share) × 100
+        feedback_count:
+          type: integer
+          description: Explicit feedback on calls served by the recommended model
+        feedback_quality:
+          type: [number, 'null']
+        projected_quality:
+          type: [number, 'null']
+      required:
+        - since
+        - calls
+        - calls_on_recommended
+        - adoption
+        - cost_per_call
+        - savings_per_call
+        - savings_pct
+        - projected_savings_pct
+        - delta_points
+        - feedback_count
+        - feedback_quality
+        - projected_quality
+
+    LearnerRecommendation:
+      type: object
+      description: |
+        A route change the learner proposes for one (use case, sensitivity),
+        always one of that group's policy-compliant candidates. Accepting it
+        changes no routing: the reviewer edits the route policy.
+      properties:
+        id:
+          type: string
+          format: uuid
+        snapshot_id:
+          type: string
+          format: uuid
+        learner_version:
+          type: string
+        use_case:
+          type: [string, 'null']
+        sensitivity_level:
+          type: string
+        current_model:
+          type: string
+          description: The model most of the group's logged traffic used
+        recommended_model:
+          type: string
+        candidates:
+          type: array
+          items:
+            type: string
+          description: The models the route policy allows for the group (`provider:model`)
+        projection:
+          type: object
+          description: Off-policy projection over the group's logged traffic
+          properties:
+            calls:
+              type: integer
+            current:
+              $ref: '#/components/schemas/LearnerArmProjection'
+            recommended:
+              $ref: '#/components/schemas/LearnerArmProjection'
+            quality_delta:
+              type: number
+            reward_delta:
+              type: number
+            savings_per_call:
+              type: number
+            savings_total:
+              type: number
+              description: savings_per_call × calls (over the logged window)
+            savings_pct:
+              type: number
+            prob_best:
+              type: number
+              description: Share of Thompson-sampling draws in which the recommended model was best
+            arm_samples:
+              type: object
+              additionalProperties:
+                type: integer
+        status:
+          type: string
+          enum: [pending, accepted, rejected, superseded]
+        reviewed_by:
+          type: [string, 'null']
+        reviewed_at:
+          type: [string, 'null']
+          format: date-time
+        review_comment:
+          type: [string, 'null']
+        reviewer_actor_type:
+          type: [string, 'null']
+          enum: [partner, null]
+        created_at:
+          type: string
+          format: date-time
+        realised:
+          description: Null unless accepted
+          oneOf:
+            - $ref: '#/components/schemas/LearnerRealised'
+            - type: 'null'
+      required:
+        - id
+        - snapshot_id
+        - learner_version
+        - use_case
+        - sensitivity_level
+        - current_model
+        - recommended_model
+        - candidates
+        - projection
+        - status
+        - reviewed_by
+        - reviewed_at
+        - review_comment
+        - reviewer_actor_type
+        - created_at
+        - realised
+
+    LearnerReviewRequest:
+      type: object
+      required: [decision, reviewed_by]
+      properties:
+        decision:
+          type: string
+          enum: [accepted, rejected]
+        reviewed_by:
+          type: string
+          minLength: 1
+          maxLength: 320
+          description: >-
+            The person deciding, e.g. an email. Asserted by the caller; the
+            partner credential is recorded alongside it.
+          example: "finops@example.com"
+        comment:
+          type: [string, 'null']
+          maxLength: 4000
+          description: Why it was accepted or rejected
+
+    LearnerSnapshotUploadResult:
+      type: object
+      required: [learner_version, snapshot_id, created, recommendations, superseded]
+      properties:
+        learner_version:
+          type: string
+        snapshot_id:
+          type: string
+          format: uuid
+        created:
+          type: boolean
+          description: False when this snapshot was already stored (the request is idempotent)
+        recommendations:
+          type: integer
+          description: Recommendations stored (0 on a resend)
+        superseded:
+          type: integer
+          description: Pending recommendations for the same groups that this snapshot replaced
+
     TokenResponse:
       type: object
       properties:
@@ -1392,7 +1685,12 @@ components:
         tenant's hash-chained admin audit trail, delivered as one event per
         row with the type `audit.<action>` (see the Audit trail guide); it
         needs the `audit:read` scope and is not part of the default list.
-      enum: [asset.created, asset.changed, asset.retired, asset.attested, audit.*]
+        `spend.anomaly` delivers spend anomaly alerts (see `SpendAlert`);
+        the event id is the alert id and `data.alert` the alert. It needs
+        `spend-alerts:read` and is not part of the default list either.
+        New values are added over time: clients should treat this as an
+        open string and ignore types they do not handle.
+      enum: [asset.created, asset.changed, asset.retired, asset.attested, audit.*, spend.anomaly]
 
     CreateWebhookSubscriptionRequest:
       type: object
@@ -1404,7 +1702,8 @@ components:
           description: >-
             Partner credential (of this tenant) that receives the events. It
             needs `changes:read`, plus `assets:read` for `asset.attested`,
-            and `audit:read` for `audit.*`.
+            `audit:read` for `audit.*` and `spend-alerts:read` for
+            `spend.anomaly`.
         url:
           type: string
           maxLength: 2048
@@ -1414,7 +1713,7 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/WebhookEventType'
-          description: Defaults to every asset event type (not `audit.*`)
+          description: Defaults to every asset event type (not `audit.*` or `spend.anomaly`)
         description:
           type: string
           maxLength: 200
@@ -2007,7 +2306,8 @@ components:
           type: object
           description: >-
             Free-form settings. `retention_days` must be an integer between 1
-            and 36500; `api_key` is refused.
+            and 36500; `spend_anomaly` must be a `SpendAnomalySettings`
+            object; `api_key` is refused.
         issue_api_key:
           type: boolean
           default: true
@@ -2033,13 +2333,119 @@ components:
           maxLength: 253
         settings:
           type: object
-          description: Merged into the stored settings; a key set to null is removed.
+          description: >-
+            Merged into the stored settings; a key set to null is removed.
+            Validated as on create (`retention_days`, `spend_anomaly`).
         disabled:
           type: boolean
           description: >-
             true disables the tenant: its ingest keys, admin tokens and
             Partner API credentials are refused (403) and its data is kept.
             false enables it again.
+
+    SpendAnomalySettings:
+      type: object
+      additionalProperties: false
+      description: >-
+        Per-tenant spend anomaly thresholds, stored as
+        `settings.spend_anomaly`. Every field is optional and falls back to
+        its default. The detector compares a UTC day's spend per use case
+        (or asset) with the EWMA mean and standard deviation of the
+        `baseline_days` days before it.
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        group_by:
+          type: string
+          enum: [use_case, asset]
+          default: use_case
+        alpha:
+          type: number
+          minimum: 0.01
+          maximum: 1
+          default: 0.3
+          description: EWMA smoothing factor (weight of the newest day)
+        sigma:
+          type: number
+          minimum: 0.5
+          maximum: 20
+          default: 3
+          description: Alert at this many standard deviations above the baseline; 2x is `critical`
+        baseline_days:
+          type: integer
+          minimum: 3
+          maximum: 90
+          default: 28
+        min_history_days:
+          type: integer
+          minimum: 2
+          maximum: 90
+          default: 7
+          description: Days of spend a group needs before it is judged; at most `baseline_days`
+        min_delta_usd:
+          type: number
+          minimum: 0
+          default: 1
+          description: The day must also be at least this many USD above the baseline
+        min_sigma_fraction:
+          type: number
+          minimum: 0
+          maximum: 10
+          default: 0.1
+          description: The standard deviation used is at least this fraction of the baseline
+
+    SpendAlert:
+      type: object
+      description: >-
+        One UTC day whose spend for a use case or asset was far above its
+        EWMA baseline. Numbers only.
+      properties:
+        id:
+          type: string
+          format: uuid
+        group_by:
+          type: string
+          enum: [use_case, asset]
+        group_key:
+          type: string
+          description: The use case name (`(none)` for assets without one), or the asset id
+        day:
+          type: string
+          format: date
+        observed_cost:
+          type: number
+          description: The day's spend in USD
+        baseline_cost:
+          type: number
+          description: EWMA of the days before, in USD
+        baseline_sigma:
+          type: number
+          description: The standard deviation used, in USD (after its floors)
+        z_score:
+          type: number
+        threshold_sigma:
+          type: number
+        history_days:
+          type: integer
+        severity:
+          type: string
+          enum: [warning, critical]
+        status:
+          type: string
+          enum: [open, acknowledged]
+        acknowledged_at:
+          type: [string, 'null']
+          format: date-time
+        acknowledged_by:
+          type: [string, 'null']
+          description: "`partner:<credential id>`, never a person"
+        created_at:
+          type: string
+          format: date-time
+      required: [id, group_by, group_key, day, observed_cost, baseline_cost, baseline_sigma,
+                 z_score, threshold_sigma, history_days, severity, status, acknowledged_at,
+                 acknowledged_by, created_at]
 
     ConnectorSyncRequest:
       type: object
@@ -2338,6 +2744,28 @@ components:
         enum: [public, internal, confidential, restricted]
       description: Filter by data classification
 
+    AttestationFieldParam:
+      name: attestation_field
+      in: query
+      schema:
+        type: string
+        enum: [asset, owner, data_classification]
+      description: |
+        With `attestation_state`: only assets whose current (newest)
+        attestation of this field is in that state. Use it as a review queue,
+        e.g. `attestation_field=owner&attestation_state=unreviewed`. Giving
+        only one of the two is a 400.
+
+    AttestationStateParam:
+      name: attestation_state
+      in: query
+      schema:
+        type: string
+        enum: [unreviewed, attested, disputed, retired]
+      description: |
+        With `attestation_field`. `unreviewed` includes fields nobody has
+        attested. Independent of `confidence`.
+
 paths:
   /ingest/feedback:
     post:
@@ -2394,6 +2822,68 @@ paths:
               description: Seconds until the limit resets
               schema:
                 type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /ingest/learner-snapshots:
+    post:
+      operationId: ingestLearnerSnapshot
+      tags: [Ingest]
+      summary: Store a routing learner snapshot
+      description: |
+        Stores one snapshot of the tenant's offline routing learner
+        (`ps-learn --upload`, `ps-learner-snapshot.v1`) and its
+        recommendations, each pending a human review. Only `recommend` mode
+        is accepted. `learner_version` must equal `lv1-` plus the first 16 hex
+        characters of the SHA-256 of the snapshot's canonical JSON without
+        `learner_version` (sorted keys, no spaces). Each recommended model
+        must be one of its group's candidates. A resend of a stored version
+        is a no-op. A new snapshot supersedes pending recommendations for
+        the same (use case, sensitivity). Body limit 2 MiB.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [schema, mode, learner_version, algorithm, data, groups, recommendations]
+              properties:
+                schema:
+                  type: string
+                  enum: [ps-learner-snapshot.v1]
+                mode:
+                  type: string
+                  enum: [recommend]
+                learner_version:
+                  type: string
+                  pattern: '^lv1-[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: Stored (or already stored)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearnerSnapshotUploadResult'
+        '400':
+          description: The body is not JSON, or nests too deep
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: The body exceeds 2 MiB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid snapshot (schema, mode, version hash, a recommendation outside its candidates, ...)
           content:
             application/json:
               schema:
@@ -2460,10 +2950,20 @@ paths:
         - $ref: '#/components/parameters/VendorParam'
         - $ref: '#/components/parameters/ConfidenceParam'
         - $ref: '#/components/parameters/DataClassificationParam'
+        - $ref: '#/components/parameters/AttestationFieldParam'
+        - $ref: '#/components/parameters/AttestationStateParam'
       security:
         - OAuth2: [assets:read]
         - PartnerApiKey: []
       responses:
+        '400':
+          description: >-
+            Only one of `attestation_field` and `attestation_state` was given,
+            or the field is not attestable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
@@ -2958,6 +3458,135 @@ paths:
               schema:
                 $ref: '#/components/schemas/SavingsReport'
 
+  /partner/v1/spend-alerts:
+    get:
+      operationId: listSpendAlerts
+      tags: [Assets]
+      summary: List spend anomaly alerts
+      description: |
+        Spend anomaly alerts for the tenant, newest day first. Alerts are
+        written by the daily job (`python -m collector.spend_anomalies`),
+        which also sends each new one as a `spend.anomaly` webhook event.
+        Requires `spend-alerts:read`.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, acknowledged]
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [warning, critical]
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date
+          description: First day to include (UTC)
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Last day to include (UTC)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+      security:
+        - OAuth2: [spend-alerts:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: Alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SpendAlert'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                    required: [total]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/spend-alerts/{alert_id}:
+    get:
+      operationId: getSpendAlert
+      tags: [Assets]
+      summary: Get a spend anomaly alert
+      description: Requires `spend-alerts:read`.
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      security:
+        - OAuth2: [spend-alerts:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The alert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SpendAlert'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Alert not found
+
+  /partner/v1/spend-alerts/{alert_id}/acknowledge:
+    post:
+      operationId: acknowledgeSpendAlert
+      tags: [Assets]
+      summary: Acknowledge a spend anomaly alert
+      description: |
+        Marks the alert `acknowledged`, recording the time and the
+        credential. Acknowledging it again changes nothing and returns it
+        as it is. Requires `spend-alerts:acknowledge`.
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      security:
+        - OAuth2: [spend-alerts:acknowledge]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The acknowledged alert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SpendAlert'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Alert not found
+
   /partner/v1/usage/sovereign-share:
     get:
       operationId: getUsageSovereignShare
@@ -2992,6 +3621,213 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SovereignShareReport'
+
+  /partner/v1/learner/snapshots:
+    get:
+      operationId: listLearnerSnapshots
+      tags: [Learner]
+      summary: List routing learner snapshots
+      description: Newest first, without their state. Requires `learner:read`.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      security:
+        - OAuth2: [learner:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LearnerSnapshotSummary'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                    required: [total]
+                required: [data, meta]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/learner/snapshots/{learner_version}:
+    parameters:
+      - name: learner_version
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^lv1-[0-9a-f]{16}$'
+    get:
+      operationId: getLearnerSnapshot
+      tags: [Learner]
+      summary: Get one learner snapshot, with its full state
+      description: Requires `learner:read`.
+      security:
+        - OAuth2: [learner:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/LearnerSnapshot'
+                required: [data]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No snapshot with this version for the tenant
+
+  /partner/v1/learner/recommendations:
+    get:
+      operationId: listLearnerRecommendations
+      tags: [Learner]
+      summary: List learner recommendations
+      description: |
+        Newest first, each with its off-policy projection and, once
+        accepted, realised vs. projected savings. Requires `learner:read`.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, rejected, superseded]
+        - name: use_case
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+        - name: learner_version
+          in: query
+          schema:
+            type: string
+            maxLength: 32
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      security:
+        - OAuth2: [learner:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: Recommendations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LearnerRecommendation'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                    required: [total]
+                required: [data, meta]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/learner/recommendations/{rec_id}:
+    parameters:
+      - name: rec_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getLearnerRecommendation
+      tags: [Learner]
+      summary: Get one learner recommendation
+      description: Requires `learner:read`.
+      security:
+        - OAuth2: [learner:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The recommendation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/LearnerRecommendation'
+                required: [data]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Recommendation not found
+
+  /partner/v1/learner/recommendations/{rec_id}/review:
+    parameters:
+      - name: rec_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: reviewLearnerRecommendation
+      tags: [Learner]
+      summary: Accept or reject a learner recommendation
+      description: |
+        Records a human decision on a pending recommendation: `accepted` or
+        `rejected`, the person deciding and an optional comment. Decided
+        once (a second review is 409). The decision is written to the admin
+        audit trail (`learner.recommendation_review`, ids and decision
+        only). Accepting changes no routing: apply it by editing the route
+        policy. Requires the `learner:review` scope.
+      security:
+        - OAuth2: [learner:review]
+        - PartnerApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LearnerReviewRequest'
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/LearnerRecommendation'
+                required: [data]
+        '403':
+          description: Token lacks `learner:review`
+        '404':
+          description: Recommendation not found
+        '409':
+          description: The recommendation is not pending
+        '422':
+          description: Invalid body (e.g. a blank `reviewed_by`)
 
   /partner/v1/usage/focus-export:
     get:
@@ -3315,7 +4151,13 @@ paths:
             each asset is an `application` component whose Prompt Shields data
             (vendor, model, modality, discovery sources, confidence, owner, risk
             classifications, ...) is carried as `promptshields:<name>` properties,
-            for example `promptshields:modality` = `audio`.
+            for example `promptshields:modality` = `audio`. Human attestation is
+            carried next to `promptshields:confidence`, never folded into it:
+            `promptshields:attestation:<field>` is the state of each attestable
+            field (`unreviewed` when nobody has attested it) and, for an
+            attested field, `…:attested_by`, `…:attested_at` and
+            `…:value_changed` (`true` when the value moved since the sign-off).
+            Attestation comments are not exported.
       security:
         - OAuth2: [export:read]
         - PartnerApiKey: []

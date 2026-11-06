@@ -35,6 +35,14 @@ data:
   PS_OIDC_POLICY: {{ toJson . | quote }}
   {{- end }}
   {{- end }}
+  {{- $budgets := .Values.gateway.budgets }}
+  {{- if $budgets.enabled }}
+  PS_BUDGETS: {{ toJson (dict "schema_version" "budget.v1" "namespace" $budgets.namespace "on_store_error" $budgets.onStoreError "budgets" $budgets.budgets) | quote }}
+  PS_BUDGET_RESERVATION_TTL_MS: {{ toString (int64 $budgets.reservationTtlMs) | quote }}
+  {{- with $budgets.redis.url }}
+  PS_BUDGET_REDIS_URL: {{ . | quote }}
+  {{- end }}
+  {{- end }}
 {{- end }}
 ---
 apiVersion: v1

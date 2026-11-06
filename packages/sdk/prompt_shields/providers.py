@@ -449,7 +449,7 @@ class CohereAdapter(ProviderAdapter):
 
 # Cross-region inference profiles prefix the model id, e.g.
 # "us.anthropic.claude-3-5-haiku-20241022-v1:0"; prices are the base model's.
-_BEDROCK_PROFILE_PREFIX = re.compile(r"^(?:us|eu|apac|us-gov|global|jp|au|ca)\.")
+_BEDROCK_PROFILE_PREFIX = re.compile(r"^(?:us|eu|apac|us-gov|global|jp|au|ca|in)\.")
 
 
 class BedrockAdapter(ProviderAdapter):

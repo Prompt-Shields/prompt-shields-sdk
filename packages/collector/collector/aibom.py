@@ -14,6 +14,14 @@ Prompt Shields data with no CycloneDX field (discovery source, confidence,
 owner, risk classification, ...) goes into ``properties`` under the
 ``promptshields:`` namespace.
 
+When the caller passes the latest attestations (collector.attestation),
+each asset also carries ``attestation:<field>`` (the human sign-off state
+of every attestable field, ``unreviewed`` when nobody has attested it) and,
+for a field someone has attested, ``attestation:<field>:attested_by``,
+``…:attested_at`` and ``…:value_changed`` (``true`` when the registry value
+has moved since the sign-off). ``confidence`` stays a separate property:
+it counts discovery sources and says nothing about human review.
+
 The JSON is built by hand so the collector needs no CycloneDX library at
 runtime. ``tests/test_aibom.py`` validates the output against the official
 CycloneDX 1.6 JSON schema.
@@ -22,14 +30,16 @@ CycloneDX 1.6 JSON schema.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from db.models import AIAsset, DataFlow, RiskMapping
+from db.models import AIAsset, AssetAttestation, DataFlow, RiskMapping
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from collector import attestation
 
 SPEC_VERSION = "1.6"
 MEDIA_TYPE = "application/vnd.cyclonedx+json; version=1.6"
@@ -122,6 +132,24 @@ def _risk_props(risks: Iterable[RiskMapping]) -> list[dict[str, str]]:
     return props
 
 
+def _attestation_props(
+    asset: AIAsset, latest: Mapping[str, AssetAttestation]
+) -> list[dict[str, str]]:
+    """Human sign-off per attestable field, next to (never folded into)
+    ``confidence``. The comment and the attested value are left out."""
+    props = []
+    for field, entry in attestation.summarize(asset, latest).items():
+        name = f"attestation:{field}"
+        props.append(_prop(name, entry["state"]))
+        if entry["attested_at"] is None:
+            continue
+        if entry["attested_by"]:
+            props.append(_prop(f"{name}:attested_by", entry["attested_by"]))
+        props.append(_prop(f"{name}:attested_at", entry["attested_at"]))
+        props.append(_prop(f"{name}:value_changed", str(entry["value_changed"]).lower()))
+    return props
+
+
 def _iso(dt: datetime | None) -> str | None:
     if dt is None:
         return None
@@ -156,6 +184,7 @@ def build_bom(
     flows: Iterable[DataFlow] = (),
     risks: Iterable[RiskMapping] = (),
     *,
+    attestations: Mapping[UUID, Mapping[str, AssetAttestation]] | None = None,
     now: datetime | None = None,
     serial: UUID | None = None,
 ) -> dict[str, Any]:
@@ -163,6 +192,8 @@ def build_bom(
 
     Rows whose ``tenant_id`` differs from ``tenant_id`` are dropped, so a
     caller bug upstream cannot leak another tenant's assets into the BOM.
+    ``attestations`` is ``attestation.latest_attestations`` for these
+    assets; when given, every asset gets ``attestation:*`` properties.
     """
     assets = [a for a in assets if a.tenant_id == tenant_id]
     asset_ids = {a.id for a in assets}
@@ -221,6 +252,13 @@ def build_bom(
         ]
         props.extend(_prop(k, v) for k, v in optional if v)
         props.extend(_risk_props(risks_by_asset.get(a.id, [])))
+        if attestations is not None:
+            latest = {
+                f: row
+                for f, row in attestations.get(a.id, {}).items()
+                if row.tenant_id == tenant_id
+            }
+            props.extend(_attestation_props(a, latest))
 
         components.append(
             {

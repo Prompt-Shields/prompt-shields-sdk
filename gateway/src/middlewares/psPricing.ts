@@ -393,6 +393,30 @@ export const COST_SOURCE_CACHE = 'cache';
 /** `cost_source` of a cost the provider billed (SDK pricing.py). */
 export const COST_SOURCE_PROVIDER_REPORTED = 'provider_reported';
 
+// Bedrock cross-region inference profile prefixes (`us.anthropic.claude-…`),
+// as the SDK's BedrockAdapter strips them: a profile is priced as its base
+// model. Kept in step with getBedrockModelWithoutRegion (providers/bedrock).
+const BEDROCK_PROFILE_PREFIX =
+  /^(?:us|us-gov|eu|apac|au|ca|jp|in|global)\.(?=[a-z0-9-]+\.)/;
+
+/**
+ * For `bedrock`, `candidates` followed by each candidate without its
+ * cross-region profile prefix (#74), so `us.`/`eu.`/`in.`… calls are priced
+ * at the base model's rates. Other vendors are returned unchanged.
+ */
+export function withBedrockBaseModels(
+  vendor: string,
+  candidates: string[]
+): string[] {
+  if (vendor !== 'bedrock') return candidates;
+  const out = [...candidates];
+  for (const c of candidates) {
+    const base = c.replace(BEDROCK_PROFILE_PREFIX, '');
+    if (base !== c && !out.includes(base)) out.push(base);
+  }
+  return out;
+}
+
 /**
  * `cost` and `cost_source` for a telemetry event, as the SDK's `_build_event`
  * and `add_usage_detail_fields` set them: priced at the served model when it
@@ -407,7 +431,7 @@ export function costFields(
 ): { cost?: number; cost_source?: string } {
   const pricingModel = resolvePricingModel(
     vendor,
-    pricingCandidates(model, servedModel)
+    withBedrockBaseModels(vendor, pricingCandidates(model, servedModel))
   );
   const cost = usageCost(vendor, pricingModel, u);
   if (cost === null) return {};

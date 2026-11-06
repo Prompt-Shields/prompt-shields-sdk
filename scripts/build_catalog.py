@@ -131,7 +131,7 @@ SERVICE_TIER_CHAINS = {
     "priority": PRICE_CHAINS[4],
 }
 COUNTRY = re.compile(r"^[A-Z]{2}$")
-JURISDICTIONS = ("EEA", "US", "NO", "CH", "UK", "CA")
+JURISDICTIONS = ("EEA", "US", "NO", "CH", "UK", "CA", "AU", "SG", "CN")
 VERSION = re.compile(r"^\d{4}-\d{2}-\d{2}(\.\d+)?$")
 
 SDK_HEADER = (
