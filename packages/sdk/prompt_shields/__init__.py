@@ -42,6 +42,8 @@ Public surface:
 
     Utilities:
         detect_pii_categories — pattern-based PII detection
+        detect_pii_categories_extended — opt-in: also names, addresses and
+                                multilingual health/financial vocabulary
         estimate_cost         — token-to-USD cost estimator
         estimate_unit_cost    — per-unit (page, character, second, image) cost
 """
@@ -83,6 +85,7 @@ from prompt_shields.instrumentation import (
     uninstrument,
 )
 from prompt_shields.pii import detect_pii_categories, scan_messages
+from prompt_shields.pii_extended import detect_pii_categories_extended
 from prompt_shields.pricing import estimate_cost, estimate_unit_cost
 from prompt_shields.pseudonymise import Pseudonymisation, pseudonymise
 from prompt_shields.route_policy import PolicyViolation
@@ -139,6 +142,7 @@ __all__ = [
     "ShieldsRouter",
     "Vendor",
     "detect_pii_categories",
+    "detect_pii_categories_extended",
     "estimate_cost",
     "estimate_unit_cost",
     "freeze_baseline",

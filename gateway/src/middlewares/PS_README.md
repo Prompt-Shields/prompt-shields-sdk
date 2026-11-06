@@ -91,11 +91,6 @@ User-facing guide, with a worked policy and the current limits:
 `docs/guides/routing.mdx`. In short, what the gateway router does **not** do
 yet:
 
-- **Load a route policy from configuration.** `src/index.ts` mounts
-  `psRouter()` with `defaultPolicy`, which has no `sensitivity`, `dataPolicy`
-  or `useCases` section, so the policy stages and the data-policy gate below
-  are off in a stock gateway. They run only with
-  `psRouter(fromRoutePolicyDoc(doc))` in code.
 - **Fail over across providers' credentials.** Router failover (below)
   changes the model only; every attempt uses the request's own provider and
   credentials (`x-portkey-provider` + `Authorization`, or a single-target
@@ -232,6 +227,23 @@ edit the JSON by hand; CI fails on drift (`docs/guides/model-catalog.mdx`).
 mounted in `src/index.ts` via `app.use('*', psRouter())`, gated on
 `PS_ROUTER_ENABLED=true`. It runs **before** `hooks` and `memoryCache` so the
 resolved model flows into cache-key computation and the downstream handler.
+
+**Route policy file (#336):** `PS_ROUTE_POLICY_FILE` names a
+`route-policy.v1` JSON document (`schemas/route-policy/`). When it is set,
+`src/index.ts` mounts `psRouter(loadedRoutePolicy)` whether or not
+`PS_ROUTER_ENABLED` is set, so the policy stages and the data-policy gate
+run in a stock gateway. `src/start-server.ts` loads the file before serving
+(`router/policyFileLoader.ts`): it is checked against the schema (a copy in
+`router/route-policy.v1.schema.json`, kept equal to the shared one by a
+test) and against the cross-field rules in the schema's description
+(`router/policyDoc.ts`), and an unreadable or invalid file stops the gateway
+with exit code 1. After that the file is re-read on `SIGHUP` and, with
+`PS_ROUTE_POLICY_RELOAD_SECONDS=N`, every N seconds; a reload that fails is
+logged (`route policy reload failed, keeping the last good policy`) and the
+previous policy stays active. `psBudget` downgrades within the router's
+active policy. Without the variable nothing changes (`defaultPolicy`, no data
+rules). Node only: edge builds do not read files. The Helm chart sets it from
+`gateway.routePolicy`.
 
 Hono 4.x re-parses the body on each `c.req.json()`, so in-place mutation does
 not propagate; the adapter overwrites `c.req.bodyCache.json` with the rewritten
