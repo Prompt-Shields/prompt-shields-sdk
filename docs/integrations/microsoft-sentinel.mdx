@@ -1,0 +1,187 @@
+---
+title: Microsoft Sentinel and Defender XDR
+description: Export per-call routing evidence and the audit trail to a Log Analytics custom table (Logs Ingestion API), or pull it as NDJSON
+---
+
+# Microsoft Sentinel and Defender XDR
+
+The collector can send two kinds of record to a Log Analytics workspace, where Microsoft Sentinel and Microsoft Defender XDR advanced hunting can query them:
+
+- **`AICall`**: the routing evidence of every model call. This covers the served provider, model and jurisdiction, the route policy version, the sensitivity level and how it was set, the route mode, group and reason, the fallback chain, cost and tokens.
+- **`Audit`**: every row of the tenant's [hash-chained audit trail](/guides/audit-trail), with `seq`, `prev_hash` and `row_hash`.
+
+Both kinds go into one custom table, `PromptShieldsAudit_CL`. Records hold metadata only. They never contain prompts, responses, prompt hashes, session ids, key fingerprints or secrets.
+
+<Info>
+  This is a first slice and has not yet been tested against a live Azure
+  workspace. The tests use mocked Entra ID and Logs Ingestion endpoints.
+  Try it in a non-production workspace first.
+</Info>
+
+## Why this path
+
+| Microsoft service | Can a third party write to it? | Used here |
+|---|---|---|
+| Microsoft Purview Audit (unified audit log) | No. The [Office 365 Management Activity API](https://learn.microsoft.com/en-us/office/office-365-management-api/office-365-management-activity-api-reference) only reads. | No |
+| Purview APIs for AI apps (Graph [`processContent` / `contentActivity`](https://learn.microsoft.com/en-us/graph/api/resources/contentactivity?view=graph-rest-beta)) | Yes. They take prompt and response text for each signed-in Entra user, and are partly beta. | No: Prompt Shields does not hold content or user identities |
+| Azure Monitor HTTP Data Collector API | It was [retired on 14 September 2026](https://azure.microsoft.com/en-us/updates/azure-monitor-data-collection-api-retirement/). | No |
+| **Azure Monitor [Logs Ingestion API](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview)**, with a data collection rule (DCR) and a `_CL` custom table | **Yes.** It is the supported replacement and uses OAuth with Microsoft Entra ID. | **Yes** |
+
+Data in a Sentinel-enabled workspace can be queried in the Sentinel and Defender portals ([advanced hunting](https://learn.microsoft.com/en-us/defender-xdr/advanced-hunting-microsoft-defender)), and used in analytics rules and workbooks. Defender for Cloud Apps cloud discovery only accepts firewall and proxy traffic logs, so it does not fit audit records.
+
+## Set up Azure
+
+1. **Create the table.** Use the JSON in [`docs/integrations/sentinel/table.json`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/integrations/sentinel/table.json):
+
+   ```bash
+   az rest --method put \
+     --url "https://management.azure.com${WORKSPACE_ID}/tables/PromptShieldsAudit_CL?api-version=2022-10-01" \
+     --body @docs/integrations/sentinel/table.json
+   ```
+
+2. **Create the DCR.** Fill in `<workspace resource id>` and `<workspace region>` in [`docs/integrations/sentinel/dcr.json`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/integrations/sentinel/dcr.json). The DCR has `kind: Direct`, so it gets its own logs ingestion endpoint and no separate data collection endpoint is needed. It declares the stream `Custom-PromptShieldsAudit` and passes it through to the table unchanged (`transformKql: source`).
+
+   ```bash
+   az rest --method put \
+     --url "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Insights/dataCollectionRules/prompt-shields?api-version=2023-03-11" \
+     --body @dcr.json
+   ```
+
+   Note the DCR's `immutableId` (`dcr-…`) and `endpoints.logsIngestion` (`https://<name>-<id>.<region>-1.ingest.monitor.azure.com`). If you already use a data collection endpoint (DCE), you can give its logs ingestion URL instead.
+
+3. **Create an Entra app registration** with a client secret. Assign it the **Monitoring Metrics Publisher** role on the DCR. Role assignments can take a few minutes to take effect.
+
+To print both JSON files from the collector image, run `python -m collector.sentinel_export --print-schema table` (or `dcr`).
+
+## Configure the collector
+
+The export is opt-in and set per tenant, in the operator environment only:
+
+```bash
+PS_SENTINEL_EXPORT='{"<tenant uuid>": {
+  "entra_tenant_id": "<directory (tenant) id>",
+  "client_id": "<application (client) id>",
+  "client_secret": "<client secret>",
+  "ingestion_endpoint": "https://prompt-shields-abcd.westeurope-1.ingest.monitor.azure.com",
+  "dcr_immutable_id": "dcr-00000000000000000000000000000000"
+}}'
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `stream_name` | `Custom-PromptShieldsAudit` | DCR input stream |
+| `cloud` | `public` | `public`, `usgov` or `china`. Sets the Entra host, the token scope (`https://monitor.azure.com//.default`, `.us` or `.cn`) and the allowed ingestion host suffix (`.ingest.monitor.azure.com`, `.us` or `.cn`). |
+| `include` | `["calls", "audit"]` | Which record kinds to send |
+| `batch_records` | `500` | Rows read per batch. Each request is also kept under the API's 1 MB limit. |
+| `max_records_per_run` | `50000` | Per kind. The next run continues from where this one stopped. |
+| `settle_seconds` | `300` | Only calls older than this are sent (see [Late events](#late-events)) |
+
+### Security
+
+- `client_secret` is never logged, stored or returned. A malformed `PS_SENTINEL_EXPORT` does not echo its contents in the error.
+- Token requests go only to the cloud's Entra host. Uploads go only to the configured ingestion host, which must be under the cloud's `ingest.monitor.azure.*` suffix.
+- Both requests go through the connector SSRF guard. The guard allows HTTPS only and public addresses only. It pins DNS (TLS is still checked against the host name), never follows redirects, and retries 429 and 5xx responses with a bound, honouring `Retry-After`. Error messages carry the status code only, never a response body.
+
+## Run it
+
+```bash
+# One tenant (operator token)
+curl -X POST https://collector.example.com/api/v1/admin/connectors/sentinel/sync \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"tenant_id": "<tenant uuid>"}'
+
+# State: cursors, last run and counts (no secrets)
+curl "https://collector.example.com/api/v1/admin/connectors/sentinel/status?tenant_id=<tenant uuid>" \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN"
+
+# From cron or a Kubernetes CronJob: every configured tenant
+python -m collector.sentinel_export --all-tenants
+```
+
+Each run sends calls and then audit rows, oldest first. Cursors are kept in the tenant settings: `(timestamp, id)` for calls and the chain `seq` for audit rows. A cursor moves only past batches the API accepted with `204`. If a batch fails, the run stops, saves its progress and is retried from the first batch that was not accepted. `EventUid` stays the same when a batch is sent again, so a resent row can be deduplicated in KQL (`summarize arg_max(TimeGenerated, *) by EventUid`).
+
+### Late events
+
+Calls have no insertion time, only the time of the call. A run sends only calls older than `settle_seconds`, so events that the SDK or gateway batch and deliver a little late are still sent. A call that arrives later than that, with an older timestamp, is not pushed. Fetch that window again with the pull endpoint, using `since`.
+
+This affects:
+
+- SDK or gateway events delivered more than `settle_seconds` after the call, for example after an outage or from an offline buffer. Raise `settle_seconds` if your senders can lag longer.
+- Usage rows from the provider usage pull. They are stamped with the start of their usage bucket and stored hours later, so the push never sends them. They are org-level totals, not routed calls, and carry no routing evidence.
+
+To fill such gaps, page through `/partner/v1/siem/calls` with `since` set to the start of the window. `EventUid` is stable, so rows that were already sent can be deduplicated.
+
+## Pull as NDJSON (fallback)
+
+If the collector cannot reach Azure, or you forward with your own pipeline (Azure Monitor Agent, Logstash, Cribl or a script that calls the Logs Ingestion API), a partner credential can pull the same records:
+
+| Route | Scope |
+|---|---|
+| `GET /partner/v1/siem/calls` | `evidence:read` |
+| `GET /partner/v1/siem/audit` | `audit:read` |
+
+Neither scope is granted by default, and `registry:read` does not include them. Both routes take these parameters:
+
+- `cursor`
+- `since`, an ISO 8601 time. It is used only when there is no cursor.
+- `limit`, from 1 to 5000. The default is 1000.
+- `/calls` also takes `settle_seconds`. The default is 300.
+
+The response is `application/x-ndjson`, with one record per line. `X-PS-Cursor` is the position after the last line; pass it back as `cursor` on the next call. `X-PS-Has-More: true` means you should call again now. Every pull is written to the partner audit log.
+
+```bash
+curl -s "https://collector.example.com/partner/v1/siem/calls?since=2026-11-01T00:00:00Z" \
+  -H "Authorization: Bearer $PARTNER_KEY" -D headers.txt > calls.ndjson
+```
+
+## Table schema
+
+| Column | Type | AICall | Audit |
+|---|---|---|---|
+| `TimeGenerated` | datetime | call time | row time |
+| `EventUid` | string | usage event id | audit row id |
+| `EventType` | string | `AICall` | `Audit` |
+| `EventProduct`, `EventVendor` | string | `Prompt Shields` | `Prompt Shields` |
+| `EventSchemaVersion` | string | `1.0` | `1.0` |
+| `EventResult` | string | `NA` | `Success` / `Failure` |
+| `EventSeverity` | string | `Informational` | `Informational`, `Low` (failure), `Medium` (`auth.failure`) |
+| `Operation` | string | `ai.call` | audit action |
+| `ActorUserType`, `ActorUserId` | string | | actor type, credential prefix or id |
+| `Object`, `ObjectType` | string | | target id and type |
+| `HttpStatusCode` | int | | status of the audited request |
+| `PsTenantId` | string | tenant | tenant |
+| `PsRequestId` | string | | `X-Request-ID` |
+| `PsCallId`, `PsAssetId`, `PsVendor`, `PsBusinessUnit`, `PsEnvironment`, `PsSource`, `PsApiSurface` | string | call and asset | |
+| `PsRequestedModel`, `PsServedModel`, `PsServedProvider` | string | routing | |
+| `PsServedJurisdiction` | string | e.g. `EEA`, `US`, `DE` | |
+| `PsSovereign` | boolean | served in the EEA. Empty when the jurisdiction is unknown. | |
+| `PsPolicyVersion` | string | route policy version | |
+| `PsSensitivityLevel`, `PsSensitivitySource` | string | level; `declared` / `pii_escalated` / `default` | |
+| `PsRouteMode`, `PsRouteGroup`, `PsRouteReason`, `PsBaselineId` | string | routing | |
+| `PsFallbackChain` | dynamic | failed attempts, in order | |
+| `PsTokensIn`, `PsTokensOut`, `PsLatencyMs` | long | usage | |
+| `PsCostUsd`, `PsCounterfactualCostUsd`, `PsRouteEstCostUsd` | real | cost | |
+| `PsAuditSeq` | long | | chain position |
+| `PsAuditPrevHash`, `PsAuditRowHash` | string | | chain hashes |
+| `PsAuditHashVersion` | int | | hash version |
+| `PsAuditDetails` | dynamic | | ids, counts, names |
+
+Field names follow the [ASIM common fields](https://learn.microsoft.com/en-us/azure/sentinel/normalization-common-fields) where one fits. Fields specific to Prompt Shields start with `Ps`. Within schema version `1.0`, columns may be added but are never renamed or removed.
+
+### Example queries
+
+```kusto
+// Calls routed outside the EEA at a confidential sensitivity level
+PromptShieldsAudit_CL
+| where EventType == "AICall" and PsSensitivityLevel == "confidential" and PsSovereign == false
+| summarize calls = count() by PsServedProvider, PsServedJurisdiction, PsPolicyVersion
+
+// Admin changes and failed admin authentications
+PromptShieldsAudit_CL
+| where EventType == "Audit"
+| project TimeGenerated, Operation, EventResult, ActorUserType, ActorUserId, ObjectType, Object, PsAuditSeq
+```
+
+## Gateway security events
+
+Gateway [security events](/guides/security-events) (guardrail verdicts, PII and injection detections, policy denials) are written as JSON lines or OTLP logs by the gateway, not by the collector, so this export does not include them. To send them to Sentinel, use the Azure Monitor Agent's custom JSON log collection, or an OpenTelemetry Collector with an Azure exporter, into a table of your own.

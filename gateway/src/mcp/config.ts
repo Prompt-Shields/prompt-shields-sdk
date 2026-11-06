@@ -13,6 +13,7 @@
  *       "tools": { "allow": ["search_issues", "get_issue"] },
  *       "pinned_tools": { "search_issues": "<sha256 hex>" },
  *       "on_description_change": "block",
+ *       "owner": "platform-team@example.com",
  *       "input_guardrails": [{ "default.regexMatch": { "rule": "...", "not": true } }],
  *       "output_guardrails": [...]
  *     }
@@ -52,9 +53,17 @@ export interface McpServerConfig {
   /** Largest JSON response, or SSE event, the gateway inspects. */
   maxResponseBytes: number;
   maxDescriptionLength: number;
+  /**
+   * Who owns the server (#77): an email address, sent with each tool-call
+   * event so the collector's asset registry shows the server with an owner.
+   */
+  owner?: string;
 }
 
 export const SERVER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+// A plain email address: what the collector stores as the asset owner.
+const OWNER_RE =
+  /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,187}\.[A-Za-z]{2,24}$/;
 const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/;
 // Headers the gateway itself sets on the upstream request.
 const RESERVED_HEADERS = new Set([
@@ -212,6 +221,12 @@ export function parseServer(
       pinned.set(name, (hash as string).toLowerCase());
     }
   }
+  if (
+    raw.owner !== undefined &&
+    (typeof raw.owner !== 'string' || !OWNER_RE.test(raw.owner))
+  )
+    fail(id, 'owner must be an email address');
+
   const onChange = raw.on_description_change ?? 'block';
   if (onChange !== 'block' && onChange !== 'flag')
     fail(id, 'on_description_change must be "block" or "flag"');
@@ -263,6 +278,7 @@ export function parseServer(
       raw.max_description_length,
       DEFAULTS.maxDescriptionLength
     ),
+    ...(raw.owner !== undefined ? { owner: raw.owner as string } : {}),
   };
 }
 

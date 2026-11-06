@@ -22,12 +22,14 @@ from collector import (
     leanix,
     learner,
     lifecycle,
+    mcp_usage,
     operator_admin,
     partner_admin,
     provider_credentials_api,
     provider_usage_admin,
     risk_reviews,
     risk_suggestions,
+    sentinel_export,
     servicenow,
     tenant_keys,
     webhook_admin,
@@ -270,6 +272,27 @@ def test_provider_credential_partner_routes_need_the_scope():
                 }, (method, path)
 
 
+def test_mcp_schemas_match_serializers():
+    now = datetime.now(UTC)
+    asset = {"x": ("id", "owner")}
+    usage = SimpleNamespace(
+        server_name="x", tool_name="t", source="gateway", calling_service="",
+        environment="", transport=None, call_count=1, error_count=0,
+        blocked_count=0, user_hash="", user_group="", latency_ms_total=0,
+        latency_count=0, first_seen=now, last_seen=now,
+    )
+    assert _props("McpTool") == set(mcp_usage._with_asset(mcp_usage._usage_dict(usage), asset))
+    daily = SimpleNamespace(
+        day=now.date(), source="gateway", server_name="x", tool_name="t",
+        call_count=1, error_count=0, blocked_count=0, latency_ms_total=0,
+        latency_count=0, request_bytes=0, response_bytes=0, bytes_count=0,
+    )
+    assert _props("McpUsageDay") == set(mcp_usage._with_asset(mcp_usage._daily_dict(daily), asset))
+    for path in ("/partner/v1/mcp/tools", "/partner/v1/mcp/usage"):
+        assert SPEC["paths"][path]["get"]["security"][0] == {"OAuth2": ["mcp:read"]}
+    assert "/api/v1/registry/mcp-tools" in SPEC["paths"]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Tenant admin and operator routes
 # ──────────────────────────────────────────────────────────────────────
@@ -289,6 +312,7 @@ ADMIN_ROUTERS = (
     cloud_inventory.router,
     leanix.router,
     servicenow.router,
+    sentinel_export.router,
     operator_admin.router,
 )
 
