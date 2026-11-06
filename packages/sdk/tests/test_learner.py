@@ -122,6 +122,21 @@ def test_policy_candidates_follow_data_policy_and_use_case_bar():
     assert policy_candidates(POLICY, "support", "restricted") == []
 
 
+def test_level_named_unclassified_keeps_its_data_policy_rule():
+    # A custom level literally called "unclassified" must keep its rule; it
+    # must not be read as "no sensitivity section" (no constraint).
+    policy = json.loads(json.dumps(POLICY))
+    policy["sensitivity"] = {
+        "levels": ["unclassified", "public"], "unclassified_default": "unclassified",
+    }
+    policy["data_policy"] = {
+        "unclassified": {"jurisdictions": ["DE"], "require_zdr": True},
+    }
+    assert policy_candidates(policy, None, "unclassified") == []
+    policy["data_policy"]["unclassified"] = {"jurisdictions": ["EEA"]}
+    assert policy_candidates(policy, None, "unclassified") == [SMALL, FRONTIER]
+
+
 def test_finds_the_cheaper_arm_at_parity():
     rows = _traffic(arms={FRONTIER: 0.7, SMALL: 0.3})
     snap = train(rows, POLICY)

@@ -188,7 +188,10 @@ def policy_candidates(
     a group at or above its ``min_group`` (by ``group_order``). Tiers without
     a ``provider`` are left out, so a bare model id never admits a vendor.
     """
-    rule = data_policy_rule(policy, None if sensitivity == UNCLASSIFIED else sensitivity)
+    # The group label is looked up as is: a policy can name a level
+    # "unclassified" with its own rule, and the router applies that rule. With
+    # no such rule the lookup gives None, as the router's level None does.
+    rule = data_policy_rule(policy, sensitivity)
     bar = (policy.get("use_cases") or {}).get(use_case) if use_case else None
     eligible = (
         set(bar.get("eligible_models") or ())
