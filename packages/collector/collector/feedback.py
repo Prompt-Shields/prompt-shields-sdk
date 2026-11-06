@@ -21,7 +21,8 @@ fixed set of labels (``REASONS``), the caller's user id as a hex hash
 * Rate-limited per tenant (``PS_FEEDBACK_RATE_LIMIT_PER_MINUTE``) and, when
   a ``user_id`` is sent, per user within the tenant
   (``PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE``), so one user cannot flood
-  the learner with votes.
+  the learner with votes. Both can be overridden per tenant
+  (collector/tenant_limits.py).
 """
 
 from __future__ import annotations
@@ -38,13 +39,10 @@ from sqlalchemy import literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import tenant_limits
 from collector.auth import resolve_tenant
-from collector.config import settings
 from collector.ingest import CALL_ID_RE, _enforce_rate_limit
-from collector.partner_rate_limit import (
-    FixedWindowRateLimiter,
-    get_feedback_rate_limiter,
-)
+from collector.partner_rate_limit import RateLimiter, get_feedback_rate_limiter
 from collector.sanitize import BodyTooDeep, is_storable, loads_bounded, too_deep_problem
 
 router = APIRouter()
@@ -184,22 +182,26 @@ async def call_matched(db: AsyncSession, tenant_id: UUID, call_id: str) -> bool:
     return row.first() is not None
 
 
-def _enforce_limits(
-    limiter: FixedWindowRateLimiter,
+async def _enforce_limits(
+    limiter: RateLimiter,
+    db: AsyncSession,
     tenant_id: UUID,
     user_id: str | None,
     response: Response,
 ) -> None:
-    _enforce_rate_limit(
-        limiter, ("tenant", tenant_id), response, settings.feedback_rate_limit_per_minute
+    await _enforce_rate_limit(
+        limiter,
+        ("tenant", tenant_id),
+        response,
+        await tenant_limits.limit_for(db, tenant_id, "feedback"),
     )
     if user_id is not None:
         # The user's own budget; its headers replace the tenant's.
-        _enforce_rate_limit(
+        await _enforce_rate_limit(
             limiter,
             ("user", tenant_id, user_id),
             response,
-            settings.feedback_user_rate_limit_per_minute,
+            await tenant_limits.limit_for(db, tenant_id, "feedback_user"),
         )
 
 
@@ -207,16 +209,15 @@ def _enforce_limits(
 async def ingest_feedback(
     request: Request,
     response: Response,
-    limiter: Annotated[FixedWindowRateLimiter, Depends(get_feedback_rate_limiter)],
+    limiter: Annotated[RateLimiter, Depends(get_feedback_rate_limiter)],
 ):
     """Record feedback on one call: ``{"call_id", "score", "reason",
     "user_id", "source"}``. See the module docstring."""
     tenant_id = await resolve_tenant(request)
     body = await _read_body(request)
     fields = parse_feedback(body)
-    _enforce_limits(limiter, tenant_id, fields["user_id"], response)
-
     db = request.state.db
+    await _enforce_limits(limiter, db, tenant_id, fields["user_id"], response)
     try:
         created = await store_feedback(db, tenant_id, fields)
         matched = await call_matched(db, tenant_id, fields["call_id"])

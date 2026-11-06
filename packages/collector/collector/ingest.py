@@ -7,13 +7,12 @@ from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, PrivateAttr, field_validator, model_validator
 
-from collector import loss_accounting, metrics, user_identity
+from collector import loss_accounting, metrics, tenant_limits, user_identity
 from collector.auth import resolve_tenant
-from collector.config import settings
 from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
-from collector.partner_rate_limit import FixedWindowRateLimiter, get_ingest_rate_limiter
+from collector.partner_rate_limit import RateLimiter, get_ingest_rate_limiter
 from collector.sanitize import BoundedJsonRoute, is_storable, storable_text
 from collector.webhooks import AssetChanges
 
@@ -649,17 +648,16 @@ class IngestRequest(BaseModel):
         return model
 
 
-def _enforce_rate_limit(
-    limiter: FixedWindowRateLimiter, tenant_id, response: Response, limit: int | None = None
+async def _enforce_rate_limit(
+    limiter: RateLimiter, tenant_id, response: Response, limit: int
 ) -> None:
     """Per-tenant request limit on ingest. Sets X-RateLimit-* headers and
     raises 429 with Retry-After once the tenant exceeds the window. ``limit``
-    defaults to PS_RATE_LIMIT_PER_MINUTE."""
-    if limit is None:
-        limit = settings.rate_limit_per_minute
+    is the tenant's limit (collector/tenant_limits.py); 0 or less turns it
+    off."""
     if limit <= 0:
         return
-    result = limiter.check(tenant_id, limit)
+    result = await limiter.acheck(tenant_id, limit)
     headers = {
         "X-RateLimit-Limit": str(result.limit),
         "X-RateLimit-Remaining": str(result.remaining),
@@ -684,13 +682,15 @@ async def ingest_events(
     body: IngestRequest,
     request: Request,
     response: Response,
-    limiter: Annotated[FixedWindowRateLimiter, Depends(get_ingest_rate_limiter)],
+    limiter: Annotated[RateLimiter, Depends(get_ingest_rate_limiter)],
 ):
     tenant_id = await resolve_tenant(request)
     db = request.state.db
     meta = loss_accounting.parse_metadata(body.metadata)
     try:
-        _enforce_rate_limit(limiter, tenant_id, response)
+        await _enforce_rate_limit(
+            limiter, tenant_id, response, await tenant_limits.limit_for(db, tenant_id, "events")
+        )
     except HTTPException as exc:
         if exc.status_code == 429:
             metrics.record_ingest("events", "rate_limited", len(body.events))

@@ -63,7 +63,8 @@ secrets:
     # README "Database roles"), PS_PARTNER_JWT_SECRET (required),
     # PS_ADMIN_TOKEN, PS_WEBHOOK_SECRET_KEYS, PS_WEBHOOK_SECRET_KEY,
     # PS_PROVIDER_ADMIN_KEYS, PS_LEANIX, PS_SERVICENOW, PS_SENTINEL_EXPORT,
-    # PS_CLOUD_INVENTORY, OPENAI_API_KEY.
+    # PS_CLOUD_INVENTORY, OPENAI_API_KEY, PS_COLLECTOR_REDIS_URL (when it
+    # holds a password).
     existingSecret: ""
     values: {}
   migration:
@@ -411,6 +412,7 @@ collector:
   #   PS_EMBEDDINGS_BACKEND: "none"        # auto | openai | local | none
   #   PS_EMBEDDINGS_OPENAI_BASE_URL: "https://llm-proxy.internal/v1"
   #   PS_RATE_LIMIT_PER_MINUTE: "100"
+  #   PS_COLLECTOR_REDIS_URL: "redis://redis-master:6379/0"  # shared rate limits
   #   PS_INGEST_KEY_CACHE_TTL_SECONDS: "30"     # 0: bcrypt on every request
   #   PS_AUTH_FAILURE_LIMIT_PER_MINUTE: "60"    # per client address; 0: off
   #   FORWARDED_ALLOW_IPS: "10.0.0.0/8"         # ingress addresses (uvicorn)
