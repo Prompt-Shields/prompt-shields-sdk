@@ -254,3 +254,118 @@ def test_oversized_invoice_is_not_read(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "MAX_INVOICE_BYTES", 10)
     side = read_invoice_csv(path)
     assert side.lines == [] and side.sources[0].dropped["too_large"] == 1
+
+
+# -- provider aliases (#24) ---------------------------------------------------
+
+@pytest.mark.parametrize(("a", "b"), [
+    # Anthropic: -latest, -0 major aliases and Vertex AI ids -> the catalog snapshot.
+    ("claude-3-5-sonnet-latest", "claude-3-5-sonnet-20241022"),
+    ("claude-3-opus-latest", "claude-3-opus-20240229"),
+    ("claude-sonnet-4-0", "claude-sonnet-4-20250514"),
+    ("claude-opus-4-0", "claude-opus-4-20250514"),
+    ("claude-3-5-sonnet-v2@20241022", "claude-3-5-sonnet-20241022"),
+    ("claude-sonnet-4@20250514", "claude-sonnet-4-20250514"),
+    # ... and a dated snapshot -> the catalog's undated name.
+    ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5"),
+    ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+    # A model the catalog does not list: the suffix rules alone.
+    ("claude-3-7-sonnet-latest", "claude-3-7-sonnet-20250219"),
+    # Gemini: -latest and -001 / -002 stable versions.
+    ("gemini-1.5-pro-002", "gemini-1.5-pro"),
+    ("gemini-1.5-flash-latest", "models/gemini-1.5-flash-001"),
+    ("gemini-2.0-flash-001", "gemini-2.0-flash"),
+    ("gemini-2.0-flash-lite-001", "gemini-2.0-flash-lite"),
+    # Mistral: -YYMM versions and the -latest alias.
+    ("mistral-large-2411", "mistral-large-latest"),
+    ("codestral-2501", "codestral-latest"),
+    ("ministral-8b-2410", "ministral-8b-latest"),
+    # OpenAI: legacy -MMDD snapshots of a catalog model.
+    ("gpt-4-0613", "gpt-4"),
+    ("gpt-3.5-turbo-0125", "gpt-3.5-turbo"),
+])
+def test_provider_aliases_share_a_key(a, b):
+    from prompt_shields.teardown.reconcile import _model_key
+
+    assert _model_key(a) == _model_key(b)
+
+
+@pytest.mark.parametrize(("a", "b"), [
+    # A snapshot the catalog does not list is not the one it does.
+    ("claude-3-5-sonnet-20240620", "claude-3-5-sonnet-20241022"),
+    ("claude-3-5-sonnet-20240620", "claude-3-5-sonnet-latest"),
+    ("claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"),
+    ("claude-opus-4-1", "claude-opus-4-0"),
+    ("claude-opus-4-1", "claude-opus-4-20250514"),
+    ("claude-opus-4-5", "claude-opus-4-20250514"),
+    ("claude-sonnet-4-5", "claude-sonnet-4-20250514"),
+    ("claude-sonnet-4-5-20250929", "claude-sonnet-4-0"),
+    ("claude-haiku-4-5", "claude-3-5-haiku-latest"),
+    # Gemini variants and previews.
+    ("gemini-2.5-flash-lite", "gemini-2.5-flash-001"),
+    ("gemini-2.5-flash-lite-001", "gemini-2.5-flash"),
+    ("gemini-1.5-flash-8b-001", "gemini-1.5-flash"),
+    ("gemini-2.5-flash-preview-05-20", "gemini-2.5-flash"),
+    ("gemini-1.5-pro-002", "gemini-1.5-flash-002"),
+    # OpenAI -latest ids and sizes are separate models.
+    ("chatgpt-4o-latest", "gpt-4o"),
+    ("gpt-4-32k-0613", "gpt-4"),
+    ("gpt-4o-mini", "gpt-4o"),
+    ("gpt-4.1-mini-2025-04-14", "gpt-4.1"),
+    # Mistral and Cohere near misses.
+    ("mistral-small-3.2-24b-instruct-2506", "mistral-small-latest"),
+    ("mistral-small-2503", "mistral-medium-latest"),
+    ("codestral-2501", "mistral-large-latest"),
+    ("command-r-08-2024", "command-r-plus-08-2024"),
+])
+def test_near_miss_names_do_not_share_a_key(a, b):
+    from prompt_shields.teardown.reconcile import _model_key
+
+    assert _model_key(a) != _model_key(b)
+
+
+def test_already_matched_names_keep_their_key():
+    from prompt_shields.teardown.reconcile import _model_key
+
+    assert _model_key("openai/GPT-4o-2024-11-20") == "gpt-4o"
+    assert _model_key("claude-3-5-sonnet-20241022") == "claude-3-5-sonnet-20241022"
+    assert _model_key("us.anthropic.claude-sonnet-4-v1:0") == "anthropic.claude-sonnet-4-v1:0"
+    assert _model_key("mistral-large-latest") == "mistral-large-latest"
+    assert _model_key("gemini-2.5-flash") == "gemini-2.5-flash"
+
+
+def test_catalog_aliases_are_used_when_listed():
+    from prompt_shields.teardown.reconcile import _build_index, _canonical_model
+
+    index = _build_index({"models": {
+        "acme/acme-large-v3": {"model": "acme-large-v3", "aliases": ["acme-large", "Acme-Big"]},
+    }})
+    assert _canonical_model("acme-large", index) == "acme-large-v3"
+    assert _canonical_model("acme-big", index) == "acme-large-v3"
+    assert _canonical_model("acme-small", index) == "acme-small"
+
+
+def test_invoice_aliases_reconcile_against_logged_snapshots(tmp_path):
+    events = [
+        _ev("2026-11-01T09:00:00Z", "claude-3-5-sonnet-20241022", 5.0, vendor="anthropic"),
+        _ev("2026-11-01T10:00:00Z", "claude-3-5-sonnet-20240620", 1.0, vendor="anthropic"),
+        _ev("2026-11-01T11:00:00Z", "gemini-1.5-pro-002", 2.0, vendor="google"),
+        _ev("2026-11-01T12:00:00Z", "gemini-2.5-flash-lite", 0.5, vendor="google"),
+    ]
+    report = _report(tmp_path, events, [
+        {"date": "2026-11-01", "provider": "anthropic", "model": "claude-3-5-sonnet-latest",
+         "amount_usd": "5"},
+        {"date": "2026-11-01", "provider": "google", "model": "gemini-1.5-pro-latest",
+         "amount_usd": "2"},
+        {"date": "2026-11-01", "provider": "google", "model": "gemini-2.5-flash",
+         "amount_usd": "0.5"},
+    ])
+    rows = {(r["provider"], r["model"]): r["status"] for r in report["rows"]}
+    assert rows == {
+        ("anthropic", "claude-3-5-sonnet-20241022"): RECONCILED,
+        # The June snapshot is a different model: not folded into the alias.
+        ("anthropic", "claude-3-5-sonnet"): MISSING_IN_PROVIDER,
+        ("google", "gemini-1.5-pro"): RECONCILED,
+        ("google", "gemini-2.5-flash"): MISSING_IN_PS,
+        ("google", "gemini-2.5-flash-lite"): MISSING_IN_PROVIDER,
+    }

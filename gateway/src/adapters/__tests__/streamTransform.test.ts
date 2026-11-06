@@ -3,6 +3,21 @@ import {
   createStreamState,
 } from '../responses/streamTransform';
 
+/** Start a stream and stream `text` into its message item. */
+function startWithText(
+  state: ReturnType<typeof createStreamState>,
+  text: string
+) {
+  transformStreamChunk(
+    'data: {"id":"chat-123","model":"gpt-4","choices":[{"delta":{"role":"assistant"}}]}',
+    state
+  );
+  transformStreamChunk(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}`,
+    state
+  );
+}
+
 describe('Stream Transform', () => {
   describe('transformStreamChunk', () => {
     test('should initialize state and emit created/in_progress events on first chunk', () => {
@@ -15,9 +30,17 @@ describe('Stream Transform', () => {
       expect(result).toBeDefined();
       expect(result).toContain('response.created');
       expect(result).toContain('response.in_progress');
-      expect(result).toContain('response.output_item.added');
-      expect(result).toContain('response.content_part.added');
+      // PS fork (#73): the message item opens with its first text
+      expect(result).not.toContain('response.output_item.added');
       expect(state.hasStarted).toBe(true);
+
+      const text = transformStreamChunk(
+        'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+        state
+      );
+      expect(text).toContain('response.output_item.added');
+      expect(text).toContain('response.content_part.added');
+      expect(text).toContain('response.output_text.delta');
     });
 
     test('should emit delta events for content chunks', () => {
@@ -36,10 +59,7 @@ describe('Stream Transform', () => {
 
     test('should emit completion events on [DONE]', () => {
       const state = createStreamState();
-      state.hasStarted = true;
-      state.responseId = 'resp_123';
-      state.outputItemId = 'msg_456';
-      state.model = 'claude-3';
+      startWithText(state, 'Hi');
 
       const result = transformStreamChunk('data: [DONE]', state);
 
@@ -137,11 +157,10 @@ describe('Stream Transform', () => {
           return JSON.parse(dataLine!.slice(5));
         });
 
-      // Initial events should have sequence numbers 0, 1, 2, 3
+      // Initial events should have sequence numbers 0, 1
       expect(events[0].sequence_number).toBe(0); // response.created
       expect(events[1].sequence_number).toBe(1); // response.in_progress
-      expect(events[2].sequence_number).toBe(2); // response.output_item.added
-      expect(events[3].sequence_number).toBe(3); // response.content_part.added
+      expect(events).toHaveLength(2);
     });
 
     test('should increment sequence_number across multiple chunks', () => {
@@ -152,14 +171,12 @@ describe('Stream Transform', () => {
         'data: {"id":"chat-123","model":"gpt-4","choices":[{"delta":{"role":"assistant"}}]}';
       transformStreamChunk(chunk1, state);
 
-      // After init, sequence should be at 4
-      expect(state.sequenceNumber).toBe(4);
+      // After init (created, in_progress), sequence should be at 2
+      expect(state.sequenceNumber).toBe(2);
 
-      // Content chunk
+      // First content chunk opens the message item (added, part added, delta)
       const chunk2 = 'data: {"choices":[{"delta":{"content":"Hello"}}]}';
       transformStreamChunk(chunk2, state);
-
-      // After content delta, sequence should be at 5
       expect(state.sequenceNumber).toBe(5);
 
       // Another content chunk
@@ -172,10 +189,7 @@ describe('Stream Transform', () => {
 
     test('should include sequence_number in completion events', () => {
       const state = createStreamState();
-      state.hasStarted = true;
-      state.responseId = 'resp_123';
-      state.outputItemId = 'msg_456';
-      state.model = 'gpt-4';
+      startWithText(state, 'Hi');
       state.sequenceNumber = 10; // Simulate some events already processed
 
       const result = transformStreamChunk('data: [DONE]', state);
@@ -227,11 +241,7 @@ describe('Stream Transform', () => {
 
     test('should include accumulated text in response.completed event', () => {
       const state = createStreamState();
-      state.hasStarted = true;
-      state.responseId = 'resp_123';
-      state.outputItemId = 'msg_456';
-      state.model = 'gpt-4';
-      state.accumulatedText = 'Hello World!';
+      startWithText(state, 'Hello World!');
 
       const result = transformStreamChunk('data: [DONE]', state);
 
@@ -253,11 +263,7 @@ describe('Stream Transform', () => {
 
     test('should include accumulated text in all done events', () => {
       const state = createStreamState();
-      state.hasStarted = true;
-      state.responseId = 'resp_123';
-      state.outputItemId = 'msg_456';
-      state.model = 'gpt-4';
-      state.accumulatedText = 'Test message';
+      startWithText(state, 'Test message');
 
       const result = transformStreamChunk('data: [DONE]', state);
 

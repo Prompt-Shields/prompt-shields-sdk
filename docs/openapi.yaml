@@ -1312,6 +1312,9 @@ components:
           description: |
             The server asset's owner: set in the registry, or taken from the
             gateway's server config (`owner`) while the asset has none.
+      required: [server_name, tool_name, source, calling_service, environment, transport,
+                 call_count, error_count, blocked_count, user_hash, user_group, avg_latency_ms,
+                 first_seen, last_seen, asset_id, owner_email]
 
     McpUsageDay:
       type: object
@@ -1342,6 +1345,9 @@ components:
           description: Calls that reported bytes
         asset_id: {type: string, format: uuid, nullable: true}
         owner_email: {type: string, nullable: true}
+      required: [day, source, server_name, tool_name, call_count, error_count, blocked_count,
+                 latency_ms_total, latency_count, avg_latency_ms, request_bytes, response_bytes,
+                 bytes_count, asset_id, owner_email]
 
     McpPageMeta:
       type: object
@@ -1360,6 +1366,7 @@ components:
           type: array
           items: {$ref: '#/components/schemas/McpTool'}
         meta: {$ref: '#/components/schemas/McpPageMeta'}
+      required: [data, meta]
 
     McpUsagePage:
       type: object
@@ -1374,6 +1381,8 @@ components:
               properties:
                 since: {type: string, format: date}
                 until: {type: string, format: date, nullable: true}
+              required: [since, until]
+      required: [data, meta]
 
     PaginationMeta:
       type: object
@@ -2611,6 +2620,19 @@ components:
           default: false
           description: Ignore the cursor and push the whole registry
       required: [tenant_id]
+
+    LeanIXSyncRequest:
+      allOf:
+        - $ref: '#/components/schemas/ConnectorSyncRequest'
+        - type: object
+          properties:
+            verify:
+              type: [boolean, 'null']
+              default: null
+              description: >-
+                Read the written fact sheets back from LeanIX (GraphQL) and
+                fail the sync, keeping the cursor, if any is missing. Null
+                uses the tenant's `verify` setting.
 
   responses:
     AdminForbidden:
@@ -5941,7 +5963,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ConnectorSyncRequest'
+              $ref: '#/components/schemas/LeanIXSyncRequest'
       responses:
         '200':
           description: Sync result

@@ -33,6 +33,8 @@ async def _no_sleep(_s: float) -> None:
 class FakeLeanIX:
     def __init__(self):
         self.ldifs: list[dict] = []
+        self.workspace: set[tuple[str, str]] = set()
+        self.lookups = 0
 
     def __call__(self, r: httpx.Request) -> httpx.Response:
         assert r.url.host == "93.184.216.34" and r.headers["host"] == HOST
@@ -42,10 +44,24 @@ class FakeLeanIX:
         if r.url.path.endswith("/configurations/"):
             return httpx.Response(200, json={})
         if r.url.path.endswith("/synchronizationRuns"):
-            self.ldifs.append(json.loads(r.content))
+            ldif = json.loads(r.content)
+            self.ldifs.append(ldif)
+            self.workspace |= {(i["type"], i["id"]) for i in ldif["content"]}
             return httpx.Response(200, json={"id": f"run-{len(self.ldifs)}"})
         if r.url.path.endswith("/status"):
             return httpx.Response(200, json={"status": "FINISHED"})
+        if r.url.path == lx.GRAPHQL_PATH:
+            self.lookups += 1
+            flt = json.loads(r.content)["variables"]["filter"]
+            (fs_type,) = flt["facetFilters"][0]["keys"]
+            edges = [
+                {"node": {"externalId": {"externalId": x}}}
+                for x in (e.removeprefix("externalId/") for e in flt["externalIds"])
+                if (fs_type, x) in self.workspace
+            ]
+            return httpx.Response(
+                200, json={"data": {"allFactSheets": {"edges": edges}}}
+            )
         return httpx.Response(404)
 
 
@@ -133,14 +149,17 @@ async def test_round_trip_through_partner_api(app_sessions, monkeypatch):
     assert ("Organization", "promptshields:business-unit:Legal") in ids
     assert any(t == "Interface" for t, _ in ids)
 
-    # Retire the asset; the incremental run picks it up through /changes.
+    # Retire the asset; the incremental run picks it up through /changes
+    # and reads the fact sheets it wrote back (round-trip check).
     async with factory() as db:
         a = await db.get(AIAsset, asset.id)
         a.lifecycle_state = "retired"
         a.lifecycle_changed_at = datetime.now(UTC)
         await db.commit()
-        out = await lx.sync_leanix(db, tid, **kw)
+        out = await lx.sync_leanix(db, tid, verify=True, **kw)
     assert out["status"] == "ok" and out["mode"] == "incremental", out
+    assert out["verification"]["missing_count"] == 0 and fake.lookups
+    assert out["verification"]["found"] == out["verification"]["checked"] == 4
     itc = next(i for i in fake.ldifs[1]["content"] if i["type"] == "ITComponent")
     assert itc["id"] == f"promptshields:asset:{asset_id}"
     assert itc["data"]["lifecyclePhase"] == "endOfLife"
@@ -163,6 +182,7 @@ async def test_round_trip_through_partner_api(app_sessions, monkeypatch):
     body = r.json()
     assert body["configured"] is True and body["workspace_host"] == HOST
     assert body["last_status"] == "ok" and body["cursor"]
+    assert body["verify"] is False and body["last_verification"]["found"] == 4
     assert LX_TOKEN not in r.text and key not in r.text
 
 

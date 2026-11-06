@@ -37,6 +37,7 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,25 @@ MAX_LABEL_CHARS = 128
 _DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 _BEDROCK_PROFILE = re.compile(r"^(?:us|eu|apac|us-gov|global|jp|au|ca)\.")
 
+# Provider alias conventions, applied after the stripping above (so a name
+# that matched before still matches: the new key is a function of the old
+# one). See ``_canonical_model``.
+_LATEST = re.compile(r"-latest$")
+#: Anthropic snapshot date (``claude-3-5-sonnet-20241022``).
+_ANTHROPIC_DATE = re.compile(r"-\d{8}$")
+#: Anthropic ``-0`` aliases of a major version (``claude-sonnet-4-0``).
+_ANTHROPIC_MAJOR_ZERO = re.compile(r"^(claude-[a-z]+-\d+)-0$")
+#: Claude on Vertex AI (``claude-3-5-sonnet-v2@20241022``).
+_VERTEX_CLAUDE = re.compile(r"^(claude-.+?)(?:-v\d+)?@(\d{8})$")
+#: Gemini stable versions (``gemini-1.5-pro-002``), as the SDK's pricing strips.
+_GEMINI_VERSION = re.compile(r"-\d{3}$")
+#: Mistral model families, versioned ``-YYMM`` with a moving ``-latest`` alias.
+_MISTRAL_FAMILY = re.compile(
+    r"^(?:mistral|codestral|pixtral|ministral|magistral|devstral|open-mistral|open-mixtral)-"
+)
+#: Mistral ``-YYMM`` and legacy OpenAI ``-MMDD`` snapshots (``gpt-4-0613``).
+_FOUR_DIGIT_VERSION = re.compile(r"-\d{4}$")
+
 
 @dataclass
 class Line:
@@ -107,14 +127,115 @@ class Side:
     sources: list[SourceStats] = field(default_factory=list)
 
 
+def _base_name(model: str) -> str:
+    """Lower-cased, without a path prefix, an OpenAI-style date or a Bedrock
+    cross-region profile."""
+    m = model.lower()[:MAX_LABEL_CHARS]
+    m = m.rsplit("/", 1)[-1] if "/" in m else m
+    return _BEDROCK_PROFILE.sub("", _DATE_SUFFIX.sub("", m))
+
+
+@dataclass(frozen=True)
+class _CatalogIndex:
+    """Model names the catalog knows, as ``_base_name`` keys them."""
+
+    known: frozenset[str] = frozenset()
+    #: An entry's optional ``aliases`` list: alias -> the entry's model.
+    aliases: Mapping[str, str] = field(default_factory=dict)
+    #: Anthropic alias base (``claude-3-5-sonnet``) -> the dated catalog
+    #: snapshots it can stand for (``claude-3-5-sonnet-20241022``).
+    snapshots: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+
+def _anthropic_base(name: str) -> str:
+    return _ANTHROPIC_MAJOR_ZERO.sub(r"\1", _ANTHROPIC_DATE.sub("", _LATEST.sub("", name)))
+
+
+def _build_index(catalog: Mapping[str, Any]) -> _CatalogIndex:
+    known: set[str] = set()
+    aliases: dict[str, str] = {}
+    snapshots: dict[str, set[str]] = defaultdict(set)
+    for key, entry in (catalog.get("models") or {}).items():
+        model = _str(entry.get("model")) or key.split("/", 1)[-1]
+        name = _base_name(model)
+        known.add(name)
+        for alias in entry.get("aliases") or ():
+            if _str(alias):
+                aliases.setdefault(_base_name(alias), name)
+        if name.startswith("claude-") and _ANTHROPIC_DATE.search(name):
+            snapshots[_anthropic_base(name)].add(name)
+    return _CatalogIndex(
+        frozenset(known), aliases, {k: frozenset(v) for k, v in snapshots.items()}
+    )
+
+
+@lru_cache(maxsize=1)
+def _catalog_index() -> _CatalogIndex:
+    """The bundled catalog's index (empty if it cannot be read: the suffix
+    rules still apply)."""
+    try:
+        from prompt_shields.catalog import load_catalog
+
+        return _build_index(load_catalog())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return _CatalogIndex()
+
+
+def _canonical_model(name: str, index: _CatalogIndex) -> str:
+    """One key for a model's aliases and snapshots, without merging different
+    models.
+
+    A catalog model name, or an alias the catalog lists, wins. Otherwise each
+    provider's documented convention applies:
+
+    * Anthropic: ``-latest``, a ``-YYYYMMDD`` snapshot date and the ``-0``
+      major-version alias (``claude-sonnet-4-0``) name one model; so does the
+      Vertex AI form ``claude-3-5-sonnet-v2@20241022``. An undated alias maps
+      to the catalog's dated snapshot when the catalog lists exactly one; a
+      dated name maps to the catalog's undated name (``claude-sonnet-4-5``).
+      A snapshot the catalog does not list (``claude-3-5-sonnet-20240620``)
+      is never mapped onto one it does (``-20241022``).
+    * Gemini: ``-latest`` and a ``-001`` / ``-002`` stable version are the
+      base model. Variants (``-lite``, ``-8b``) and previews stay apart.
+    * Mistral: ``-YYMM`` versions and ``-latest`` are one model (keyed as the
+      catalog's ``-latest`` name when it has one).
+    * OpenAI: a legacy ``-MMDD`` snapshot (``gpt-4-0613``) is the base model,
+      only when the catalog lists that base. ``-latest`` ids
+      (``chatgpt-4o-latest``) are separate models and are left alone.
+    """
+    if name in index.known:
+        return name
+    if name in index.aliases:
+        return index.aliases[name]
+    if name.startswith("claude-"):
+        name = _VERTEX_CLAUDE.sub(r"\1-\2", name)
+        if name in index.known:
+            return name
+        base = _anthropic_base(name)
+        if base in index.known:
+            return base
+        snaps = index.snapshots.get(base, frozenset())
+        if not _ANTHROPIC_DATE.search(name) and len(snaps) == 1:
+            return next(iter(snaps))
+        return base
+    if name.startswith("gemini-"):
+        return _GEMINI_VERSION.sub("", _LATEST.sub("", name))
+    if _MISTRAL_FAMILY.match(name):
+        base = _FOUR_DIGIT_VERSION.sub("", _LATEST.sub("", name))
+        return base + "-latest" if base + "-latest" in index.known else base
+    if name.startswith("gpt-"):
+        base = _FOUR_DIGIT_VERSION.sub("", name)
+        if base in index.known:
+            return base
+    return name
+
+
 def _model_key(model: str | None) -> str | None:
     model = _str(model)
     if not model:
         return None
-    m = model.lower()[:MAX_LABEL_CHARS]
-    m = m.rsplit("/", 1)[-1] if "/" in m else m
-    m = _BEDROCK_PROFILE.sub("", _DATE_SUFFIX.sub("", m))
-    return m or None
+    m = _base_name(model)
+    return _canonical_model(m, _catalog_index()) if m else None
 
 
 def _provider_key(value: Any) -> str | None:
