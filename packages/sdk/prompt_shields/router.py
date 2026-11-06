@@ -79,11 +79,14 @@ provider's shape (chat-completion chunks, or Anthropic Messages events).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 import os
+import sys
 import time
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -137,6 +140,7 @@ from prompt_shields.sovereign import (
     get_openai_compatible,
     resolve_base_url,
 )
+from prompt_shields.streaming import _StreamBase
 from prompt_shields.types import PSMetadata, RouteHint
 
 logger = logging.getLogger("prompt_shields.router")
@@ -1671,6 +1675,14 @@ class _RouterCore:
         chunk builds none (``_stream_lazy_start``). So the cost is recorded
         here, once, however the stream ends; ``commit_soon`` writes a network
         store from a thread when an event loop is running.
+
+        ``AsyncShieldsRouter`` streams use ``commit_soon`` too, not
+        ``acommit``, as the instrumented async clients do
+        (``budget_event_hook``): the hook is synchronous and may run inside
+        the garbage collector (an abandoned stream), where nothing can be
+        awaited; inside a running loop ``commit_soon`` already hands a
+        blocking store to the default executor, so the loop is never
+        blocked, and a task scheduled from here could be lost at shutdown.
         """
         inner = self._event_hook(plan, captured, tracker)
         recorded = False
@@ -1716,13 +1728,17 @@ class _RouterCore:
         caller: placeholders restored across chunks, ``ps`` set now and
         completed when the stream ends."""
         plan = candidate.data[0]
+        # The instrumented client's stream (or the provider's, if wrapping it
+        # failed): what finalising an abandoned RoutedStream reports and closes.
+        upstream = getattr(stream, "_stream", stream)
         if plan.pseudo is not None:
             stream = plan.pseudo.restore_stream(stream, clear_when_done=True)
         ps = self._ps_result(
             plan, {}, attempts, (self.policy or {}).get("policy_version"), None
         )
         cls = AsyncRoutedStream if is_async else RoutedStream
-        return cls(stream, ps, lambda: self._stream_finished(plan, captured, attempts))
+        return cls(stream, ps, lambda: self._stream_finished(plan, captured, attempts),
+                   upstream)
 
     @staticmethod
     def _gateway_result(model: str, response: Any, event: dict,
@@ -1862,6 +1878,58 @@ async def _aclose(stream: Any) -> None:
             await result
 
 
+#: Upstream closes scheduled by finalised async streams, kept until done so
+#: the event loop does not drop the tasks.
+_closing: set = set()
+
+
+def _finalize_stream(upstream: Any, on_end: Any, is_async: bool) -> None:
+    """A RoutedStream was garbage-collected before it ended (never read, or
+    left mid-way without ``close()``). Runs from the garbage collector, at
+    most once, never after the stream ended, never at interpreter shutdown.
+
+    In order: the telemetry event is built and enqueued (not sent) and the
+    spend recorded with ``commit_soon`` (an in-memory store in place; a
+    blocking store such as ``RedisBudgetStore`` from the default executor
+    when an event loop is running in this thread, else written in place,
+    inside the collector, as the instrumented clients' streams always
+    have), the upstream is closed, then ``on_end`` tells the learner and drops the
+    pseudonymisation mapping. Each step is fail-open and never raises; only
+    exception class names are logged, never content.
+    """
+    if sys.is_finalizing():
+        return
+    try:
+        if isinstance(upstream, _StreamBase):
+            # The event that the instrumented stream would build when it is
+            # collected, built now so the learner sees its call id.
+            upstream.abandon()
+        if is_async:
+            # An async close cannot be awaited here: scheduled on the running
+            # loop when there is one (else the connection is released when
+            # the stream is collected, as before).
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                task = loop.create_task(_aclose(upstream))
+                _closing.add(task)
+                task.add_done_callback(_closing.discard)
+        else:
+            close = getattr(upstream, "close", None)
+            if close is not None:
+                close()  # the event is built already: closing sends nothing
+    except Exception as exc:  # noqa: BLE001 - never raise from a finalizer
+        with contextlib.suppress(Exception):
+            logger.debug("routed stream finalise error: %s", type(exc).__name__)
+    try:
+        on_end()
+    except Exception as exc:  # noqa: BLE001 - never raise from a finalizer
+        with contextlib.suppress(Exception):
+            logger.debug("routed stream finalise error: %s", type(exc).__name__)
+
+
 class RoutedStream:
     """A local-mode ``stream=True`` call.
 
@@ -1876,18 +1944,34 @@ class RoutedStream:
     closed: ``ps.cost.usd`` and ``ps.pseudonymisation`` are filled in then.
     Failover happens only before the first chunk; an error after it is
     raised to the caller and never retried.
+
+    A stream dropped without ``close()`` (never read, or left mid-way) is
+    finalised when it is garbage-collected: its telemetry event and spend
+    are recorded, the upstream is closed (scheduled on the running loop for
+    an async stream), the learner is told and the mapping is dropped, each
+    once. Prefer ``with`` / ``close()``: finalisation waits for the garbage
+    collector when the stream is part of a reference cycle.
     """
 
-    def __init__(self, stream: Any, ps: PSResult, on_end: Any) -> None:
+    def __init__(self, stream: Any, ps: PSResult, on_end: Any,
+                 upstream: Any = None) -> None:
         self._stream = stream
         self._on_end = on_end
         self._ended = False
         self.ps = ps
+        # Holds no reference to self; detached when the stream ends, so an
+        # ended stream is never reported again.
+        self._finalizer = weakref.finalize(
+            self, _finalize_stream, upstream if upstream is not None else stream,
+            on_end, isinstance(self, AsyncRoutedStream),
+        )
+        self._finalizer.atexit = False
 
     def _end(self) -> None:
         if self._ended:
             return
         self._ended = True
+        self._finalizer.detach()
         try:
             self.ps = self._on_end()
         except Exception as exc:  # noqa: BLE001 - fail-open: the stream is over

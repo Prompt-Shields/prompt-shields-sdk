@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import weakref
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -688,5 +689,214 @@ def test_async_stream_closed_early_records_once():
         (event,) = events
         assert event["tokens_estimated"] is True
         assert _spent(enforcer) == pytest.approx(event["cost"])
+
+    asyncio.run(main())
+
+
+# --- finalisation of a stream dropped without close() --------------------------------
+
+
+@pytest.fixture
+def no_cyclic_gc():
+    """Reference counting only: a dropped stream must be finalised at once,
+    not when the cyclic garbage collector happens to run."""
+    gc.collect()
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+
+
+def _with_learner(router, learner=None):
+    """Make every plan carry a learner choice, as auto mode would."""
+    from dataclasses import replace
+
+    from prompt_shields.learner_auto import LearnerChoice
+
+    learner = learner or _Learner()
+    router.learner = learner
+    choice = LearnerChoice(
+        model="primary:primary-model", mode="exploit", propensity=1.0,
+        explore_rate=0.0, policy_model="primary:primary-model",
+        learner_version=None, use_case="support", sensitivity="confidential",
+    )
+    original = router._plan
+
+    def plan(*args, **kwargs):
+        return replace(original(*args, **kwargs), learner=choice)
+
+    router._plan = plan
+    return learner, choice
+
+
+def test_abandoned_stream_tells_the_learner_once(no_cyclic_gc):
+    enforcer = _enforcer()
+    router, events, upstreams = _router(budgets=enforcer, scripts={
+        "primary": [lambda m: _chunks(m, ["a", "b"], usage=False)],
+    })
+    learner, choice = _with_learner(router)
+    stream = router.chat.completions.create(messages=HI, stream=True, **CONFIDENTIAL)
+    next(stream)
+    alive = weakref.ref(stream)
+    del stream
+    # The finaliser holds no reference to the stream: it is collected.
+    assert alive() is None
+    # Finalised by reference counting alone: event, spend, learner, close.
+    (event,) = events
+    assert event["stream_abandoned"] is True
+    assert [(c, ch) for c, ch, _ in learner.observed] == [(event["call_id"], choice)]
+    assert _spent(enforcer) == pytest.approx(event["cost"])
+    assert upstreams["primary"].streams[0].closed
+    gc.collect()
+    assert len(events) == 1 and len(learner.observed) == 1
+
+
+@pytest.mark.parametrize("how", ["exhausted", "closed", "error"])
+def test_ended_stream_is_not_reported_again_when_collected(how, no_cyclic_gc):
+    script = (
+        [_chunk("primary-model", "a"), Boom()] if how == "error"
+        else _chunks("primary-model", ["a", "b"])
+    )
+    enforcer = _enforcer()
+    router, events, _ = _router(budgets=enforcer, scripts={"primary": [script]})
+    learner, _ = _with_learner(router)
+    stream = router.chat.completions.create(messages=HI, stream=True, **CONFIDENTIAL)
+    if how == "exhausted":
+        list(stream)
+    elif how == "closed":
+        next(stream)
+        stream.close()
+    else:
+        with pytest.raises(Boom):
+            list(stream)
+    assert len(events) == 1 and len(learner.observed) == 1
+    spent = _spent(enforcer)
+    del stream
+    gc.collect()
+    assert len(events) == 1 and len(learner.observed) == 1
+    assert _spent(enforcer) == spent
+
+
+def test_never_read_stream_dropped_clears_mapping_and_closes_upstream(no_cyclic_gc):
+    router, events, upstreams = _router(pseudonymise=True, scripts={
+        "primary": [lambda m: _chunks(m, ["a", "b"])],
+    })
+    learner, _ = _with_learner(router)
+    seen = _capture_pseudo(router)
+    stream = router.chat.completions.create(
+        messages=[{"role": "user", "content": f"Mail {EMAIL}"}], stream=True,
+        **CONFIDENTIAL,
+    )
+    (pseudo,) = seen
+    assert pseudo.active
+    # The first chunk was read for failover: the upstream is open.
+    assert upstreams["primary"].streams[0].read == 1
+    del stream
+    assert not pseudo.active
+    assert upstreams["primary"].streams[0].closed
+    (event,) = events
+    assert event["stream_abandoned"] is True
+    assert len(learner.observed) == 1
+
+
+def test_stream_in_a_reference_cycle_is_finalised_by_the_collector(no_cyclic_gc):
+    router, events, upstreams = _router(pseudonymise=True)
+    learner, _ = _with_learner(router)
+    seen = _capture_pseudo(router)
+    stream = router.chat.completions.create(
+        messages=[{"role": "user", "content": f"Mail {EMAIL}"}], stream=True,
+        **CONFIDENTIAL,
+    )
+    stream.cycle = stream
+    del stream
+    assert learner.observed == [] and seen[0].active  # kept alive by the cycle
+    gc.collect()
+    assert not seen[0].active
+    assert upstreams["primary"].streams[0].closed
+    assert len(events) == 1 and len(learner.observed) == 1
+
+
+def test_finaliser_never_raises_nor_logs_content(no_cyclic_gc, monkeypatch, caplog):
+    import logging
+    import sys
+
+    class Raising(_Learner):
+        def observe(self, call_id, choice, signals):
+            raise RuntimeError(f"cannot learn from {EMAIL}")
+
+    reported = []
+    monkeypatch.setattr(sys, "excepthook", lambda *a: reported.append(a))
+    monkeypatch.setattr(sys, "unraisablehook", lambda u: reported.append(u))
+    router, events, _ = _router(pseudonymise=True)
+    _with_learner(router, Raising())
+    seen = _capture_pseudo(router)
+    caplog.set_level(logging.DEBUG)
+    stream = router.chat.completions.create(
+        messages=[{"role": "user", "content": f"Mail {EMAIL}"}], stream=True,
+        **CONFIDENTIAL,
+    )
+    del stream
+    assert reported == []
+    assert not seen[0].active  # dropped even though the learner raised
+    assert len(events) == 1
+    assert EMAIL not in caplog.text
+
+
+def test_finaliser_does_nothing_at_interpreter_shutdown(no_cyclic_gc, monkeypatch):
+    import sys
+
+    router, events, upstreams = _router()
+    learner, _ = _with_learner(router)
+    stream = router.chat.completions.create(messages=HI, stream=True, **CONFIDENTIAL)
+    assert stream._finalizer.atexit is False  # not run by the atexit hook
+    monkeypatch.setattr(sys, "is_finalizing", lambda: True)
+    del stream
+    assert events == [] and learner.observed == []
+    assert not upstreams["primary"].streams[0].closed
+
+
+def test_async_abandoned_stream_is_finalised_once(no_cyclic_gc):
+    async def main():
+        enforcer = _enforcer()
+        router, events, upstreams = _router(
+            cls=AsyncShieldsRouter, budgets=enforcer, pseudonymise=True,
+            scripts={"primary": [lambda m: _chunks(m, ["a", "b"], usage=False)]},
+        )
+        learner, choice = _with_learner(router)
+        seen = _capture_pseudo(router)
+        stream = await router.chat.completions.create(
+            messages=[{"role": "user", "content": f"Mail {EMAIL}"}], stream=True,
+            **CONFIDENTIAL,
+        )
+        await stream.__anext__()
+        del stream
+        (event,) = events
+        assert event["stream_abandoned"] is True
+        assert [(c, ch) for c, ch, _ in learner.observed] == [(event["call_id"], choice)]
+        assert _spent(enforcer) == pytest.approx(event["cost"])
+        assert not seen[0].active
+        # The async close is scheduled on the running loop.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert upstreams["primary"].streams[0].closed
+        gc.collect()
+        assert len(events) == 1 and len(learner.observed) == 1
+
+    asyncio.run(main())
+
+
+def test_async_closed_stream_is_not_reported_again(no_cyclic_gc):
+    async def main():
+        router, events, _ = _router(cls=AsyncShieldsRouter)
+        learner, _ = _with_learner(router)
+        stream = await router.chat.completions.create(
+            messages=HI, stream=True, **CONFIDENTIAL
+        )
+        async with stream:
+            await stream.__anext__()
+        del stream
+        gc.collect()
+        assert len(events) == 1 and len(learner.observed) == 1
 
     asyncio.run(main())

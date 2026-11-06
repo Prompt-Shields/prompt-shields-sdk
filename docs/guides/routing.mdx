@@ -291,6 +291,9 @@ stream.ps.cost.usd             # filled in once the stream has ended
   the way through (`restore_stream`), including placeholders split across
   chunks, and the mapping is dropped when the stream ends, fails or is
   closed. `stream.ps.pseudonymisation` is filled in at the end.
+- **Dropped without `close()`:** a stream that is garbage-collected before
+  it ended is finalised once: event and spend, upstream closed, learner
+  told, mapping dropped (see [Limits](#limits)).
 
 ## Failover
 
@@ -581,9 +584,33 @@ against the code.
   stream yields chat-completion chunks from OpenAI and OpenAI-compatible
   providers and Messages stream events from Anthropic; they are not
   translated into one shape. Failover only happens before the first chunk.
-  The learner hears about a stream when it ends or is closed, not when it
-  is dropped unfinished without `close()` (its event and spend are still
-  recorded).
+- **A stream dropped without `close()` is finalised by the garbage
+  collector.** When a `RoutedStream` is collected before it ended (never
+  read, or left mid-way), its event and spend are recorded, the upstream
+  connection is closed, the learner is told and the pseudonymisation mapping
+  is dropped, each once and never again after `close()` or the end of the
+  stream. On CPython that happens as soon as the last reference goes, unless
+  the stream is in a reference cycle, where it waits for the cyclic
+  collector. Nothing is reported at interpreter shutdown. For an
+  `AsyncRoutedStream` the upstream close can only be scheduled on the
+  running event loop (with no loop running, the connection is released when
+  the provider's stream is collected). Use `with` / `async with` or
+  `close()` to end a stream at a known point.
+- **Async streams record spend from a worker thread.** An
+  `AsyncRoutedStream` records its spend with the budget enforcer's
+  `commit_soon`, as the instrumented async clients do, not `acommit`: the
+  event is built in synchronous code that may run inside the garbage
+  collector, where nothing can be awaited. Inside a running loop a blocking
+  `budget_store` is written from the default executor, so the loop is not
+  blocked; with no loop running (a stream collected after `asyncio.run`
+  returned) the write happens in place.
+- **A blocking budget store may be written inside the garbage collector.**
+  A sync `RoutedStream` dropped unfinished with a blocking `budget_store`
+  (`RedisBudgetStore`) and no event loop running in the collecting thread
+  writes its spend in place, from the collector, as any instrumented
+  client's abandoned stream does: the collection waits for that write (up
+  to the store's socket timeout). End streams with `with` / `close()` to
+  keep the write at a known point.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
   OpenAI-only parameters (`tools`, `response_format`, `n`, ...) raise
   `RouterError` when the call is routed to Anthropic. They are not silently
