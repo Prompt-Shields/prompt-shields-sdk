@@ -183,6 +183,12 @@ from collector.risk_reviews import partner_router as risk_reviews_partner_router
 app.include_router(risk_reviews_admin_router)
 app.include_router(risk_reviews_partner_router)
 
+# Routing learner snapshots and recommendation review (#47, #48)
+from collector.learner import ingest_router as learner_ingest_router
+from collector.learner import partner_router as learner_partner_router
+
+app.include_router(learner_ingest_router)
+app.include_router(learner_partner_router)
 # Spend anomaly alerts: Partner API list and acknowledge (#30)
 from collector.spend_anomalies import partner_router as spend_alerts_partner_router
 
@@ -215,6 +221,13 @@ from collector.servicenow import router as servicenow_router
 
 app.include_router(leanix_router)
 app.include_router(servicenow_router)
+
+# Microsoft Sentinel / Defender XDR export (#32): operator push, partner pull
+from collector.sentinel_export import partner_router as sentinel_partner_router
+from collector.sentinel_export import router as sentinel_router
+
+app.include_router(sentinel_router)
+app.include_router(sentinel_partner_router)
 
 # Tenant admin automation credentials: scoped admin tokens and tenant
 # ingest keys (collector/admin_auth.py)

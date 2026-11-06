@@ -76,6 +76,7 @@
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",
+        "guides/routing-learner",
         "guides/pseudonymisation",
         "guides/spend-anomaly-alerts"
       ]
@@ -149,6 +150,7 @@
         "integrations/ardoq",
         "integrations/leanix",
         "integrations/servicenow",
+        "integrations/microsoft-sentinel",
         "integrations/kong"
       ]
     }

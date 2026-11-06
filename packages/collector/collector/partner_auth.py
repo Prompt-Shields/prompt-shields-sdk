@@ -309,6 +309,7 @@ ADMIN_SCOPES = frozenset(
         "webhooks:manage",
         "attestations:write",
         "risks:review",
+        "learner:review",
         "provider-credentials:manage",
     }
 )

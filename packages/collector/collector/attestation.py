@@ -48,7 +48,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from db.models import AIAsset, AssetAttestation
-from sqlalchemy import any_, bindparam, func, select
+from sqlalchemy import ColumnElement, any_, bindparam, func, select
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -265,6 +265,53 @@ async def attestation_history(
     return list((await db.execute(stmt)).scalars())
 
 
+def state_filter(tenant_id: UUID, field: str, state: str) -> ColumnElement[bool]:
+    """WHERE clause on `AIAsset`: the current attestation state of `field`
+    is `state`. An asset with no attestation of the field counts as
+    `unreviewed`. Used by the registry and Partner API asset lists to build
+    a review queue (e.g. every asset whose owner nobody has attested).
+
+    Raises ValueError for an unknown field or state.
+    """
+    if field not in _FIELDS:
+        raise ValueError(
+            f"Unknown field {field!r}. Attestable fields: {sorted(_FIELDS)}"
+        )
+    if state not in ATTESTATION_STATES:
+        raise ValueError(
+            f"Unknown state {state!r}. Allowed: {list(ATTESTATION_STATES)}"
+        )
+    latest = (
+        select(AssetAttestation.state)
+        .where(
+            AssetAttestation.tenant_id == tenant_id,
+            AssetAttestation.asset_id == AIAsset.id,
+            AssetAttestation.field == field,
+        )
+        .order_by(AssetAttestation.created_at.desc(), AssetAttestation.id.desc())
+        .limit(1)
+        .correlate(AIAsset)
+        .scalar_subquery()
+    )
+    return func.coalesce(latest, UNREVIEWED) == state
+
+
+def list_filter(
+    tenant_id: UUID, field: str | None, state: str | None
+) -> ColumnElement[bool] | None:
+    """`state_filter` for the `attestation_field` / `attestation_state`
+    query parameters of the asset lists: None when neither is given.
+
+    Raises ValueError when only one is given, or for an unknown field or
+    state.
+    """
+    if field is None and state is None:
+        return None
+    if field is None or state is None:
+        raise ValueError("attestation_field and attestation_state must be given together")
+    return state_filter(tenant_id, field, state)
+
+
 def serialize_attestation(row: AssetAttestation) -> dict:
     return {
         "id": str(row.id),
@@ -340,9 +387,11 @@ __all__ = [
     "attestation_changes_since",
     "attestation_history",
     "latest_attestations",
+    "list_filter",
     "record_attestation",
     "register_attestable_field",
     "serialize_attestation",
+    "state_filter",
     "summarize",
     "validate",
 ]
