@@ -754,7 +754,7 @@ async def test_tenant_admin_and_partner_scope_failures(env):
     assert rows[0].details["reason"] == "insufficient_scope"
 
 
-async def test_operator_access_is_recorded(env):
+async def test_break_glass_access_is_recorded(env):
     async with _client() as c:
         resp = await c.post(
             "/api/v1/admin/provider-usage/pull", headers=OP, json={"tenant_id": str(env["tenant"])}
@@ -762,7 +762,7 @@ async def test_operator_access_is_recorded(env):
         assert resp.status_code == 200, resp.text
     rows = await _system_rows(env["factory"])
     assert [(r.action, r.actor_type, r.details["route"]) for r in rows] == [
-        ("operator.access", "operator", "/api/v1/admin/provider-usage/pull")
+        ("operator.break_glass", "operator", "/api/v1/admin/provider-usage/pull")
     ]
 
 

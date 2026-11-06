@@ -18,8 +18,10 @@ ingest keys. Mounted at /api/v1/admin. Auth and scopes: collector/admin_auth.py.
                                            grace window for the old one  admin:keys *
   DELETE /api-keys/{key_id}                revoke                        admin:keys
 
-  * While PS_ADMIN_REQUIRE_SCOPED_TOKENS is off, an ingest key is full admin,
-    so issuing or rotating one needs every admin scope (require_full_admin).
+  * While PS_ADMIN_REQUIRE_SCOPED_TOKENS is off, a full-scope ingest key is
+    full admin, so issuing or rotating one needs every admin scope
+    (require_full_admin). A key with fewer scopes (the default for a new
+    key is ``ingest:write`` only, #341) needs just ``admin:keys``.
 
 Conventions shared with partner credentials:
 
@@ -255,6 +257,10 @@ class CreateApiKeyBody(BaseModel):
 
     name: str = NAME
     expires_at: datetime | None = None
+    # tenant_keys.KEY_SCOPES; ingest:write only unless more are asked for.
+    scopes: list[str] = Field(
+        default_factory=lambda: list(tenant_keys.DEFAULT_KEY_SCOPES), min_length=1
+    )
 
 
 class RotateApiKeyBody(BaseModel):
@@ -308,12 +314,23 @@ async def _adopt(request: Request, principal: AdminPrincipal) -> None:
 async def create_api_key(
     body: CreateApiKeyBody, request: Request, principal: AdminPrincipal = _KEYS
 ) -> dict:
-    await require_full_admin(request, principal)
+    bad = tenant_keys.unknown_key_scopes(body.scopes)
+    if bad:
+        raise _problem(
+            400,
+            "Bad Request",
+            f"Unknown scopes: {bad}. Allowed: {list(tenant_keys.KEY_SCOPES)}",
+        )
+    await require_full_admin(request, principal, body.scopes)
     db = request.state.db
     await _adopt(request, principal)
     try:
         row, key = await tenant_keys.issue_key(
-            db, principal.tenant_id, body.name, expires_at=_future(body.expires_at)
+            db,
+            principal.tenant_id,
+            body.name,
+            expires_at=_future(body.expires_at),
+            scopes=body.scopes,
         )
     except DuplicateName:
         raise _problem(
@@ -330,6 +347,7 @@ async def create_api_key(
         target_type="tenant_api_key",
         target_id=out["id"],
         name=row.name,
+        scopes=out["scopes"],
     )
     await db.commit()
     return {**out, "key": key, "warning": KEY_WARNING}
@@ -374,9 +392,9 @@ async def rotate_api_key(
     body: RotateApiKeyBody | None = None,
     principal: AdminPrincipal = _KEYS,
 ) -> dict:
-    await require_full_admin(request, principal)
     db = request.state.db
     row = await _get_key(request, principal.tenant_id, key_id)
+    await require_full_admin(request, principal, row.scopes or ())
     grace = body.grace_period_seconds if body else 0
     try:
         key = tenant_keys.rotate_key(row, timedelta(seconds=grace))

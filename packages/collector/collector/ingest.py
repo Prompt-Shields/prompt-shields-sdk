@@ -7,7 +7,13 @@ from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, PrivateAttr, field_validator, model_validator
 
-from collector import loss_accounting, metrics, tenant_limits, user_identity
+from collector import (
+    loss_accounting,
+    metrics,
+    tenant_keys,
+    tenant_limits,
+    user_identity,
+)
 from collector.auth import resolve_tenant
 from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
@@ -684,7 +690,7 @@ async def ingest_events(
     response: Response,
     limiter: Annotated[RateLimiter, Depends(get_ingest_rate_limiter)],
 ):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
     db = request.state.db
     meta = loss_accounting.parse_metadata(body.metadata)
     try:

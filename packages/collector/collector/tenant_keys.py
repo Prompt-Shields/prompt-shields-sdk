@@ -16,6 +16,18 @@ tenant row later by the first key *write* for that tenant (issuing a key,
 other. Listing keys never writes: until then the list does not show it. Moving clears the tenant-row columns, so a revoked
 key cannot come back through the fallback. The key itself does not change.
 
+Scopes (#341)
+-------------
+Each key carries scopes (``tenant_api_keys.scopes``, ``KEY_SCOPES``):
+``ingest:write`` (the /ingest routes and OTLP/Kong/MCP/learner/feedback
+ingest), ``registry:read`` (the /api/v1/registry reads and
+/telemetry/loss) and ``registry:attest`` (POST attestations). Keys that
+existed before migration 037, and a legacy key on the tenant row, hold all
+three, so nothing breaks on upgrade. A key issued since holds
+``ingest:write`` unless more are asked for. Only a key holding every scope
+can act on the tenant admin API (collector.admin_auth), because that is
+what an ingest key could do before scopes existed.
+
 Validity
 --------
 A key authenticates when it is not revoked, not past ``expires_at``, and
@@ -42,6 +54,30 @@ MAX_ROTATION_GRACE = timedelta(days=7)
 KEY_WARNING = "Save the key now. It will not be shown again."
 
 STATUSES = ("active", "expired", "revoked")
+
+# Ingest key scopes (#341). Order is the order shown in docs and errors.
+INGEST_WRITE = "ingest:write"
+REGISTRY_READ = "registry:read"
+REGISTRY_ATTEST = "registry:attest"
+KEY_SCOPES: dict[str, str] = {
+    INGEST_WRITE: "Send usage, OTLP, Kong, MCP, learner and feedback events",
+    REGISTRY_READ: "Read the tenant registry (/api/v1/registry) and /telemetry/loss",
+    REGISTRY_ATTEST: "Record attestations on registry assets",
+}
+# What keys from before scopes existed (and legacy tenant-row keys) hold.
+ALL_KEY_SCOPES: frozenset[str] = frozenset(KEY_SCOPES)
+# What a newly issued key holds unless more are asked for.
+DEFAULT_KEY_SCOPES: tuple[str, ...] = (INGEST_WRITE,)
+
+
+def unknown_key_scopes(requested) -> list[str]:
+    return sorted(set(requested) - set(KEY_SCOPES))
+
+
+def ordered_scopes(scopes) -> list[str]:
+    """Scopes in ``KEY_SCOPES`` order, without duplicates."""
+    held = set(scopes or ())
+    return [s for s in KEY_SCOPES if s in held]
 
 
 def generate_key() -> str:
@@ -86,6 +122,7 @@ def serialize_key(row: TenantApiKey) -> dict:
         "name": row.name,
         "key_hint": row.key_hint,
         "origin": row.origin or "api",
+        "scopes": ordered_scopes(row.scopes),
         "status": key_status(row, now),
         # Set while the key replaced by the last rotation still authenticates.
         "rotation_grace_ends_at": _iso(grace_ends_at(row, now)),
@@ -138,6 +175,7 @@ async def adopt_legacy_key(db: AsyncSession, tenant_id: UUID) -> TenantApiKey | 
         key_hash=tenant.api_key_hash,
         key_hint=None,
         origin="legacy",
+        scopes=list(KEY_SCOPES),
         created_at=tenant.created_at or datetime.now(UTC),
     )
     tenant.api_key_prefix = None
@@ -156,8 +194,13 @@ async def issue_key(
     name: str,
     *,
     expires_at: datetime | None = None,
+    scopes=DEFAULT_KEY_SCOPES,
 ) -> tuple[TenantApiKey, str]:
-    """Create a key. Returns (row, plaintext). Flushes; the caller commits."""
+    """Create a key holding ``scopes`` (``ingest:write`` by default).
+    Returns (row, plaintext). Flushes; the caller commits."""
+    bad = unknown_key_scopes(scopes)
+    if bad or not scopes:
+        raise ValueError(f"invalid ingest key scopes: {bad or 'none'}")
     if await _name_taken(db, tenant_id, name):
         raise DuplicateName(name)
     plaintext = generate_key()
@@ -168,6 +211,7 @@ async def issue_key(
         key_hash=hash_api_key(plaintext),
         key_hint=hint(plaintext),
         origin="api",
+        scopes=ordered_scopes(scopes),
         created_at=datetime.now(UTC),
         expires_at=expires_at,
     )
@@ -227,6 +271,8 @@ class KeyCandidate:
     tenant_disabled: bool
     # tenant_api_keys.id; None for a legacy key on the tenant row.
     key_id: UUID | None = None
+    # What the key may do (#341); a legacy tenant-row key holds every scope.
+    scopes: frozenset[str] = ALL_KEY_SCOPES
 
 
 async def find_candidate(db: AsyncSession, plaintext: str) -> KeyCandidate | None:
@@ -250,9 +296,15 @@ async def find_candidate(db: AsyncSession, plaintext: str) -> KeyCandidate | Non
     if row is not None:
         key, disabled_at = row
         active = key_status(key, now) == "active"
+        scopes = frozenset(key.scopes or ())
         if key.key_prefix == prefix:
             return KeyCandidate(
-                key.tenant_id, key.key_hash, active, disabled_at is not None, key.id
+                key.tenant_id,
+                key.key_hash,
+                active,
+                disabled_at is not None,
+                key.id,
+                scopes,
             )
         in_grace = bool(key.previous_expires_at and key.previous_expires_at > now)
         return KeyCandidate(
@@ -261,6 +313,7 @@ async def find_candidate(db: AsyncSession, plaintext: str) -> KeyCandidate | Non
             active and in_grace,
             disabled_at is not None,
             key.id,
+            scopes,
         )
 
     legacy = (
