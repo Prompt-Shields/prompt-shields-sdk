@@ -544,6 +544,41 @@ components:
             Sum of `cache_saved_cost` (USD): the upstream cost that gateway
             cache hits avoided. Null when no event in the period reported one.
           example: 18.4
+        cache_tokens_saved:
+          type: integer
+          nullable: true
+          description: >
+            Sum of the gateway's `est_tokens_saved`: its estimate of the
+            prompt tokens that cache lookups saved (0 for a miss). An
+            estimate from the request size, not a provider token count.
+            Null when no event in the period reported one.
+          example: 2400000
+        learner_requests:
+          type: integer
+          description: >
+            Events the SDK routing learner decided in auto mode (they carry
+            `route_learner_mode`: `exploit`, `explore` or `policy`, where
+            `policy` means it kept the route policy's pick). 0 when the
+            learner decided none.
+          example: 4200
+        learner_routed_share:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Share (0 to 1) of all events in the period that the routing
+            learner decided (`learner_requests` / `total_requests`). Null
+            when there were no events.
+          example: 0.28
+        learner_explore_share:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Share (0 to 1) of the learner-decided events on which it explored
+            (`route_learner_mode: explore`), a random pick from the
+            policy-safe set. Null when the learner decided no event.
+          example: 0.05
         outcome_signals_reported:
           type: integer
           description: >
@@ -593,6 +628,10 @@ components:
         - budget_blocked_requests
         - cache_hit_rate
         - cache_saved_usd
+        - cache_tokens_saved
+        - learner_requests
+        - learner_routed_share
+        - learner_explore_share
         - outcome_signals_reported
         - outcome_signal_counts
         - period

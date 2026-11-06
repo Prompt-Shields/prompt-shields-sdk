@@ -1,8 +1,10 @@
 """Telemetry loss accounting (#87): batch metadata on /ingest/events and the
 GET /telemetry/loss read endpoint. DB tests use PS_TEST_DATABASE_URL."""
 
+from types import SimpleNamespace
+
 import pytest
-from collector import ingest, loss_accounting
+from collector import ingest, loss_accounting, partner_rate_limit
 from collector.app import app
 from collector.loss_accounting import (
     UNIDENTIFIED_CLIENT,
@@ -159,6 +161,11 @@ async def test_batches_without_metadata_and_ignored_fields(seeded_db):
 @pytest.mark.asyncio
 async def test_rate_limited_batch_counted_as_rejected(seeded_db, monkeypatch):
     monkeypatch.setattr(ingest.settings, "rate_limit_per_minute", 1)
+    # Pin the limiter's clock: with the real one the two requests could fall
+    # either side of a minute boundary, land in fresh windows and both pass.
+    monkeypatch.setattr(
+        partner_rate_limit, "time", SimpleNamespace(time=lambda: 1_800_000_030.0)
+    )
     fresh = FixedWindowRateLimiter()
     app.dependency_overrides[get_ingest_rate_limiter] = lambda: fresh
     try:

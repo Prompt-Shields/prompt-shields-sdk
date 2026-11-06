@@ -638,7 +638,7 @@ async def test_budget_and_cache_fields_under_rls(rls_db):
         "vendor": "openai", "model": "gpt-4o-mini", "source": "gateway",
         "budget_state": "exceeded", "budget_id": "mkt-monthly",
         "budget_action": "downgraded", "cache_status": "SEMANTIC HIT",
-        "cache_saved_cost": 0.002,
+        "cache_saved_cost": 0.002, "est_tokens_saved": 75,
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
@@ -651,12 +651,14 @@ async def test_budget_and_cache_fields_under_rls(rls_db):
             )).scalar_one()
         assert (ev.budget_state, ev.budget_action, ev.cache_status) == (
             "exceeded", "downgraded", "semantic hit")
+        assert ev.est_tokens_saved == 75
         url = f"/partner/v1/assets/{ev.asset_id}/usage-summary"
         resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_A}"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["budget_downgraded_requests"] == 1
         assert body["cache_hit_rate"] == 1.0 and body["cache_saved_usd"] == 0.002
+        assert body["cache_tokens_saved"] == 75
         # Tenant b neither sees the asset nor its aggregates.
         resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
         assert resp.status_code == 404
@@ -667,6 +669,83 @@ async def test_budget_and_cache_fields_under_rls(rls_db):
             text("SELECT count(*) FROM ai_usage_events WHERE budget_id IS NOT NULL")
         )).scalar_one()
     assert n == 0
+
+
+async def test_cache_tokens_saved_summary_is_tenant_scoped_under_rls(rls_db):
+    """Both tenants report est_tokens_saved on one model; each tenant's
+    usage summary sums only its own events, and tenant b's credential gets
+    404 for tenant a's asset."""
+    a, b = rls_db["a"], rls_db["b"]
+    lookup = {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway",
+              "cache_status": "HIT"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key, tokens in ((KEY_A, (40, 60)), (KEY_B, (1000,))):
+            resp = await c.post(
+                "/ingest/events", headers={"Authorization": f"Bearer {key}"},
+                json={"events": [{**lookup, "est_tokens_saved": t} for t in tokens]})
+            assert resp.status_code == 200, resp.text
+
+        assets = {}
+        for tenant in (a, b):
+            async with rls_db["plain"]() as s:
+                await rls.set_tenant(s, tenant)
+                assets[tenant] = (await s.execute(
+                    select(AIUsageEvent.asset_id)
+                    .where(AIUsageEvent.est_tokens_saved.is_not(None))
+                )).scalars().first()
+                total = (await s.execute(
+                    text("SELECT sum(est_tokens_saved) FROM ai_usage_events")
+                )).scalar_one()
+            assert total == (100 if tenant == a else 1000)
+
+        for tenant, key, expected in ((a, PARTNER_KEY_A, 100), (b, PARTNER_KEY_B, 1000)):
+            url = f"/partner/v1/assets/{assets[tenant]}/usage-summary"
+            resp = await c.get(url, headers={"Authorization": f"Bearer {key}"})
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["cache_tokens_saved"] == expected
+        resp = await c.get(f"/partner/v1/assets/{assets[a]}/usage-summary",
+                           headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
+        assert resp.status_code == 404
+
+
+async def test_learner_route_fields_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    event = {
+        "vendor": "mistral", "model": "auto", "served_model": "mistral-small-rls",
+        "source": "sdk", "route_learner_mode": "explore", "route_propensity": 0.0125,
+        "route_learner_version": "lv1-0123456789abcdef", "route_learner_frozen": False,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},
+                            json={"events": [event, {**event, "route_learner_mode": "policy",
+                                                     "route_propensity": 0.9875}]})
+        assert resp.status_code == 200, resp.text
+        # Tenant b's learner traffic for the same model stays out of a's numbers.
+        resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_B}"},
+                            json={"events": [event] * 3})
+        assert resp.status_code == 200, resp.text
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, a)
+            rows = (await s.execute(
+                select(AIUsageEvent).where(AIUsageEvent.route_learner_mode.is_not(None))
+            )).scalars().all()
+        assert sorted(e.route_learner_mode for e in rows) == ["explore", "policy"]
+        assert all(e.route_learner_version == "lv1-0123456789abcdef" for e in rows)
+        url = f"/partner/v1/assets/{rows[0].asset_id}/usage-summary"
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_A}"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["learner_requests"] == 2
+        assert body["learner_routed_share"] == 1.0 and body["learner_explore_share"] == 0.5
+        resp = await c.get(url, headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
+        assert resp.status_code == 404
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, b)
+        n = (await s.execute(text(
+            "SELECT count(*) FROM ai_usage_events WHERE route_learner_mode IS NOT NULL"
+        ))).scalar_one()
+    assert n == 3
 
 
 def _learner_snapshot() -> dict:
