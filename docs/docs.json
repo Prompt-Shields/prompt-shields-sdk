@@ -150,6 +150,7 @@
         "integrations/ardoq",
         "integrations/leanix",
         "integrations/servicenow",
+        "integrations/microsoft-sentinel",
         "integrations/kong"
       ]
     }

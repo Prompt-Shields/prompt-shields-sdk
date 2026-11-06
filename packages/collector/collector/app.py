@@ -222,6 +222,13 @@ from collector.servicenow import router as servicenow_router
 app.include_router(leanix_router)
 app.include_router(servicenow_router)
 
+# Microsoft Sentinel / Defender XDR export (#32): operator push, partner pull
+from collector.sentinel_export import partner_router as sentinel_partner_router
+from collector.sentinel_export import router as sentinel_router
+
+app.include_router(sentinel_router)
+app.include_router(sentinel_partner_router)
+
 # Tenant admin automation credentials: scoped admin tokens and tenant
 # ingest keys (collector/admin_auth.py)
 from collector.admin_api import router as admin_api_router
