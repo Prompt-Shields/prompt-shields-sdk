@@ -13,6 +13,7 @@ import {
   BEDROCK_MANTLE,
   CLAUDE_PLATFORM_AWS,
   GOOGLE_VERTEX_AI,
+  META_MODEL_API,
 } from '../../globals';
 
 // Providers that natively support the Messages API
@@ -21,6 +22,8 @@ const PROVIDERS_THAT_HANDLE_MESSAGES_FOR_ALL_MODELS = new Set([
   BEDROCK,
   // Claude Platform on AWS serves the first-party Messages API (#74).
   CLAUDE_PLATFORM_AWS,
+  // The Meta Model API serves an Anthropic-compatible Messages API (#74).
+  META_MODEL_API,
 ]);
 
 const PROVIDERS_THAT_HANDLE_MESSAGES_FOR_ANTHROPIC_MODELS = new Set([
