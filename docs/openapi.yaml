@@ -99,7 +99,8 @@ components:
             attestations:write: Record human attestations, including retiring and un-retiring assets (never granted by default)
             risks:review: Confirm or reject risk mappings, with reviewer and comment (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
-            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
+            audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events, or pull it from `/siem/audit` (never granted by default)
+            evidence:read: Pull per-call routing evidence as NDJSON from `/siem/calls` (never granted by default)
             learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
             learner:review: Accept or reject routing learner recommendations, with reviewer and comment (never granted by default)
             spend-alerts:read: List spend anomaly alerts and receive them as `spend.anomaly` webhook events (never granted by default)
@@ -497,6 +498,43 @@ components:
             policy marks it `EEA`. It says nothing about US CLOUD Act
             exposure. See `GET /partner/v1/usage/sovereign-share`.
           example: 0.62
+        budget_downgraded_requests:
+          type: integer
+          nullable: true
+          description: >
+            Events whose `budget_action` is `downgraded`: a spend budget moved
+            the call to a cheaper model (SDK or gateway budgets). Null when no
+            event in the period reported a `budget_action`.
+          example: 14
+        budget_blocked_requests:
+          type: integer
+          nullable: true
+          description: >
+            Events whose `budget_action` is `blocked`. The SDK and gateway
+            refuse an over-budget call before it is sent and report no event
+            for it today, so this stays 0 until an emitter reports refused
+            calls. Null when no event in the period reported a
+            `budget_action`.
+          example: 0
+        cache_hit_rate:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Share (0 to 1) of the gateway's cache lookups that were served
+            from the cache (exact or semantic hit), counted on the gateway's
+            cache-only events; a hit call's own event (`cost_source: cache`)
+            is not counted again. Null when no lookup was reported in the
+            period.
+          example: 0.31
+        cache_saved_usd:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Sum of `cache_saved_cost` (USD): the upstream cost that gateway
+            cache hits avoided. Null when no event in the period reported one.
+          example: 18.4
         outcome_signals_reported:
           type: integer
           description: >
@@ -542,6 +580,10 @@ components:
         - savings_usd
         - fallback_rate
         - sovereign_share
+        - budget_downgraded_requests
+        - budget_blocked_requests
+        - cache_hit_rate
+        - cache_saved_usd
         - outcome_signals_reported
         - outcome_signal_counts
         - period
@@ -4126,6 +4168,124 @@ paths:
                   next_cursor: null
                   sync_token: "2026-03-25T15:01:00Z"
 
+  /partner/v1/siem/calls:
+    get:
+      operationId: pullSiemCalls
+      tags: [Sync]
+      summary: Per-call routing evidence as NDJSON (SIEM export)
+      description: |
+        One `AICall` record per model call, in the Microsoft Sentinel table
+        schema `PromptShieldsAudit_CL` (see the Microsoft Sentinel
+        integration guide): served provider, model and jurisdiction, route
+        policy version, sensitivity level and source, route mode, group and
+        reason, fallback chain, cost and tokens. Metadata only.
+
+        Ordered by call time. Only calls older than `settle_seconds` are
+        returned. `X-PS-Cursor` is the position after the last line: pass
+        it back as `cursor`. `X-PS-Has-More: true` means call again now.
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: '`X-PS-Cursor` of the previous call'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start time when there is no cursor
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 1000
+        - name: settle_seconds
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 86400
+            default: 300
+          description: Leave out calls newer than this, so late-delivered events are not skipped
+      security:
+        - OAuth2: [evidence:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: Invalid cursor or `since`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: NDJSON, one record per line
+          headers:
+            X-PS-Cursor:
+              schema:
+                type: string
+            X-PS-Has-More:
+              schema:
+                type: string
+                enum: ['true', 'false']
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+
+  /partner/v1/siem/audit:
+    get:
+      operationId: pullSiemAudit
+      tags: [Sync]
+      summary: Audit trail rows with chain hashes as NDJSON (SIEM export)
+      description: |
+        One `Audit` record per row of the tenant's hash-chained audit trail,
+        in chain order, with `PsAuditSeq`, `PsAuditPrevHash` and
+        `PsAuditRowHash`, in the Microsoft Sentinel table schema
+        `PromptShieldsAudit_CL`. `X-PS-Cursor` is the `seq` of the last line.
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+          description: '`X-PS-Cursor` of the previous call'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start time when there is no cursor
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 1000
+      security:
+        - OAuth2: [audit:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: Invalid `since`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: NDJSON, one record per line
+          headers:
+            X-PS-Cursor:
+              schema:
+                type: string
+            X-PS-Has-More:
+              schema:
+                type: string
+                enum: ['true', 'false']
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+
   /partner/v1/export:
     get:
       operationId: exportRegistry
@@ -5601,6 +5761,62 @@ paths:
       responses:
         '200':
           description: Connector configuration (no secrets) and sync state
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/sentinel/sync:
+    post:
+      operationId: syncSentinel
+      tags: [Operator]
+      summary: Push a tenant's AI call evidence and audit trail to Microsoft Sentinel (operator)
+      description: |
+        Sends new `AICall` and `Audit` records to the tenant's Log Analytics
+        workspace through the Azure Monitor Logs Ingestion API
+        (`PS_SENTINEL_EXPORT`). Returns `not_configured` when the tenant has
+        no configuration.
+      security:
+        - OperatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id]
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Export result (counts, status)
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/sentinel/status:
+    get:
+      operationId: sentinelStatus
+      tags: [Operator]
+      summary: Microsoft Sentinel export state for a tenant (operator)
+      security:
+        - OperatorToken: []
+      parameters:
+        - $ref: '#/components/parameters/TenantIdQueryParam'
+      responses:
+        '200':
+          description: Configuration (hosts and ids, no secrets), cursors and last run
           content:
             application/json:
               schema:
