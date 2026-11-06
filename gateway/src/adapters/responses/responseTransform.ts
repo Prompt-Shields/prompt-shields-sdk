@@ -242,13 +242,26 @@ export function responseModel(originalRequest?: any): string {
  * `response.in_progress` and the terminal event), so a client reads the
  * same request config back from either, as from the native API.
  */
+const TOOL_CREDENTIAL_KEYS = new Set(['headers', 'authorization']);
+
+function withoutToolCredentials(tool: any) {
+  if (!tool || typeof tool !== 'object') return tool;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(tool)) {
+    if (!TOOL_CREDENTIAL_KEYS.has(key.toLowerCase())) out[key] = value;
+  }
+  return out;
+}
+
 export function echoRequestFields(originalRequest?: any) {
   const req =
     originalRequest && typeof originalRequest === 'object'
       ? originalRequest
       : {};
   // Function tools take the Response object's full shape; other tool types
-  // (web_search, mcp, custom, ...) are echoed as sent.
+  // (web_search, mcp, custom, ...) are echoed as sent, minus credentials
+  // (an mcp tool's `headers` / `authorization`), which must not reach the
+  // response or anything that logs it.
   const tools = (Array.isArray(req.tools) ? req.tools : []).map((t: any) =>
     !t?.type || t.type === 'function'
       ? {
@@ -258,7 +271,7 @@ export function echoRequestFields(originalRequest?: any) {
           parameters: t?.parameters ?? null,
           strict: t?.strict ?? null,
         }
-      : t
+      : withoutToolCredentials(t)
   );
   // `text` keeps any other config sent with it (e.g. verbosity)
   const text = {
