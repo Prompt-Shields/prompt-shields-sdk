@@ -58,7 +58,7 @@ async def _seed(engine):
                cost=Decimal("1.000000"), latency_ms=500, session_id="s2",
                tokens_cache_write=400, counterfactual_cost=Decimal("0.500000"),
                budget_state="ok", budget_action="none", cache_status="hit",
-               cache_saved_cost=Decimal("0.250000")),
+               cost_source="cache", cache_saved_cost=Decimal("0.250000")),
             # Tenant A, 30d..90d
             ev(ta, asset_a, timedelta(days=60), tokens_in=7, tokens_out=7, session_id="s3"),
             # Tenant A, older than 90d
@@ -66,7 +66,7 @@ async def _seed(engine):
             # Tenant B — must never show up in tenant A's numbers
             ev(tb, asset_b, timedelta(hours=1), tokens_in=5000, tokens_out=5000,
                cost=Decimal("9.000000"), latency_ms=9000, session_id="sb",
-               budget_action="blocked", cache_status="hit",
+               budget_action="blocked", cache_status="hit", cost_source="cache",
                cache_saved_cost=Decimal("5.000000")),
         ])
 

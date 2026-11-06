@@ -32,7 +32,7 @@ from db.models import (
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, not_, or_, select
 
 from collector import aibom, attestation, focus_export
 from collector.attestation import (
@@ -551,21 +551,24 @@ def budget_cache_columns() -> list:
     count() skips NULL, so the *_reported counts are the events that sent
     the field at all, and the case() counts only the matching ones.
 
-    The gateway reports a cache lookup twice: a cache-only event for every
-    lookup (any status, no cost_source) and, on a hit, the call's own event
-    with the same cache_status and cost_source "cache". The hit rate counts
-    only the former, so a hit is counted once and misses are in the
-    denominator.
+    The gateway reports each cache lookup as cache_status on the call's own
+    event, once per request; a hit's event has cost_source "cache". Older
+    gateways also sent a cache-only event per lookup (no cost_source), which
+    repeats each hit. So a hit is counted from its cost_source "cache" event
+    only, and every other status from any event: each lookup counts once
+    for both gateway versions.
     """
     action = AIUsageEvent.budget_action
-    lookup = AIUsageEvent.cost_source.is_distinct_from(COST_SOURCE_CACHE)
-    status = case((lookup, AIUsageEvent.cache_status))
+    status = AIUsageEvent.cache_status
+    is_hit = status.in_(CACHE_HIT_STATUSES)
+    own_hit = and_(is_hit, AIUsageEvent.cost_source == COST_SOURCE_CACHE)
+    lookup = or_(own_hit, and_(status.is_not(None), not_(is_hit)))
     return [
         func.count(action).label("budget_reported"),
         func.count(case((action == "downgraded", 1))).label("budget_downgraded"),
         func.count(case((action == "blocked", 1))).label("budget_blocked"),
-        func.count(status).label("cache_reported"),
-        func.count(case((status.in_(CACHE_HIT_STATUSES), 1))).label("cache_hits"),
+        func.count(case((lookup, 1))).label("cache_reported"),
+        func.count(case((own_hit, 1))).label("cache_hits"),
         func.sum(AIUsageEvent.cache_saved_cost).label("cache_saved_usd"),
     ]
 

@@ -638,7 +638,7 @@ async def test_budget_and_cache_fields_under_rls(rls_db):
         "vendor": "openai", "model": "gpt-4o-mini", "source": "gateway",
         "budget_state": "exceeded", "budget_id": "mkt-monthly",
         "budget_action": "downgraded", "cache_status": "SEMANTIC HIT",
-        "cache_saved_cost": 0.002,
+        "cost": 0, "cost_source": "cache", "cache_saved_cost": 0.002,
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {KEY_A}"},

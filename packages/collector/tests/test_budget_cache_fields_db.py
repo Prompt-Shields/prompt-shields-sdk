@@ -44,8 +44,9 @@ CACHE_HIT = {
     "cache_saved_cost": 0.0021,
 }
 
-# The cache-only event the gateway sends for every cache lookup
-# (buildCacheEvent): no cost and no cost_source.
+# The cache-only event older gateways sent for every cache lookup
+# (buildCacheEvent): no cost and no cost_source. Current gateways put the
+# lookup on the call's own event instead.
 CACHE_LOOKUP = {
     "vendor": "openai",
     "model": "gpt-4o-mini",
@@ -199,8 +200,16 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
     events = [
         BUDGET_EVENT,
         {**BUDGET_EVENT, "budget_state": "warn", "budget_action": "none"},
-        {**BUDGET_EVENT, "budget_action": "blocked"},
-        # The gateway sends a cache-only event for every lookup and, on a
+        # A call the gateway refused for a budget: no usage, no cost.
+        {
+            "vendor": "openai",
+            "model": "gpt-4o-mini",
+            "source": "gateway",
+            "budget_state": "exceeded",
+            "budget_id": "mkt-monthly",
+            "budget_action": "blocked",
+        },
+        # An older gateway: a cache-only event for every lookup and, on a
         # hit, the call's own event (cost_source cache) with the same status.
         CACHE_LOOKUP,
         CACHE_HIT,
@@ -213,6 +222,16 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
         {**CACHE_LOOKUP, "cache_status": "MISS"},
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway", "cost": 0.003},
         {**CACHE_LOOKUP, "cache_status": "SEMANTIC BYPASS"},
+        # A current gateway: one event per call, carrying its lookup.
+        {**CACHE_HIT, "cache_status": "HIT", "cache_saved_cost": 0.001},
+        {
+            "vendor": "openai",
+            "model": "gpt-4o-mini",
+            "source": "gateway",
+            "cost": 0.003,
+            "cost_source": "pricing_table",
+            "cache_status": "MISS",
+        },
         # Reports neither: left out of every rate.
         {"vendor": "openai", "model": "gpt-4o-mini", "source": "gateway"},
     ]
@@ -222,10 +241,11 @@ async def test_usage_summary_reports_budget_and_cache_aggregates(seeded_db):
     body = await _summary(seeded_db)
     assert body["budget_downgraded_requests"] == 1
     assert body["budget_blocked_requests"] == 1
-    # Three hits among five lookups; the calls' own hit events are not
-    # counted a second time.
-    assert body["cache_hit_rate"] == 0.6
-    assert body["cache_saved_usd"] == 0.003
+    # Four hits among seven lookups: an older gateway's hits are counted
+    # once (from the cost_source cache event), a current gateway's miss
+    # from the call's own event.
+    assert body["cache_hit_rate"] == round(4 / 7, 4)
+    assert body["cache_saved_usd"] == 0.004
 
 
 @pytest.mark.asyncio
