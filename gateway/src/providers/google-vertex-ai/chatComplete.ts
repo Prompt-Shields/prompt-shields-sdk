@@ -26,6 +26,8 @@ import {
   transformGeminiFinishReason,
   geminiStreamToolCalls,
   transformGeminiStreamParts,
+  assistantToolCallTextParts,
+  toolResponseName,
 } from '../google/chatComplete';
 import {
   ChatCompletionResponse,
@@ -71,6 +73,7 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
       transform: (params: Params) => {
         let lastRole: GoogleMessageRole | undefined;
         const messages: GoogleMessage[] = [];
+        const toolNames: Record<string, string> = {};
 
         params.messages?.forEach((message: Message) => {
           // From gemini-1.5 onwards, systemInstruction is supported
@@ -85,11 +88,15 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
           let parts = [];
 
           if (message.role === 'assistant' && message.tool_calls) {
+            parts.push(...assistantToolCallTextParts(message));
             message.tool_calls.forEach((tool_call: ToolCall) => {
               const thought_signature = getThoughtSignature(
                 params.model,
                 tool_call.function.thought_signature
               );
+              if (tool_call.id) {
+                toolNames[tool_call.id] = tool_call.function?.name;
+              }
               parts.push({
                 functionCall: {
                   name: tool_call.function?.name,
@@ -101,7 +108,7 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
               });
             });
           } else if (message.role === 'tool') {
-            const toolName = message.name ?? 'gateway-tool-filler-name';
+            const toolName = toolResponseName(message, toolNames);
             // OpenAI: tool message content is string or array of text parts (type "text").
             if (typeof message.content === 'string') {
               parts.push({

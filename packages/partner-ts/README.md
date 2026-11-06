@@ -24,6 +24,11 @@ for await (const asset of client.assets.list({ limit: 200 })) {
 | `client.assets.attestations(id, { field, limit })` | `GET /partner/v1/assets/{id}/attestations` |
 | `client.assets.attest(id, { field, state, attestedBy, comment })` | `POST /partner/v1/assets/{id}/attestations` (`attestations:write`) |
 | `client.assets.usageSummary(id, { period })` | `GET /partner/v1/assets/{id}/usage-summary` |
+| `client.assets.riskReviews(id, riskId, { limit })` | `GET /partner/v1/assets/{id}/risks/{riskId}/reviews` (review history; `meta.current` is the mapping now) |
+| `client.assets.reviewRisk(id, riskId, { status, reviewedBy, comment })` | `POST /partner/v1/assets/{id}/risks/{riskId}/review` (`risks:review`) |
+| `client.spendAlerts.list({ status, severity, since, until, limit })` | `GET /partner/v1/spend-alerts` (`spend-alerts:read`; no cursor, up to 500) |
+| `client.spendAlerts.get(id)` / `acknowledge(id)` | `GET /partner/v1/spend-alerts/{id}`, `POST .../acknowledge` (`spend-alerts:acknowledge`) |
+| `client.usage.focusExport({ start, end, format, granularity, costMode }, { signal })` | `GET /partner/v1/usage/focus-export` (`usage:export`; FinOps FOCUS v1.4 CSV or JSON Lines, streamed) |
 | `client.usage.savings({ period, groupBy })` | `GET /partner/v1/usage/savings` (realised savings vs. counterfactual, by day/week/month, asset, use case or business unit) |
 | `client.usage.sovereignShare({ period })` | `GET /partner/v1/usage/sovereign-share` (share of calls and spend served in the EEA, per sensitivity level) |
 | `client.telemetry.coverage()` | `GET /partner/v1/telemetry/coverage` (coverage per source: sdk, gateway, otel, kong) |
@@ -31,7 +36,8 @@ for await (const asset of client.assets.list({ limit: 200 })) {
 | `client.changes.list({ since })` / `listPage(...)` | `GET /partner/v1/changes` |
 | `client.export.get()` | `GET /partner/v1/export` |
 | `client.health()` | `GET /partner/v1/health` |
-| `client.send(method, path, { query, body })` | Any other endpoint |
+| `client.send(method, path, { query, body, retrySafe })` | Any other endpoint |
+| `client.getStream(path, query, { signal, accept })` | Any other download: the `Response` with its body unread |
 
 Webhook subscriptions are the tenant admin API (`/api/v1/admin/webhooks`), so they need a client built with the tenant's API key, not partner credentials:
 
@@ -48,7 +54,9 @@ Responses are converted from the API's snake_case to camelCase. Request paramete
 
 **Auth.** Pass `clientId` and `clientSecret` for OAuth client credentials, or `apiKey`. With OAuth, the client fetches a token from `/oauth/token`, caches it, refreshes it a minute before it expires, and fetches a new one once if a request gets a 401.
 
-**Retries.** The client retries 429, 502, 503, 504 and network errors up to `maxRetries` times (default 2). POST requests (attestations, creating a subscription, rotating a secret, redelivering) are retried only on 429, since after a network error or a 5xx the server may already have acted. On a 429 it waits for the time in `Retry-After`. If `Retry-After` is longer than `maxRetryAfterSeconds` (default 60), it throws `RateLimitError` straight away.
+**Retries.** The client retries 429, 502, 503, 504 and network errors up to `maxRetries` times (default 2). POST requests (attestations, risk reviews, creating a subscription, rotating a secret, redelivering) are retried only on 429, since after a network error or a 5xx the server may already have acted. `spendAlerts.acknowledge()` is idempotent, so it is retried like a GET. On a 429 it waits for the time in `Retry-After`. If `Retry-After` is longer than `maxRetryAfterSeconds` (default 60), it throws `RateLimitError` straight away.
+
+**Streamed downloads.** `client.usage.focusExport()` resolves with a `FocusExport` once the response headers arrive (errors before then throw as usual, with retries). It carries `focusVersion`, `windowStart`, `windowEnd` and `filename` from the headers. The body is read once, as you consume it, through `rows()` (parsed JSON Lines rows, FOCUS column names kept as sent), `lines()`, `for await (const chunk of exp)`, `saveTo(path)` (Node: streams into a temporary file and renames it to `path` when complete; on failure nothing is left behind and an existing file is kept) or `body` (a web `ReadableStream`). Only `text()` holds the body in memory. `timeoutMs` covers the wait for the headers; pass `{ signal }` to cancel or bound the download. A lost or aborted connection, or a body that ends mid-line (truncated), throws `APIConnectionError`.
 
 **Errors.** Every error extends `PartnerError`. An HTTP error is an `APIError` with `status`, `title` and `detail`. The subclasses are `BadRequestError`, `AuthenticationError`, `PermissionDeniedError`, `NotFoundError`, `RateLimitError` (which has `retryAfter`) and `InternalServerError`. A network failure is an `APIConnectionError`, and a timeout is an `APITimeoutError`.
 
@@ -63,6 +71,6 @@ npm test
 
 Tests mock `fetch` and make no network calls.
 
-**Types and `docs/openapi.yaml`.** The types in `src/types.ts` are written by hand, because the SDK camelCases the wire format. `test/openapi.test.ts` (part of `npm test`, or alone with `npm run check:openapi`) reads `src/types.ts` with the TypeScript compiler and fails when a schema property, enum value, query parameter or operation in `docs/openapi.yaml` has no counterpart in the SDK, or the SDK has a field the spec does not. It also fails when a field is optional in one and required in the other, and it checks request bodies. The webhook admin API (`client.webhooks`) is covered too. The provider credential routes are in the spec but not wrapped by the SDK; call them with `client.send()`.
+**Types and `docs/openapi.yaml`.** The types in `src/types.ts` are written by hand, because the SDK camelCases the wire format. `test/openapi.test.ts` (part of `npm test`, or alone with `npm run check:openapi`) reads `src/types.ts` with the TypeScript compiler and fails when a schema property, enum value, query parameter or operation in `docs/openapi.yaml` has no counterpart in the SDK, or the SDK has a field the spec does not. It also fails when a field is optional in one and required in the other, and it checks request bodies. The webhook admin API (`client.webhooks`) is covered too, and the FOCUS row columns are compared by their exact names. The provider credential routes, the rest of the tenant admin API and the operator routes are in the spec but not wrapped by the SDK (the test lists them as such); call them with `client.send()`.
 
 **Releasing.** See [RELEASING.md](RELEASING.md). Publishing needs the `NPM_TOKEN` secret and the `@prompt-shields` npm org.

@@ -165,7 +165,7 @@
       "derivation": "Standard requests report service_tier 'default': 1000 x $2.50 + 2000 x $10.00"
     },
     {
-      "id": "openai-gpt-4o-priority-unpriced",
+      "id": "openai-gpt-4o-priority",
       "dimension": "service_tier",
       "vendor": "openai",
       "model": "gpt-4o",
@@ -174,8 +174,76 @@
         "tokens_out": 2000,
         "service_tier": "priority"
       },
+      "expected_cost": 0.03825,
+      "derivation": "Priority list price $4.25 in / $17.00 out: 1000 x $4.25 + 2000 x $17.00 = $0.00425 + $0.034"
+    },
+    {
+      "id": "openai-gpt-5-priority-with-cache-read",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "gpt-5",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cached": 8000,
+        "service_tier": "priority"
+      },
+      "expected_cost": 0.027,
+      "derivation": "Priority list price $2.50 in / $0.25 cached in / $20.00 out: 2000 x $2.50 + 8000 x $0.25 + 1000 x $20.00 = $0.005 + $0.002 + $0.020"
+    },
+    {
+      "id": "openai-o4-mini-flex-with-cache-read",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "o4-mini",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cached": 8000,
+        "service_tier": "flex"
+      },
+      "expected_cost": 0.004404,
+      "derivation": "Flex list price $0.55 in / $0.138 cached in / $2.20 out: 2000 x $0.55 + 8000 x $0.138 + 1000 x $2.20 = $0.0011 + $0.001104 + $0.0022"
+    },
+    {
+      "id": "openai-gpt-4o-batch-with-cache-read",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 1000,
+        "tokens_cached": 8000,
+        "service_tier": "batch"
+      },
+      "expected_cost": 0.0125,
+      "derivation": "Batch list price $1.25 in / $5.00 out; no batch cached-input price is listed, so cached input is the standard $1.25 x (batch / standard input) = $0.625: 2000 x $1.25 + 8000 x $0.625 + 1000 x $5.00 = $0.0025 + $0.005 + $0.005"
+    },
+    {
+      "id": "openai-gpt-4-turbo-priority-unpriced",
+      "dimension": "service_tier",
+      "vendor": "openai",
+      "model": "gpt-4-turbo",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "service_tier": "priority"
+      },
       "expected_cost": null,
-      "derivation": "Priority is priced per model, not as a multiple of standard; with no rate in the catalog the call is unmetered rather than under-reported"
+      "derivation": "Priority is priced per model, not as a multiple of standard; with no priority rate in the catalog the call is unmetered rather than under-reported"
+    },
+    {
+      "id": "azure-openai-gpt-4o-priority-unpriced",
+      "dimension": "service_tier",
+      "vendor": "azure-openai",
+      "model": "gpt-4o",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "service_tier": "priority"
+      },
+      "expected_cost": null,
+      "derivation": "Azure OpenAI is priced at OpenAI list prices for standard and batch only; OpenAI's per-model priority rates are not applied to another vendor, so the call is unmetered"
     },
     {
       "id": "google-gemini-2.5-flash-batch",

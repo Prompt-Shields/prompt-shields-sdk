@@ -33,7 +33,21 @@ export function transformResponsesToChatCompletions(req: any): Params {
   } else if (Array.isArray(req.input)) {
     for (const item of req.input) {
       const msg = transformInputItem(item);
-      if (msg) messages.push(msg);
+      if (!msg) continue;
+      // PS fork (#73): a turn's function calls (parallel calls, or calls
+      // after the assistant's text) are one assistant message, so each call
+      // is directly followed by its tool result as Chat Completions,
+      // Anthropic and Gemini require.
+      const last = messages[messages.length - 1];
+      if (
+        item.type === 'function_call' &&
+        msg.tool_calls &&
+        last?.role === 'assistant'
+      ) {
+        last.tool_calls = [...(last.tool_calls ?? []), ...msg.tool_calls];
+        continue;
+      }
+      messages.push(msg);
     }
   }
 
@@ -170,13 +184,30 @@ function transformInputItem(item: any): Message | null {
         return {
           role: 'tool',
           tool_call_id: item.call_id,
-          content: item.output,
+          content: functionCallOutputText(item.output),
         };
       }
       break;
   }
 
   return null;
+}
+
+/**
+ * PS fork (#73): `function_call_output.output` may be a string or a list of
+ * `input_text` / `input_image` / `input_file` parts. Chat Completions tool
+ * messages carry text, so text parts are joined; other parts fall back to
+ * JSON rather than reaching the provider as unknown part types.
+ */
+function functionCallOutputText(output: any): string {
+  if (typeof output === 'string') return output;
+  if (
+    Array.isArray(output) &&
+    output.every((p: any) => p?.type === 'input_text' || p?.type === 'text')
+  ) {
+    return output.map((p: any) => p.text || '').join('\n');
+  }
+  return JSON.stringify(output);
 }
 
 /**

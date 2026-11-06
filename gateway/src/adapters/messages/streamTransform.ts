@@ -16,6 +16,15 @@ import { toAnthropicStopReason } from './responseTransform';
 
 type BlockType = 'thinking' | 'text' | 'tool_use';
 
+interface ToolCall {
+  id: string;
+  name: string;
+  /** Content block index once the block is open (streamed live) */
+  index?: number;
+  /** Arguments not yet sent (buffered calls) */
+  args: string;
+}
+
 interface StreamState {
   messageId: string;
   model: string;
@@ -31,8 +40,15 @@ interface StreamState {
   contentBlockIndex: number;
   /** Currently open content block, if any */
   openBlock: { index: number; type: BlockType } | null;
-  /** Chat tool_call index → Anthropic content block index */
-  toolBlocks: Record<number, { index: number; id: string }>;
+  /** Chat tool_call index → its tool call */
+  toolBlocks: Record<number, ToolCall>;
+  /**
+   * PS fork (#73): tool calls that started while another tool_use block was
+   * open. Anthropic blocks never interleave, but OpenAI-compatible streams
+   * may send parallel calls' arguments interleaved, so these are buffered
+   * and sent, in order, once the model finishes.
+   */
+  bufferedTools: ToolCall[];
   hasToolUse: boolean;
   finishReason: string | null;
   stopReason: string | null;
@@ -61,6 +77,28 @@ function openBlock(
     sse('content_block_start', { index, content_block: contentBlock })
   );
   return index;
+}
+
+/** PS fork (#73): send buffered tool calls, one complete block each. */
+function flushBufferedTools(state: StreamState, events: string[]) {
+  for (const call of state.bufferedTools) {
+    call.index = openBlock(state, events, 'tool_use', {
+      type: 'tool_use',
+      id: call.id,
+      name: call.name,
+      input: {},
+    });
+    if (call.args) {
+      events.push(
+        sse('content_block_delta', {
+          index: call.index,
+          delta: { type: 'input_json_delta', partial_json: call.args },
+        })
+      );
+    }
+    closeOpenBlock(state, events);
+  }
+  state.bufferedTools = [];
 }
 
 /** Ensure an open block of the given type and return its index. */
@@ -96,6 +134,7 @@ export function transformStreamChunk(
 
     const events: string[] = [];
     closeOpenBlock(state, events);
+    flushBufferedTools(state, events);
     state.stopReason = toAnthropicStopReason(
       state.finishReason,
       state.hasToolUse
@@ -243,32 +282,45 @@ export function transformStreamChunk(
     for (const tc of delta.tool_calls) {
       if (!tc) continue;
       const toolIdx = tc.index ?? 0;
-      const known = state.toolBlocks[toolIdx];
+      let call: ToolCall | undefined = state.toolBlocks[toolIdx];
       // A new id on a known index is a new call (Gemini restarts at 0)
-      const isNew = !known || (tc.id && tc.id !== known.id);
-      let index = known?.index;
-      if (isNew) {
-        const id = tc.id || `toolu_${randomUUID()}`;
-        index = openBlock(state, events, 'tool_use', {
-          type: 'tool_use',
-          id,
+      if (!call || (tc.id && tc.id !== call.id)) {
+        call = {
+          id: tc.id || `toolu_${randomUUID()}`,
           name: tc.function?.name || '',
-          input: {},
-        });
-        state.toolBlocks[toolIdx] = { index, id };
+          args: '',
+        };
+        state.toolBlocks[toolIdx] = call;
         state.hasToolUse = true;
+        // PS fork (#73): stream it live unless another tool_use block is
+        // open (its arguments may still be coming); buffer it otherwise.
+        if (
+          state.openBlock?.type === 'tool_use' ||
+          state.bufferedTools.length
+        ) {
+          state.bufferedTools.push(call);
+        } else {
+          call.index = openBlock(state, events, 'tool_use', {
+            type: 'tool_use',
+            id: call.id,
+            name: call.name,
+            input: {},
+          });
+        }
       }
 
-      if (tc.function?.arguments) {
-        events.push(
-          sse('content_block_delta', {
-            index,
-            delta: {
-              type: 'input_json_delta',
-              partial_json: tc.function.arguments,
-            },
-          })
-        );
+      const args = tc.function?.arguments;
+      if (args) {
+        if (call.index === undefined) {
+          call.args += args;
+        } else if (state.openBlock?.index === call.index) {
+          events.push(
+            sse('content_block_delta', {
+              index: call.index,
+              delta: { type: 'input_json_delta', partial_json: args },
+            })
+          );
+        }
       }
     }
   }
@@ -281,6 +333,7 @@ export function transformStreamChunk(
       state.hasToolUse
     );
     closeOpenBlock(state, events);
+    flushBufferedTools(state, events);
   }
 
   return events.length > 0 ? events.join('') : undefined;
@@ -303,6 +356,7 @@ export function createStreamState(requestedModel?: unknown): StreamState {
     contentBlockIndex: 0,
     openBlock: null,
     toolBlocks: {},
+    bufferedTools: [],
     hasToolUse: false,
     finishReason: null,
     stopReason: null,
