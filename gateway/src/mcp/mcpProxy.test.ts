@@ -876,6 +876,43 @@ describe('MCP proxy', () => {
         expect(attrs(spans[2])['gen_ai.operation.name']).toBeUndefined();
       });
 
+      test('spans carry no session id, resource URI, prompt arguments or result', async () => {
+        await rpc(
+          'tools/call',
+          { name: 'echo', arguments: { q: 'result-marker' } },
+          {
+            version: LEGACY,
+            headers: { 'mcp-session-id': SESSION_ID },
+          }
+        );
+        await rpc(
+          'resources/read',
+          { uri: 'file:///secret-resource-path' },
+          { headers: { 'mcp-session-id': SESSION_ID } }
+        );
+        await rpc(
+          'prompts/get',
+          { name: 'summarise', arguments: { topic: 'private-prompt-var' } },
+          { headers: { 'mcp-session-id': SESSION_ID } }
+        );
+        expect(enqueue).toHaveBeenCalledTimes(3);
+        const all = JSON.stringify(enqueue.mock.calls);
+        for (const leaked of [
+          SESSION_ID,
+          'secret-resource-path',
+          'private-prompt-var',
+          'result-marker',
+          'mcp.session.id',
+          'mcp.resource.uri',
+          'gen_ai.tool.call.arguments',
+          'gen_ai.tool.call.result',
+        ])
+          expect(all).not.toContain(leaked);
+        const [, resource, prompt] = enqueue.mock.calls.map(([s]) => s.span);
+        expect(resource.name).toBe('resources/read');
+        expect(prompt.name).toMatch(/^prompts\/get/);
+      });
+
       test('nothing is emitted when export is off', async () => {
         _setMcpOtelExporterForTests(null);
         await rpc('tools/call', { name: 'echo' });
