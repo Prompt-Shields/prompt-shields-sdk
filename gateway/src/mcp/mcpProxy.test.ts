@@ -37,6 +37,7 @@ import {
   toolDefinitionHash,
 } from './policy';
 import { _resetMcpTelemetryForTests, psMcpTelemetrySender } from './telemetry';
+import { _setMcpOtelExporterForTests } from './otel';
 import {
   FakeMcpServer,
   SESSION_ID,
@@ -769,13 +770,153 @@ describe('MCP proxy', () => {
         outcome: 'ok',
         latency_ms: expect.any(Number),
         transport: 'streamable-http',
+        request_bytes: expect.any(Number),
+        response_bytes: expect.any(Number),
         environment: 'prod',
         calling_service: 'agent-a',
       });
+      expect(ok.request_bytes).toBeGreaterThan(20);
+      expect(ok.response_bytes).toBeGreaterThan(20);
       expect(JSON.stringify(sendSpy.mock.calls)).not.toContain('private');
       expect(sendSpy.mock.calls[1][0]).toMatchObject({
         tool_name: 'fail',
         outcome: 'error',
+      });
+    });
+
+    test('the configured owner rides on the event (asset owner, #77)', async () => {
+      configure(fake, { owner: 'platform-team@example.com' });
+      await rpc('tools/call', { name: 'echo' });
+      expect(sendSpy.mock.calls[0][0]).toMatchObject({
+        server_name: 'fake',
+        server_owner: 'platform-team@example.com',
+      });
+      for (const owner of ['', 'not an email', 42, 'a@b'])
+        expect(() =>
+          parseServer(
+            'x',
+            {
+              url: 'https://mcp.example.com/',
+              auth: { type: 'none' },
+              tools: { deny: [] },
+              owner,
+            },
+            {}
+          )
+        ).toThrow(McpConfigError);
+    });
+
+    describe('OTel MCP spans', () => {
+      let enqueue: jest.Mock;
+      beforeEach(() => {
+        enqueue = jest.fn();
+        _setMcpOtelExporterForTests({ enqueue } as any);
+      });
+      afterEach(() => _setMcpOtelExporterForTests(null));
+      const attrs = (span: any) =>
+        Object.fromEntries(
+          span.attributes.map((a: any) => [
+            a.key,
+            a.value.stringValue ?? a.value.intValue ?? a.value.boolValue,
+          ])
+        );
+
+      test('one span per request with MCP semantic-convention attributes, no content', async () => {
+        await rpc(
+          'tools/call',
+          { name: 'echo', arguments: { q: 'private-arg' } },
+          {
+            id: 7,
+            headers: {
+              traceparent:
+                '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
+            },
+          }
+        );
+        expect(enqueue).toHaveBeenCalledTimes(1);
+        const { span } = enqueue.mock.calls[0][0];
+        expect(span.name).toBe('tools/call echo');
+        expect(span.kind).toBe(3);
+        expect(span.traceId).toBe('0123456789abcdef0123456789abcdef');
+        expect(span.parentSpanId).toBe('0123456789abcdef');
+        expect(span.status).toEqual({ code: 0 });
+        const a = attrs(span);
+        expect(a).toMatchObject({
+          'mcp.method.name': 'tools/call',
+          'gen_ai.operation.name': 'execute_tool',
+          'gen_ai.tool.name': 'echo',
+          'jsonrpc.request.id': '7',
+          'mcp.protocol.version': MODERN,
+          'network.transport': 'tcp',
+          'server.address': '127.0.0.1',
+          'ps.mcp.server': 'fake',
+          'ps.mcp.outcome': 'ok',
+        });
+        expect(Number(a['ps.mcp.request.size'])).toBeGreaterThan(0);
+        expect(Number(a['ps.mcp.response.size'])).toBeGreaterThan(0);
+        expect(JSON.stringify(span)).not.toContain('private-arg');
+      });
+
+      test('refusals and errors end the span with error.type', async () => {
+        await rpc('tools/call', { name: 'delete_everything' });
+        await rpc('tools/call', { name: 'fail' });
+        // SSE: the span ends when the response event has been checked.
+        await (
+          await rpc('tools/list', undefined, { server: 'fakesse' })
+        ).text();
+        const spans = enqueue.mock.calls.map(([s]) => s.span);
+        expect(spans).toHaveLength(3);
+        // A refused name stays out of the span name (cardinality).
+        expect(spans[0].name).toBe('tools/call');
+        expect(attrs(spans[0])['gen_ai.tool.name']).toBe('delete_everything');
+        expect(attrs(spans[0])['error.type']).toBe('denied');
+        expect(spans[0].status.code).toBe(2);
+        expect(attrs(spans[1])['error.type']).toBe('tool_error');
+        expect(spans[2].name).toBe('tools/list');
+        expect(attrs(spans[2])['gen_ai.operation.name']).toBeUndefined();
+      });
+
+      test('spans carry no session id, resource URI, prompt arguments or result', async () => {
+        await rpc(
+          'tools/call',
+          { name: 'echo', arguments: { q: 'result-marker' } },
+          {
+            version: LEGACY,
+            headers: { 'mcp-session-id': SESSION_ID },
+          }
+        );
+        await rpc(
+          'resources/read',
+          { uri: 'file:///secret-resource-path' },
+          { headers: { 'mcp-session-id': SESSION_ID } }
+        );
+        await rpc(
+          'prompts/get',
+          { name: 'summarise', arguments: { topic: 'private-prompt-var' } },
+          { headers: { 'mcp-session-id': SESSION_ID } }
+        );
+        expect(enqueue).toHaveBeenCalledTimes(3);
+        const all = JSON.stringify(enqueue.mock.calls);
+        for (const leaked of [
+          SESSION_ID,
+          'secret-resource-path',
+          'private-prompt-var',
+          'result-marker',
+          'mcp.session.id',
+          'mcp.resource.uri',
+          'gen_ai.tool.call.arguments',
+          'gen_ai.tool.call.result',
+        ])
+          expect(all).not.toContain(leaked);
+        const [, resource, prompt] = enqueue.mock.calls.map(([s]) => s.span);
+        expect(resource.name).toBe('resources/read');
+        expect(prompt.name).toMatch(/^prompts\/get/);
+      });
+
+      test('nothing is emitted when export is off', async () => {
+        _setMcpOtelExporterForTests(null);
+        await rpc('tools/call', { name: 'echo' });
+        expect(enqueue).not.toHaveBeenCalled();
       });
     });
 
@@ -1015,6 +1156,34 @@ describe('MCP proxy', () => {
         );
       }
       expect(fake.requests).toHaveLength(2);
+    });
+
+    test('a tool hidden by policy answers -32010 whatever its Mcp-Param headers say', async () => {
+      // Learn the declarations, then hide the tool from the caller's group.
+      await listTools([regionTool()]);
+      const SUBJECT_HASH = '0123456789abcdef0123456789abcdef';
+      const id: OidcIdentity = {
+        subjectHash: SUBJECT_HASH,
+        subject: 's',
+        group: {
+          name: 'g',
+          match: ['g'],
+          mcp: parseMcpGroupPolicy('g', {
+            servers: { fake: { tools: { deny: ['echo'] } } },
+          }),
+        },
+        config: { telemetrySubject: 'hash' } as any,
+      };
+      const res = await rpc(
+        'tools/call',
+        { name: 'echo', arguments: { region: 'eu-west1' } },
+        { identity: id, headers: { 'mcp-param-region': 'us-west1' } }
+      );
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as any).error.code).toBe(
+        MCP_ERRORS.TOOL_DENIED
+      );
+      expect(fake.requests).toHaveLength(0);
     });
 
     test('null or absent values need no header', async () => {

@@ -529,6 +529,24 @@ accepts or rejects each recommendation. See the [Routing Learner guide](/guides/
 ps-learn --tuples tuples.jsonl --policy route-policy.json --out snapshot.json
 ```
 
+### Auto mode (opt-in)
+
+`ShieldsRouter(mode="local", learner=AutoLearner(...))` lets the learner route live calls
+of the use cases you enable, only inside the policy-safe set, with 5% exploration (0 for
+`restricted` and `min_group: frontier`), auto-rollback and a freeze on drift or poisoning.
+A use case can only be enabled with an accurate `recommend` track record. Without
+`learner=` nothing changes. See [Auto mode](/guides/routing-learner#auto-mode).
+
+```python
+from prompt_shields.learner_auto import AutoLearner, fetch_recommendations
+
+learner = AutoLearner(
+    {"support": fetch_recommendations("support", partner_token=TOKEN, ps_collector_url=URL)},
+    snapshot=json.load(open("snapshot.json")),
+)
+router = ShieldsRouter(ps_api_key=..., providers=..., policy="route-policy.json", learner=learner)
+```
+
 ## PII Detection
 
 The SDK runs a local pattern-based scanner before sending telemetry:

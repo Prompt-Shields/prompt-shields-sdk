@@ -6,10 +6,10 @@ Point an MCP client (Claude Desktop, Cursor, VS Code, an agent framework) at `ht
 
 ## Protocol support
 
-| Revision                 | What the proxy does                                                                                                                                                                                                                                                                      |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Revision                 | What the proxy does                                                                                                                                                                                                                                                                                                                |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `2026-07-28` (stateless) | `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call`, `prompts/get` and `resources/read`, `Mcp-Name` are required and must match the body (`=?base64?…?=` values are decoded). A mismatch is `400` with JSON-RPC `-32020` (`HeaderMismatch`). `Mcp-Param-*` headers are checked against the arguments (below) and forwarded. |
-| `2025-11-25` (sessions)  | `initialize`, `Mcp-Session-Id` (both ways), the GET stream, DELETE and `Last-Event-ID` pass through, but the GET stream never carries a response (see below), so a resumed stream does not deliver the response it would replay. Mirrored headers are checked when a client sends them.  |
+| `2025-11-25` (sessions)  | `initialize`, `Mcp-Session-Id` (both ways), the GET stream, DELETE and `Last-Event-ID` pass through, but the GET stream never carries a response (see below), so a resumed stream does not deliver the response it would replay. Mirrored headers are checked when a client sends them.                                            |
 
 Every POST body must be one JSON-RPC 2.0 message: batches are refused, and a request method without an `id` (other than `notifications/*`) is refused, so a `tools/call` cannot be smuggled as a notification. The body sent upstream is the JSON the gateway checked, re-serialised, so the upstream cannot read a different message (duplicate keys, parser differences).
 
@@ -36,6 +36,7 @@ Servers are read at startup from the `mcp_servers` key of `PS_MCP_CONFIG_FILE`, 
       "tools": { "allow": ["search_issues", "get_issue"] },
       "pinned_tools": { "search_issues": "<sha256 hex>" },
       "on_description_change": "block",
+      "owner": "platform-team@example.com",
       "input_guardrails": [
         {
           "default.regexMatch": { "rule": "[Pp]assword|[Ss]ecret", "not": true }
@@ -60,6 +61,7 @@ Servers are read at startup from the `mcp_servers` key of `PS_MCP_CONFIG_FILE`, 
 | `max_request_bytes`                      | 1 MiB    | Request body limit                                                                                                                                                                                                                |
 | `max_response_bytes`                     | 8 MiB    | Largest JSON response, or SSE event, the gateway inspects                                                                                                                                                                         |
 | `max_description_length`                 | `2048`   | Tool descriptions are cut to this length                                                                                                                                                                                          |
+| `owner`                                  | none     | Email address of the server's owner. Sent as `server_owner` on each tool-call event; the collector registers the server as an asset (vendor `mcp`) with this owner while the asset has none (an owner set in the registry wins)   |
 
 Environment:
 
@@ -80,11 +82,24 @@ The MCP route is a `/v1/*` route, so the gateway's OIDC middleware runs on it be
 - A user whose groups match no policy entry under `default: deny` gets the OIDC `403` (`policy.denied`), and the group's rate limit applies (`429`).
 - The group's provider and model allowlists do not apply: an MCP call names no provider or model.
 - **Per-group MCP policy.** A policy entry's `mcp` key lists the servers its users may reach and, per server, tool `allow` / `deny` lists layered on the server's own tool policy: a tool must pass both, and the group's `deny` wins (matched regardless of case). See [the OIDC guide](../../docs/guides/gateway-oidc.mdx#group-policy).
+
   ```json
-  { "name": "analysts", "match": ["quants"],
-    "mcp": { "servers": { "github": { "tools": { "deny": ["create_issue"] } }, "docs": {} } } }
+  {
+    "name": "analysts",
+    "match": ["quants"],
+    "mcp": {
+      "servers": {
+        "github": { "tools": { "deny": ["create_issue"] } },
+        "docs": {}
+      }
+    }
+  }
   ```
+
+  The group's tool rules apply to `tools/call` and `tools/list` only. On a server the group may use, `prompts/get` and `resources/read` (and the other non-tool methods) pass through under the server's configuration alone, as they do without OIDC: there is no per-prompt or per-resource policy yet (see "Not in this slice"). Leave a server out of the group's `servers` to keep its prompts and resources from the group.
+
   A server the entry does not list is `403` with JSON-RPC `-32016` for every request (POST, GET, DELETE), whether or not it is configured, so a group cannot probe for server ids. A tool the entry does not allow is answered like the server's own policy (`-32010`, HTTP 200), and `tools/list` shows the user only the tools that pass both. Both refusals record a `policy.denied` event (`mcp_server_not_allowed` / `mcp_tool_not_allowed`, with `ps.mcp.server` and `ps.mcp.tool`). An entry without `mcp`, a user who matched no entry under `default: allow`, and OIDC off keep the previous behaviour: every configured server, within its tool policy.
+
 - The IdP token never reaches the MCP server. When the request also carries `x-portkey-provider` with a key in `PS_OIDC_PROVIDER_KEYS`, the middleware sets that provider key as `Authorization`; the MCP handler never forwards `Authorization`, so it does not leave the gateway either.
 - The `mcp_tool_call` telemetry event carries `user_id` (the subject hash the LLM telemetry uses; the hash even with `PS_OIDC_TELEMETRY_SUBJECT=raw`, nothing with `off`) and `user_group` (the policy entry's `name`). Never the raw subject or email.
 
@@ -106,7 +121,8 @@ JSON-RPC errors from the gateway use the implementation-defined range: `-32010` 
 
 ## Audit and metrics
 
-- **Collector.** One `mcp_tool_call` event per `tools/call` that passed the tool policy, posted to `POST /ingest/mcp` (#214), with the same opt-in, retries and loss accounting as LLM telemetry (`PS_API_KEY`, `PS_COLLECTOR_URL`): `{source: "gateway", server_name: <server id>, tool_name, outcome, latency_ms, transport: "streamable-http", environment, calling_service, user_id, user_group}`. `environment` comes from `X-PS-Environment`, `calling_service` from `X-PS-Calling-Service`, `user_id` / `user_group` from the OIDC identity (above). `outcome` is `ok`, `error` or `blocked` (a guardrail refused the arguments or the result); the collector counts blocked calls apart from errors (`blocked_count`). Calls refused by the tool policy are counted in metrics only, so a client cannot fill the registry with made-up tool names. The LLM telemetry, OTel and router middlewares skip this route.
+- **Collector.** One `mcp_tool_call` event per `tools/call` that passed the tool policy, posted to `POST /ingest/mcp` (#214), with the same opt-in, retries and loss accounting as LLM telemetry (`PS_API_KEY`, `PS_COLLECTOR_URL`): `{source: "gateway", server_name: <server id>, tool_name, outcome, latency_ms, transport: "streamable-http", request_bytes, response_bytes, server_owner, environment, calling_service, user_id, user_group}`. `request_bytes` is the size of the request body and `response_bytes` the size of the response message the gateway checked (absent when there was none); `server_owner` is the server's `owner`. The collector keeps lifetime aggregates (`GET /api/v1/registry/mcp-tools`, `GET /partner/v1/mcp/tools`), daily metering per server and tool (`GET /partner/v1/mcp/usage`, scope `mcp:read`) and registers each server as an asset with its owner (#77). `environment` comes from `X-PS-Environment`, `calling_service` from `X-PS-Calling-Service`, `user_id` / `user_group` from the OIDC identity (above). `outcome` is `ok`, `error` or `blocked` (a guardrail refused the arguments or the result); the collector counts blocked calls apart from errors (`blocked_count`). Calls refused by the tool policy are counted in metrics only, so a client cannot fill the registry with made-up tool names. The LLM telemetry, OTel and router middlewares skip this route.
+- **OpenTelemetry** (`PS_OTEL_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, the same exporter and batches as the LLM spans): one CLIENT span per JSON-RPC request the proxy decided on, per the [OTel MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/mcp.md) (status Development). Name `{mcp.method.name} {target}` (`tools/call search_issues`, `prompts/get summary`; a tool name the policy refused is left out of the name). Attributes: `mcp.method.name`, `gen_ai.operation.name` (`execute_tool` for `tools/call`), `gen_ai.tool.name`, `gen_ai.prompt.name`, `jsonrpc.request.id`, `mcp.protocol.version`, `network.transport` (`tcp`), `network.protocol.name` (`http`), `server.address` / `server.port` (the configured upstream), `error.type` (the JSON-RPC error code of an upstream error, `tool_error` for `isError: true`, else the gateway outcome: `denied`, `blocked`, `invalid`, `upstream_error`), `rpc.status_code` (upstream JSON-RPC error code), and `ps.mcp.server`, `ps.mcp.outcome`, `ps.mcp.request.size`, `ps.mcp.response.size`, `ps.user.hash`, `ps.user.group`. The parent comes from the client's `traceparent`; the span ends when the response was checked (for SSE, when its event was). Never content: the spec's opt-in `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` and `gen_ai.prompt.variable` are not emitted whatever `PS_OTEL_CAPTURE_CONTENT` says, nor `mcp.resource.uri` (a URI can carry data) or `mcp.session.id` (a session handle). Requests refused before a server is known (gateway auth, unknown or group-denied server) have no span; their security events cover them. Sending these spans to the Prompt Shields collector's `/ingest/otel/v1/traces` while `PS_API_KEY` telemetry is on counts each tool call twice (once as `gateway`, once as `otel`): use one.
 - **Prometheus** (`PS_METRICS_ENABLED`):
   - `ps_gateway_mcp_requests_total{server, method, outcome}`: `method` is one of the MCP methods, else `notification` or `other`; `outcome` is `ok`, `error`, `denied`, `blocked`, `invalid` or `upstream_error`.
   - `ps_gateway_mcp_tool_calls_total{server, tool, outcome}` and `ps_gateway_mcp_tool_call_duration_seconds{server, outcome}`: `tool` is a tool the policy allowed, capped at 200 names per process (then `other`).
@@ -119,7 +135,8 @@ JSON-RPC errors from the gateway use the implementation-defined range: `-32010` 
 - Per-consumer and per-tool rate limits.
 - Shared drift state across replicas, and verifying a pinned tool's definition on `tools/call` when no `tools/list` has been seen.
 - Policy and guardrails on `resources/*`, `prompts/*`, `initialize` instructions, server-to-client requests on 2025-11-25 streams (sampling, elicitation) and `notifications/message`. These pass through unchanged today.
-- OTel MCP spans (`mcp.method.name`) from the gateway, and a collector-side MCP server registry that the gateway pulls its allowlist from (Phase 2).
+- Per-group (OIDC) rules for `prompts/get` and `resources/read`: group rules cover tools only (above).
+- A collector-side MCP server registry that the gateway pulls its allowlist from (Phase 2).
 - DNS-rebinding-proof upstream checks (the host check is by name; see FORK_NOTICE #6). The upstream URL is set by the operator, never by the client, so the default trust of `localhost` / `127.0.0.1` (for a server beside the gateway) is not reachable by a client; set `TRUSTED_CUSTOM_HOSTS` to narrow it.
 - `Mcp-Param-*` headers of a tool the gateway has not yet seen in a `tools/list` (no declarations to check against; the upstream must check them, per the spec), and shared `x-mcp-header` state across replicas.
 - Guardrails on MRTR `inputResponses` of `prompts/get` and `resources/read` retries (those methods have no guardrails yet).

@@ -77,6 +77,7 @@ async def test_ingest_aggregates_names_only(client, seeded_db):
         "server_name", "tool_name", "source", "calling_service", "environment",
         "transport", "call_count", "error_count", "blocked_count", "user_hash",
         "user_group", "avg_latency_ms", "first_seen", "last_seen",
+        "asset_id", "owner_email",
     }
     resp = await client.get("/api/v1/registry/mcp-tools", headers=HEADERS,
                             params={"server_name": "nope"})
@@ -236,3 +237,11 @@ async def test_otel_mcp_spans(client, seeded_db):
     async with seeded_db.connect() as conn:
         events = (await conn.execute(text("SELECT count(*) FROM ai_usage_events"))).scalar()
     assert events == 0
+    # Each named server is registered as an asset (#77), after the commit.
+    async with seeded_db.connect() as conn:
+        assets = (await conn.execute(text(
+            "SELECT model, discovery_source FROM ai_assets WHERE vendor = 'mcp' ORDER BY model"
+        ))).all()
+    assert [(a[0], a[1]) for a in assets] == [
+        ("crm.internal", ["otel"]), ("support-bot", ["otel"]),
+    ]

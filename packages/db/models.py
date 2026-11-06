@@ -371,9 +371,11 @@ class McpToolUsage(Base):
     spans) or the server's ``service.name`` (server spans); "unknown" when
     none is known. ``source`` is ``sdk``, ``otel``, ``gateway`` or ``scan``.
     ``calling_service`` and ``environment`` are "" when not reported, so the
-    upsert key has no NULLs. Separate from ``ai_assets`` on purpose: an MCP
-    server is not an AI model. Rows not seen within the tenant's retention
-    period are purged (collector/retention.py).
+    upsert key has no NULLs. Usage is kept apart from ``ai_assets`` (an MCP
+    server is not an AI model), but each named server is also registered as
+    an asset (vendor ``mcp``, model = ``server_name``) so it has an owner and
+    a lifecycle (#77, collector/mcp_usage.py). Rows not seen within the
+    tenant's retention period are purged (collector/retention.py).
     """
 
     __tablename__ = "mcp_tool_usage"
@@ -407,6 +409,40 @@ class McpToolUsage(Base):
             unique=True,
         ),
         Index("ix_mcp_tool_usage_tenant_last_seen", "tenant_id", "last_seen"),
+    )
+
+
+class McpToolUsageDaily(Base):
+    """MCP tool-call metering (#77): one row per (tenant, UTC day, source,
+    server, tool) with counts, latency and bytes. Names and numbers only.
+    ``bytes_count`` is how many calls reported bytes (the gateway does), so
+    a mean can be taken. Rows older than the retention period are purged.
+    """
+
+    __tablename__ = "mcp_tool_usage_daily"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    day = Column(Date, nullable=False)
+    source = Column(Text, nullable=False)
+    server_name = Column(Text, nullable=False)
+    tool_name = Column(Text, nullable=False)
+    call_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    error_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    blocked_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    latency_ms_total = Column(BigInteger, nullable=False, default=0, server_default="0")
+    latency_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    request_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    response_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    bytes_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (
+        Index(
+            "ux_mcp_tool_usage_daily_key",
+            "tenant_id", "day", "source", "server_name", "tool_name",
+            unique=True,
+        ),
+        Index("ix_mcp_tool_usage_daily_tenant_day", "tenant_id", "day"),
     )
 
 
