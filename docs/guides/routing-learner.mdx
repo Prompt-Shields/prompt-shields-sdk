@@ -58,8 +58,10 @@ aggregates over the prompt features and the recommendations.
   it off). It is not traffic: it changes no call count, current route or
   propensity term, and shows up as the arm's `replay_n` (not `n`). It is used
   only when the replayed model is one of the group's policy candidates,
-  differs from the logged model and has a measured parity from a large
-  enough cell. Snapshots of tuples without these fields are unchanged; with
+  differs from the logged model, has a measured parity from a large
+  enough cell and a projected cost. A recommendation resting on replay rows
+  alone (no logged call on the recommended model) carries
+  `counterfactual_only: true` in its projection. Snapshots of tuples without these fields are unchanged; with
   them the snapshot carries an `inputs` block with these settings and the
   replay rows used and skipped.
 * **Thompson sampling.** Each arm keeps a Bayesian linear regression. The

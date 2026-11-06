@@ -447,7 +447,21 @@ def test_replay_arm_moves_the_recommendation_to_the_cheaper_candidate():
     assert p["quality_delta"] == pytest.approx(-0.01, abs=0.005)
     assert p["arm_samples"] == {FRONTIER: len(rows), SMALL: 0}
     assert p["counterfactual_samples"] == {SMALL: len(rows)}
+    assert p["counterfactual_only"] is True
     assert snap["inputs"]["replay"] == {"rows": len(rows), "skipped": {}}
+
+
+def test_an_unpriced_replay_does_not_train_a_zero_cost():
+    # Logged cost but no tokens, so the replayed arm's cost comes from its
+    # regression; an unpriced replay must not teach it a cost of 0 (which
+    # would project the whole current cost as savings).
+    rows = _teardown()
+    for r in rows:
+        r["cost_usd"] = r.pop("tokens_in") / 1000 * 0.0025 + r.pop("tokens_out") / 1000 * 0.01
+        r["replay"]["cost_usd"] = None
+    snap = train(rows, POLICY)
+    assert snap["recommendations"] == []
+    assert snap["inputs"]["replay"] == {"rows": 0, "skipped": {"no_cost": len(rows)}}
 
 
 def test_replay_is_not_traffic():

@@ -72,8 +72,10 @@ above. It trains the replayed arm but is not traffic: it adds nothing to
 (propensity) term, and it counts in the arm's ``replay_n``, not ``n``; the
 ``min_arm_samples`` gate counts both. A replay row is used only when the
 replayed ``provider:model`` is one of the group's policy candidates,
-differs from the logged model, and has a measured parity from a sufficient
-cell. Without these fields nothing in the snapshot changes, so an existing
+differs from the logged model, has a measured parity from a sufficient
+cell and a projected cost (an unpriced replay would train a cost of 0).
+A recommendation whose recommended model has no logged rows is marked
+``counterfactual_only``. Without these fields nothing in the snapshot changes, so an existing
 snapshot's version is unchanged; with them the snapshot carries an
 ``inputs`` block with these settings and the rows used and skipped.
 
@@ -428,10 +430,15 @@ def _replay_row(
     factor = _sample_weight(rp.get("quality_samples"), inputs)
     if factor is None:
         return None, "insufficient_sample"
+    cost = _num(rp.get("cost_usd"))
+    if cost is None or cost < 0:
+        # An unpriced replay would train the arm's cost regression at 0 and
+        # project the whole current cost as savings.
+        return None, "no_cost"
     return replace(
         row, arm=arm, quality=quality, source="replay",
         weight=SOURCE_WEIGHTS["eval"] * inputs.replay_weight * factor,
-        cost=_num(rp.get("cost_usd")), propensity=None,
+        cost=cost, propensity=None,
     ), None
 
 
@@ -872,6 +879,10 @@ def train(
                         },
                         **({"counterfactual_samples": replay_samples}
                            if replay_samples else {}),
+                        # No logged call on the recommended model: the whole
+                        # case rests on replayed (eval parity) rows.
+                        **({"counterfactual_only": True}
+                           if arms[best].n == 0 else {}),
                     },
                 })
         groups_out.append(group)
