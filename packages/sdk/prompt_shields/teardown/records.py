@@ -307,7 +307,7 @@ def normalise_provider(value: Any) -> str | None:
 
 # Checked in order: Bedrock model ids ("anthropic.claude-...") come first.
 _MODEL_PREFIX_PROVIDER = (
-    (re.compile(r"^(?:(?:us|eu|apac|global)\.)?(?:anthropic|amazon|meta|cohere|mistral)\."), "bedrock"),
+    (re.compile(r"^(?:(?:us|us-gov|eu|apac|au|ca|jp|in|global)\.)?(?:anthropic|amazon|meta|cohere|mistral)\."), "bedrock"),
     (re.compile(r"^(gpt-|o\d|chatgpt|text-embedding|whisper|tts|dall-e|gpt-image)"), "openai"),
     (re.compile(r"^claude"), "anthropic"),
     (re.compile(r"^gemini"), "google"),

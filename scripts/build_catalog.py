@@ -113,7 +113,7 @@ PRICE_CHAINS = (
     ("input_cost_per_token_flex", "output_cost_per_token_flex"),
 )
 COUNTRY = re.compile(r"^[A-Z]{2}$")
-JURISDICTIONS = ("EEA", "US", "NO", "CH", "UK", "CA")
+JURISDICTIONS = ("EEA", "US", "NO", "CH", "UK", "CA", "AU", "SG", "CN")
 VERSION = re.compile(r"^\d{4}-\d{2}-\d{2}(\.\d+)?$")
 
 SDK_HEADER = (
