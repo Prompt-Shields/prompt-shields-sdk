@@ -43,6 +43,7 @@ export class Download implements AsyncIterable<Uint8Array> {
   /** `Content-Type` of the body. */
   readonly contentType: string | null;
   private used = false;
+  private complete = false;
   /**
    * Set by a subclass whose server ends every non-empty body with `\n`, so
    * a body that stops mid-line is reported as truncated.
@@ -65,6 +66,15 @@ export class Download implements AsyncIterable<Uint8Array> {
   /** Whether the body has been (or is being) read. */
   get bodyUsed(): boolean {
     return this.used;
+  }
+
+  /**
+   * Whether the body was read to its end without error, through `chunks()`
+   * or anything built on it (`lines()`, `text()`, `saveTo()`, ...). A body
+   * taken raw from `body` is never marked fully read.
+   */
+  get fullyRead(): boolean {
+    return this.complete;
   }
 
   /**
@@ -95,6 +105,7 @@ export class Download implements AsyncIterable<Uint8Array> {
           if (this.endsWithNewline && last !== -1 && last !== 0x0a) {
             throw new APIConnectionError('Download ended mid-line: the body is truncated');
           }
+          this.complete = true;
           return;
         }
         if (next.value && next.value.byteLength > 0) {
@@ -247,12 +258,31 @@ export class SiemBatch extends Download {
   readonly cursor: string | null;
   /** `X-PS-Has-More`: true when the batch was full, so call again now. */
   readonly hasMore: boolean;
+  private markedConsumed = false;
 
   constructor(response: Response) {
     super(response);
     this.endsWithNewline = true;
     this.cursor = response.headers.get('x-ps-cursor');
     this.hasMore = (response.headers.get('x-ps-has-more') ?? '').toLowerCase() === 'true';
+  }
+
+  /**
+   * Whether a `SiemFeed` may move its cursor past this batch: the body was
+   * read to its end (`fullyRead`) or `markConsumed()` was called.
+   */
+  get consumed(): boolean {
+    return this.fullyRead || this.markedConsumed;
+  }
+
+  /**
+   * Tell `SiemFeed.batches()` that you are done with this batch although it
+   * was not read through `records()`, `lines()`, `text()` or `saveTo()`:
+   * you read it in full from `body`, or you mean to skip its records. The
+   * feed's cursor then moves past it.
+   */
+  markConsumed(): void {
+    this.markedConsumed = true;
   }
 
   /** Parsed records, one at a time. Column names are kept as sent (`TimeGenerated`, `PsServedModel`). */
@@ -277,10 +307,11 @@ export class SiemBatch extends Download {
  * until a batch is not full; `cursor` then holds the position to start the
  * next run from.
  *
- * `cursor` moves only after a whole batch has been yielded, so a loop that
- * stops part way through a batch (or throws) leaves it at the start of
- * that batch: save it and that batch is read again next time (at least
- * once delivery). Each iteration continues from `cursor`.
+ * `cursor` moves past a batch only once its body has been read to the end
+ * (or `markConsumed()` was called), so a loop that stops part way through a
+ * batch (or throws) leaves it at the start of that batch: save it and that
+ * batch is read again next time (at least once delivery). Each iteration
+ * continues from `cursor`.
  */
 export class SiemFeed implements AsyncIterable<SiemRecord> {
   /** Where the next batch starts: the last fully read batch's cursor, or the starting cursor. */
@@ -293,7 +324,14 @@ export class SiemFeed implements AsyncIterable<SiemRecord> {
     this.cursor = cursor;
   }
 
-  /** Whole batches. Read each batch's body before asking for the next. */
+  /**
+   * Whole batches. Read each batch's body to the end (`records()`,
+   * `lines()`, `text()`, `saveTo()`), or call `batch.markConsumed()`, before
+   * asking for the next. Asking for the next batch while the current one is
+   * unread or part read cancels it and throws a `PartnerError`, leaving
+   * `cursor` at the start of that batch, so no record is skipped; the next
+   * iteration starts from that batch again.
+   */
   async *batches(): AsyncGenerator<SiemBatch, void, undefined> {
     const seen = new Set<string>();
     for (;;) {
@@ -302,6 +340,13 @@ export class SiemFeed implements AsyncIterable<SiemRecord> {
         yield batch;
       } finally {
         if (!batch.bodyUsed) await batch.cancel();
+      }
+      if (!batch.consumed) {
+        throw new PartnerError(
+          `The SIEM batch at cursor ${this.cursor ?? '(start)'} was not read to the end before the next batch was ` +
+            'requested; feed.cursor still points at its start, so no record was skipped. Read the whole batch ' +
+            '(records(), lines(), text() or saveTo()) or call batch.markConsumed() before asking for the next.',
+        );
       }
       if (batch.cursor !== null) this.cursor = batch.cursor;
       if (!batch.hasMore) return;

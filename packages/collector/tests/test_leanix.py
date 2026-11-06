@@ -423,6 +423,12 @@ class Fakes:
         self.fail_leanix_with: int | None = None
         # Tenant of the partner key, as the Partner API reports it.
         self.key_tenant: str | None = str(TENANT)
+        # Mocked workspace: (type, external id) of fact sheets the runs
+        # wrote, minus any type the processor "skips".
+        self.workspace: set[tuple[str, str]] = set()
+        self.skip_types: set[str] = set()
+        self.graphql_requests: list[dict] = []
+        self.graphql_response: dict | None = None
 
     def partner(self, r: httpx.Request) -> httpx.Response:
         self.partner_requests.append(r)
@@ -468,8 +474,31 @@ class Fakes:
             return httpx.Response(200, json={})
         if r.url.path == f"{lx.INTEGRATION_API}/synchronizationRuns":
             assert r.url.params["start"] == "true"
-            self.ldifs.append(json.loads(r.content))
+            ldif = json.loads(r.content)
+            self.ldifs.append(ldif)
+            self.workspace |= {
+                (i["type"], i["id"])
+                for i in ldif["content"]
+                if i["type"] not in self.skip_types
+            }
             return httpx.Response(200, json={"id": f"run-{len(self.ldifs)}"})
+        if r.url.path == lx.GRAPHQL_PATH:
+            assert r.method == "POST"
+            body = json.loads(r.content)
+            self.graphql_requests.append(body)
+            if self.graphql_response is not None:
+                return httpx.Response(200, json=self.graphql_response)
+            flt = body["variables"]["filter"]
+            (fs_type,) = flt["facetFilters"][0]["keys"]
+            ids = [x.removeprefix("externalId/") for x in flt["externalIds"]]
+            edges = [
+                {"node": {"externalId": {"externalId": x}}}
+                for x in ids
+                if (fs_type, x) in self.workspace
+            ]
+            return httpx.Response(
+                200, json={"data": {"allFactSheets": {"edges": edges}}}
+            )
         if r.url.path.endswith("/status"):
             status = (
                 self.run_status.pop(0)
@@ -773,3 +802,179 @@ async def test_repeated_401_fails_once_refreshed():
 )
 def test_expires_in_parsing(value, expected):
     assert cx._expires_in(value) == expected
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Round-trip verification (read back through GraphQL)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_verify_reads_every_fact_sheet_back(caplog):
+    caplog.set_level(logging.DEBUG)
+    db = FakeSession()
+    fakes = Fakes()
+    out = await lx.sync_leanix(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "ok", out
+    assert out["verification"] == {
+        "checked": 4,
+        "found": 4,
+        "missing_count": 0,
+        "missing": [],
+    }
+    # One lookup per fact sheet type, by external id, after the run.
+    types = [
+        q["variables"]["filter"]["facetFilters"][0]["keys"][0]
+        for q in fakes.graphql_requests
+    ]
+    assert sorted(types) == ["ITComponent", "Interface", "Organization", "Provider"]
+    it = next(q for q in fakes.graphql_requests if "on ITComponent" in q["query"])
+    assert it["variables"]["filter"]["externalIds"] == [
+        f"externalId/{lx.asset_external_id(A1)}"
+    ]
+    assert it["variables"]["first"] == 1
+    paths = [r.url.path for r in fakes.leanix_requests]
+    assert paths.index(lx.GRAPHQL_PATH) > paths.index(
+        f"{lx.INTEGRATION_API}/synchronizationRuns"
+    )
+    state = db.tenant.settings["connectors"]["leanix"]
+    assert state["last_verification"]["found"] == 4
+    assert state["cursor"] == "2026-10-15T11:55:00+00:00"
+    blob = json.dumps(db.tenant.settings) + json.dumps(out) + caplog.text
+    for secret in (LX_TOKEN, PARTNER_KEY, BEARER):
+        assert secret not in blob
+
+
+async def test_verify_missing_fact_sheets_fail_the_sync_and_keep_cursor():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"leanix": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    # The run finishes, but the processor wrote no Interfaces.
+    fakes.skip_types = {"Interface"}
+    out = await lx.sync_leanix(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "error"
+    assert out["error"] == "leanix: 1 of 4 fact sheets not found after sync"
+    assert out["verification"]["missing"] == [lx.flow_external_id(F1)]
+    state = db.tenant.settings["connectors"]["leanix"]
+    assert state["cursor"] == cursor and state["last_status"] == "error"
+    assert state["last_verification"]["missing_count"] == 1
+
+
+async def test_verify_is_off_by_default_and_follows_tenant_setting():
+    fakes = Fakes()
+    db = FakeSession()
+    out = await lx.sync_leanix(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "ok" and "verification" not in out
+    assert fakes.graphql_requests == []
+    # Default off is the pre-verify behaviour: same result keys, same
+    # LeanIX calls, no verification state.
+    assert set(out) == {
+        "tenant_id",
+        "status",
+        "mode",
+        "since",
+        "cursor",
+        "run_ids",
+        "assets",
+        "data_flows",
+        "ldif_items",
+        "runs",
+    }
+    assert lx.GRAPHQL_PATH not in [r.url.path for r in fakes.leanix_requests]
+    assert "last_verification" not in db.tenant.settings["connectors"]["leanix"]
+
+    fakes = Fakes()
+    out = await lx.sync_leanix(
+        FakeSession(), TENANT, **fakes.kwargs(_settings(verify=True))
+    )
+    assert out["verification"]["checked"] == 4 and fakes.graphql_requests
+
+    # An explicit verify=False beats the tenant setting.
+    fakes = Fakes()
+    out = await lx.sync_leanix(
+        FakeSession(), TENANT, verify=False, **fakes.kwargs(_settings(verify=True))
+    )
+    assert "verification" not in out and fakes.graphql_requests == []
+
+
+async def test_verify_pages_lookups_and_covers_every_batch(monkeypatch):
+    monkeypatch.setattr(lx, "VERIFY_PAGE", 1)
+    fakes = Fakes(assets=[_asset(A1), _asset(A2)], run_status=("FINISHED",))
+    out = await lx.sync_leanix(
+        FakeSession(), TENANT, verify=True, **fakes.kwargs(_settings(batch_size=1))
+    )
+    assert out["status"] == "ok", out
+    # 2 IT Components, 1 shared Provider, 1 Organization, 1 Interface.
+    assert out["verification"]["checked"] == 5
+    assert len(fakes.graphql_requests) == 5
+    assert all(
+        len(q["variables"]["filter"]["externalIds"]) == 1
+        for q in fakes.graphql_requests
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"errors": [{"message": f"bad token {LX_TOKEN}"}], "data": None},
+        {"data": None},
+        {"data": {"allFactSheets": {"edges": "nope"}}},
+    ],
+)
+async def test_verify_graphql_errors_fail_without_echo(response):
+    fakes = Fakes()
+    fakes.graphql_response = response
+    out = await lx.sync_leanix(FakeSession(), TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "error"
+    assert out["error"].startswith("leanix: fact sheet lookup returned")
+    assert LX_TOKEN not in json.dumps(out)
+
+
+async def test_verify_http_failure_keeps_cursor():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"leanix": {"cursor": cursor}}})
+    fakes = Fakes(
+        changes=[{"asset": _asset(), "changed_at": "2026-10-15T13:00:00+00:00"}]
+    )
+    leanix = fakes.leanix
+
+    def fail_graphql(r: httpx.Request) -> httpx.Response:
+        if r.url.path == lx.GRAPHQL_PATH:
+            return httpx.Response(403, text=LX_TOKEN)
+        return leanix(r)
+
+    fakes.leanix = fail_graphql
+    out = await lx.sync_leanix(db, TENANT, verify=True, **fakes.kwargs())
+    assert out["status"] == "error"
+    assert out["error"] == "leanix: fact sheet lookup returned HTTP 403"
+    assert LX_TOKEN not in json.dumps(out)
+    state = db.tenant.settings["connectors"]["leanix"]
+    assert state["cursor"] == cursor and state["last_status"] == "error"
+
+
+def test_verify_query_rejects_unsafe_type():
+    with pytest.raises(cx.ConnectorError):
+        lx._verify_query("ITComponent { id } } #")
+
+
+def test_expected_fact_sheets_dedupes_per_type():
+    ldif = lx.build_ldif([_asset(A1), _asset(A2)], {A1: [_flow()]}, connector_id="ps")
+    exp = lx.expected_fact_sheets(ldif)
+    assert exp["ITComponent"] == [lx.asset_external_id(A1), lx.asset_external_id(A2)]
+    assert exp["Provider"] == [lx.provider_external_id("openai")]
+    assert exp["Interface"] == [lx.flow_external_id(F1)]
+
+
+def test_cli_verify_flag(monkeypatch):
+    seen = {}
+
+    async def fake_main(tenant, full, verify=None):
+        seen.update(tenant=tenant, full=full, verify=verify)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(lx, "_main", fake_main)
+    lx.main(["--tenant", str(TENANT)])
+    assert seen == {"tenant": TENANT, "full": False, "verify": None}
+    lx.main(["--tenant", str(TENANT), "--full", "--verify"])
+    assert seen == {"tenant": TENANT, "full": True, "verify": True}

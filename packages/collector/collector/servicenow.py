@@ -17,7 +17,34 @@ through the Identification and Reconciliation Engine (IRE) REST API,
   Asset -> vendor  ``cmdb_rel_ci`` "Depends on::Used by"
   Data flow peer   ``data_system_class`` CI (opt-in)   ``promptshields:system:<hash>``
   Data flow        ``cmdb_rel_ci`` "Sends data to::Receives data from"
+  Business unit    ``business_unit_table`` record      source native key
+                   (opt-in, e.g. ``cmn_department``)   ``promptshields:business-unit:<bu>``
+                   referenced from the asset CI's      (IRE identifies it on ``name``)
+                   ``business_unit_field``
+                   (default ``department``)
+  Risk mapping     ``cmdb_key_value`` related entry    key ``promptshields:risk:<fw>:<cat>``
+                   of the asset CI (opt-in)
   ===============  ==================================  ==============================
+
+Business units and risk mappings are opt-in per tenant (off by default):
+
+- Business units are not CIs. IRE supports a fixed set of non-CMDB tables
+  in the global scope, Department (``cmn_department``) among them, but a
+  payload relationship cannot point at a non-CMDB record. So a business
+  unit is sent as a ``cmn_department`` item and linked to the asset CI with
+  a ``referenceItems`` entry that fills the CI's ``department`` reference
+  field (a ``cmdb_ci`` base field). CSDM's ``business_unit`` table is not on
+  IRE's global non-CMDB list; ``cmn_department.business_unit`` can point a
+  department at it inside ServiceNow.
+- Risk mappings (confirmed ones, from ``/assets/{id}/risks``) go into the
+  ``related`` array of the asset CI as ``cmdb_key_value`` entries, one per
+  framework and category with the highest level as value, matching the
+  AI-BOM ``risk:<framework>:<category>`` properties. IRE writes related
+  entries from the same payload under a Related Entry rule, without using
+  them for identification. GRC / IRM records (``sn_risk_risk``,
+  ``sn_compliance_*``) are not CMDB tables IRE identifies: they need the
+  IRM application and its own APIs, and IRM picks CIs up as entities
+  (entity filters on the CI class or its key values) instead.
 
 Why IRE and not the Table API: the Table API inserts rows as given, so a
 connector writing ``cmdb_ci_*`` with it creates duplicates of CIs that
@@ -136,6 +163,14 @@ DEFAULT_SELF_HOSTED_VENDORS = (
 DEFAULT_PROVIDER_CLASS = "cmdb_ci_service"
 DEFAULT_DATA_SOURCE = "PromptShields"
 RELATION_TYPE = "Depends on::Used by"
+# Business units (opt-in): the asset CI's reference field pointing at the
+# non-CMDB business unit table.
+DEFAULT_BUSINESS_UNIT_FIELD = "department"
+# Risk mappings (opt-in): related entries of the asset CI.
+RISK_TABLE = "cmdb_key_value"
+MAX_BUSINESS_UNIT_NAME = 100
+MAX_KEY = 100
+RISK_LEVEL_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 FLOW_RELATION_TYPE = "Sends data to::Receives data from"
 # Assets per IRE request; each request also carries their vendors, the
 # systems their data flows connect to and the relations between them.
@@ -195,15 +230,29 @@ class ServiceNowConnection(BaseModel):
     # (needs ``data-flows:read`` on the partner key and an identification
     # rule on correlation_id). None: data flows are not read or pushed.
     data_system_class: str | None = None
+    # Opt-in: non-CMDB table for business units (e.g. cmn_department, with
+    # an IRE identification rule on name) and the asset CI's reference
+    # field pointing at it. None: business units are not pushed.
+    business_unit_table: str | None = None
+    business_unit_field: str = DEFAULT_BUSINESS_UNIT_FIELD
+    # Opt-in: confirmed risk mappings as cmdb_key_value related entries of
+    # the asset CI (needs risks:read on the partner key and a Related Entry
+    # rule). False: risk mappings are not read or pushed.
+    push_risk_mappings: bool = False
     batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, le=100)
 
     @field_validator(
-        "asset_class", "self_hosted_asset_class", "provider_class", "data_system_class"
+        "asset_class",
+        "self_hosted_asset_class",
+        "provider_class",
+        "data_system_class",
+        "business_unit_table",
+        "business_unit_field",
     )
     @classmethod
     def _table(cls, v: str | None) -> str | None:
         if v is not None and not _TABLE.match(v):
-            raise ValueError("must be a CMDB table name, e.g. cmdb_ci_appl")
+            raise ValueError("must be a table or field name, e.g. cmdb_ci_appl")
         return v
 
     @field_validator("self_hosted_vendors")
@@ -545,6 +594,8 @@ def _cost(flows: list[dict] | None, conn: ServiceNowConnection) -> int:
     n = 1 + (conn.provider_class is not None)
     if conn.data_system_class is not None and flows:
         n += min(len(flows), MAX_SYSTEMS_PER_ASSET)
+    if conn.business_unit_table is not None:
+        n += 1  # its business unit record, added after the payload is built
     return n
 
 
@@ -590,6 +641,119 @@ def build_payload(
         if _pushable(a):
             builder.add(a, (flows or {}).get(a["id"]))
     return builder.payload()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Business units and risk mappings (opt-in): added to a built payload
+# ──────────────────────────────────────────────────────────────────────
+
+
+def business_unit_ref(bu: str) -> str:
+    """Same external id as the LeanIX connector's business unit."""
+    return f"{NS}:business-unit:{bu}"
+
+
+def _business_unit(a: dict) -> str | None:
+    bu = a.get("business_unit")
+    if not isinstance(bu, str):
+        return None
+    return " ".join(bu.split())[:MAX_BUSINESS_UNIT_NAME] or None
+
+
+def business_unit_item(bu: str, conn: ServiceNowConnection) -> dict:
+    """A business unit record. Only ``name`` is sent, so linking to a
+    department that already exists under that name changes nothing else
+    on it; the identifier travels as the source native key."""
+    ref = business_unit_ref(bu)
+    return {
+        "className": conn.business_unit_table,
+        "internal_id": ref,
+        "values": {"name": bu},
+        "sys_object_source_info": _source_info(conn.data_source, ref, None),
+    }
+
+
+def risk_key(framework: Any, category: str) -> str:
+    """``cmdb_key_value.key`` of a risk mapping; hashed when too long, so
+    two mappings never collapse into one truncated key."""
+    key = f"{NS}:risk:{framework or 'custom'}:{category}"
+    if len(key) <= MAX_KEY:
+        return key
+    return f"{NS}:risk:{hashlib.sha256(key.encode()).hexdigest()[:32]}"
+
+
+def risk_entries(risks: list[dict]) -> list[dict]:
+    """``cmdb_key_value`` related entries for an asset's confirmed risk
+    mappings: one per framework and category, valued with the highest
+    level (as the AI-BOM risk properties). Anything else is skipped."""
+    levels: dict[str, str] = {}
+    for r in risks:
+        if (r.get("status") or "confirmed") != "confirmed":
+            continue
+        category = r.get("risk_category")
+        if not isinstance(category, str) or not category.strip():
+            continue
+        level = str(r.get("risk_level") or "").strip().lower()
+        if level not in RISK_LEVEL_RANK:
+            continue
+        key = risk_key(r.get("framework"), category.strip())
+        if RISK_LEVEL_RANK[level] > RISK_LEVEL_RANK.get(levels.get(key, ""), -1):
+            levels[key] = level
+    return [
+        {"className": RISK_TABLE, "values": {"key": k, "value": levels[k]}}
+        for k in sorted(levels)
+    ]
+
+
+def assets_by_ref(assets: list[dict]) -> dict[str, dict]:
+    """Asset dicts keyed on the ``correlation_id`` of their CI."""
+    return {asset_ref(a["id"]): a for a in assets if a.get("id")}
+
+
+def add_business_units_and_risks(
+    payload: dict,
+    assets: dict[str, dict],
+    risks: dict[str, list[dict]],
+    conn: ServiceNowConnection,
+) -> dict[str, int]:
+    """Extend a built IRE payload in place: one business unit record per
+    distinct business unit, referenced from its assets' CIs
+    (``referenceItems``), and risk mappings as related entries of the
+    asset CIs. ``assets`` comes from `assets_by_ref`; ``risks`` maps asset
+    id -> risk mappings. Leaves the payload untouched when neither option
+    is enabled. Returns the counts added."""
+    counts = {"business_units": 0, "risk_entries": 0}
+    if conn.business_unit_table is None and not conn.push_risk_mappings:
+        return counts
+    added: set[str] = set()
+    references: list[dict] = []
+    for item in list(payload["items"]):
+        a = assets.get((item.get("values") or {}).get("correlation_id"))
+        if a is None:
+            continue  # a vendor or other non-asset CI
+        bu = _business_unit(a) if conn.business_unit_table else None
+        if bu is not None:
+            ref = business_unit_ref(bu)
+            if ref not in added:
+                payload["items"].append(business_unit_item(bu, conn))
+                added.add(ref)
+            item["internal_id"] = item["values"]["correlation_id"]
+            references.append(
+                {
+                    "referencedBy": item["internal_id"],
+                    "referenced": ref,
+                    "referenceField": conn.business_unit_field,
+                }
+            )
+        if conn.push_risk_mappings:
+            entries = risk_entries(risks.get(a["id"]) or [])
+            if entries:
+                item["related"] = entries
+                counts["risk_entries"] += len(entries)
+    if references:
+        payload["referenceItems"] = references
+    counts["business_units"] = len(added)
+    return counts
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -763,11 +927,14 @@ async def sync_servicenow(
                 partner,
                 since,
                 include_data_flows=conn.data_system_class is not None,
+                include_risks=conn.push_risk_mappings,
             )
         assets = read.assets
+        by_ref = assets_by_ref(assets)
 
         requests = items = relations = flows_skipped = 0
         operations: dict[str, int] = {}
+        extras = {"business_units": 0, "risk_entries": 0}
         batches = build_payloads(assets, conn, read.flows)
         if batches:
             async with ServiceNowClient(
@@ -775,6 +942,9 @@ async def sync_servicenow(
             ) as sn:
                 for batch in batches:
                     payload = batch.payload()
+                    added = add_business_units_and_risks(
+                        payload, by_ref, read.risks, conn
+                    )
                     ops = await sn.identify_reconcile(payload)
                     requests += 1
                     items += len(payload["items"])
@@ -782,6 +952,8 @@ async def sync_servicenow(
                     flows_skipped += batch.flows_skipped
                     for op, n in ops.items():
                         operations[op] = operations.get(op, 0) + n
+                    for k, n in added.items():
+                        extras[k] += n
     except (ConnectorError, ValueError, TypeError, OverflowError) as exc:
         # Malformed Partner API data is a failed run, not a server error.
         error = str(exc) if isinstance(exc, ConnectorError) else "invalid response data"
@@ -800,6 +972,10 @@ async def sync_servicenow(
     if conn.data_system_class is not None:
         counts["data_flows"] = sum(len(v) for v in read.flows.values())
         counts["data_flows_skipped"] = flows_skipped
+    if conn.business_unit_table is not None:
+        counts["business_units"] = extras["business_units"]
+    if conn.push_risk_mappings:
+        counts["risk_entries"] = extras["risk_entries"]
     state.update(
         cursor=read.cursor or state.get("cursor"),
         last_run_at=now.isoformat(),
@@ -876,6 +1052,9 @@ async def status_endpoint(tenant_id: UUID, request: Request) -> dict:
         "self_hosted_asset_class": conn.self_hosted_asset_class if conn else None,
         "provider_class": conn.provider_class if conn else None,
         "data_system_class": conn.data_system_class if conn else None,
+        "business_unit_table": conn.business_unit_table if conn else None,
+        "business_unit_field": conn.business_unit_field if conn else None,
+        "push_risk_mappings": conn.push_risk_mappings if conn else None,
         "data_source": conn.data_source if conn else None,
         "config_error": config_error,
         **state,

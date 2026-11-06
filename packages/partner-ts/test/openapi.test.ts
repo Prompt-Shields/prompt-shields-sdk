@@ -230,6 +230,7 @@ const UNMAPPED_SCHEMAS = new Set([
   'CreateTenantRequest',
   'UpdateTenantRequest',
   'ConnectorSyncRequest',
+  'LeanIXSyncRequest',
 ]);
 
 interface Operation {

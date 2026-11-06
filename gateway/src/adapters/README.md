@@ -177,7 +177,10 @@ from any provider that supports it (Anthropic, Google, etc.) without setting any
   output items open in the order their content arrives (`reasoning` with
   `reasoning_summary_*` events, `message`, one `function_call` per call),
   so there is no empty message item when the model only calls tools; a
-  provider error mid-stream ends with `response.failed`
+  provider error mid-stream ends with `response.failed`; every snapshot
+  (`response.created`, `response.in_progress`, the terminal event) echoes
+  the request fields (`tools`, `instructions`, sampling, `text`,
+  `reasoning`, `metadata`, ...) exactly as the JSON response does
 - Messages streams never interleave blocks: parallel tool calls whose
   arguments arrive interleaved are sent as complete `tool_use` blocks, in
   order, when the model finishes

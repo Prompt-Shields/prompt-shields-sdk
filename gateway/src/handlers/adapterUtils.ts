@@ -578,7 +578,8 @@ function adaptStreamingResponse(
     })();
   } else {
     // Responses API adapter
-    const state = responsesCreateStreamState();
+    // PS fork (#73): snapshots echo the client's request fields
+    const state = responsesCreateStreamState(adapterCtx.originalRequest);
 
     (async () => {
       try {
