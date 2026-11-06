@@ -98,7 +98,12 @@ async function importPrivateKey(pem: string): Promise<CryptoKey> {
 // every request; a small in-process cache is used when no hook is set. The
 // cache key is a SHA-256 of the whole credential, private key included, so a
 // caller who knows another account's project, key id and email but not its
-// private key cannot be handed that account's cached token.
+// private key cannot be handed that account's cached token. The key also
+// covers the OAuth scope and audience, so a token minted for one scope is
+// never reused for another. Concurrent requests for the same key share one
+// in-flight token exchange (single-flight); the entry is dropped when the
+// exchange settles, so a failed exchange is not reused and the next caller
+// tries again.
 const VERTEX_TOKEN_EXPIRY_MARGIN_S = 300;
 const VERTEX_TOKEN_DEFAULT_LIFETIME_S = 3600;
 export const VERTEX_TOKEN_CACHE_MAX_ENTRIES = 256;
@@ -107,17 +112,30 @@ const vertexTokenCache = new Map<
   { token: string; expiresAt: number }
 >();
 
+const vertexTokenInFlight = new Map<string, Promise<string>>();
+
 /** Test hook: empties the in-process Vertex token cache. */
-export const clearVertexTokenCache = () => vertexTokenCache.clear();
+export const clearVertexTokenCache = () => {
+  vertexTokenCache.clear();
+  vertexTokenInFlight.clear();
+};
+
+const VERTEX_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+export const VERTEX_TOKEN_SCOPE =
+  'https://www.googleapis.com/auth/cloud-platform';
 
 export const vertexTokenCacheKey = async (
-  serviceAccountInfo: Record<string, any>
+  serviceAccountInfo: Record<string, any>,
+  scope: string = VERTEX_TOKEN_SCOPE,
+  audience: string = VERTEX_TOKEN_URL
 ): Promise<string> => {
   const material = JSON.stringify([
     serviceAccountInfo.project_id,
     serviceAccountInfo.client_email,
     serviceAccountInfo.private_key_id,
     serviceAccountInfo.private_key,
+    scope,
+    audience,
   ]);
   const digest = await crypto.subtle.digest(
     'SHA-256',
@@ -185,8 +203,6 @@ const storeVertexToken = async (
   });
 };
 
-const VERTEX_TOKEN_URL = 'https://oauth2.googleapis.com/token';
-
 const isRetryableTokenStatus = (status: number) =>
   status === 429 || status >= 500;
 
@@ -195,11 +211,43 @@ export const getAccessToken = async (
   serviceAccountInfo: Record<string, any>
 ): Promise<string> => {
   try {
-    const cacheKey = await vertexTokenCacheKey(serviceAccountInfo);
+    const scope = VERTEX_TOKEN_SCOPE;
+    const cacheKey = await vertexTokenCacheKey(
+      serviceAccountInfo,
+      scope,
+      VERTEX_TOKEN_URL
+    );
     const cached = await readCachedVertexToken(c, cacheKey);
     if (cached) return cached;
 
-    const scope = 'https://www.googleapis.com/auth/cloud-platform';
+    // No await between this lookup and the set below, so concurrent callers
+    // for one key always find the same exchange.
+    const inFlight = vertexTokenInFlight.get(cacheKey);
+    if (inFlight) return await inFlight;
+    const exchange = exchangeVertexToken(
+      c,
+      serviceAccountInfo,
+      cacheKey,
+      scope
+    ).finally(() => {
+      if (vertexTokenInFlight.get(cacheKey) === exchange) {
+        vertexTokenInFlight.delete(cacheKey);
+      }
+    });
+    vertexTokenInFlight.set(cacheKey, exchange);
+    return await exchange;
+  } catch (err) {
+    return '';
+  }
+};
+
+const exchangeVertexToken = async (
+  c: Context,
+  serviceAccountInfo: Record<string, any>,
+  cacheKey: string,
+  scope: string
+): Promise<string> => {
+  try {
     const iat = Math.floor(Date.now() / 1000);
     const exp = iat + 3600; // Token expiration time (1 hour)
 
