@@ -100,6 +100,9 @@ yet:
   changes the model only; every attempt uses the request's own provider and
   credentials (`x-portkey-provider` + `Authorization`, or a single-target
   config).
+- **Run the routing learner in auto mode, or pseudonymise.** Both run only
+  in the SDK's `ShieldsRouter` (local mode), which refuses them with
+  `mode="gateway"`. The gateway classifies and routes what it receives.
 
 The SDK's ordinary clients never pick a model (`ShieldsRouter` is the opt-in
 exception). They express *intent*; the gateway owns the
