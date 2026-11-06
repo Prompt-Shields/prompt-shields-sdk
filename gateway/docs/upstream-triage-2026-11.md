@@ -22,7 +22,7 @@ Class is one of: **security**, **bug fix**, **provider**, **feature** or **irrel
 
 Status is one of:
 
-- **Ported**: done in this PR, with a test.
+- **Ported**: done in this PR, with a test, or (entries 12-14 and 19-21) in the F2 follow-up PR.
 - **In fork**: the fork already behaves this way. The column names where.
 - **N/A**: the code involved is not in the fork.
 - **Follow-up**: worth doing; listed below.
@@ -41,16 +41,16 @@ Status is one of:
 | 9 | 2.29.0 | Messages API: non-native providers surface cache tokens | bug fix | In fork | `toMessagesUsage` in `src/adapters/shared.ts` (#73) |
 | 10 | 2.29.0 | JWT plugin claim extraction | feature | Skip | Guardrail plugin |
 | 11 | 2.29.0 | MCP: real status codes for blocks | irrelevant | N/A | Upstream MCP app |
-| 12 | 2.29.1 | Trust store: emSign CA distrust | security | Follow-up | F2: image is `node:20-alpine` |
-| 13 | 2.29.1 | System CA bundle without `emSign ECC Root CA - G3` | security | Follow-up | F2 |
-| 14 | 2.29.1 | Node.js 24.22.1 | security | Follow-up | F2 |
+| 12 | 2.29.1 | Trust store: emSign CA distrust | security | Ported | F2: the image is now `node:24.22.2-alpine3.24`, whose bundled root store no longer has the emSign ECC G3, C1 and C3 roots |
+| 13 | 2.29.1 | System CA bundle without `emSign ECC Root CA - G3` | security | Ported | F2 |
+| 14 | 2.29.1 | Node.js 24.22.1 | security | Ported | F2 (24.22.2) |
 | 15 | 2.30.0 | NEAR AI provider | provider | Follow-up | F7 (#74 pattern) |
 | 16 | 2.30.0 | Simple cache honours `max_age` | bug fix | Ported | The fork had a different bug in the same place. `max_age` (seconds) was added to `Date.now()` as milliseconds, so entries expired almost at once. Fixed by `cacheExpiresAt` in `src/middlewares/cache/index.ts` |
 | 17 | 2.30.0 | Messages API: negative cost with large cached prefix | bug fix | In fork | `input_tokens` clamped at 0 in `toMessagesUsage` |
 | 18 | 2.30.0 | Faster control-plane/S3 log writes | irrelevant | N/A | Portkey log store |
-| 19 | 2.30.1 | Trust store: emSign CA distrust | security | Follow-up | F2 (same as 12) |
-| 20 | 2.30.1 | System CA bundle update | security | Follow-up | F2 |
-| 21 | 2.30.1 | Node.js 24.22.1 | security | Follow-up | F2 |
+| 19 | 2.30.1 | Trust store: emSign CA distrust | security | Ported | F2 (same as 12) |
+| 20 | 2.30.1 | System CA bundle update | security | Ported | F2 |
+| 21 | 2.30.1 | Node.js 24.22.1 | security | Ported | F2 (24.22.2) |
 | 22 | 2.31.0 | Hardened Fireworks AI upstream URL construction | security | Ported | Two changes in `src/providers/fireworks-ai/api.ts`. The account id is now a slug, and the image model path rejects `..`, empty segments and URL metacharacters. List query values are encoded |
 | 23 | 2.31.0 | Hardened Vertex AI upstream URL construction | security | Ported | `assertVertexUrlParts` in `src/providers/google-vertex-ai/api.ts` checks the region (before, a region could rewrite the `<region>-aiplatform` host), the project id and the model. List query values are encoded |
 | 24 | 2.31.0 | SSRF allowlist expanded | security | N/A | The fork has no allowlist to expand. It blocks private and metadata targets (`isSafeUpstreamURL`, `plugins/egress.ts`), and operators add hosts with `TRUSTED_CUSTOM_HOSTS` |
@@ -119,12 +119,12 @@ Status is one of:
 
 | Class | Entries | Ported | In fork | N/A | Follow-up | Skip |
 |---|---|---|---|---|---|---|
-| security | 20 | 6 | 3 | 5 | 6 | 0 |
+| security | 20 | 12 | 3 | 5 | 0 | 0 |
 | bug fix | 22 | 5 | 5 | 1 | 11 | 0 |
 | provider | 1 | 0 | 0 | 0 | 1 | 0 |
 | feature | 30 | 0 | 1 | 2 | 13 | 14 |
 | irrelevant | 16 | 0 | 0 | 16 | 0 | 0 |
-| **Total** | **89** | **11** | **9** | **24** | **31** | **14** |
+| **Total** | **89** | **17** | **9** | **24** | **25** | **14** |
 
 The four "Updated dependencies" entries (1, 25, 54, 74) are covered by a single dependency bump.
 
@@ -136,7 +136,7 @@ The four "Updated dependencies" entries (1, 25, 54, 74) are covered by a single 
   - `tmp` and `yaml`, pulled in by `patch-package`, which runs only at install.
 
   None is in the request path.
-- **F2 (security, image).** The gateway image runs `node:20-alpine`. Node 20 reached end of life in April 2026, and its bundled root store still trusts the distrusted emSign CA. Move the image (and CI) to Node 24 LTS, then rebuild and run the image smoke test.
+- **F2 (security, image).** The gateway image ran `node:20-alpine`. Node 20 reached end of life in April 2026, and its bundled root store still trusts the distrusted emSign CA. Move the image (and CI) to Node 24 LTS, then rebuild and run the image smoke test. **Done:** the image is `node:24.22.2-alpine3.24` (build and runtime stages) and the CI gateway job runs Node 24.
 - **F5 (feature).** A Decisions API (`/v1/decisions`) for OpenAI, Workers AI and Azure (entries 2, 3, 56, 81), if the product wants it.
 - **F6 (cost accuracy).** The catalog/pricing cases: Azure `x-ms-served-model` fallback, Bedrock Mantle web-search pricing, and tiered long-context pricing on Claude Platform on AWS (entries 4, 5, 34). Per the sync policy each should become its own issue.
 - **F7 (provider).** NEAR AI (entry 15), using the #74 pattern from public docs.
