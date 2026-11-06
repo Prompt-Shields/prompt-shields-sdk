@@ -52,6 +52,10 @@ SCOPES: dict[str, str] = {
         "Store, rotate and delete provider admin keys (write-only) and "
         "key fingerprint links for the org usage pull"
     ),
+    "mcp:read": (
+        "Read observed MCP servers and tools (with each server's registry "
+        "asset and owner) and their daily tool-call metering"
+    ),
     "audit:read": (
         "Receive the tenant's admin audit trail as `audit.*` webhook events "
         "(credential, scope, webhook, retention and registry changes)"
