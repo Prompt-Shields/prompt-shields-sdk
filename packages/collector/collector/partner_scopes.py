@@ -71,7 +71,12 @@ SCOPES: dict[str, str] = {
     ),
     "audit:read": (
         "Receive the tenant's admin audit trail as `audit.*` webhook events "
-        "(credential, scope, webhook, retention and registry changes)"
+        "(credential, scope, webhook, retention and registry changes), or pull "
+        "it as NDJSON from /siem/audit"
+    ),
+    "evidence:read": (
+        "Pull per-call routing evidence (served provider, model and "
+        "jurisdiction, policy version, sensitivity) as NDJSON from /siem/calls"
     ),
 }
 

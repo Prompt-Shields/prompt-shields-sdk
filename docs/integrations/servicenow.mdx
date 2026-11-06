@@ -8,9 +8,10 @@ description: Integration guide for ServiceNow CMDB
 Connect Prompt Shields to ServiceNow to add AI assets to your CMDB.
 
 <Info>
-  The built-in ServiceNow connector is a first slice: it pushes AI assets
-  and their vendors as CIs, with an asset-to-vendor relationship, and, when
-  enabled per tenant, business units and risk mappings. It has not
+  The built-in ServiceNow connector pushes AI assets and their vendors as
+  CIs, with an asset-to-vendor relationship, and optionally the systems
+  their data flows connect to, with data flow relationships, and business
+  units and risk mappings when enabled per tenant. It has not
   yet been verified against a live ServiceNow instance (PDI); check the
   identification rules below in a sub-production instance before using it
   in production.
@@ -25,9 +26,11 @@ REST API (`POST /api/now/identifyreconcile`):
 
 1. First run: `GET /partner/v1/export`.
 2. Later runs: `GET /partner/v1/changes?since=<cursor>`.
-3. Send the assets to IRE in batches (one request per batch, with the
-   vendors and relationships of those assets).
-4. Store the new cursor in the tenant settings. If IRE rejects any item or
+3. With `data_system_class` set: `GET /partner/v1/assets/{id}/data-flows`
+   for each asset read.
+4. Send the assets to IRE in batches (one request per batch, with the
+   vendors, data flow systems and relationships of those assets).
+5. Store the new cursor in the tenant settings. If IRE rejects any item or
    relationship, the run fails and the cursor stays where it was, so the
    next run retries the same changes.
 
@@ -50,6 +53,8 @@ integration that writes CIs.
 | AI Asset, self-hosted vendor | `self_hosted_asset_class` CI (default `cmdb_ci_appl_ai_application`) | `promptshields:asset:<asset id>` |
 | AI Vendor | `provider_class` CI (default `cmdb_ci_service`) | `promptshields:provider:<vendor>` |
 | Asset → Vendor | `cmdb_rel_ci`, type `Depends on::Used by` | |
+| Data flow system (opt-in) | `data_system_class` CI | `promptshields:system:<hash>` |
+| Data flow | `cmdb_rel_ci`, type `Sends data to::Receives data from` | |
 | Business unit (opt-in) | `business_unit_table` record (e.g. `cmn_department`), referenced from the asset CI's `business_unit_field` (default `department`) | `name`; source native key `promptshields:business-unit:<name>` |
 | Risk mapping (opt-in) | `cmdb_key_value` related entry of the asset CI | key `promptshields:risk:<framework>:<category>` |
 
@@ -86,7 +91,34 @@ updates the same CIs; the connector never deletes CIs.
 `name` is the use case (or vendor and model) followed by the first eight
 characters of the Prompt Shields id; `short_description` lists vendor,
 model, business unit, owner, environment, region, classification,
-confidence and lifecycle. Data flows are not pushed yet.
+confidence and lifecycle (and, with data flows enabled, the number of
+flows and the PII types detected in them). Business units and risk
+mappings are opt-in, see below.
+
+### Data flows
+
+Off by default. Set `data_system_class` to a CMDB class (for example
+`cmdb_ci_appl` or a custom `u_` class, with the same independent
+identification rule on `correlation_id` as the other classes) and give
+the partner credential the `data-flows:read` scope. Each run then reads
+the data flows of every asset it pushes and sends:
+
+- one CI per external system a flow connects to, named after the system
+  and identified by `promptshields:system:` plus the first 32 hex
+  characters of the SHA-256 of its name (whitespace collapsed, lower
+  case), since system names can be longer than `correlation_id` (100
+  characters). The same system seen by several assets is one CI.
+- a `Sends data to::Receives data from` relationship per direction:
+  system → asset for `input` / `inbound` flows (the system is the flow's
+  source), asset → system for `output` / `outbound` flows (the system is
+  the destination), and both for bi-directional flows (the source is the
+  system).
+
+Flows with another direction, or whose system is empty or `unknown` (a
+telemetry event with no calling service), are skipped and counted in
+`data_flows_skipped`, as are systems beyond the first 100 of one asset.
+Incremental runs push the flows of the assets that changed. Relationships
+of flows that no longer exist are not removed.
 
 ### Business units and risk mappings (opt-in)
 
@@ -166,8 +198,9 @@ so it reaches ServiceNow on the asset's next change or the next full sync.
      or an OAuth application registry entry with the client credentials
      grant enabled for that user.
 2. In Prompt Shields, issue a partner credential for the connector with the
-   scopes `export:read` and `changes:read`, plus `risks:read` for risk
-   mappings (`POST /api/v1/admin/partner-credentials`).
+   scopes `export:read` and `changes:read`, plus `data-flows:read` if
+   you push data flows and `risks:read` if you push risk mappings
+   (`POST /api/v1/admin/partner-credentials`).
 3. Configure the connector in the collector's environment, per tenant:
 
 ```bash
@@ -191,10 +224,14 @@ auth; exactly one of the two is required. Optional per-tenant fields:
 `cmdb_ci_appl_ai_application`; `null` to use `asset_class` for every
 asset), `self_hosted_vendors` (JSON list, see above), `provider_class`
 (default `cmdb_ci_service`;
-`null` pushes assets only, without vendor CIs or relationships),
-`business_unit_table` (default `null`: off; e.g. `cmn_department`),
-`business_unit_field` (default `department`), `push_risk_mappings`
-(default `false`) and `batch_size` (assets per IRE request, default 50, at most 100). For a
+`null` pushes assets only, without vendor CIs or relationships) and
+`batch_size` (assets per IRE request, default 50, at most 100; a request
+also closes early once it reaches 500 CIs) and `data_system_class`
+(default `null`, see [Data flows](#data-flows)), `business_unit_table`
+(default `null`: off; e.g. `cmn_department`), `business_unit_field`
+(default `department`) and `push_risk_mappings` (default `false`; see
+[Business units and risk mappings](#business-units-and-risk-mappings-opt-in)).
+For a
 collector reached over an internal network, set
 `"allow_private_network": true` under `partner_api`; it must still be https.
 

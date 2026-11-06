@@ -359,6 +359,7 @@ class Fakes:
         # (asset sys_id, key) -> value of cmdb_key_value related entries.
         self.references: dict[tuple[str, str], str] = {}
         self.key_values: dict[tuple[str, str], str] = {}
+        self.flows: dict[str, list[dict]] = {}
 
     def partner(self, r: httpx.Request) -> httpx.Response:
         self.partner_requests.append(r)
@@ -372,6 +373,11 @@ class Fakes:
         if r.url.path == "/partner/v1/changes":
             meta = {"has_more": False, **tenant}
             return httpx.Response(200, json={"data": self.changes, "meta": meta})
+        if r.url.path.endswith("/data-flows"):
+            aid = r.url.path.split("/")[-2]
+            return httpx.Response(
+                200, json={"data": self.flows.get(aid, []), "meta": tenant}
+            )
         if r.url.path.endswith("/risks"):
             if self.risks_status != 200:
                 return httpx.Response(self.risks_status)
@@ -712,6 +718,199 @@ async def test_basic_auth_401_is_not_retried():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Data flows (opt-in: data_system_class)
+# ──────────────────────────────────────────────────────────────────────
+
+FLOW_REL = "Sends data to::Receives data from"
+
+
+def _flow(src, dst, direction, fid=None, pii=None) -> dict:
+    return {
+        "id": fid or str(uuid.uuid4()),
+        "source_system": src,
+        "destination_system": dst,
+        "direction": direction,
+        "data_classification": "confidential",
+        "detected_pii_types": pii,
+    }
+
+
+@pytest.mark.parametrize(
+    "flow,edge",
+    [
+        (_flow("crm", "openai/gpt-4o", "input"), ("crm", True, False)),
+        (_flow("crm", "openai/gpt-4o", "Inbound"), ("crm", True, False)),
+        (_flow("openai/gpt-4o", "tickets", "output"), ("tickets", False, True)),
+        (_flow("openai/gpt-4o", "tickets", "outbound"), ("tickets", False, True)),
+        (_flow("  hr   db ", "x", "bi-directional"), ("hr db", True, True)),
+        (_flow("unknown", "openai/gpt-4o", "input"), None),
+        (_flow(" ", "openai/gpt-4o", "input"), None),
+        (_flow(["crm"], "openai/gpt-4o", "input"), None),
+        (_flow("crm", "openai/gpt-4o", "sideways"), None),
+        ({"direction": None}, None),
+    ],
+)
+def test_flow_edge(flow, edge):
+    assert sn.flow_edge(flow) == edge
+
+
+def test_system_ref_is_bounded_stable_and_case_insensitive():
+    ref = sn.system_ref("Salesforce CRM")
+    assert ref.startswith("promptshields:system:") and len(ref) <= 100
+    assert sn.system_ref("  salesforce   crm ") == ref
+    assert len(sn.system_ref("x" * 200)) == len(ref)
+    assert sn.system_ref("other") != ref
+
+
+def test_invalid_data_system_class_is_refused():
+    with pytest.raises(ValueError):
+        _connection(data_system_class="cmdb_ci; drop")
+
+
+def test_data_flows_are_ignored_unless_data_system_class_is_set():
+    flows = {A1: [_flow("crm", "openai/gpt-4o", "input")]}
+    payload = sn.build_payload([_asset(A1)], _connection(), flows)
+    assert [i["className"] for i in payload["items"]] == [
+        "cmdb_ci_function_ai",
+        "cmdb_ci_service",
+    ]
+    assert all(r["type"] != FLOW_REL for r in payload["relations"])
+
+
+def test_payload_maps_data_flow_systems_and_relations():
+    conn = _connection(data_system_class="cmdb_ci_appl")
+    flows = {
+        A1: [
+            _flow("CRM", "openai/gpt-4o", "input", pii=["email"]),
+            _flow("crm", "openai/gpt-4o", "input", pii=["phone", "email"]),
+            _flow("openai/gpt-4o", "Tickets", "output"),
+            _flow("unknown", "openai/gpt-4o", "input"),
+        ],
+        A2: [_flow("crm", "openai/gpt-4o", "input")],
+    }
+    payload = sn.build_payload([_asset(A1), _asset(A2)], conn, flows)
+    items = payload["items"]
+    # A1, openai, CRM, Tickets, A2 (openai and CRM shared within the payload).
+    assert [i["className"] for i in items] == [
+        "cmdb_ci_function_ai",
+        "cmdb_ci_service",
+        "cmdb_ci_appl",
+        "cmdb_ci_appl",
+        "cmdb_ci_function_ai",
+    ]
+    crm = items[2]
+    assert crm["values"]["name"] == "CRM"
+    assert crm["values"]["correlation_id"] == sn.system_ref("crm")
+    assert crm["sys_object_source_info"]["source_native_key"] == sn.system_ref("crm")
+    assert items[3]["values"]["name"] == "Tickets"
+    desc = items[0]["values"]["short_description"]
+    assert "Data flows: 4." in desc and "Detected PII types: email, phone." in desc
+    assert payload["relations"] == [
+        {"type": "Depends on::Used by", "parent": 0, "child": 1},
+        {"type": FLOW_REL, "parent": 2, "child": 0},  # CRM sends to A1
+        {"type": FLOW_REL, "parent": 0, "child": 3},  # A1 sends to Tickets
+        {"type": "Depends on::Used by", "parent": 4, "child": 1},
+        {"type": FLOW_REL, "parent": 2, "child": 4},  # CRM sends to A2
+    ]
+
+
+def test_systems_per_asset_are_capped_and_counted(monkeypatch):
+    monkeypatch.setattr(sn, "MAX_SYSTEMS_PER_ASSET", 2)
+    conn = _connection(data_system_class="cmdb_ci_appl", provider_class=None)
+    flows = {A1: [_flow(f"s{i}", "m", "input") for i in range(4)]}
+    [batch] = sn.build_payloads([_asset(A1)], conn, flows)
+    assert len(batch.items) == 3 and len(batch.relations) == 2
+    assert batch.flows_skipped == 2
+
+
+def test_payloads_close_early_at_the_item_cap(monkeypatch):
+    monkeypatch.setattr(sn, "MAX_ITEMS_PER_REQUEST", 7)
+    conn = _connection(data_system_class="cmdb_ci_appl")
+    flows = {
+        A1: [_flow(f"a{i}", "m", "input") for i in range(3)],
+        A2: [_flow(f"b{i}", "m", "input") for i in range(3)],
+        A3: [],
+    }
+    batches = sn.build_payloads([_asset(A1), _asset(A2), _asset(A3)], conn, flows)
+    # A1 is 5 items (asset, vendor, 3 systems); A2 would make 10 -> new
+    # request, which A3 (at most 2 more) still fits into.
+    assert [b.assets for b in batches] == [1, 2]
+    for b in batches:
+        p = b.payload()
+        n = len(p["items"])
+        assert all(0 <= r["parent"] < n and 0 <= r["child"] < n for r in p["relations"])
+
+
+async def test_sync_pushes_data_flows_idempotently(caplog):
+    caplog.set_level(logging.DEBUG)
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2)])
+    fakes.flows = {
+        A1: [
+            _flow("crm", "openai/gpt-4o", "input", pii=["email"]),
+            _flow("openai/gpt-4o", "tickets", "output"),
+        ],
+        A2: [_flow("crm", "openai/gpt-4o", "input"), _flow("x", "y", "?")],
+    }
+    settings = _settings(data_system_class="cmdb_ci_appl")
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs(settings))
+    assert out["status"] == "ok", out
+    paths = [r.url.path for r in fakes.partner_requests]
+    assert paths == [
+        "/partner/v1/export",
+        f"/partner/v1/assets/{A1}/data-flows",
+        f"/partner/v1/assets/{A2}/data-flows",
+    ]
+    assert out["data_flows"] == 4 and out["data_flows_skipped"] == 1
+    # 2 assets, openai, crm, tickets.
+    assert out["ci_items"] == 5 and out["operations"] == {"INSERT": 5}
+    flow_rels = {r for r in fakes.rels if r[1] == FLOW_REL}
+    assert len(flow_rels) == 3 and len(fakes.rels) == 5
+    systems = {k for k in fakes.cmdb if k[0] == "cmdb_ci_appl"}
+    assert systems == {
+        ("cmdb_ci_appl", sn.system_ref("crm")),
+        ("cmdb_ci_appl", sn.system_ref("tickets")),
+    }
+
+    out = await sn.sync_servicenow(db, TENANT, full=True, **fakes.kwargs(settings))
+    assert out["status"] == "ok" and out["operations"] == {"NO_CHANGE": 5}
+    assert len(fakes.cmdb) == 5 and len(fakes.rels) == 5
+    blob = json.dumps(db.tenant.settings) + json.dumps(out) + caplog.text
+    for secret in SECRETS:
+        assert secret not in blob
+
+
+async def test_data_flows_are_not_read_by_default():
+    db = FakeSession()
+    fakes = Fakes()
+    fakes.flows = {A1: [_flow("crm", "openai/gpt-4o", "input")]}
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs())
+    assert out["status"] == "ok" and "data_flows" not in out
+    assert [r.url.path for r in fakes.partner_requests] == ["/partner/v1/export"]
+
+
+async def test_data_flow_read_failure_keeps_cursor_and_writes_nothing():
+    cursor = "2026-10-15T00:00:00+00:00"
+    db = FakeSession({"connectors": {"servicenow": {"cursor": cursor}}})
+    fakes = Fakes(changes=[{"asset": _asset(A1), "changed_at": cursor}])
+    original = fakes.partner
+
+    def partner(r):
+        if r.url.path.endswith("/data-flows"):
+            fakes.partner_requests.append(r)
+            return httpx.Response(403)
+        return original(r)
+
+    fakes.partner = partner
+    out = await sn.sync_servicenow(
+        db, TENANT, **fakes.kwargs(_settings(data_system_class="cmdb_ci_appl"))
+    )
+    assert out["status"] == "error" and "data flows returned HTTP 403" in out["error"]
+    assert fakes.sn_requests == []
+    assert db.tenant.settings["connectors"]["servicenow"]["cursor"] == cursor
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Business units and risk mappings (opt-in)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -942,3 +1141,27 @@ async def test_risk_read_of_another_tenant_fails_closed():
     assert out["status"] == "error"
     assert "does not belong to the configured tenant" in out["error"]
     assert fakes.sn_requests == []
+
+
+async def test_business_units_risks_and_data_flows_together():
+    db = FakeSession()
+    fakes = Fakes(assets=[_asset(A1), _asset(A2, business_unit="Finance")])
+    fakes.flows = {
+        A1: [{"direction": "input", "source_system": "crm"}],
+        A2: [{"direction": "output", "destination_system": "warehouse"}],
+    }
+    fakes.risks = {A2: [RISK]}
+    settings = _settings(
+        data_system_class="cmdb_ci_appl", push_risk_mappings=True, **BU_OPTS
+    )
+    out = await sn.sync_servicenow(db, TENANT, **fakes.kwargs(settings))
+    assert out["status"] == "ok", out
+    assert out["business_units"] == 2 and out["risk_entries"] == 1
+    (payload,) = fakes.payloads
+    classes = [i["className"] for i in payload["items"]]
+    assert classes.count("cmn_department") == 2 and classes.count("cmdb_ci_appl") == 2
+    # Business unit records come after every CI the relations point at.
+    first_bu = classes.index("cmn_department")
+    for rel in payload["relations"]:
+        assert rel["parent"] < first_bu and rel["child"] < first_bu
+    assert len(fakes.rels) == 4 and len(fakes.references) == 2

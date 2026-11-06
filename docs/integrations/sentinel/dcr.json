@@ -1,0 +1,220 @@
+{
+  "location": "<workspace region>",
+  "kind": "Direct",
+  "properties": {
+    "streamDeclarations": {
+      "Custom-PromptShieldsAudit": {
+        "columns": [
+          {
+            "name": "TimeGenerated",
+            "type": "datetime"
+          },
+          {
+            "name": "EventUid",
+            "type": "string"
+          },
+          {
+            "name": "EventType",
+            "type": "string"
+          },
+          {
+            "name": "EventProduct",
+            "type": "string"
+          },
+          {
+            "name": "EventVendor",
+            "type": "string"
+          },
+          {
+            "name": "EventSchemaVersion",
+            "type": "string"
+          },
+          {
+            "name": "EventResult",
+            "type": "string"
+          },
+          {
+            "name": "EventSeverity",
+            "type": "string"
+          },
+          {
+            "name": "Operation",
+            "type": "string"
+          },
+          {
+            "name": "ActorUserType",
+            "type": "string"
+          },
+          {
+            "name": "ActorUserId",
+            "type": "string"
+          },
+          {
+            "name": "Object",
+            "type": "string"
+          },
+          {
+            "name": "ObjectType",
+            "type": "string"
+          },
+          {
+            "name": "HttpStatusCode",
+            "type": "int"
+          },
+          {
+            "name": "PsTenantId",
+            "type": "string"
+          },
+          {
+            "name": "PsRequestId",
+            "type": "string"
+          },
+          {
+            "name": "PsCallId",
+            "type": "string"
+          },
+          {
+            "name": "PsAssetId",
+            "type": "string"
+          },
+          {
+            "name": "PsVendor",
+            "type": "string"
+          },
+          {
+            "name": "PsBusinessUnit",
+            "type": "string"
+          },
+          {
+            "name": "PsEnvironment",
+            "type": "string"
+          },
+          {
+            "name": "PsSource",
+            "type": "string"
+          },
+          {
+            "name": "PsApiSurface",
+            "type": "string"
+          },
+          {
+            "name": "PsRequestedModel",
+            "type": "string"
+          },
+          {
+            "name": "PsServedModel",
+            "type": "string"
+          },
+          {
+            "name": "PsServedProvider",
+            "type": "string"
+          },
+          {
+            "name": "PsServedJurisdiction",
+            "type": "string"
+          },
+          {
+            "name": "PsSovereign",
+            "type": "boolean"
+          },
+          {
+            "name": "PsPolicyVersion",
+            "type": "string"
+          },
+          {
+            "name": "PsSensitivityLevel",
+            "type": "string"
+          },
+          {
+            "name": "PsSensitivitySource",
+            "type": "string"
+          },
+          {
+            "name": "PsRouteMode",
+            "type": "string"
+          },
+          {
+            "name": "PsRouteGroup",
+            "type": "string"
+          },
+          {
+            "name": "PsRouteReason",
+            "type": "string"
+          },
+          {
+            "name": "PsFallbackChain",
+            "type": "dynamic"
+          },
+          {
+            "name": "PsBaselineId",
+            "type": "string"
+          },
+          {
+            "name": "PsTokensIn",
+            "type": "long"
+          },
+          {
+            "name": "PsTokensOut",
+            "type": "long"
+          },
+          {
+            "name": "PsCostUsd",
+            "type": "real"
+          },
+          {
+            "name": "PsCounterfactualCostUsd",
+            "type": "real"
+          },
+          {
+            "name": "PsRouteEstCostUsd",
+            "type": "real"
+          },
+          {
+            "name": "PsLatencyMs",
+            "type": "long"
+          },
+          {
+            "name": "PsAuditSeq",
+            "type": "long"
+          },
+          {
+            "name": "PsAuditPrevHash",
+            "type": "string"
+          },
+          {
+            "name": "PsAuditRowHash",
+            "type": "string"
+          },
+          {
+            "name": "PsAuditHashVersion",
+            "type": "int"
+          },
+          {
+            "name": "PsAuditDetails",
+            "type": "dynamic"
+          }
+        ]
+      }
+    },
+    "destinations": {
+      "logAnalytics": [
+        {
+          "workspaceResourceId": "<workspace resource id>",
+          "name": "workspace"
+        }
+      ]
+    },
+    "dataFlows": [
+      {
+        "streams": [
+          "Custom-PromptShieldsAudit"
+        ],
+        "destinations": [
+          "workspace"
+        ],
+        "transformKql": "source",
+        "outputStream": "Custom-PromptShieldsAudit_CL"
+      }
+    ]
+  }
+}

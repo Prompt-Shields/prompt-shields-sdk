@@ -15,6 +15,8 @@ through the Identification and Reconciliation Engine (IRE) REST API,
   Vendor           ``provider_class`` CI               ``promptshields:provider:<v>``
                    (default ``cmdb_ci_service``)
   Asset -> vendor  ``cmdb_rel_ci`` "Depends on::Used by"
+  Data flow peer   ``data_system_class`` CI (opt-in)   ``promptshields:system:<hash>``
+  Data flow        ``cmdb_rel_ci`` "Sends data to::Receives data from"
   Business unit    ``business_unit_table`` record      source native key
                    (opt-in, e.g. ``cmn_department``)   ``promptshields:business-unit:<bu>``
                    referenced from the asset CI's      (IRE identifies it on ``name``)
@@ -169,9 +171,22 @@ RISK_TABLE = "cmdb_key_value"
 MAX_BUSINESS_UNIT_NAME = 100
 MAX_KEY = 100
 RISK_LEVEL_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-# Assets per IRE request; each request also carries their vendors and
-# relations, so a batch is at most 2x items plus 1x relations.
+FLOW_RELATION_TYPE = "Sends data to::Receives data from"
+# Assets per IRE request; each request also carries their vendors, the
+# systems their data flows connect to and the relations between them.
 DEFAULT_BATCH_SIZE = 50
+# Items (CIs) per IRE request. With data flows an asset can bring many
+# systems, so a request is closed early once it would exceed this.
+MAX_ITEMS_PER_REQUEST = 500
+# Distinct flow systems pushed per asset; the rest are counted as skipped.
+MAX_SYSTEMS_PER_ASSET = 100
+# Flow directions (hand-entered and derived, see collector.data_flows):
+# which side is the external system and who sends data to whom.
+_SYSTEM_SENDS = frozenset({"input", "inbound"})
+_ASSET_SENDS = frozenset({"output", "outbound"})
+_BOTH_SEND = frozenset({"bi-directional", "bidirectional", "both"})
+# data_flows.UNKNOWN_SOURCE: a flow whose calling service is not known.
+_UNKNOWN_SYSTEM = "unknown"
 MAX_NAME = 255
 MAX_DESCRIPTION = 1000
 
@@ -211,6 +226,10 @@ class ServiceNowConnection(BaseModel):
     self_hosted_vendors: list[str] = list(DEFAULT_SELF_HOSTED_VENDORS)
     # None: push assets only, no vendor CIs or relations.
     provider_class: str | None = DEFAULT_PROVIDER_CLASS
+    # Opt-in: class for the systems the assets' data flows connect to
+    # (needs ``data-flows:read`` on the partner key and an identification
+    # rule on correlation_id). None: data flows are not read or pushed.
+    data_system_class: str | None = None
     # Opt-in: non-CMDB table for business units (e.g. cmn_department, with
     # an IRE identification rule on name) and the asset CI's reference
     # field pointing at it. None: business units are not pushed.
@@ -226,6 +245,7 @@ class ServiceNowConnection(BaseModel):
         "asset_class",
         "self_hosted_asset_class",
         "provider_class",
+        "data_system_class",
         "business_unit_table",
         "business_unit_field",
     )
@@ -330,6 +350,20 @@ def provider_ref(vendor: str) -> str:
     return f"{NS}:provider:{vendor}"
 
 
+def system_key(name: str) -> str:
+    """How flow system names are compared: whitespace collapsed,
+    case-insensitive."""
+    return " ".join(name.split()).lower()
+
+
+def system_ref(name: str) -> str:
+    """Identifier of a data flow system. System names are free text of up
+    to 200 characters and ``correlation_id`` holds 100, so the name is
+    hashed (the name itself goes into ``name``)."""
+    digest = hashlib.sha256(system_key(name).encode()).hexdigest()[:32]
+    return f"{NS}:system:{digest}"
+
+
 def _text(value: Any, limit: int) -> str:
     return str(value)[:limit] if value is not None else ""
 
@@ -355,7 +389,7 @@ def _asset_name(a: dict) -> str:
     return _text(f"{base} [{str(a['id'])[:8]}]", MAX_NAME)
 
 
-def _asset_description(a: dict) -> str:
+def _asset_description(a: dict, flows: list[dict] | None = None) -> str:
     parts = [
         f"AI asset discovered by Prompt Shields ({asset_ref(a['id'])}).",
         f"Vendor: {a.get('vendor')}.",
@@ -372,6 +406,18 @@ def _asset_description(a: dict) -> str:
     ):
         if a.get(key):
             parts.append(f"{label}: {a[key]}.")
+    if flows:
+        parts.append(f"Data flows: {len(flows)}.")
+        pii = sorted(
+            {
+                str(p)
+                for f in flows
+                if isinstance(f.get("detected_pii_types"), list)
+                for p in f["detected_pii_types"]
+            }
+        )
+        if pii:
+            parts.append(f"Detected PII types: {', '.join(pii)}.")
     return _text(" ".join(parts), MAX_DESCRIPTION)
 
 
@@ -392,14 +438,16 @@ def _source_info(data_source: str, native_key: str, seen: str | None) -> dict:
     return info
 
 
-def asset_item(a: dict, conn: ServiceNowConnection) -> dict:
+def asset_item(
+    a: dict, conn: ServiceNowConnection, flows: list[dict] | None = None
+) -> dict:
     install, operational = _status(a)
     ref = asset_ref(a["id"])
     return {
         "className": conn.class_for(a.get("vendor")),
         "values": {
             "name": _asset_name(a),
-            "short_description": _asset_description(a),
+            "short_description": _asset_description(a, flows),
             "correlation_id": ref,
             "install_status": install,
             "operational_status": operational,
@@ -423,32 +471,176 @@ def provider_item(vendor: str, conn: ServiceNowConnection) -> dict:
     }
 
 
-def build_payload(assets: list[dict], conn: ServiceNowConnection) -> dict:
-    """One IRE payload for ``assets`` (Partner API asset dicts): one CI per
-    asset, one per vendor (once per payload) and an asset -> vendor
-    relation referencing them by index."""
-    items: list[dict] = []
-    relations: list[dict] = []
-    provider_index: dict[str, int] = {}
+def system_item(name: str, conn: ServiceNowConnection) -> dict:
+    ref = system_ref(name)
+    return {
+        "className": conn.data_system_class,
+        "values": {
+            "name": _text(name, MAX_NAME),
+            "short_description": "System exchanging data with AI assets, "
+            "reported by Prompt Shields.",
+            "correlation_id": ref,
+        },
+        "sys_object_source_info": _source_info(conn.data_source, ref, None),
+    }
+
+
+def flow_edge(flow: dict) -> tuple[str, bool, bool] | None:
+    """(system name, system sends to asset, asset sends to system) for a
+    Partner API data flow; None when it cannot be mapped (unknown
+    direction, no usable system name).
+
+    Derived flows run ``<source> -> <asset's model>`` (``input``) and
+    ``<asset's model> -> <destination>`` (``output``), so the external
+    system is the source of an input and the destination of an output;
+    hand-entered ``inbound`` / ``outbound`` read the same way. For a
+    bi-directional flow the source is taken as the external system."""
+    direction = str(flow.get("direction") or "").strip().lower()
+    if direction in _SYSTEM_SENDS:
+        name, system_sends, asset_sends = flow.get("source_system"), True, False
+    elif direction in _ASSET_SENDS:
+        name, system_sends, asset_sends = flow.get("destination_system"), False, True
+    elif direction in _BOTH_SEND:
+        name, system_sends, asset_sends = flow.get("source_system"), True, True
+    else:
+        return None
+    if not isinstance(name, str):
+        return None
+    name = " ".join(name.split())
+    if not name or system_key(name) == _UNKNOWN_SYSTEM:
+        return None
+    return name, system_sends, asset_sends
+
+
+def _asset_systems(
+    flows: list[dict],
+) -> tuple[dict[str, tuple[str, bool, bool]], int]:
+    """Distinct systems of one asset's flows (key -> name, directions) and
+    the number of flows not pushed (unmappable, or past the cap)."""
+    systems: dict[str, tuple[str, bool, bool]] = {}
+    skipped = 0
+    for f in flows:
+        edge = flow_edge(f)
+        if edge is None:
+            skipped += 1
+            continue
+        name, system_sends, asset_sends = edge
+        key = system_key(name)
+        if key in systems:
+            first, s, a = systems[key]
+            systems[key] = (first, s or system_sends, a or asset_sends)
+        elif len(systems) < MAX_SYSTEMS_PER_ASSET:
+            systems[key] = edge
+        else:
+            skipped += 1
+    return systems, skipped
+
+
+class PayloadBuilder:
+    """One IRE payload: CIs, plus relations referencing them by index.
+    A vendor or flow system appears once per payload."""
+
+    def __init__(self, conn: ServiceNowConnection):
+        self.conn = conn
+        self.items: list[dict] = []
+        self.relations: list[dict] = []
+        self.assets = 0
+        self.flows_skipped = 0
+        self._shared: dict[str, int] = {}
+
+    def _shared_item(self, ref: str, make: Any) -> int:
+        if ref not in self._shared:
+            self.items.append(make())
+            self._shared[ref] = len(self.items) - 1
+        return self._shared[ref]
+
+    def _relate(self, parent: int, child: int, rel_type: str) -> None:
+        self.relations.append({"type": rel_type, "parent": parent, "child": child})
+
+    def add(self, a: dict, flows: list[dict] | None = None) -> None:
+        conn = self.conn
+        self.items.append(asset_item(a, conn, flows))
+        self.assets += 1
+        asset_idx = len(self.items) - 1
+        if conn.provider_class is not None:
+            vendor = str(a["vendor"])
+            idx = self._shared_item(
+                provider_ref(vendor), lambda: provider_item(vendor, conn)
+            )
+            self._relate(asset_idx, idx, RELATION_TYPE)
+        if conn.data_system_class is None or not flows:
+            return
+        systems, skipped = _asset_systems(flows)
+        self.flows_skipped += skipped
+        for name, system_sends, asset_sends in systems.values():
+            idx = self._shared_item(
+                system_ref(name), lambda n=name: system_item(n, conn)
+            )
+            if system_sends:
+                self._relate(idx, asset_idx, FLOW_RELATION_TYPE)
+            if asset_sends:
+                self._relate(asset_idx, idx, FLOW_RELATION_TYPE)
+
+    def payload(self) -> dict:
+        return {"items": self.items, "relations": self.relations}
+
+
+def _pushable(a: dict) -> bool:
+    return bool(a.get("id")) and bool(a.get("vendor"))
+
+
+def _cost(flows: list[dict] | None, conn: ServiceNowConnection) -> int:
+    """Upper bound of the items one asset adds to a payload."""
+    n = 1 + (conn.provider_class is not None)
+    if conn.data_system_class is not None and flows:
+        n += min(len(flows), MAX_SYSTEMS_PER_ASSET)
+    if conn.business_unit_table is not None:
+        n += 1  # its business unit record, added after the payload is built
+    return n
+
+
+def build_payloads(
+    assets: list[dict],
+    conn: ServiceNowConnection,
+    flows: dict[str, list[dict]] | None = None,
+) -> list[PayloadBuilder]:
+    """IRE payloads for ``assets`` (Partner API asset dicts) and their
+    data flows (asset id -> flows): at most ``batch_size`` assets and,
+    unless a single asset needs more, ``MAX_ITEMS_PER_REQUEST`` items
+    each. Assets without id or vendor are skipped."""
+    flows = flows or {}
+    out: list[PayloadBuilder] = []
+    current = PayloadBuilder(conn)
     for a in assets:
-        if not a.get("id") or not a.get("vendor"):
+        if not _pushable(a):
             continue
-        items.append(asset_item(a, conn))
-        asset_idx = len(items) - 1
-        if conn.provider_class is None:
-            continue
-        vendor = str(a["vendor"])
-        if vendor not in provider_index:
-            items.append(provider_item(vendor, conn))
-            provider_index[vendor] = len(items) - 1
-        relations.append(
-            {
-                "type": RELATION_TYPE,
-                "parent": asset_idx,
-                "child": provider_index[vendor],
-            }
-        )
-    return {"items": items, "relations": relations}
+        asset_flows = flows.get(a["id"])
+        cost = _cost(asset_flows, conn)
+        if current.assets and (
+            current.assets >= conn.batch_size
+            or len(current.items) + cost > MAX_ITEMS_PER_REQUEST
+        ):
+            out.append(current)
+            current = PayloadBuilder(conn)
+        current.add(a, asset_flows)
+    if current.assets:
+        out.append(current)
+    return out
+
+
+def build_payload(
+    assets: list[dict],
+    conn: ServiceNowConnection,
+    flows: dict[str, list[dict]] | None = None,
+) -> dict:
+    """One IRE payload for all of ``assets``: one CI per asset, one per
+    vendor and per data flow system (once per payload), asset -> vendor
+    relations and data flow relations, referencing items by index."""
+    builder = PayloadBuilder(conn)
+    for a in assets:
+        if _pushable(a):
+            builder.add(a, (flows or {}).get(a["id"]))
+    return builder.payload()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -734,23 +926,22 @@ async def sync_servicenow(
             read = await read_registry(
                 partner,
                 since,
-                include_data_flows=False,
+                include_data_flows=conn.data_system_class is not None,
                 include_risks=conn.push_risk_mappings,
             )
         assets = read.assets
         by_ref = assets_by_ref(assets)
 
-        requests = items = relations = 0
+        requests = items = relations = flows_skipped = 0
         operations: dict[str, int] = {}
         extras = {"business_units": 0, "risk_entries": 0}
-        if assets:
+        batches = build_payloads(assets, conn, read.flows)
+        if batches:
             async with ServiceNowClient(
                 conn, transport=servicenow_transport, resolver=resolver, sleep=sleep
             ) as sn:
-                for i in range(0, len(assets), conn.batch_size):
-                    payload = build_payload(assets[i : i + conn.batch_size], conn)
-                    if not payload["items"]:
-                        continue
+                for batch in batches:
+                    payload = batch.payload()
                     added = add_business_units_and_risks(
                         payload, by_ref, read.risks, conn
                     )
@@ -758,6 +949,7 @@ async def sync_servicenow(
                     requests += 1
                     items += len(payload["items"])
                     relations += len(payload["relations"])
+                    flows_skipped += batch.flows_skipped
                     for op, n in ops.items():
                         operations[op] = operations.get(op, 0) + n
                     for k, n in added.items():
@@ -777,6 +969,9 @@ async def sync_servicenow(
         "requests": requests,
         "operations": operations,
     }
+    if conn.data_system_class is not None:
+        counts["data_flows"] = sum(len(v) for v in read.flows.values())
+        counts["data_flows_skipped"] = flows_skipped
     if conn.business_unit_table is not None:
         counts["business_units"] = extras["business_units"]
     if conn.push_risk_mappings:
@@ -856,6 +1051,7 @@ async def status_endpoint(tenant_id: UUID, request: Request) -> dict:
         "asset_class": conn.asset_class if conn else None,
         "self_hosted_asset_class": conn.self_hosted_asset_class if conn else None,
         "provider_class": conn.provider_class if conn else None,
+        "data_system_class": conn.data_system_class if conn else None,
         "business_unit_table": conn.business_unit_table if conn else None,
         "business_unit_field": conn.business_unit_field if conn else None,
         "push_risk_mappings": conn.push_risk_mappings if conn else None,
