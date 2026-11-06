@@ -11,6 +11,36 @@ import {
 } from '../../../globals';
 import { isValidCustomHost } from '..';
 
+// zod 3's name for the type of a parsed value, as used in its messages.
+function zod3TypeName(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'number' && Number.isNaN(value)) return 'nan';
+  if (value instanceof Date) return 'date';
+  if (value instanceof Map) return 'map';
+  if (value instanceof Set) return 'set';
+  if (value instanceof Promise) return 'promise';
+  return typeof value;
+}
+
+/**
+ * Keeps the 400 body of an invalid `x-portkey-config` stable across the
+ * zod 3 → 4 upgrade. zod 4 reworded its built-in type errors ("Invalid
+ * input: expected string, received number"); clients may match on the zod 3
+ * wording ("Expected string, received number", "Required"), so we keep it.
+ * Messages set on a schema (every `.refine` here) take precedence over this
+ * map, and all other issue codes fall through to zod's defaults.
+ */
+export const configErrorMap: z.core.$ZodErrorMap = (issue) => {
+  if (issue.code === 'invalid_type') {
+    const received = zod3TypeName(issue.input);
+    if (received === 'undefined') return 'Required';
+    return `Expected ${issue.expected}, received ${received}`;
+  }
+  return undefined;
+};
+
 export const configSchema: any = z
   .object({
     strategy: z

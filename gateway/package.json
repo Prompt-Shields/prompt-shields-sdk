@@ -55,7 +55,7 @@
     "jose": "^6.0.11",
     "patch-package": "^8.0.1",
     "ws": "^8.22.0",
-    "zod": "^3.22.4"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20230518.0",
