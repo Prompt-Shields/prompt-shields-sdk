@@ -3,14 +3,26 @@ import {
   getOAuthClientCredentialsToken,
   hasOAuthClientCredentials,
 } from '../../utils/oauthClientCredentials';
+import {
+  assertWorkloadUpstreamIsVendor,
+  getWorkloadIdentityToken,
+  isWorkloadAuth,
+} from '../../utils/vendorWorkloadIdentity';
 
 const OpenAIAPIConfig: ProviderAPIConfig = {
   getBaseURL: () => 'https://api.openai.com/v1',
   headers: async ({ providerOptions, fn, c }) => {
-    // PS fork (#76): keyless auth via OAuth client credentials.
-    const bearer = hasOAuthClientCredentials(providerOptions)
-      ? await getOAuthClientCredentialsToken(providerOptions, c)
-      : providerOptions.apiKey;
+    // PS fork (#76): keyless auth via the operator's workload identity
+    // federation (explicit opt-in, wins), or OAuth client credentials.
+    let bearer: string | undefined;
+    if (isWorkloadAuth('openai', providerOptions.openaiAuthType, c)) {
+      assertWorkloadUpstreamIsVendor('openai', providerOptions, c);
+      bearer = await getWorkloadIdentityToken('openai', c);
+    } else if (hasOAuthClientCredentials(providerOptions)) {
+      bearer = await getOAuthClientCredentialsToken(providerOptions, c);
+    } else {
+      bearer = providerOptions.apiKey;
+    }
     const headersObj: Record<string, string> = {
       Authorization: `Bearer ${bearer}`,
     };

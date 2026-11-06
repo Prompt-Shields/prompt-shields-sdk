@@ -268,7 +268,7 @@ describe('OpenAI', () => {
     });
   });
 
-  test('a response served from the gateway cache is not priced', async () => {
+  test('a response served from the gateway cache costs 0 (cost_source cache)', async () => {
     upstream(/api\.openai\.com\/v1\/chat\/completions$/, () =>
       json({
         id: 'chatcmpl-4',
@@ -298,7 +298,11 @@ describe('OpenAI', () => {
       cost: 0.000033,
       cost_source: 'pricing_table',
     });
-    expect(details(cached)).toEqual({});
+    expect(details(cached)).toEqual({ cost: 0, cost_source: 'cache' });
+    expect(cached).toMatchObject({
+      cache_status: 'HIT',
+      cache_saved_cost: 0.000033,
+    });
   });
 });
 

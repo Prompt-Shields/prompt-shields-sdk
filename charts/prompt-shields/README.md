@@ -471,6 +471,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_SECURITY_EVENTS_LOG`, `PS_SECURITY_EVENTS_TENANT` | Security events as JSON lines on stdout |
 | `PS_SECURITY_EVENTS_OTLP`, `PS_SECURITY_EVENTS_OTLP_ENDPOINT`, `PS_SECURITY_EVENTS_OTLP_HEADERS` | Security events as OTLP log records |
 | `PS_ROUTER_ENABLED`, `PS_CACHE_DEFAULT`, `PS_CACHE_MAX_ENTRIES` | Router and response cache |
+| `PS_SEMANTIC_CACHE_EMBEDDER`, `PS_SEMANTIC_CACHE_THRESHOLD`, `PS_SEMANTIC_CACHE_TTL_SECONDS`, `PS_SEMANTIC_CACHE_MAX_ENTRIES`, `PS_SEMANTIC_CACHE_MAX_MB`, `PS_SEMANTIC_CACHE_MAX_PER_PARTITION`, `PS_SEMANTIC_CACHE_MAX_INPUT_CHARS`, `PS_SEMANTIC_CACHE_MAX_SENSITIVITY`, `PS_SEMANTIC_CACHE_ALLOW_PII`, `PS_SEMANTIC_CACHE_SHARE_PRINCIPALS`, `PS_SEMANTIC_CACHE_LOCAL_DIMS`, `PS_SEMANTIC_CACHE_EMBEDDING_URL`, `PS_SEMANTIC_CACHE_EMBEDDING_MODEL`, `PS_SEMANTIC_CACHE_EMBEDDING_API_KEY` (secret), `PS_SEMANTIC_CACHE_EMBEDDING_TIMEOUT_MS`, `PS_SEMANTIC_CACHE_EMBEDDING_{PROVIDER,JURISDICTION,ZDR,US_CLOUD_ACT_EXPOSURE}` | Semantic cache (`PS_CACHE_DEFAULT=semantic` or `X-PS-Cache: semantic`); off until an embedder is set. See `gateway/docs/semantic-cache.md` |
 | `PS_BASELINE_FILE` | Frozen savings baseline (`baseline.v1` JSON, mount it from a ConfigMap with `gateway.extraVolumes` / `extraVolumeMounts`): routed events carry `baseline_id` and `counterfactual_cost`. An invalid file stops the gateway |
 | `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE` | `POST /v1/feedback` limit per user and replica (default 60, `0` off) |
 | `PS_MAX_CUSTOM_HOST_RESPONSE_BYTES`, `TRUSTED_CUSTOM_HOSTS`, `OAUTH_TOKEN_URL_ALLOWED_HOSTS` | Custom upstream hosts |
@@ -478,6 +479,8 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `REDIS_CONNECTION_STRING` (secret) | Shared cache and rate limits across replicas |
 | `AWS_AMBIENT_CREDENTIALS_ENABLED` | Allow IRSA / pod identity / instance credentials for Bedrock and SageMaker |
 | `AWS_*`, `AZURE_*` identity variables | Cloud identity (usually injected by IRSA / Workload Identity) |
+| `OPENAI_AMBIENT_CREDENTIALS_ENABLED`, `OPENAI_IDENTITY_TOKEN_FILE`, `OPENAI_IDENTITY_PROVIDER_ID`, `OPENAI_SERVICE_ACCOUNT_ID`, `OPENAI_SUBJECT_TOKEN_TYPE` | OpenAI workload identity federation for callers that send `openai_auth_type: workload` (mount a projected service-account token with `gateway.extraVolumes`). Default off |
+| `ANTHROPIC_AMBIENT_CREDENTIALS_ENABLED`, `ANTHROPIC_IDENTITY_TOKEN_FILE`, `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID` | Anthropic workload identity federation for callers that send `anthropic_auth_type: workload`. Default off |
 | `HTTPS_PROXY` | Egress proxy |
 | `TLS_KEY_PATH`, `TLS_CERT_PATH`, `TLS_CA_PATH` | Serve TLS from the pod (mount the files) |
 | `LOG_LEVEL`, `LOG_TIMESTAMP`, `LOG_COLORS` | Logging |
