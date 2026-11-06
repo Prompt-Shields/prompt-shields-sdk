@@ -29,7 +29,9 @@ import { fromRoutePolicyDoc } from '../../middlewares/router/constraints';
 import { __resetSemanticCacheForTests } from '../../middlewares/cache/semantic';
 
 const EMBED_URL = 'http://embed.test/v1/embeddings';
-const CHAT = /api\.openai\.com\/v1\/chat\/completions$/;
+// OpenAI, and Mistral for the nordic policy's mistral-eu tiers: the data
+// policy holds a tier naming a provider to that provider (#20).
+const CHAT = /(api\.openai\.com|api\.mistral\.ai)\/v1\/chat\/completions$/;
 
 const original = { ...defaultPolicy };
 function usePolicy(p: any) {
@@ -77,6 +79,7 @@ const OPENAI_A = {
   'x-ps-cache': 'semantic',
 };
 const OPENAI_B = { ...OPENAI_A, authorization: 'Bearer sk-tenant-B' };
+const MISTRAL_A = { ...OPENAI_A, 'x-portkey-provider': 'mistral-ai' };
 
 const chat = (content: string, extra: object = {}) => ({
   model: 'gpt-4o-mini',
@@ -276,7 +279,7 @@ describe('sensitivity and PII', () => {
   test('under a policy, unclassified calls take its default level', async () => {
     usePolicy(nordic); // unclassified_default: confidential
     const m = { model: 'mistral-small-eu' }; // allowed at confidential
-    const res = await ask('What is the capital of France?', OPENAI_A, m);
+    const res = await ask('What is the capital of France?', MISTRAL_A, m);
     expect(res).toMatchObject({ status: 'SEMANTIC BYPASS', code: 200 });
   });
 });
@@ -354,7 +357,7 @@ describe('embeddings', () => {
 
   describe('under a data policy', () => {
     const headers = {
-      ...OPENAI_A,
+      ...MISTRAL_A,
       'x-ps-data-classification': 'confidential',
     };
     beforeEach(() => {
