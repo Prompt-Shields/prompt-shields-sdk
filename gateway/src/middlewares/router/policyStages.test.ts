@@ -519,21 +519,53 @@ describe('requestText / scanRequestBody', () => {
 });
 
 describe('PII detection stays linear on large bodies', () => {
+  // Checked by how the cost grows, not by a wall-clock limit, so a busy
+  // machine (parallel jest workers) can't fail it: 4x the input must cost
+  // under 8x as much. Linear scanning gives ~4x; the unanchored email pattern
+  // this guards against was quadratic (~16x; 100 KB of letters took ~8 s).
+  // Cost is this process's CPU time, which other processes don't inflate.
+  // Each sample does the same work (the quarter-size input four times vs the
+  // full input once), so both see the same timer and scheduler granularity,
+  // and the best of several interleaved samples is kept.
+  const cpuMs = (text: string, times: number) => {
+    const start = process.cpuUsage();
+    for (let i = 0; i < times; i++) detectPiiCategories(text);
+    const { user, system } = process.cpuUsage(start);
+    return (user + system) / 1000;
+  };
+  const growth = (small: string, large: string) => {
+    let bestSmall = Infinity;
+    let bestLarge = Infinity;
+    const deadline = performance.now() + 1000;
+    for (let i = 0; i < 5 && (i === 0 || performance.now() < deadline); i++) {
+      bestSmall = Math.min(bestSmall, cpuMs(small, 4));
+      bestLarge = Math.min(bestLarge, cpuMs(large, 1));
+    }
+    // bestSmall covers four quarter-size scans: the cost of one is a quarter.
+    return (4 * bestLarge) / Math.max(bestSmall, 0.01);
+  };
+
   test.each([
-    ['letters', 'a'.repeat(200_000)],
-    ['dotted', 'a.'.repeat(100_000)],
-    ['digits', '1'.repeat(200_000)],
-    ['local part then @', 'a'.repeat(200_000) + '@'],
-    ['many @', 'a@'.repeat(100_000)],
-    ['digit-dash', '1-'.repeat(100_000)],
-    ['plus groups', '+1 '.repeat(66_000)],
-    ['zero groups', '0 '.repeat(100_000)],
-    ['iban heads', 'SE45 '.repeat(40_000)],
-  ])('%s', (_name, text) => {
-    const t = Date.now();
-    detectPiiCategories(text);
-    expect(Date.now() - t).toBeLessThan(1000);
-  });
+    ['letters', (n: number) => 'a'.repeat(n), 200_000],
+    ['dotted', (n: number) => 'a.'.repeat(n), 100_000],
+    ['digits', (n: number) => '1'.repeat(n), 200_000],
+    ['local part then @', (n: number) => 'a'.repeat(n) + '@', 200_000],
+    ['many @', (n: number) => 'a@'.repeat(n), 100_000],
+    ['digit-dash', (n: number) => '1-'.repeat(n), 100_000],
+    ['plus groups', (n: number) => '+1 '.repeat(n), 66_000],
+    ['zero groups', (n: number) => '0 '.repeat(n), 100_000],
+    ['iban heads', (n: number) => 'SE45 '.repeat(n), 40_000],
+  ])(
+    '%s',
+    (_name, make, n) => {
+      const large = make(n);
+      expect(large.length).toBeGreaterThanOrEqual(198_000);
+      expect(growth(make(n / 4), large)).toBeLessThan(8);
+    },
+    // A quadratic regression takes tens of seconds here; let it fail on the
+    // growth assertion rather than on the default timeout.
+    120_000
+  );
 
   test('the anchored email pattern still finds addresses mid-run', () => {
     expect(detectPiiCategories('xx..jane.doe+1@acme.co.uk')).toContain('email');

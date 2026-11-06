@@ -229,6 +229,24 @@ export interface UsageSummary {
    */
   sovereignShare: number | null;
   /**
+   * Events a spend budget downgraded to a cheaper model. `null` when no event
+   * reported a budget action.
+   */
+  budgetDowngradedRequests: number | null;
+  /**
+   * Events reported as blocked by a spend budget (SDK and gateway refuse such
+   * calls without an event today, so 0). `null` when no event reported a
+   * budget action.
+   */
+  budgetBlockedRequests: number | null;
+  /**
+   * Share (0 to 1) of the gateway's cache lookups that were hits (exact or
+   * semantic), each lookup counted once. `null` when no lookup was reported.
+   */
+  cacheHitRate: number | null;
+  /** Upstream cost (USD) gateway cache hits avoided. `null` when none reported it. */
+  cacheSavedUsd: number | null;
+  /**
    * Events that reported implicit outcome signals (#44), including those that
    * reported none happened.
    */
