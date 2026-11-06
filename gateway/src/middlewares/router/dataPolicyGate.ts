@@ -81,23 +81,15 @@ export function dataPolicyTargetDenied(
     : requireModel
       ? [undefined]
       : [];
-  let routedModel: string | undefined;
-  try {
-    routedModel = c.get('psRoute')?.servedModel;
-  } catch {
-    routedModel = undefined;
-  }
   for (const model of toCheck) {
     // A tier naming a provider vouches only for a call sent to that
-    // provider at its own base URL (#20, psServedTarget.ts). The model the
-    // router chose is not held to the provider yet: the gateway router
-    // rewrites only the model, not the provider (see PS_README.md), so a
-    // routed call is checked against the provider only with a custom host.
+    // provider at its own base URL (#20, psServedTarget.ts). This holds for
+    // the model the router chose too: the gateway router rewrites only the
+    // model, not the provider, so a routed tier at another provider (e.g. an
+    // EEA tier's `meta-llama/Llama-3.3-70B-Instruct` sent to a US provider
+    // that serves the same id) must fail closed rather than run there.
     const target = { provider, customHost };
-    const applies =
-      model !== undefined && model === routedModel && !customHost
-        ? undefined
-        : (tier: ModelTier) => tierServesTarget(tier, target);
+    const applies = (tier: ModelTier) => tierServesTarget(tier, target);
     if (!modelComplies(gate.policy, model, gate.rule, applies)) {
       return policyViolationResponse(c, {
         requestedModel: model ?? '',

@@ -237,8 +237,10 @@ fixed base URLs and reports `served_provider` and `served_jurisdiction` on
 each event. Under a data policy, a tier that names a provider vouches for a
 model only when the call goes to that provider at its own base URL; the same
 model id sent directly to another provider, or to another custom host, has no
-facts and fails closed. The gateway router still rewrites only the model, so
-a routed call goes to the provider the request names.
+facts and fails closed. The model the gateway router chooses is held to the
+same rule: the router rewrites only the model, not the provider, so a routed
+tier that names another provider than the one the request names is refused
+(403). Send the request to the provider of the tiers the policy can choose.
 
 ## Sovereignty facts and the model catalog
 

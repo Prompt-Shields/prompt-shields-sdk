@@ -194,3 +194,52 @@ test('the served provider is the fallback target that answered', async () => {
   expect(event.served_jurisdiction).toBeUndefined();
   expect(events).toHaveLength(1);
 });
+
+describe("the router's choice is held to the provider too", () => {
+  // berget-llama-70b is the only restricted-compliant balanced tier; it
+  // names berget. Before, the router rewrote the model and the call ran at
+  // whatever provider the request named, here a US one.
+  const restricted = {
+    'x-ps-data-classification': 'restricted',
+    'x-ps-quality': 'balanced',
+  };
+
+  test('a routed EEA tier is not sent to another provider', async () => {
+    upstream(/api\.together\.xyz\/v1\/chat\/completions$/, chatOk);
+    await expectViolation(
+      await post(
+        app,
+        '/v1/chat/completions',
+        { model: 'auto', messages: hi },
+        { ...as('together-ai'), ...restricted }
+      )
+    );
+  });
+
+  test('a routing hint on a concrete model does not skip the check', async () => {
+    await expectViolation(
+      await post(
+        app,
+        '/v1/chat/completions',
+        { model: 'berget-llama-70b', messages: hi },
+        { ...as('openai'), ...restricted }
+      )
+    );
+  });
+
+  test('a routed tier is served at its own provider', async () => {
+    upstream(/api\.berget\.ai\/v1\/chat\/completions$/, chatOk);
+    const res = await post(
+      app,
+      '/v1/chat/completions',
+      { model: 'auto', messages: hi },
+      { ...as('berget'), ...restricted }
+    );
+    expect(res.status).toBe(200);
+    expect(upstreamCalls[0].url).toBe(
+      'https://api.berget.ai/v1/chat/completions'
+    );
+    expect(upstreamCalls[0].body.model).toBe('berget-llama-70b');
+    expect((await telemetryEvent()).served_jurisdiction).toBe('EEA');
+  });
+});

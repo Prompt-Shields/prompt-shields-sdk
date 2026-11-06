@@ -41,6 +41,15 @@ const POLICY_PROVIDER_IDS: Record<string, string> = {
 };
 
 /**
+ * Other route-policy ids a gateway provider answers to. `mistral-eu` is the
+ * id the shipped example policies (nordic-sovereign) use for Mistral's
+ * EU-hosted La Plateforme, which is the gateway's `mistral-ai` base URL.
+ */
+const POLICY_PROVIDER_ALIASES: Record<string, string[]> = {
+  'mistral-ai': ['mistral-eu'],
+};
+
+/**
  * The fixed base URL of providers whose facts can apply to a target with a
  * custom host, when that host is the provider's own.
  */
@@ -85,7 +94,8 @@ export function tierServesTarget(
   const gatewayId = target.provider.toLowerCase();
   if (
     tier.provider !== gatewayId &&
-    tier.provider !== policyProviderId(gatewayId)
+    tier.provider !== policyProviderId(gatewayId) &&
+    !(POLICY_PROVIDER_ALIASES[gatewayId] || []).includes(tier.provider)
   )
     return false;
   if (!target.customHost) return true;
