@@ -702,3 +702,50 @@ def test_numbers_in_anthropic_tool_use_input_are_pseudonymised():
     p = pseudonymise([{"role": "assistant", "content": [
         {"type": "tool_use", "id": "t", "name": "dial", "input": {"to": [PHONE]}}]}])
     assert p.messages[0]["content"][0]["input"] == {"to": [_ph("PHONE")]}
+
+
+def test_abandoned_async_client_stream_drops_the_mapping(calls, caplog):
+    # Through the whole async client (telemetry wrapper, call id): nothing in
+    # that path may hold the restoring wrapper, or the mapping would wait
+    # for a cyclic GC pass.
+    client, events = _async()
+
+    async def fake_upstream(**kwargs):
+        return _AsyncStream([_chunk(f"to {_ph('EMAIL')}"), _chunk(" more"),
+                             _chunk(finish="stop")])
+
+    client.chat.completions._call_upstream = fake_upstream
+
+    async def run():
+        stream = await client.chat.completions.create(model="m", messages=MESSAGES,
+                                                      stream=True)
+        first = await stream.__anext__()
+        assert first.choices[0].delta.content == f"to {EMAIL}"
+        assert not _cleared(calls)
+        del stream, first
+        return _cleared(calls)
+
+    with caplog.at_level("DEBUG"):
+        assert _without_cyclic_gc(lambda: asyncio.run(run())) is True
+    assert EMAIL not in caplog.text
+    assert _leaks(events) == []
+
+
+@pytest.mark.parametrize("arguments, expected", [
+    # A phone number as a JSON string, nested, and as a bare JSON value.
+    (json.dumps({"q": {"phone": "+1 415 555 1234"}}), None),
+    (str(PHONE), None),
+    # Not JSON at all: scanned as text, never parsed or re-encoded.
+    (f"dial {PHONE} now", f"dial {_ph('PHONE')} now"),
+    ('{"phone": 4155551234', '{"phone": ' + _ph("PHONE")),
+])
+def test_phone_in_tool_call_arguments_strings(arguments, expected):
+    p = pseudonymise([{"role": "assistant", "tool_calls": [
+        {"id": "c", "type": "function", "function": {"name": "f", "arguments": arguments}}]}])
+    sent = p.messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert "555" not in sent
+    if expected is None:
+        json.loads(sent)  # still valid JSON
+        assert _ph("PHONE") in sent
+    else:
+        assert sent == expected
