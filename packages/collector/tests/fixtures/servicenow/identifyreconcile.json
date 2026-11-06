@@ -1,0 +1,51 @@
+{
+  "result": {
+    "items": [
+      {
+        "className": "cmdb_ci_function_ai",
+        "operation": "INSERT",
+        "sysId": "3f1c2b7a9d5e4f60a1b2c3d4e5f60718",
+        "identifierEntrySysId": "8a4f0e1b1b2230107e0d3a0ce54bcb11",
+        "identificationAttempts": [
+          {
+            "info": "NO_MATCH",
+            "attributes": ["correlation_id"],
+            "hybridEntryCiAttributes": [],
+            "searchOnTable": "cmdb_ci_function_ai",
+            "attempt": "NO_MATCH",
+            "identifierName": "AI Function (Prompt Shields)"
+          }
+        ],
+        "errorCount": 0,
+        "markers": [],
+        "inserted": true
+      },
+      {
+        "className": "cmdb_ci_service",
+        "operation": "NO_CHANGE",
+        "sysId": "b7e9d1c3a5f74e2d9c0b1a2f3e4d5c6b",
+        "identifierEntrySysId": "c2a6f7e01b2230107e0d3a0ce54bcb22",
+        "identificationAttempts": [
+          {
+            "info": "MATCHED",
+            "attributes": ["correlation_id"],
+            "hybridEntryCiAttributes": [],
+            "searchOnTable": "cmdb_ci_service",
+            "attempt": "MATCHED",
+            "identifierName": "Service (Prompt Shields)"
+          }
+        ],
+        "errorCount": 0,
+        "markers": []
+      }
+    ],
+    "relations": [
+      {
+        "className": "cmdb_rel_ci",
+        "operation": "INSERT",
+        "sysId": "d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9",
+        "errorCount": 0
+      }
+    ]
+  }
+}

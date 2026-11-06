@@ -62,10 +62,24 @@ the attempt that served the call is recorded once afterwards in
 ``budget_store`` (default: in-process, per-process counters; use
 ``RedisBudgetStore`` to share them); failed attempts record nothing. See
 ``prompt_shields.budgets``.
+
+Streaming (``stream=True``, local mode) returns a ``RoutedStream``
+(``AsyncRoutedStream``): the route, data-policy gate, budget check and
+learner choice happen first, as for any call. An attempt counts as served
+once its first chunk is in, so failover only happens before that (the
+request raising, or the stream failing before its first chunk); an error
+after it goes to the caller and is never retried, as on the gateway. One
+telemetry event is built when the stream ends, fails or is closed early,
+with the provider's usage from the final chunk where it sends one, else
+estimated tokens (``tokens_estimated``), and the spend is recorded once from
+it. With ``pseudonymise=True`` the chunks go through ``restore_stream`` and
+the mapping is dropped when the stream is done. Chunks keep the serving
+provider's shape (chat-completion chunks, or Anthropic Messages events).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -1541,8 +1555,15 @@ class _RouterCore:
             else from_openai(response)
         )
         pseudo_info = _restore_completion(out, plan) if plan.pseudo is not None else None
+        out.ps = _RouterCore._ps_result(plan, event, attempts, policy_version, pseudo_info)
+        return out
+
+    @staticmethod
+    def _ps_result(plan: _Plan, event: dict, attempts: tuple[Attempt, ...],
+                   policy_version: str | None,
+                   pseudo_info: PseudonymisationInfo | None) -> PSResult:
         d = plan.decision
-        out.ps = PSResult(
+        return PSResult(
             route=RouteInfo(
                 mode="local",
                 requested_model=plan.requested_model,
@@ -1575,7 +1596,6 @@ class _RouterCore:
             ),
             pseudonymisation=pseudo_info,
         )
-        return out
 
     def _learner_error(self, stage: str, exc: Exception) -> None:
         """Auto mode: the learner raised in ``stage`` (``choose`` or
@@ -1600,9 +1620,9 @@ class _RouterCore:
             except Exception as exc:  # noqa: BLE001 - the learner never fails the call
                 self._learner_error("observe", exc)
 
-    def _routed(self, candidate: Candidate, response: Any, captured: dict,
-                attempts: tuple[Attempt, ...]) -> RoutedChatCompletion:
-        plan = candidate.data[0]
+    def _learner_observe(self, plan: _Plan, captured: dict,
+                         attempts: tuple[Attempt, ...]) -> None:
+        """Auto mode: report the served call's outcome to the learner."""
         if plan.learner is not None and self.learner is not None:
             live = captured.get("_event") or captured
             signals = live.get("outcome_signals")
@@ -1612,6 +1632,10 @@ class _RouterCore:
                 self.learner.observe(captured.get("call_id"), plan.learner, signals)
             except Exception as exc:  # noqa: BLE001 - the learner never fails the call
                 self._learner_error("observe", exc)
+
+    def _routed(self, candidate: Candidate, response: Any, captured: dict,
+                attempts: tuple[Attempt, ...]) -> RoutedChatCompletion:
+        self._learner_observe(candidate.data[0], captured, attempts)
         return self._local_result(
             candidate.data[0], response, captured, attempts,
             (self.policy or {}).get("policy_version"),
@@ -1633,6 +1657,72 @@ class _RouterCore:
     async def _arecord_spend(self, plan: _Plan, captured: dict) -> None:
         if plan.budget is not None and self.budgets is not None:
             await self.budgets.acommit(plan.budget, self._budget_cost(plan, captured))
+
+    # --- streaming (local mode) ----------------------------------------------
+
+    def _stream_event_hook(self, plan: _Plan, captured: dict,
+                           tracker: _AttemptTracker):
+        """``_event_hook`` for a streamed attempt that also records the spend.
+
+        The instrumented client builds one event per stream, when it ends
+        (exhausted, failed, closed early or garbage-collected), with the
+        provider's usage from the final chunk, else estimated tokens
+        (``tokens_estimated``). An attempt that failed before its first
+        chunk builds none (``_stream_lazy_start``). So the cost is recorded
+        here, once, however the stream ends; ``commit_soon`` writes a network
+        store from a thread when an event loop is running.
+        """
+        inner = self._event_hook(plan, captured, tracker)
+        recorded = False
+
+        def hook(event: dict) -> None:
+            nonlocal recorded
+            inner(event)
+            if recorded:
+                return
+            recorded = True
+            if plan.budget is not None and self.budgets is not None:
+                self.budgets.commit_soon(plan.budget, self._budget_cost(plan, event))
+
+        return hook
+
+    def _stream_finished(self, plan: _Plan, captured: dict,
+                         attempts: tuple[Attempt, ...]) -> PSResult:
+        """A routed stream ended: tell the learner, drop the mapping and
+        return the final ``ps``, with the event's cost."""
+        try:
+            self._learner_observe(plan, captured, attempts)
+            pseudo_info = None
+            if plan.pseudo is not None:
+                stats = plan.pseudo.stats()
+                pseudo_info = PseudonymisationInfo(
+                    entities=dict(stats.entities),
+                    restored=stats.restored,
+                    unknown_placeholders=stats.unknown,
+                    detected_level=plan.detected_level,
+                    anonymise_then_route=plan.anonymised_route,
+                )
+            return self._ps_result(
+                plan, captured, attempts,
+                (self.policy or {}).get("policy_version"), pseudo_info,
+            )
+        finally:
+            if plan.pseudo is not None:
+                plan.pseudo.clear()
+
+    def _stream_result(self, candidate: Candidate, stream: Any, captured: dict,
+                       attempts: tuple[Attempt, ...], is_async: bool) -> Any:
+        """The serving attempt's stream (first chunk already read) for the
+        caller: placeholders restored across chunks, ``ps`` set now and
+        completed when the stream ends."""
+        plan = candidate.data[0]
+        if plan.pseudo is not None:
+            stream = plan.pseudo.restore_stream(stream, clear_when_done=True)
+        ps = self._ps_result(
+            plan, {}, attempts, (self.policy or {}).get("policy_version"), None
+        )
+        cls = AsyncRoutedStream if is_async else RoutedStream
+        return cls(stream, ps, lambda: self._stream_finished(plan, captured, attempts))
 
     @staticmethod
     def _gateway_result(model: str, response: Any, event: dict,
@@ -1677,11 +1767,205 @@ def _restore_completion(out: RoutedChatCompletion, plan: _Plan) -> Pseudonymisat
     )
 
 
-def _refuse_stream(kwargs: dict) -> None:
-    if kwargs.get("stream") is True:
-        raise RouterError(
-            "stream=True is not supported by the router in local mode yet"
-        )
+_NO_CHUNK = object()
+
+
+class _Prefetched:
+    """A stream whose first chunk the router already read (so a failure
+    before it could fail over); that chunk is handed out first."""
+
+    def __init__(self, stream: Any, iterator: Any, first: Any) -> None:
+        self._stream = stream
+        self._iterator = iterator
+        self._first = first
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._first is not _NO_CHUNK:
+            chunk, self._first = self._first, _NO_CHUNK
+            return chunk
+        if self._iterator is None:
+            raise StopIteration
+        return next(self._iterator)
+
+    def close(self) -> None:
+        self._first = _NO_CHUNK
+        close = getattr(self._stream, "close", None)
+        if close is not None:
+            close()
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._stream, name)
+
+
+class _AsyncPrefetched:
+    # No __iter__: restore_stream picks its async wrapper by that.
+
+    def __init__(self, stream: Any, iterator: Any, first: Any) -> None:
+        self._stream = stream
+        self._iterator = iterator
+        self._first = first
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._stream, name)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._first is not _NO_CHUNK:
+            chunk, self._first = self._first, _NO_CHUNK
+            return chunk
+        if self._iterator is None:
+            raise StopAsyncIteration
+        return await self._iterator.__anext__()
+
+    async def close(self) -> None:
+        self._first = _NO_CHUNK
+        await _aclose(self._stream)
+
+    async def aclose(self) -> None:
+        await self.close()
+
+
+def _prefetch(stream: Any) -> _Prefetched:
+    """Read the first chunk. An error here is still before the stream
+    started, so failover may try the next candidate."""
+    iterator = iter(stream)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        return _Prefetched(stream, None, _NO_CHUNK)
+    return _Prefetched(stream, iterator, first)
+
+
+async def _aprefetch(stream: Any) -> _AsyncPrefetched:
+    iterator = stream.__aiter__()
+    try:
+        first = await iterator.__anext__()
+    except StopAsyncIteration:
+        return _AsyncPrefetched(stream, None, _NO_CHUNK)
+    return _AsyncPrefetched(stream, iterator, first)
+
+
+async def _aclose(stream: Any) -> None:
+    close = getattr(stream, "close", None)
+    if close is not None:
+        result = close()
+        if hasattr(result, "__await__"):
+            await result
+
+
+class RoutedStream:
+    """A local-mode ``stream=True`` call.
+
+    Iterate it, or use it as a context manager, for the serving provider's
+    chunks in that provider's shape: chat-completion chunks from OpenAI and
+    OpenAI-compatible providers, Messages stream events from Anthropic
+    (``ps.route.provider`` says which). With ``pseudonymise=True`` the
+    values are restored, also when a placeholder is split across chunks.
+
+    ``ps`` is set from the start (route, attempts, ``fallback_chain``,
+    budget, estimated cost) and completed when the stream ends, fails or is
+    closed: ``ps.cost.usd`` and ``ps.pseudonymisation`` are filled in then.
+    Failover happens only before the first chunk; an error after it is
+    raised to the caller and never retried.
+    """
+
+    def __init__(self, stream: Any, ps: PSResult, on_end: Any) -> None:
+        self._stream = stream
+        self._on_end = on_end
+        self._ended = False
+        self.ps = ps
+
+    def _end(self) -> None:
+        if self._ended:
+            return
+        self._ended = True
+        try:
+            self.ps = self._on_end()
+        except Exception as exc:  # noqa: BLE001 - fail-open: the stream is over
+            logger.debug("routed stream finish error: %s", type(exc).__name__)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._ended:
+            raise StopIteration
+        try:
+            return next(self._stream)
+        except BaseException:
+            # Exhausted, or failed after the first chunk: the error is the
+            # caller's, never retried mid-stream.
+            self._end()
+            raise
+
+    def close(self) -> None:
+        try:
+            close = getattr(self._stream, "close", None)
+            if close is not None:
+                close()
+        finally:
+            self._end()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._stream, name)
+
+
+class AsyncRoutedStream(RoutedStream):
+    """``RoutedStream`` for ``AsyncShieldsRouter``: ``async for`` and
+    ``async with``."""
+
+    def __iter__(self):
+        raise TypeError("use 'async for' with an AsyncShieldsRouter stream")
+
+    def __next__(self):
+        raise TypeError("use 'async for' with an AsyncShieldsRouter stream")
+
+    def __enter__(self):
+        raise TypeError("use 'async with' with an AsyncShieldsRouter stream")
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._ended:
+            raise StopAsyncIteration
+        try:
+            return await self._stream.__anext__()
+        except BaseException:
+            self._end()
+            raise
+
+    async def close(self) -> None:  # type: ignore[override]
+        try:
+            await _aclose(self._stream)
+        finally:
+            self._end()
+
+    async def aclose(self) -> None:
+        await self.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.close()
 
 
 class ShieldsRouter(_RouterCore):
@@ -1791,7 +2075,8 @@ class _RouterCompletions:
                               int((time.monotonic() - start) * 1000))
             return r._gateway_result(model, response, captured, attempt)
 
-        _refuse_stream(kwargs)
+        # Route, data-policy gate, budgets and the learner's choice all
+        # happen before anything is sent, streamed or not.
         plan = r._plan(
             messages, model, route,
             max_tokens if max_tokens is not None
@@ -1799,18 +2084,26 @@ class _RouterCompletions:
             data_classification, use_case,
             budget=r._budget_check(use_case),
         )
+        streaming = kwargs.get("stream") is True
         try:
-            return self._send(plan, max_tokens, kwargs, ps_metadata, captured)
-        finally:
-            # The mapping lives for this call only.
+            result = self._send(plan, max_tokens, kwargs, ps_metadata, captured)
+        except BaseException:
             if plan.pseudo is not None:
                 plan.pseudo.clear()
+            raise
+        # The mapping lives for this call only; a stream drops it when it
+        # ends, fails or is closed.
+        if plan.pseudo is not None and not streaming:
+            plan.pseudo.clear()
+        return result
 
     def _send(self, plan: Any, max_tokens: int | None, kwargs: dict,
               ps_metadata: PSMetadata | None, captured: dict) -> Any:
         r = self._router
         candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
         try:
+            if kwargs.get("stream") is True:
+                return self._dispatch_stream(candidates, ps_metadata, captured)
             return self._dispatch(candidates, ps_metadata, captured)
         except Exception:
             # Auto mode: a call that failed outright counts against the
@@ -1857,6 +2150,59 @@ class _RouterCompletions:
         return r._routed(result.candidate, result.response, captured,
                          r._attempts(result.attempts, tracker))
 
+    def _dispatch_stream(self, candidates: list[Candidate],
+                         ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        """``stream=True``: an attempt succeeds once its first chunk is in.
+
+        A failure before that (the request raising, or the stream failing
+        before any chunk: connection errors, 5xx, 429) is a failed attempt
+        like a non-streamed one, so failover may try the next candidate.
+        Once the first chunk is in, the engine is done: a later error goes
+        to the caller and is never retried. The spend is recorded once,
+        when the stream's telemetry event is built (``_stream_event_hook``).
+        """
+        r = self._router
+        tracker = _AttemptTracker()
+
+        def call(c: Candidate) -> Any:
+            cplan, (call_messages, call_max, call_kwargs) = c.data
+            if len(tracker.failures) >= r.max_attempts:
+                raise _AttemptLimit()
+            captured.clear()
+            start = time.monotonic()
+            stream = None
+            try:
+                stream = r._client(cplan.provider.name).chat.completions._create(
+                    model=cplan.decision.model, messages=call_messages,
+                    ps_metadata=ps_metadata, max_tokens=call_max,
+                    _event_hook=r._stream_event_hook(cplan, captured, tracker),
+                    _stream_lazy_start=True,
+                    **call_kwargs,
+                )
+                return _prefetch(stream)
+            except BaseException as exc:
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+                if isinstance(exc, Exception):
+                    r._failed(c, exc, start, tracker)
+                raise
+
+        if not r.failover:
+            start = time.monotonic()
+            stream = call(candidates[0])
+            attempt = Attempt(candidates[0].provider, candidates[0].model, True,
+                              int((time.monotonic() - start) * 1000))
+            return r._stream_result(candidates[0], stream, captured, (attempt,), False)
+        try:
+            result = r._engine.run(
+                candidates, call, allow=lambda c: r._complies(c.data[0])
+            )
+        except _AttemptLimit:
+            raise r._attempt_limit(tracker) from tracker.last
+        return r._stream_result(result.candidate, result.response, captured,
+                                r._attempts(result.attempts, tracker), False)
+
 
 class _AsyncRouterCompletions:
     def __init__(self, router: AsyncShieldsRouter):
@@ -1891,7 +2237,6 @@ class _AsyncRouterCompletions:
                               int((time.monotonic() - start) * 1000))
             return r._gateway_result(model, response, captured, attempt)
 
-        _refuse_stream(kwargs)
         plan = r._plan(
             messages, model, route,
             max_tokens if max_tokens is not None
@@ -1899,18 +2244,26 @@ class _AsyncRouterCompletions:
             data_classification, use_case,
             budget=await r._abudget_check(use_case),
         )
+        streaming = kwargs.get("stream") is True
         try:
-            return await self._send(plan, max_tokens, kwargs, ps_metadata, captured)
-        finally:
-            # The mapping lives for this call only.
+            result = await self._send(plan, max_tokens, kwargs, ps_metadata, captured)
+        except BaseException:
             if plan.pseudo is not None:
                 plan.pseudo.clear()
+            raise
+        # The mapping lives for this call only; a stream drops it when it
+        # ends, fails or is closed.
+        if plan.pseudo is not None and not streaming:
+            plan.pseudo.clear()
+        return result
 
     async def _send(self, plan: Any, max_tokens: int | None, kwargs: dict,
               ps_metadata: PSMetadata | None, captured: dict) -> Any:
         r = self._router
         candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
         try:
+            if kwargs.get("stream") is True:
+                return await self._dispatch_stream(candidates, ps_metadata, captured)
             return await self._dispatch(candidates, ps_metadata, captured)
         except Exception:
             # Auto mode: a call that failed outright counts against the
@@ -1956,3 +2309,49 @@ class _AsyncRouterCompletions:
         await r._arecord_spend(result.candidate.data[0], captured)
         return r._routed(result.candidate, result.response, captured,
                          r._attempts(result.attempts, tracker))
+
+    async def _dispatch_stream(self, candidates: list[Candidate],
+                               ps_metadata: PSMetadata | None,
+                               captured: dict) -> Any:
+        """``stream=True``; see ``_RouterCompletions._dispatch_stream``."""
+        r = self._router
+        tracker = _AttemptTracker()
+
+        async def call(c: Candidate) -> Any:
+            cplan, (call_messages, call_max, call_kwargs) = c.data
+            if len(tracker.failures) >= r.max_attempts:
+                raise _AttemptLimit()
+            captured.clear()
+            start = time.monotonic()
+            stream = None
+            try:
+                stream = await r._client(cplan.provider.name).chat.completions._create(
+                    model=cplan.decision.model, messages=call_messages,
+                    ps_metadata=ps_metadata, max_tokens=call_max,
+                    _event_hook=r._stream_event_hook(cplan, captured, tracker),
+                    _stream_lazy_start=True,
+                    **call_kwargs,
+                )
+                return await _aprefetch(stream)
+            except BaseException as exc:
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        await _aclose(stream)
+                if isinstance(exc, Exception):
+                    r._failed(c, exc, start, tracker)
+                raise
+
+        if not r.failover:
+            start = time.monotonic()
+            stream = await call(candidates[0])
+            attempt = Attempt(candidates[0].provider, candidates[0].model, True,
+                              int((time.monotonic() - start) * 1000))
+            return r._stream_result(candidates[0], stream, captured, (attempt,), True)
+        try:
+            result = await r._engine.arun(
+                candidates, call, allow=lambda c: r._complies(c.data[0])
+            )
+        except _AttemptLimit:
+            raise r._attempt_limit(tracker) from tracker.last
+        return r._stream_result(result.candidate, result.response, captured,
+                                r._attempts(result.attempts, tracker), True)

@@ -404,6 +404,7 @@ const UNMAPPED_SCHEMAS = new Set([
   'UpdateTenantRequest',
   'ConnectorSyncRequest',
   'LeanIXSyncRequest',
+  'ServiceNowSyncRequest',
 ]);
 
 interface Operation {

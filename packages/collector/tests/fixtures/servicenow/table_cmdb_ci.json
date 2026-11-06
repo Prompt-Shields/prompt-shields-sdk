@@ -1,0 +1,14 @@
+{
+  "result": [
+    {
+      "sys_id": "3f1c2b7a9d5e4f60a1b2c3d4e5f60718",
+      "sys_class_name": "cmdb_ci_function_ai",
+      "correlation_id": "promptshields:asset:0190a000-0000-7000-8000-000000000001"
+    },
+    {
+      "sys_id": "b7e9d1c3a5f74e2d9c0b1a2f3e4d5c6b",
+      "sys_class_name": "cmdb_ci_service",
+      "correlation_id": "promptshields:provider:openai"
+    }
+  ]
+}

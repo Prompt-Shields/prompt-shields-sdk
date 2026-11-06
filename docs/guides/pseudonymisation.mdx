@@ -128,18 +128,26 @@ resp.ps_pseudonymisation    # counts only: entities, restored, unknown
   blocks (`title` and text `content`).
 - **Sent unchanged:** other request parameters, including `user` and
   `metadata` (such as Anthropic's `metadata.user_id`). Do not put PII in them;
-  use an opaque id. Numbers in tool-call arguments and `tool_use` input
-  (`{"phone": 4791234567}`) are not scanned; only string values are.
+  use an opaque id. Integers in tool-call arguments and `tool_use` input
+  (`{"phone": 4791234567}`) are scanned as their digits, like text; one that
+  holds PII is sent as a placeholder string, and comes back restored as a
+  string (`"4791234567"`), not a number. Floats and booleans are kept.
 - **Restored:** OpenAI `content`, `refusal` and tool-call `arguments`;
   Anthropic `text` blocks and `tool_use` input. A stream is restored chunk by
   chunk, as `restore_stream` below does. Thinking blocks are left as they are,
-  because their signature covers the text.
+  because their signature covers the text. `thinking` and `redacted_thinking`
+  blocks from earlier turns are sent unchanged too, but placeholder-shaped
+  text in them is reserved, so this call never mints the same placeholder.
 - **Telemetry:** the event is built from what was sent. `detected_pii_types`
   lists the categories of the original prompt (labels only), as with the
   router. With `send_prompt_text=True`, `prompt_text` holds the placeholders.
   The `on_prompt_features` callback also gets the pseudonymised messages.
 - **Mapping:** dropped when the call returns or raises, or, for a stream, when
-  it ends, fails or is closed.
+  it ends, fails or is closed. A stream you stop reading early without
+  closing drops it when the stream object is garbage collected (at once on
+  CPython once nothing refers to it). Use `with` / `async with` (or
+  `close()` / `aclose()`) if you may stop early: that also closes the
+  upstream connection.
 - **Not for the gateway:** a call with `route=` hints or other `X-PS-*` headers
   goes to a Prompt Shields gateway. It raises `ValueError` and nothing is sent,
   because the gateway would classify the placeholders instead of the original
@@ -172,7 +180,8 @@ stream events, sync or async. A placeholder split across chunks is restored:
 the stream holds back at most 40 characters after a `⟦` until the placeholder
 is complete or clearly is not one. Text still held back when a choice
 finishes (or a content block stops) comes out before the finish. Tool-call
-argument fragments are restored with JSON escaping.
+and legacy `function_call` argument fragments are restored with JSON
+escaping.
 
 `p.restore(text)` restores one string, `p.restore(text, json_escape=True)`
 a JSON string such as tool-call arguments.
@@ -213,7 +222,7 @@ are numbered per call, so they do not identify a person across calls.
 - **Only text is pseudonymised.** Images, audio, files (base64, URL or file-id
   documents such as PDFs) and tool definitions (`tools`) are sent as they are.
   Function names are not changed. Request parameters such as `user` and
-  `metadata` are sent as they are, and numbers in tool arguments are not
+  `metadata` are sent as they are. Floats in tool arguments are not
   scanned.
 - **The answer is restored for whoever reads it.** Restored output can hold
   any value from the prompt. Do not pass it on to someone who should not see
@@ -221,8 +230,9 @@ are numbered per call, so they do not identify a person across calls.
 - **Not anonymisation.** The provider still sees the context around each
   placeholder, which can identify a person. The mapping exists in your process
   while the call runs.
-- **Local mode only, no router streaming.** `ShieldsRouter` local mode still
-  refuses `stream=True`; use a `Shields*` client with `pseudonymise=True` to
-  stream. The gateway does not pseudonymise.
+- **Local mode only.** `ShieldsRouter` streams in local mode
+  (`stream=True`): chunks are restored on the way through, and the mapping is
+  dropped when the stream ends, fails or is closed. The gateway does not
+  pseudonymise.
 - **Not yet per tenant.** It is a client setting. A per-tenant switch, gated on
   the #35 recall benchmark, is not built yet.

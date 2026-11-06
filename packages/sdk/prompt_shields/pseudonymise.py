@@ -32,7 +32,8 @@ import contextlib
 import copy
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+import weakref
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
@@ -114,6 +115,11 @@ class Pseudonymisation:
 
         for m in messages:
             _walk_message(m, reserve)
+            # Signed thinking blocks from earlier turns are never changed
+            # (that would break their signature), but a placeholder in them
+            # is reserved so this call never mints the same one.
+            for signed in _signed_texts(m):
+                reserve(signed)
         _walk_content(system, reserve)
         _walk_prediction(prediction, reserve)
 
@@ -258,7 +264,9 @@ class Pseudonymisation:
         restored. The wrapper closes and forwards attributes to ``stream``.
 
         ``clear_when_done`` drops the mapping once the stream ends, fails or
-        is closed (the instrumented clients' ``pseudonymise=True`` uses it).
+        is closed (the instrumented clients' ``pseudonymise=True`` uses it),
+        or when an abandoned wrapper is garbage collected. Use ``with`` /
+        ``async with`` when you may stop reading early.
         """
         on_done = self.clear if clear_when_done else None
         if hasattr(stream, "__aiter__") and not hasattr(stream, "__iter__"):
@@ -280,9 +288,19 @@ def pseudonymise(messages: Iterable[Any] | None, *,
 
 
 def _json_value(value: Any, text: Callable[[str], str]) -> Any:
-    """``text`` applied to every string, keys included, in a JSON value."""
+    """``text`` applied to every string, keys included, in a JSON value.
+
+    Integers are scanned as their digits, as they appear in the arguments
+    string on the wire (``{"phone": 4791234567}``); one that changes becomes
+    the replaced string, so a phone or card number sent as a number is
+    pseudonymised too. Floats and booleans are kept.
+    """
     if isinstance(value, str):
         return text(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        digits = str(value)
+        replaced = text(digits)
+        return value if replaced == digits else replaced
     if isinstance(value, list):
         return [_json_value(v, text) for v in value]
     if isinstance(value, Mapping):
@@ -338,6 +356,24 @@ def _walk_content(content: Any, text: Callable[[str], str]) -> Any:
                 part = {**part, "input": _json_value(part["input"], text)}
         parts.append(part)
     return parts
+
+
+def _signed_texts(message: Any) -> Iterator[str]:
+    """The text of a message's Anthropic ``thinking`` and ``redacted_thinking``
+    blocks, read only: their signature covers it, so it is never changed."""
+    content = _get(message, "content")
+    if not isinstance(content, list):
+        return
+    for part in content:
+        kind = _get(part, "type")
+        if kind == "thinking":
+            value = _get(part, "thinking")
+        elif kind == "redacted_thinking":
+            value = _get(part, "data")
+        else:
+            continue
+        if isinstance(value, str):
+            yield value
 
 
 def _walk_document_source(source: Mapping, text: Callable[[str], str]) -> Any:
@@ -519,11 +555,13 @@ def _set(obj: Any, name: str, value: Any) -> None:
 class _ChunkRestorer:
     """Per-field restorers over a stream of chunks.
 
-    OpenAI chunks: ``choices[i].delta.content`` / ``.refusal`` and
-    ``choices[i].delta.tool_calls[j].function.arguments`` (JSON-escaped),
+    OpenAI chunks: ``choices[i].delta.content`` / ``.refusal``,
+    ``choices[i].delta.tool_calls[j].function.arguments`` and the legacy
+    ``choices[i].delta.function_call.arguments`` (both JSON-escaped),
     flushed on the choice's ``finish_reason``. Anthropic events:
     ``content_block_delta`` ``text`` / ``partial_json``, flushed on
-    ``content_block_stop``. Text still held back when a field ends comes out
+    ``content_block_stop``; ``thinking`` and ``signature`` deltas are signed
+    and passed through as they are. Text still held back when a field ends comes out
     in an extra chunk, a copy of the field's last chunk.
     """
 
@@ -537,7 +575,7 @@ class _ChunkRestorer:
             return text
         restorer = self._restorers.get(key)
         if restorer is None:
-            restorer = self._owner.stream_restorer(json_escape=key[0] in ("t", "j"))
+            restorer = self._owner.stream_restorer(json_escape=key[0] in ("t", "j", "f"))
             self._restorers[key] = restorer
         self._last[key] = chunk
         return restorer.feed(text)
@@ -559,10 +597,16 @@ class _ChunkRestorer:
         _set(chunk, "choices", [choice])
         _set(choice, "finish_reason", None)
         delta = _get(choice, "delta")
-        for name in ("content", "refusal", "tool_calls"):
+        for name in ("content", "refusal", "tool_calls", "function_call"):
             if _get(delta, name) is not None:
                 _set(delta, name, None)
-        if key[0] == "t":
+        if key[0] == "f":
+            fc = copy.deepcopy(_get(_get(_choice(last, key[1]), "delta"), "function_call"))
+            if _get(fc, "name") is not None:
+                _set(fc, "name", None)
+            _set(fc, "arguments", text)
+            _set(delta, "function_call", fc)
+        elif key[0] == "t":
             last_delta = _get(_choice(last, key[1]), "delta")
             tc = copy.deepcopy(next(
                 t for t in _get(last_delta, "tool_calls") if _get(t, "index") == key[2]
@@ -617,9 +661,14 @@ class _ChunkRestorer:
                         key = ("t", index, _get(tc, "index"))
                         _set(fn, "arguments", self._feed(key, _get(fn, "arguments"), chunk))
                         fed[key] = (fn, "arguments")
+                fc = _get(delta, "function_call")
+                if fc is not None and isinstance(_get(fc, "arguments"), str):
+                    key = ("f", index)
+                    _set(fc, "arguments", self._feed(key, _get(fc, "arguments"), chunk))
+                    fed[key] = (fc, "arguments")
             if _get(choice, "finish_reason") is None:
                 continue
-            for key in [k for k in self._restorers if k[0] in ("c", "r", "t") and k[1] == index]:
+            for key in [k for k in self._restorers if k[0] in ("c", "r", "t", "f") and k[1] == index]:
                 if key in fed:
                     # Written in this chunk: append the rest in place.
                     obj, name = fed[key]
@@ -646,25 +695,52 @@ def _choice(chunk: Any, index: Any) -> Any:
     return next(c for c in _get(chunk, "choices") if _get(c, "index") == index)
 
 
+def _noop() -> None:
+    return None
+
+
+def _done_callback(wrapper: Any, on_done: Callable[[], None] | None) -> Callable[[], Any]:
+    """``on_done`` run once: when the stream ends, fails or is closed, or
+    when ``wrapper`` is garbage collected without any of those (an
+    abandoned stream), whichever comes first. The callback holds no
+    reference to ``wrapper``."""
+    if on_done is None:
+        return _noop
+    return weakref.finalize(wrapper, on_done)
+
+
+# The generators are module functions, not methods: a generator holding the
+# wrapper would make a reference cycle, and an abandoned wrapper would then
+# keep the mapping until the cyclic garbage collector runs. Without the
+# cycle, CPython drops it as soon as the last reference to the wrapper goes.
+
+
+def _restore_chunks(stream: Any, restorer: _ChunkRestorer, done: Callable[[], Any]):
+    try:
+        for chunk in stream:
+            yield from restorer.process(chunk)
+        yield from restorer.finish()
+    finally:
+        done()
+
+
+async def _arestore_chunks(stream: Any, restorer: _ChunkRestorer, done: Callable[[], Any]):
+    try:
+        async for chunk in stream:
+            for out in restorer.process(chunk):
+                yield out
+        for out in restorer.finish():
+            yield out
+    finally:
+        done()
+
+
 class _RestoringStream:
     def __init__(self, stream: Any, restorer: _ChunkRestorer,
                  on_done: Callable[[], None] | None = None) -> None:
         self._stream = stream
-        self._restorer = restorer
-        self._on_done = on_done
-        self._gen = self._run()
-
-    def _done(self) -> None:
-        if self._on_done is not None:
-            self._on_done()
-
-    def _run(self):
-        try:
-            for chunk in self._stream:
-                yield from self._restorer.process(chunk)
-            yield from self._restorer.finish()
-        finally:
-            self._done()
+        self._done = _done_callback(self, on_done)
+        self._gen = _restore_chunks(stream, restorer, self._done)
 
     def __iter__(self):
         return self
@@ -691,26 +767,16 @@ class _RestoringStream:
 
 
 class _AsyncRestoringStream:
+    """Use it with ``async with`` (or ``aclose``) when you may stop early.
+    An abandoned stream drops its mapping when it is garbage collected
+    (at once on CPython), but the upstream connection is only closed by
+    ``aclose``."""
+
     def __init__(self, stream: Any, restorer: _ChunkRestorer,
                  on_done: Callable[[], None] | None = None) -> None:
         self._stream = stream
-        self._restorer = restorer
-        self._on_done = on_done
-        self._gen = self._run()
-
-    def _done(self) -> None:
-        if self._on_done is not None:
-            self._on_done()
-
-    async def _run(self):
-        try:
-            async for chunk in self._stream:
-                for out in self._restorer.process(chunk):
-                    yield out
-            for out in self._restorer.finish():
-                yield out
-        finally:
-            self._done()
+        self._done = _done_callback(self, on_done)
+        self._gen = _arestore_chunks(stream, restorer, self._done)
 
     def __aiter__(self):
         return self
