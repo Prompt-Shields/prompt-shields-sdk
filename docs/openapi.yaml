@@ -2453,6 +2453,28 @@ components:
         enum: [public, internal, confidential, restricted]
       description: Filter by data classification
 
+    AttestationFieldParam:
+      name: attestation_field
+      in: query
+      schema:
+        type: string
+        enum: [asset, owner, data_classification]
+      description: |
+        With `attestation_state`: only assets whose current (newest)
+        attestation of this field is in that state. Use it as a review queue,
+        e.g. `attestation_field=owner&attestation_state=unreviewed`. Giving
+        only one of the two is a 400.
+
+    AttestationStateParam:
+      name: attestation_state
+      in: query
+      schema:
+        type: string
+        enum: [unreviewed, attested, disputed, retired]
+      description: |
+        With `attestation_field`. `unreviewed` includes fields nobody has
+        attested. Independent of `confidence`.
+
 paths:
   /ingest/feedback:
     post:
@@ -2575,10 +2597,20 @@ paths:
         - $ref: '#/components/parameters/VendorParam'
         - $ref: '#/components/parameters/ConfidenceParam'
         - $ref: '#/components/parameters/DataClassificationParam'
+        - $ref: '#/components/parameters/AttestationFieldParam'
+        - $ref: '#/components/parameters/AttestationStateParam'
       security:
         - OAuth2: [assets:read]
         - PartnerApiKey: []
       responses:
+        '400':
+          description: >-
+            Only one of `attestation_field` and `attestation_state` was given,
+            or the field is not attestable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
@@ -3559,7 +3591,13 @@ paths:
             each asset is an `application` component whose Prompt Shields data
             (vendor, model, modality, discovery sources, confidence, owner, risk
             classifications, ...) is carried as `promptshields:<name>` properties,
-            for example `promptshields:modality` = `audio`.
+            for example `promptshields:modality` = `audio`. Human attestation is
+            carried next to `promptshields:confidence`, never folded into it:
+            `promptshields:attestation:<field>` is the state of each attestable
+            field (`unreviewed` when nobody has attested it) and, for an
+            attested field, `…:attested_by`, `…:attested_at` and
+            `…:value_changed` (`true` when the value moved since the sign-off).
+            Attestation comments are not exported.
       security:
         - OAuth2: [export:read]
         - PartnerApiKey: []
