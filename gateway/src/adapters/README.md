@@ -173,7 +173,26 @@ from any provider that supports it (Anthropic, Google, etc.) without setting any
 - Function tool calls
 - Token usage tracking
 - Reasoning/thinking output (automatically included when provider returns it)
-- Streaming responses (SSE events transformed to Responses API format)
+- Streaming responses (SSE events transformed to Responses API format):
+  output items open in the order their content arrives (`reasoning` with
+  `reasoning_summary_*` events, `message`, one `function_call` per call),
+  so there is no empty message item when the model only calls tools; a
+  provider error mid-stream ends with `response.failed`
+- Messages streams never interleave blocks: parallel tool calls whose
+  arguments arrive interleaved are sent as complete `tool_use` blocks, in
+  order, when the model finishes
+
+### Conformance suite
+
+`src/tests/regression/adapterConformance.test.ts` drives `/v1/messages` and
+`/v1/responses` through the whole app against stub OpenAI-compatible,
+Anthropic and Gemini upstreams (text, tool calls, parallel tool calls,
+thinking, `max_tokens`; JSON and SSE; multi-turn tool round trips). Every
+adapted stream is replayed through the client contracts in
+`src/tests/regression/conformance/clientContracts.ts`, which mirror the
+Anthropic SDK accumulator (used by Claude Code) and the `openai` SDK
+`ResponseStream` accumulator plus the `.done` events Codex reads;
+provenance is documented in that file.
 
 ### ❌ Not Supported (Responses API-only features)
 

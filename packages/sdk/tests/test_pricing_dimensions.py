@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from prompt_shields import ShieldsClient
 from prompt_shields.instrumentation import _extract_responses
+from prompt_shields.pricing import estimate_cost
 from prompt_shields.providers import AnthropicAdapter, OpenAIAdapter
 
 MESSAGES = [{"role": "user", "content": "hello"}]
@@ -54,16 +55,76 @@ def test_openai_flex_tier_is_discounted():
     assert event["cost_source"] == "pricing_table"
 
 
-def test_openai_priority_tier_is_unmetered_not_standard():
+def test_openai_priority_tier_priced_at_model_priority_rates():
+    usage = NS(
+        prompt_tokens=10000, completion_tokens=1000,
+        prompt_tokens_details=NS(cached_tokens=8000),
+    )
+    client, events = _client("openai", _openai("gpt-5", usage, "priority"))
+    client.chat.completions.create(model="gpt-5", messages=MESSAGES)
+    event = events[0]
+    assert event["service_tier"] == "priority"
+    # 2000 x $2.50 + 8000 x $0.25 + 1000 x $20.00 (priority list price)
+    assert event["cost"] == pytest.approx(0.027)
+    assert event["cost_source"] == "pricing_table"
+
+
+def test_openai_priority_tier_without_rates_is_unmetered_not_standard():
     response = _openai(
-        "gpt-4o", NS(prompt_tokens=1000, completion_tokens=2000), "priority"
+        "gpt-4-turbo", NS(prompt_tokens=1000, completion_tokens=2000), "priority"
     )
     client, events = _client("openai", response)
-    client.chat.completions.create(model="gpt-4o", messages=MESSAGES)
+    client.chat.completions.create(model="gpt-4-turbo", messages=MESSAGES)
     event = events[0]
     assert event["service_tier"] == "priority"
     assert event["cost"] is None
     assert "cost_source" not in event
+
+
+def test_responses_api_priority_tier_is_priced():
+    response = NS(
+        model="gpt-4.1", output=[], service_tier="priority",
+        usage=NS(input_tokens=1000, output_tokens=500,
+                 input_tokens_details=NS(cached_tokens=0),
+                 output_tokens_details=NS(reasoning_tokens=0)),
+    )
+    fields = _extract_responses(response)
+    assert fields["service_tier"] == "priority"
+    # 1000 x $3.50 + 500 x $14.00
+    assert estimate_cost(
+        "openai", "gpt-4.1", fields["tokens_in"], fields["tokens_out"],
+        service_tier=fields["service_tier"],
+    ) == pytest.approx(0.0105)
+
+
+def test_tier_rates_cover_what_the_tier_does_not_price():
+    # o4-mini flex prices input, output and cache read; gpt-4o batch prices
+    # input and output, so its cache read is standard x (batch / standard input).
+    assert estimate_cost(
+        "openai", "o4-mini", 10000, 1000, tokens_cached=8000, service_tier="flex"
+    ) == pytest.approx((2000 * 0.55 + 8000 * 0.138 + 1000 * 2.2) / 1e6)
+    assert estimate_cost(
+        "openai", "gpt-4o", 10000, 1000, tokens_cached=8000, service_tier="batch"
+    ) == pytest.approx((2000 * 1.25 + 8000 * 0.625 + 1000 * 5.0) / 1e6)
+
+
+def test_tier_rates_are_not_used_through_vendor_fallback_or_custom_tables():
+    # Azure priority processing is not priced at OpenAI's priority rates.
+    assert estimate_cost(
+        "azure-openai", "gpt-4o", 1000, 1000, service_tier="priority"
+    ) is None
+    # Azure batch keeps the vendor multiplier.
+    assert estimate_cost(
+        "azure-openai", "gpt-4o", 1000, 1000, service_tier="batch"
+    ) == pytest.approx((1000 * 1.25 + 1000 * 5.0) / 1e6)
+    # A custom table has no tier rates: batch by multiplier, priority unpriced.
+    table = {("openai", "gpt-4o"): (0.002, 0.008)}
+    assert estimate_cost(
+        "openai", "gpt-4o", 1000, 1000, table, service_tier="batch"
+    ) == pytest.approx(0.005)
+    assert estimate_cost(
+        "openai", "gpt-4o", 1000, 1000, table, service_tier="priority"
+    ) is None
 
 
 def test_streamed_openai_chunks_carry_service_tier():
