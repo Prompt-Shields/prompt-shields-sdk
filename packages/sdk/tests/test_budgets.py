@@ -39,7 +39,9 @@ from prompt_shields.budgets import (
     load_budget_policy,
     window_period,
 )
+from prompt_shields.failover import NoCompliantCandidate
 
+from tests import test_router_failover as fo
 from tests.test_router import (
     HI,
     NORDIC,
@@ -48,6 +50,7 @@ from tests.test_router import (
     _policy,
     _wire,
 )
+from tests.test_router_failover import ProviderError
 
 SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schemas" / "budget"
 KEY_VECTORS = json.loads((SCHEMA_DIR / "vectors" / "keys.json").read_text())
@@ -534,3 +537,101 @@ async def test_async_client_block():
     assert events[0]["budget_state"] == "ok"
     with pytest.raises(BudgetExceeded):
         await client.chat.completions.create(model="gpt-4o-mini", messages=HI)
+
+
+# --- budgets with failover (#21 + #29) -------------------------------------------
+
+
+def _failover_router(enforcer, failures, cls=ShieldsRouter):
+    router = fo._router(cls=cls, policy=copy.deepcopy(fo.NORDIC), budgets=enforcer)
+    events, upstreams = fo._wire(router, failures, is_async=cls is AsyncShieldsRouter)
+    return router, events, upstreams
+
+
+def _spent(enforcer) -> float:
+    return enforcer.check({}).statuses[0].spent_usd
+
+
+def test_failover_downgrade_clamp_narrows_candidates_and_records_once():
+    enforcer = _enforcer(_budget(mode="downgrade", limit_usd=1.0))
+    _spend(enforcer, 1.0 - 0.0004)  # room for the small EEA models only
+    router, events, upstreams = _failover_router(
+        enforcer, {"mistral-eu": [ProviderError(503)]}
+    )
+    resp = router.chat.completions.create(
+        messages=HI, route=RouteHint(quality="critical"),
+        data_classification="confidential",
+    )
+    # Downgraded off the frontier tier to the best model under the ceiling;
+    # the fallback is the next compliant candidate under it, never
+    # mistral-large-eu (same provider, above the ceiling).
+    assert [c["model"] for c in upstreams["mistral-eu"].calls] == ["mistral-small-eu"]
+    assert [c["model"] for c in upstreams["scaleway"].calls] == ["scaleway-small"]
+    assert resp.ps.route.model == "scaleway-small"
+    assert resp.ps.fallback_chain == ("server_error",)
+    assert (resp.ps.budget.state, resp.ps.budget.action) == ("warn", "downgraded")
+    (event,) = events
+    assert (event["budget_state"], event["budget_action"]) == ("warn", "downgraded")
+    assert event["fallback_chain"] == ["server_error"]
+    # Only the attempt that served the call is recorded, once.
+    assert _spent(enforcer) == pytest.approx(1.0 - 0.0004 + event["cost"])
+
+
+def test_failover_exhausted_downgrade_never_escalates_cost():
+    enforcer = _enforcer(_budget(mode="downgrade", limit_usd=0.5))
+    _spend(enforcer, 0.5)
+    router, events, upstreams = _failover_router(
+        enforcer, {"scaleway": [ProviderError(503)]}
+    )
+    with pytest.raises(NoCompliantCandidate):
+        router.chat.completions.create(
+            messages=HI, route=RouteHint(quality="critical"),
+            data_classification="confidential",
+        )
+    # The cheapest compliant model was the only candidate within the budget.
+    assert {u for u, up in upstreams.items() if up.calls} == {"scaleway"}
+    assert events == []
+    assert _spent(enforcer) == pytest.approx(0.5)
+
+
+def test_failed_attempts_do_not_consume_budget():
+    enforcer = _enforcer(_budget(mode="block", limit_usd=10))
+    router, events, upstreams = _failover_router(
+        enforcer,
+        {"scaleway": [ProviderError(503)], "mistral-eu": [ProviderError(503)]},
+    )
+    with pytest.raises(NoCompliantCandidate):
+        router.chat.completions.create(messages=HI, data_classification="confidential")
+    assert sum(len(u.calls) for u in upstreams.values()) == 2
+    assert _spent(enforcer) == 0.0
+
+    # Next call: scaleway fails again, mistral serves; one cost recorded.
+    upstreams["scaleway"].failures.append(ProviderError(503))
+    resp = router.chat.completions.create(messages=HI, data_classification="confidential")
+    assert resp.ps.route.provider == "mistral-eu"
+    (event,) = events
+    assert _spent(enforcer) == pytest.approx(event["cost"])
+
+
+async def test_async_failover_records_only_the_serving_attempt():
+    enforcer = _enforcer(_budget(mode="block", limit_usd=10))
+    router, events, _ = _failover_router(
+        enforcer, {"scaleway": [ProviderError(503)]}, cls=AsyncShieldsRouter
+    )
+    resp = await router.chat.completions.create(
+        messages=HI, data_classification="confidential"
+    )
+    assert resp.ps.route.provider == "mistral-eu"
+    assert resp.ps.budget.state == "ok"
+    (event,) = events
+    assert event["budget_state"] == "ok"
+    assert _spent(enforcer) == pytest.approx(event["cost"])
+
+
+def test_block_budget_refuses_before_any_failover_attempt():
+    enforcer = _enforcer(_budget(mode="block", limit_usd=1))
+    _spend(enforcer, 1.0)
+    router, events, upstreams = _failover_router(enforcer, {})
+    with pytest.raises(BudgetExceeded):
+        router.chat.completions.create(messages=HI, data_classification="confidential")
+    assert all(not u.calls for u in upstreams.values()) and events == []
