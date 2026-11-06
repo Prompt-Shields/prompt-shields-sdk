@@ -17,7 +17,10 @@ Tenants:
   GET    /tenants                     list (?status=active|disabled) operator:tenants
   GET    /tenants/{id}                read                          operator:tenants
   PATCH  /tenants/{id}                name, domain, settings (merged; null
-                                      removes a key), disabled      operator:tenants
+                                      removes a key), disabled;     operator:tenants
+                                      per-tenant ingest limits live in
+                                      settings.ingest_rate_limits
+                                      (collector/tenant_limits.py)
   DELETE /tenants/{id}?confirm={id}   erase the tenant and all its data
                                       (below; unchanged)            operator:erase
   POST   /tenants/{id}/admin-tokens   bootstrap a scoped admin token operator:tenants
@@ -68,6 +71,7 @@ from collector import (
     rls,
     spend_anomalies,
     tenant_keys,
+    tenant_limits,
     user_identity,
 )
 from collector.admin_auth import (
@@ -290,6 +294,10 @@ def _check_settings(values: dict) -> None:
         errors = spend_anomalies.settings_errors(values[spend_anomalies.SETTINGS_KEY])
         if errors:
             raise _problem(400, "Bad Request", "; ".join(errors))
+    if tenant_limits.SETTINGS_KEY in values:
+        errors = tenant_limits.settings_errors(values[tenant_limits.SETTINGS_KEY])
+        if errors:
+            raise _problem(400, "Bad Request", "; ".join(errors))
 
 
 def _created_by(request: Request) -> str:
@@ -495,6 +503,9 @@ async def update_tenant(
             disabled=tenant.disabled_at is not None,
         )
         await db.commit()
+        if "settings" in changed:
+            # After the commit, so a read in between cannot re-cache the old value.
+            tenant_limits.invalidate(tenant_id)
         await db.refresh(tenant)
     return _tenant_dict(tenant)
 

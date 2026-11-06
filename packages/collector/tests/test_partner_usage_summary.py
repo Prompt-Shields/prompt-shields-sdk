@@ -442,7 +442,7 @@ class TestAuthAndRateLimit:
             allowed, limit, remaining, reset_at, retry_after = False, 1, 0, 0, 30
 
         class Limiter:
-            def check(self, *_):
+            async def acheck(self, *_):
                 return Denied()
 
         monkeypatch.setattr(partner_registry, "get_rate_limiter", lambda: Limiter())

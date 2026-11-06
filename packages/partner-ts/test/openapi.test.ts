@@ -408,6 +408,7 @@ const UNMAPPED_SCHEMAS = new Set([
   'TenantCreated',
   'CreateTenantRequest',
   'UpdateTenantRequest',
+  'IngestRateLimitSettings', // settings.ingest_rate_limits (#345)
   'ConnectorSyncRequest',
   'LeanIXSyncRequest',
   'ServiceNowSyncRequest',

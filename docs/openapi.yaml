@@ -2638,6 +2638,7 @@ components:
           description: >-
             Free-form settings. `retention_days` must be an integer between 1
             and 36500; `spend_anomaly` must be a `SpendAnomalySettings`
+            object; `ingest_rate_limits` must be an `IngestRateLimitSettings`
             object; `api_key` is refused.
         issue_api_key:
           type: boolean
@@ -2673,13 +2674,50 @@ components:
           type: object
           description: >-
             Merged into the stored settings; a key set to null is removed.
-            Validated as on create (`retention_days`, `spend_anomaly`).
+            Validated as on create (`retention_days`, `spend_anomaly`,
+            `ingest_rate_limits`).
         disabled:
           type: boolean
           description: >-
             true disables the tenant: its ingest keys, admin tokens and
             Partner API credentials are refused (403) and its data is kept.
             false enables it again.
+
+    IngestRateLimitSettings:
+      type: object
+      additionalProperties: false
+      description: >-
+        Per-tenant ingest rate limits in requests per minute, stored as
+        `settings.ingest_rate_limits`. Each field is optional and falls back
+        to its environment default; 0 turns that limit off for the tenant.
+        Workers pick a change up within `PS_TENANT_LIMITS_CACHE_TTL_SECONDS`
+        (default 30).
+      properties:
+        events:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+          description: /ingest/events (default `PS_RATE_LIMIT_PER_MINUTE`)
+        kong:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+          description: /ingest/kong (default `PS_KONG_RATE_LIMIT_PER_MINUTE`)
+        mcp:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+          description: /ingest/mcp (default `PS_MCP_RATE_LIMIT_PER_MINUTE`)
+        feedback:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+          description: /ingest/feedback per tenant (default `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`)
+        feedback_user:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+          description: /ingest/feedback per user_id (default `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE`)
 
     SpendAnomalySettings:
       type: object

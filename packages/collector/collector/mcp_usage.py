@@ -55,13 +55,12 @@ from sqlalchemy import and_, func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import tenant_keys
+from collector import tenant_keys, tenant_limits
 from collector.audit import record_read
 from collector.auth import resolve_tenant
-from collector.config import settings
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.ingest import _enforce_rate_limit
-from collector.partner_rate_limit import FixedWindowRateLimiter, get_mcp_rate_limiter
+from collector.partner_rate_limit import RateLimiter, get_mcp_rate_limiter
 from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
 from collector.webhooks import AssetChanges
 
@@ -444,16 +443,22 @@ async def _read_body(request: Request) -> Any:
 async def ingest_mcp(
     request: Request,
     response: Response,
-    limiter: Annotated[FixedWindowRateLimiter, Depends(get_mcp_rate_limiter)],
+    limiter: Annotated[RateLimiter, Depends(get_mcp_rate_limiter)],
 ):
     """Ingest observed MCP tool calls: ``{"events": [{server_name,
     tool_name, outcome, latency_ms, calling_service, environment,
     transport, source, user_id, user_group}]}``. ``outcome`` is ok, error
     or blocked; ``user_id`` is kept only when it is a hex hash. Same ingest-key auth as ``/ingest/events``,
-    with its own per-tenant rate limit (``PS_MCP_RATE_LIMIT_PER_MINUTE``);
+    with its own per-tenant rate limit (``PS_MCP_RATE_LIMIT_PER_MINUTE``,
+    overridable per tenant: collector/tenant_limits.py);
     at most ``MAX_EVENTS`` events and ``MAX_BODY_BYTES`` bytes per request."""
     tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
-    _enforce_rate_limit(limiter, tenant_id, response, settings.mcp_rate_limit_per_minute)
+    await _enforce_rate_limit(
+        limiter,
+        tenant_id,
+        response,
+        await tenant_limits.limit_for(request.state.db, tenant_id, "mcp"),
+    )
     body = await _read_body(request)
     events = body.get("events") if isinstance(body, dict) else None
     if not isinstance(events, list):
