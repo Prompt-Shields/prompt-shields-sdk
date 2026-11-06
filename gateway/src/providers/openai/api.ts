@@ -110,7 +110,10 @@ const OpenAIAPIConfig: ProviderAPIConfig = {
       case 'cancelModelResponse':
         return basePath;
       case 'countResponseInputTokens':
-        return basePath;
+        // PS fork (#73 follow-up): /v1/messages/count_tokens via Responses
+        return basePath.startsWith('/responses')
+          ? basePath
+          : '/responses/input_tokens';
       default:
         return '';
     }

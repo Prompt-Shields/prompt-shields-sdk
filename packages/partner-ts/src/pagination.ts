@@ -1,6 +1,12 @@
 import { PartnerError } from './errors';
 import type { Page } from './types';
 
+/** Any cursor page: `data` plus `meta.hasMore` / `meta.nextCursor`. */
+export interface CursorPage<T> {
+  data: T[];
+  meta: { hasMore: boolean; nextCursor: string | null };
+}
+
 /**
  * Lazily walks a cursor-paginated list.
  *
@@ -12,16 +18,16 @@ import type { Page } from './types';
  *
  * Each iteration starts from the first page again.
  */
-export class PageIterator<T> implements AsyncIterable<T>, PromiseLike<T[]> {
+export class PageIterator<T, P extends CursorPage<T> = Page<T>> implements AsyncIterable<T>, PromiseLike<T[]> {
   /** The most recent page fetched by any iteration, or `undefined` before the first fetch. */
-  lastPage: Page<T> | undefined;
+  lastPage: P | undefined;
 
   constructor(
-    private readonly fetchPage: (after: string | undefined) => Promise<Page<T>>,
+    private readonly fetchPage: (after: string | undefined) => Promise<P>,
     private readonly startAfter?: string,
   ) {}
 
-  async *pages(): AsyncGenerator<Page<T>, void, undefined> {
+  async *pages(): AsyncGenerator<P, void, undefined> {
     let after = this.startAfter;
     const seen = new Set<string>();
     for (;;) {

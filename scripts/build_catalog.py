@@ -12,7 +12,7 @@ writes three generated files:
 - ``gateway/src/middlewares/psPricingTables.json``: the token rate tables
   the gateway prices telemetry events with (psPricing.ts), built exactly as
   the SDK's ``catalog.py`` builds ``pricing.DEFAULT_PRICING``,
-  ``LONG_CONTEXT_PRICING`` and ``AUDIO_PRICING``.
+  ``LONG_CONTEXT_PRICING``, ``AUDIO_PRICING`` and ``SERVICE_TIER_PRICING``.
 
 Usage::
 
@@ -75,8 +75,13 @@ PRICE_FIELDS = (
     "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
     "input_cost_per_token_batches",
     "output_cost_per_token_batches",
+    "cache_read_input_token_cost_batches",
     "input_cost_per_token_flex",
     "output_cost_per_token_flex",
+    "cache_read_input_token_cost_flex",
+    "input_cost_per_token_priority",
+    "output_cost_per_token_priority",
+    "cache_read_input_token_cost_priority",
     "input_cost_per_audio_token",
     "output_cost_per_audio_token",
 )
@@ -89,7 +94,7 @@ CAPABILITY_FIELDS = (
     "supports_prompt_caching",
 )
 LIMIT_FIELDS = ("max_input_tokens", "max_output_tokens")
-OTHER_FIELDS = ("mode", "deprecation_date", "litellm_key", "currency", "source", "comment")
+OTHER_FIELDS = ("mode", "deprecation_date", "litellm_key", "currency", "source", "comment", "aliases")
 MODEL_FIELDS = (*OTHER_FIELDS, *LIMIT_FIELDS, *CAPABILITY_FIELDS, *PRICE_FIELDS, *SOVEREIGNTY_FIELDS)
 
 # A later field of each chain needs the earlier ones (the SDK's rate tuple is
@@ -109,9 +114,22 @@ PRICE_CHAINS = (
         "cache_creation_input_token_cost_above_200k_tokens",
         "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
     ),
-    ("input_cost_per_token_batches", "output_cost_per_token_batches"),
-    ("input_cost_per_token_flex", "output_cost_per_token_flex"),
+    *(
+        (
+            f"input_cost_per_token{suffix}",
+            f"output_cost_per_token{suffix}",
+            f"cache_read_input_token_cost{suffix}",
+        )
+        for suffix in ("_batches", "_flex", "_priority")
+    ),
 )
+# Service tiers (the `service_tier` a provider reports) with per-model rates:
+# (input, output[, cache read]), as catalog.SERVICE_TIER_RATES.
+SERVICE_TIER_CHAINS = {
+    "batch": PRICE_CHAINS[2],
+    "flex": PRICE_CHAINS[3],
+    "priority": PRICE_CHAINS[4],
+}
 COUNTRY = re.compile(r"^[A-Z]{2}$")
 JURISDICTIONS = ("EEA", "US", "NO", "CH", "UK", "CA", "AU", "SG", "CN")
 VERSION = re.compile(r"^\d{4}-\d{2}-\d{2}(\.\d+)?$")
@@ -196,6 +214,9 @@ def validate(source: dict) -> None:
             errors.append(f"{where}: mode is required")
         if not isinstance(entry.get("source"), str):
             errors.append(f"{where}: source is required")
+        aliases = entry.get("aliases", [])
+        if not (isinstance(aliases, list) and all(isinstance(a, str) and a for a in aliases)):
+            errors.append(f"{where}: aliases must be a list of model names")
         if entry.get("currency", "USD") not in CURRENCIES:
             errors.append(f"{where}: currency must be one of {CURRENCIES}")
         for field in PRICE_FIELDS:
@@ -313,8 +334,9 @@ def _rate_list(entry: dict, fields: tuple[str, ...]) -> list[float] | None:
 def build_gateway_pricing(source: dict) -> dict:
     """USD token rates per 1k tokens, keyed "<provider>/<model id>", as the
     SDK's catalog.py builds them (pricing_table, long_context_pricing,
-    audio_pricing). Non-USD and unpriced entries are left out."""
-    tokens, long_context, audio = {}, {}, {}
+    audio_pricing, service_tier_pricing). Non-USD and unpriced entries are
+    left out."""
+    tokens, long_context, audio, tiers = {}, {}, {}, {}
     for key, entry in source["models"].items():
         if entry.get("currency", "USD") != "USD" or "input_cost_per_token" not in entry:
             continue
@@ -329,12 +351,20 @@ def build_gateway_pricing(source: dict) -> dict:
                 per_1k(entry["input_cost_per_audio_token"]),
                 per_1k(entry["output_cost_per_audio_token"]),
             ]
+        by_tier = {}
+        for tier, chain in SERVICE_TIER_CHAINS.items():
+            tier_rates = _rate_list(entry, chain)
+            if tier_rates is not None:
+                by_tier[tier] = tier_rates
+        if by_tier:
+            tiers[key] = by_tier
     return {
         "_generated": SDK_HEADER,
         "catalogVersion": source["catalog_version"],
         "tokenPricing": tokens,
         "longContextPricing": long_context,
         "audioPricing": audio,
+        "serviceTierPricing": tiers,
     }
 
 

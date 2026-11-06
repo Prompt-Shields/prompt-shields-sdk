@@ -52,6 +52,11 @@ import {
 } from './messages';
 import { VertexAnthropicMessagesCountTokensConfig } from './messagesCountTokens';
 import {
+  geminiMessagesCountTokensResponseTransform,
+  vertexGeminiMessagesCountTokensConfig,
+} from '../google/countTokens';
+import { GoogleErrorResponseTransform } from './utils';
+import {
   GetMistralAIChatCompleteResponseTransform,
   GetMistralAIChatCompleteStreamChunkTransform,
   MistralAIChatCompleteConfig,
@@ -118,6 +123,10 @@ const VertexConfig: ProviderConfigs = {
           chatComplete: VertexGoogleChatCompleteConfig,
           api: GoogleApiConfig,
           embed: GoogleEmbedConfig,
+          // PS fork (#73 follow-up): Messages count_tokens via countTokens.
+          messagesCountTokens: vertexGeminiMessagesCountTokensConfig(
+            VertexGoogleChatCompleteConfig
+          ),
           imageGenerate: GoogleImageGenConfig,
           createBatch: GoogleBatchCreateConfig,
           createFinetune: baseConfig.createFinetune,
@@ -126,6 +135,10 @@ const VertexConfig: ProviderConfigs = {
             chatComplete: GoogleChatCompleteResponseTransform,
             embed: GoogleEmbedResponseTransform,
             imageGenerate: GoogleImageGenResponseTransform,
+            messagesCountTokens: geminiMessagesCountTokensResponseTransform(
+              GOOGLE_VERTEX_AI,
+              GoogleErrorResponseTransform
+            ),
             ...responseTransforms,
           },
           requestTransforms: {

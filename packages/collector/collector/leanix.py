@@ -45,6 +45,13 @@ Run with ``POST /api/v1/admin/connectors/leanix/sync`` (operator only:
 ``Authorization: Bearer $PS_ADMIN_TOKEN``) or ``python -m collector.leanix
 --tenant <uuid> [--full]``. The cursor is kept in the tenant settings and
 only advances after every LDIF run has finished.
+
+With ``verify`` (per tenant in ``PS_LEANIX``, or ``--verify`` / ``"verify":
+true`` per run) the sync reads the fact sheets it just wrote back through
+the LeanIX GraphQL API and checks that every one exists under its
+external id. That closes the round trip: a run LeanIX reports as finished
+but whose processor skipped items (meta model mismatch, missing
+permission) fails the sync and the cursor stays where it was.
 """
 
 from __future__ import annotations
@@ -95,6 +102,7 @@ LX_VERSION = "1.0.0"
 
 TOKEN_PATH = "/services/mtm/v1/oauth2/token"
 INTEGRATION_API = "/services/integration-api/v1"
+GRAPHQL_PATH = "/services/pathfinder/v1/graphql"
 
 # Assets per LDIF run; each run also carries their providers, business
 # units and flows.
@@ -102,12 +110,16 @@ DEFAULT_BATCH_SIZE = 500
 POLL_INTERVAL_S = 5.0
 MAX_POLL_S = 900.0
 MAX_TEXT = 2000
+# External ids per GraphQL lookup, and missing ids named in a result.
+VERIFY_PAGE = 100
+MAX_MISSING_REPORTED = 20
 
 RUN_DONE = {"FINISHED"}
 RUN_FAILED = {"FAILED", "ABORTED", "CANCELLED", "CANCELED", "ERROR"}
 
 _CONNECTOR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+_FS_TYPE = re.compile(r"^[A-Za-z]{1,64}$")
 
 NS = aibom.NS
 
@@ -130,6 +142,8 @@ class LeanIXConnection(BaseModel):
     business_unit_type: Literal["Organization", "UserGroup"] = "Organization"
     # Workspace UUID, sent as the optional LDIF lxWorkspace.
     lx_workspace: UUID | None = None
+    # Read the written fact sheets back after each sync (round-trip check).
+    verify: bool = False
 
     @field_validator("connector_id")
     @classmethod
@@ -351,6 +365,26 @@ def build_ldif(
     }
 
 
+def expected_fact_sheets(ldif: dict) -> dict[str, list[str]]:
+    """Fact sheet type -> external ids an LDIF document should create or
+    update, in content order."""
+    out: dict[str, dict[str, None]] = {}
+    for item in ldif.get("content", []):
+        out.setdefault(item["type"], {})[item["id"]] = None
+    return {fs_type: list(ids) for fs_type, ids in out.items()}
+
+
+def _verify_query(fs_type: str) -> str:
+    if not _FS_TYPE.match(fs_type):
+        raise ConnectorError("leanix: invalid fact sheet type")
+    return (
+        "query PromptShieldsVerify($filter: FilterInput!, $first: Int!) {"
+        " allFactSheets(first: $first, filter: $filter) {"
+        f" edges {{ node {{ ... on {fs_type} {{ externalId {{ externalId }} }} }} }}"
+        " } }"
+    )
+
+
 def _by_external_id(expr: str) -> dict:
     return {"external": {"id": {"expr": expr}, "type": {"expr": "externalId"}}}
 
@@ -504,6 +538,70 @@ class LeanIXClient:
             raise ConnectorError("leanix: synchronization run returned no valid id")
         return run_id
 
+    async def find_external_ids(
+        self, fs_type: str, external_ids: list[str]
+    ) -> set[str]:
+        """The subset of ``external_ids`` that exist as ``fs_type`` fact
+        sheets in the workspace (GraphQL, ``VERIFY_PAGE`` ids per query)."""
+        query = _verify_query(fs_type)
+        found: set[str] = set()
+        for i in range(0, len(external_ids), VERIFY_PAGE):
+            page = external_ids[i : i + VERIFY_PAGE]
+            body = await self._token.json(
+                "POST",
+                GRAPHQL_PATH,
+                what="fact sheet lookup",
+                json={
+                    "query": query,
+                    "variables": {
+                        "first": len(page),
+                        "filter": {
+                            "facetFilters": [
+                                {
+                                    "facetKey": "FactSheetTypes",
+                                    "operator": "OR",
+                                    "keys": [fs_type],
+                                }
+                            ],
+                            "externalIds": [f"externalId/{x}" for x in page],
+                        },
+                    },
+                },
+            )
+            if not isinstance(body, dict) or body.get("errors"):
+                # GraphQL errors can quote the query; do not echo them.
+                raise ConnectorError("leanix: fact sheet lookup returned errors")
+            try:
+                edges = body["data"]["allFactSheets"]["edges"] or []
+            except (KeyError, TypeError):
+                raise ConnectorError("leanix: fact sheet lookup returned no data")
+            if not isinstance(edges, list):
+                raise ConnectorError("leanix: fact sheet lookup returned no data")
+            wanted = set(page)
+            for edge in edges:
+                node = edge.get("node") if isinstance(edge, dict) else None
+                ext = node.get("externalId") if isinstance(node, dict) else None
+                value = ext.get("externalId") if isinstance(ext, dict) else None
+                if isinstance(value, str) and value in wanted:
+                    found.add(value)
+        return found
+
+    async def verify(self, expected: dict[str, list[str]]) -> dict:
+        """Look every expected fact sheet up; counts and (capped) missing
+        external ids."""
+        checked = 0
+        missing: list[str] = []
+        for fs_type, ids in expected.items():
+            found = await self.find_external_ids(fs_type, ids)
+            checked += len(ids)
+            missing += [x for x in ids if x not in found]
+        return {
+            "checked": checked,
+            "found": checked - len(missing),
+            "missing_count": len(missing),
+            "missing": missing[:MAX_MISSING_REPORTED],
+        }
+
     async def wait_for_run(self, run_id: str, max_wait_s: float = MAX_POLL_S) -> str:
         waited = 0.0
         while True:
@@ -532,11 +630,21 @@ class LeanIXClient:
 # ──────────────────────────────────────────────────────────────────────
 
 
+class VerificationFailed(ConnectorError):
+    def __init__(self, verification: dict):
+        self.verification = verification
+        super().__init__(
+            f"leanix: {verification['missing_count']} of "
+            f"{verification['checked']} fact sheets not found after sync"
+        )
+
+
 async def sync_leanix(
     db: AsyncSession,
     tenant_id: UUID,
     *,
     full: bool = False,
+    verify: bool | None = None,
     settings: LeanIXSettings | None = None,
     partner_transport: httpx.AsyncBaseTransport | None = None,
     leanix_transport: httpx.AsyncBaseTransport | None = None,
@@ -546,7 +654,8 @@ async def sync_leanix(
 ) -> dict:
     """Push the tenant's registry (or what changed since the last run) to
     LeanIX. Records the outcome in the tenant's connector state; the cursor
-    only moves when every run finished."""
+    only moves when every run finished (and, with ``verify``, every fact
+    sheet was read back). ``verify=None`` uses the tenant's setting."""
     now = now or datetime.now(UTC)
     state = await load_sync_state(db, tenant_id, CONNECTOR)
     if state is None:
@@ -564,6 +673,8 @@ async def sync_leanix(
         "mode": "incremental" if since else "full",
         "since": since,
     }
+    verify = conn.verify if verify is None else verify
+    verification: dict | None = None
     try:
         async with PartnerApiClient(
             conn.partner_api,
@@ -584,6 +695,8 @@ async def sync_leanix(
                 conn, transport=leanix_transport, resolver=resolver, sleep=sleep
             ) as lx:
                 await lx.put_processor_configuration()
+                # Ordered sets: a 50k-asset registry must not cost O(n^2).
+                expected: dict[str, dict[str, None]] = {}
                 for i in range(0, len(assets), conn.batch_size):
                     batch = assets[i : i + conn.batch_size]
                     ldif = build_ldif(
@@ -597,13 +710,28 @@ async def sync_leanix(
                     run_id = await lx.start_run(ldif)
                     run_ids.append(run_id)
                     await lx.wait_for_run(run_id)
+                    if verify:
+                        for fs_type, ids in expected_fact_sheets(ldif).items():
+                            expected.setdefault(fs_type, {}).update(
+                                dict.fromkeys(ids)
+                            )
+                if verify:
+                    verification = await lx.verify(
+                        {fs_type: list(ids) for fs_type, ids in expected.items()}
+                    )
+                    if verification["missing_count"]:
+                        raise VerificationFailed(verification)
     except (ConnectorError, ValueError, TypeError, OverflowError) as exc:
         # Malformed Partner API data is a failed run, not a server error.
         error = str(exc) if isinstance(exc, ConnectorError) else "invalid response data"
         logger.warning("leanix sync failed for tenant %s: %s", tenant_id, error)
         state.update(last_run_at=now.isoformat(), last_status="error", last_error=error)
+        out = {**result, "status": "error", "error": error}
+        if isinstance(exc, VerificationFailed):
+            state["last_verification"] = exc.verification
+            out["verification"] = exc.verification
         await save_sync_state(db, tenant_id, CONNECTOR, state)
-        return {**result, "status": "error", "error": error}
+        return out
 
     counts = {
         "assets": len(assets),
@@ -619,6 +747,8 @@ async def sync_leanix(
         last_counts=counts,
         last_run_ids=run_ids[-10:],
     )
+    if verification is not None:
+        state["last_verification"] = verification
     await save_sync_state(db, tenant_id, CONNECTOR, state)
     logger.info("leanix sync: tenant=%s %s", tenant_id, counts)
     return {
@@ -627,6 +757,7 @@ async def sync_leanix(
         "cursor": state["cursor"],
         "run_ids": run_ids,
         **counts,
+        **({"verification": verification} if verification is not None else {}),
     }
 
 
@@ -653,6 +784,8 @@ class LeanIXSyncBody(BaseModel):
     tenant_id: UUID
     # Ignore the cursor and push the whole registry.
     full: bool = False
+    # Read the written fact sheets back; null uses the tenant's setting.
+    verify: bool | None = None
 
 
 @router.post(
@@ -666,7 +799,9 @@ async def sync_endpoint(body: LeanIXSyncBody, request: Request) -> dict:
     await rls.set_tenant(db, body.tenant_id)
     if await db.get(Tenant, body.tenant_id) is None:
         raise _not_found()
-    return await sync_leanix(db, body.tenant_id, full=body.full)
+    return await sync_leanix(
+        db, body.tenant_id, full=body.full, verify=body.verify
+    )
 
 
 @router.get(
@@ -690,18 +825,19 @@ async def status_endpoint(tenant_id: UUID, request: Request) -> dict:
         # Host only: the API token and partner key are never returned.
         "workspace_host": conn.workspace_host if conn else None,
         "business_unit_type": conn.business_unit_type if conn else None,
+        "verify": conn.verify if conn else None,
         "config_error": config_error,
         **state,
     }
 
 
-async def _main(tenant: UUID, full: bool) -> dict:
+async def _main(tenant: UUID, full: bool, verify: bool | None = None) -> dict:
     from collector.app import SessionLocal, engine
 
     try:
         async with SessionLocal() as db:
             await rls.set_tenant(db, tenant)
-            return await sync_leanix(db, tenant, full=full)
+            return await sync_leanix(db, tenant, full=full, verify=verify)
     finally:
         await engine.dispose()
 
@@ -710,8 +846,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tenant", type=UUID, required=True)
     parser.add_argument("--full", action="store_true", help="ignore the cursor")
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        default=None,
+        help="read the written fact sheets back from LeanIX (round-trip check)",
+    )
     args = parser.parse_args(argv)
-    print(json.dumps(asyncio.run(_main(args.tenant, args.full)), indent=2))
+    out = asyncio.run(_main(args.tenant, args.full, args.verify))
+    print(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":

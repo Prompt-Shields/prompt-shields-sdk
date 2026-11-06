@@ -48,6 +48,9 @@ suffix, both through the connector SSRF guard (public addresses only, DNS
 pinned, no redirects). Run with ``POST
 /api/v1/admin/connectors/sentinel/sync`` (operator) or ``python -m
 collector.sentinel_export --tenant <uuid>`` / ``--all-tenants`` from cron.
+With ``--all-tenants`` each tenant runs on its own: one that fails, even
+unexpectedly, is recorded in its export status, the run moves on, and the
+command prints a summary and exits non-zero.
 Cursors live in the tenant settings and move only past batches the API
 accepted (204), so a failed run resends from the first unaccepted batch;
 ``EventUid`` is stable, so a resend is a duplicate, not a different row.
@@ -80,6 +83,7 @@ import base64
 import json
 import logging
 import re
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -763,8 +767,34 @@ async def export_sentinel(
     return {**result, "status": "ok"}
 
 
+async def _record_unexpected_failure(
+    session_factory, tenant_id: UUID, exc: Exception, now: datetime
+) -> dict:
+    """Save an unexpected failure in the tenant's export status, in a fresh
+    session (the run's own may be unusable). Only the exception type is
+    stored and logged: its message can carry an upstream body or a secret."""
+    error = f"unexpected error ({type(exc).__name__})"
+    logger.error("sentinel export failed for tenant %s: %s", tenant_id, error)
+    try:
+        async with session_factory() as db:
+            await rls.set_tenant(db, tenant_id)
+            state = await load_sync_state(db, tenant_id, CONNECTOR)
+            if state is not None:
+                state.update(last_run_at=now.isoformat(), last_status="error", last_error=error)
+                await save_sync_state(db, tenant_id, CONNECTOR, state)
+    except Exception as save_exc:  # noqa: BLE001 - still report and move on
+        logger.error(
+            "sentinel export: could not save the failure for tenant %s: %s",
+            tenant_id,
+            type(save_exc).__name__,
+        )
+    return {"tenant_id": str(tenant_id), "status": "error", "error": error}
+
+
 async def export_all_tenants(session_factory, **kwargs) -> list[dict]:
-    """Every configured tenant, each in its own session scoped to it."""
+    """Every configured tenant, each in its own session scoped to it. A
+    tenant that fails, even unexpectedly, is recorded in its own export
+    status and does not stop the others."""
     settings = kwargs.pop("settings", None) or load_settings()
     out = []
     for tenant in sorted(settings.sentinel_export):
@@ -773,10 +803,30 @@ async def export_all_tenants(session_factory, **kwargs) -> list[dict]:
         except ValueError:
             out.append({"tenant_id": tenant, "status": "error", "error": "not a UUID"})
             continue
-        async with session_factory() as db:
-            await rls.set_tenant(db, tenant_id)
-            out.append(await export_sentinel(db, tenant_id, settings=settings, **kwargs))
+        try:
+            async with session_factory() as db:
+                await rls.set_tenant(db, tenant_id)
+                out.append(await export_sentinel(db, tenant_id, settings=settings, **kwargs))
+        except Exception as exc:  # noqa: BLE001 - one tenant must not stop the rest
+            now = kwargs.get("now") or datetime.now(UTC)
+            out.append(await _record_unexpected_failure(session_factory, tenant_id, exc, now))
     return out
+
+
+def _succeeded(result: dict) -> bool:
+    return result.get("status") in ("ok", "not_configured")
+
+
+def summarize(results: list[dict]) -> str:
+    """One line for the end of an ``--all-tenants`` run."""
+    failed = [r for r in results if not _succeeded(r)]
+    line = f"sentinel export: {len(results)} tenants, {len(results) - len(failed)} ok"
+    if failed:
+        detail = ", ".join(
+            f"{r.get('tenant_id')} ({r.get('error') or r.get('status')})" for r in failed
+        )
+        line += f", {len(failed)} failed: {detail}"
+    return line
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -986,7 +1036,9 @@ def main(argv: list[str] | None = None) -> int:
     out = asyncio.run(_main(args.tenant, args.all_tenants))
     print(json.dumps(out, indent=2))
     results = out if isinstance(out, list) else [out]
-    return 0 if all(r.get("status") in ("ok", "not_configured") for r in results) else 1
+    if args.all_tenants:
+        print(summarize(results), file=sys.stderr)
+    return 0 if all(_succeeded(r) for r in results) else 1
 
 
 if __name__ == "__main__":

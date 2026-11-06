@@ -331,6 +331,29 @@ describe('realtime (Node) upstream URL', () => {
   });
 });
 
+describe('realtime (Node) upstream failure before open', () => {
+  test.each(['error', 'close'])(
+    'an upstream %s before open settles the handler as an error',
+    async (event) => {
+      const WS = jest.requireMock('ws') as jest.Mock;
+      WS.mockImplementationOnce((url: string, options: any) => {
+        wsInstances.push({ url, options });
+        return {
+          addEventListener: (type: string, fn: (e: any) => void) => {
+            if (type === event) fn({ message: 'boom' });
+          },
+          send: jest.fn(),
+          close: jest.fn(),
+        };
+      });
+      const c = realtimeContext(azureRealtime(), '/v1/realtime');
+      await realTimeHandlerNode(c);
+      expect(wsInstances).toHaveLength(1);
+      expect(c.get('websocketError')).toBe(true);
+    }
+  );
+});
+
 describe('realtime (Workers) upstream URL', () => {
   test.each(badRealtime)('%s is refused with 400', async (_, headers) => {
     const res = await realTimeHandler(realtimeContext(headers, '/v1/realtime'));

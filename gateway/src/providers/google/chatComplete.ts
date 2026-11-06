@@ -342,6 +342,44 @@ export const transformToolChoiceForGemini = (
 
 // TODOS: this configuration does not enforce the maximum token limit for the input parameter. If you want to enforce this, you might need to add a custom validation function or a max property to the ParameterConfig interface, and then use it in the input configuration. However, this might be complex because the token count is not a simple length check, but depends on the specific tokenization method used by the model.
 
+/**
+ * PS fork (#73): text an assistant message sends alongside its tool calls
+ * (e.g. "Let me check." before a tool_use from the Messages adapter). It
+ * was dropped; it now precedes the functionCall parts, as Gemini returns it.
+ */
+export function assistantToolCallTextParts(
+  message: Message
+): { text: string }[] {
+  const c = message.content;
+  const text =
+    typeof c === 'string'
+      ? c
+      : Array.isArray(c)
+        ? c
+            .filter((p: ContentType) => p.type === 'text')
+            .map((p: ContentType) => p.text ?? '')
+            .join('')
+        : '';
+  return text ? [{ text }] : [];
+}
+
+/**
+ * PS fork (#73): the function name for a `tool` message. Chat Completions
+ * tool messages carry only `tool_call_id`, so the name is looked up from the
+ * assistant tool call it answers, instead of a filler name Gemini cannot
+ * match to the call.
+ */
+export function toolResponseName(
+  message: Message,
+  toolNames: Record<string, string>
+): string {
+  return (
+    message.name ??
+    toolNames[message.tool_call_id ?? ''] ??
+    'gateway-tool-filler-name'
+  );
+}
+
 export const GoogleChatCompleteConfig: ProviderConfig = {
   model: {
     param: 'model',
@@ -355,6 +393,7 @@ export const GoogleChatCompleteConfig: ProviderConfig = {
       transform: (params: Params) => {
         let lastRole: GoogleMessageRole | undefined;
         const messages: GoogleMessage[] = [];
+        const toolNames: Record<string, string> = {};
 
         params.messages?.forEach((message: Message) => {
           // From gemini-1.5 onwards, systemInstruction is supported
@@ -369,11 +408,14 @@ export const GoogleChatCompleteConfig: ProviderConfig = {
           let parts = [];
 
           if (message.role === 'assistant' && message.tool_calls) {
+            parts.push(...assistantToolCallTextParts(message));
             message.tool_calls.forEach((tool_call: ToolCall) => {
               const thought_signature = getThoughtSignature(
                 params.model,
                 tool_call.function.thought_signature
               );
+              if (tool_call.id)
+                toolNames[tool_call.id] = tool_call.function.name;
               parts.push({
                 functionCall: {
                   name: tool_call.function.name,
@@ -385,7 +427,7 @@ export const GoogleChatCompleteConfig: ProviderConfig = {
               });
             });
           } else if (message.role === 'tool') {
-            const toolName = message.name ?? 'gateway-tool-filler-name';
+            const toolName = toolResponseName(message, toolNames);
             // OpenAI: tool message content is string or array of text parts (type "text").
             if (typeof message.content === 'string') {
               parts.push({
