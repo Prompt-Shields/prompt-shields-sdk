@@ -304,6 +304,105 @@ describe('/v1/responses conformance (OpenAI SDK / Codex shape)', () => {
   });
 });
 
+// ── Request echo: every snapshot carries the request config ─────────────────
+
+/**
+ * Request fields the Response object echoes (openai Response type and the
+ * native API: `response.created` already carries them). The openai SDK's
+ * `responses.stream()` helpers and Codex read them from the snapshots.
+ */
+const ECHO_REQUEST = {
+  instructions: 'You are a coding agent.',
+  tool_choice: 'required',
+  temperature: 0.3,
+  top_p: 0.8,
+  max_output_tokens: 512,
+  metadata: { session: 'conf-1' },
+  parallel_tool_calls: false,
+  text: {
+    format: {
+      type: 'json_schema',
+      name: 'weather',
+      schema: {
+        type: 'object',
+        properties: { city: { type: 'string' } },
+        required: ['city'],
+        additionalProperties: false,
+      },
+      strict: true,
+    },
+  },
+  reasoning: { effort: 'low', summary: 'auto' },
+};
+
+function expectEcho(r: any) {
+  expect(r).toMatchObject(ECHO_REQUEST);
+  expect(r.tools).toEqual([
+    {
+      ...WEATHER_TOOL_RESPONSES,
+      description: WEATHER_TOOL_RESPONSES.description,
+      strict: null,
+    },
+  ]);
+  expect(typeof r.model).toBe('string');
+  expect(r.model).not.toBe('');
+}
+
+describe('/v1/responses snapshots echo the request', () => {
+  const targets = Object.entries(TARGETS).filter(([n]) => n !== 'openai');
+  test.each(targets)('%s', async (_name, t) => {
+    const body = (stream: boolean) => ({
+      ...responsesRequest(t, 'tool', stream),
+      ...ECHO_REQUEST,
+    });
+
+    serve(t, 'tool', false);
+    const jsonRes = await post(app, '/v1/responses', body(false), t.headers);
+    expect(jsonRes.status).toBe(200);
+    const final = await jsonRes.json();
+    expectEcho(final);
+
+    resetHarness();
+    serve(t, 'tool', true);
+    const res = await post(app, '/v1/responses', body(true), t.headers);
+    expect(res.status).toBe(200);
+    const events = parseSSE(await res.text());
+    const terminal = replayResponsesStream(events);
+    const snapshots = events
+      .filter((e) => e.data.response)
+      .map((e) => e.data.response);
+    expect(snapshots.map((s) => s.status)).toEqual([
+      'in_progress',
+      'in_progress',
+      'completed',
+    ]);
+    // Every snapshot echoes the same request config and model, matching
+    // the JSON response, so a client can read it from the first event.
+    const KEYS = [
+      'model',
+      'instructions',
+      'tools',
+      'tool_choice',
+      'temperature',
+      'top_p',
+      'max_output_tokens',
+      'metadata',
+      'parallel_tool_calls',
+      'text',
+      'reasoning',
+      'truncation',
+      'store',
+      'previous_response_id',
+    ];
+    const pick = (r: any) => Object.fromEntries(KEYS.map((k) => [k, r[k]]));
+    for (const s of snapshots) {
+      expectEcho(s);
+      expect(pick(s)).toEqual(pick(terminal));
+    }
+    expect(pick(terminal)).toEqual(pick(final));
+  });
+});
+
 // ── Request side: multi-turn tool round trip ────────────────────────────────
 
 interface Turn {
