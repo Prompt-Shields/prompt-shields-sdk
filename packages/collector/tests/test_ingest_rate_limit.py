@@ -19,7 +19,7 @@ TENANTS = {"key-a": uuid.uuid4(), "key-b": uuid.uuid4()}
 
 @pytest.fixture
 def limiter(monkeypatch):
-    async def fake_resolve_tenant(request):
+    async def fake_resolve_tenant(request, *scopes):
         return TENANTS[request.headers["Authorization"].removeprefix("Bearer ")]
 
     monkeypatch.setattr(ingest, "resolve_tenant", fake_resolve_tenant)

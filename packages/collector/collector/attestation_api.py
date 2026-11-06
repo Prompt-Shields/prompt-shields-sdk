@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from collector import attestation
+from collector import attestation, tenant_keys
 from collector.attestation import AttestationState
 from collector.audit import bearer_key_prefix, record_read
 from collector.auth import resolve_tenant
@@ -129,7 +129,7 @@ async def list_attestations(
     field: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
     asset = await _load_asset(db, tenant_id, asset_id)
     if asset is None:
@@ -142,7 +142,7 @@ async def list_attestations(
 
 @tenant_router.post("/assets/{asset_id}/attestations", status_code=201)
 async def create_attestation(asset_id: UUID, body: AttestationBody, request: Request):
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_ATTEST)
     db = request.state.db
     asset = await _load_asset(db, tenant_id, asset_id)
     if asset is None:

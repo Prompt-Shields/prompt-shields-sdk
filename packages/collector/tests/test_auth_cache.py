@@ -202,7 +202,12 @@ async def _status(c, key: str) -> int:
 
 
 async def _issue(c, name: str = "k") -> dict:
-    resp = await c.post("/api/v1/admin/api-keys", headers=H(TENANT_KEY), json={"name": name})
+    # registry:read: _status reads the registry (a new key is ingest-only).
+    resp = await c.post(
+        "/api/v1/admin/api-keys",
+        headers=H(TENANT_KEY),
+        json={"name": name, "scopes": ["ingest:write", "registry:read"]},
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()
 

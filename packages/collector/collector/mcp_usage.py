@@ -55,6 +55,7 @@ from sqlalchemy import and_, func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import tenant_keys
 from collector.audit import record_read
 from collector.auth import resolve_tenant
 from collector.config import settings
@@ -451,7 +452,7 @@ async def ingest_mcp(
     or blocked; ``user_id`` is kept only when it is a hex hash. Same ingest-key auth as ``/ingest/events``,
     with its own per-tenant rate limit (``PS_MCP_RATE_LIMIT_PER_MINUTE``);
     at most ``MAX_EVENTS`` events and ``MAX_BODY_BYTES`` bytes per request."""
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
     _enforce_rate_limit(limiter, tenant_id, response, settings.mcp_rate_limit_per_minute)
     body = await _read_body(request)
     events = body.get("events") if isinstance(body, dict) else None
@@ -707,7 +708,7 @@ async def list_mcp_tools(
     ``MAX_PAGE`` rows: pass ``meta.next_cursor`` as ``cursor`` for the
     next. Names are data reported by MCP servers and apps: escape them when
     rendering and never put them in an LLM prompt."""
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.REGISTRY_READ)
     db = request.state.db
     body = await tools_page(
         db, tenant_id, server_name=server_name, source=source, limit=limit, cursor=cursor

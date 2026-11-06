@@ -28,7 +28,9 @@ This is separate from the **registry read log** (`partner_audit_log`), which rec
 | `registry.lifecycle_sweep` | A tenant admin runs the lifecycle sweep (counts) |
 | `registry.merge_assets` | An operator merges duplicate assets (`python -m collector.dedup merge-duplicates --apply`) |
 | `auth.failure` | A refused operator token or tenant key on an admin route, or a partner without a write scope (`webhooks:manage`, `attestations:write`, `risks:review`, `learner:review`, `provider-credentials:manage`). Rate-limited (below). |
-| `operator.access` | An operator-token call to the provider usage, cloud inventory, LeanIX or ServiceNow routes |
+| `operator.access` | A named operator token's call to an operator route (route and method) |
+| `operator.break_glass` | Any call made with `PS_ADMIN_TOKEN` (route and method): every use of the break-glass token |
+| `operator_token.issue` / `operator_token.rotate` / `operator_token.revoke` | Named operator tokens issued, rotated or revoked (`/api/v1/operator/tokens`) |
 | `audit_log.purge` | `python -m collector.audit purge` deleted read-log rows |
 | `audit.purge` | A checkpoint left by the audit trail's own purge (below) |
 
@@ -41,7 +43,7 @@ Each row holds:
 | `tenant_id`, `seq` | The chain and the row's position in it (1, 2, ...) |
 | `created_at` | UTC time the row was written |
 | `action`, `outcome` | What happened; `success` or `failure` |
-| `actor_type`, `actor_id` | `tenant_key` (the key's SHA-256 lookup prefix), `admin_token` (a scoped admin token's SHA-256 lookup prefix), `partner` (credential id), `operator` (`operator-api`), `system` (job name, e.g. `cli`, `provider-usage-pull`) or `anonymous` (an unauthenticated caller; the prefix of the key it presented, if any) |
+| `actor_type`, `actor_id` | `tenant_key` (the key's SHA-256 lookup prefix), `admin_token` (a scoped admin token's SHA-256 lookup prefix), `partner` (credential id), `operator` (`operator-api`: `PS_ADMIN_TOKEN`), `operator_token` (the named operator token's name), `system` (job name, e.g. `cli`, `provider-usage-pull`) or `anonymous` (an unauthenticated caller; the prefix of the key it presented, if any) |
 | `target_type`, `target_id` | What was acted on, e.g. `provider_credential` / `openai` |
 | `request_id`, `status_code` | The request's `X-Request-ID` (yours if you send a short token, else generated and returned in the response header) and HTTP status |
 | `details` | Ids, counts, scope names and field names |
@@ -49,7 +51,7 @@ Each row holds:
 
 Rows never contain secrets (keys, tokens, signing secrets), webhook URLs, emails such as `attested_by`, IP addresses, comments or other free text. Keys whose name looks secret are replaced with `[REDACTED]` before the row is written.
 
-Events that belong to no tenant (operator authentication failures, `operator.access`, `audit_log.purge`) go on a **system chain** with tenant id `00000000-0000-0000-0000-000000000000`.
+Events that belong to no tenant (operator authentication failures, `operator.access`, `operator.break_glass`, `operator_token.*`, `audit_log.purge`) go on a **system chain** with tenant id `00000000-0000-0000-0000-000000000000`.
 
 ## How the chain works
 
@@ -150,7 +152,7 @@ The gateway's [security events](/guides/security-events) (`docs/security-events.
 | `request_id` | `ps.request_id` |
 | `status_code` | `http.response.status_code` |
 | `details.route`, `details.method` (auth failures) | `http.route`, `http.request.method` |
-| `details.realm` (`operator`, `tenant_admin`, `partner`) | `ps.auth.realm` (`admin`, `metrics`) |
+| `details.realm` (`operator`, `tenant_admin`, `partner`, `ingest_key`) | `ps.auth.realm` (`admin`, `metrics`) |
 | `details.reason` (`missing_credentials`, `invalid_credentials`, `insufficient_scope`) | `ps.auth.reason` |
 | `tenant_id` | `ps.tenant` |
 

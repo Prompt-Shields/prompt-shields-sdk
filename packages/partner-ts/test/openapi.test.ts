@@ -394,6 +394,12 @@ const UNMAPPED_SCHEMAS = new Set([
   'TenantApiKeyWithSecret',
   'CreateTenantApiKeyRequest',
   'RotateTenantApiKeyRequest',
+  'TenantApiKeyScope',
+  // Named operator tokens (#341): operator routes, not wrapped.
+  'OperatorScope',
+  'OperatorTokenRecord',
+  'OperatorTokenWithSecret',
+  'CreateOperatorTokenRequest',
   'PartnerCredential',
   'PartnerCredentialWithSecrets',
   'IssuePartnerCredentialRequest',
@@ -554,6 +560,12 @@ const OPERATIONS: Record<string, Operation> = {
   'PUT /api/v1/operator/tenants/{tenant_id}/retention': NOT_WRAPPED,
   'POST /api/v1/operator/retention/purge': NOT_WRAPPED,
   'GET /api/v1/operator/audit/verify': NOT_WRAPPED,
+  'GET /api/v1/operator/token-scopes': NOT_WRAPPED,
+  'POST /api/v1/operator/tokens': NOT_WRAPPED,
+  'GET /api/v1/operator/tokens': NOT_WRAPPED,
+  'GET /api/v1/operator/tokens/{token_id}': NOT_WRAPPED,
+  'DELETE /api/v1/operator/tokens/{token_id}': NOT_WRAPPED,
+  'POST /api/v1/operator/tokens/{token_id}/rotate': NOT_WRAPPED,
   // Call feedback (#43) is sent by the Python SDK and the gateway with the
   // tenant ingest key, never by a partner.
   'POST /ingest/feedback': NOT_WRAPPED,

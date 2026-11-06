@@ -1,21 +1,38 @@
 """Operator endpoints: tenants, data retention and tenant erasure (#85).
 
 Mounted at /api/v1/operator. These act across tenants, so they are not
-behind a tenant API key: they take ``Authorization: Bearer $PS_ADMIN_TOKEN``.
-With ``PS_ADMIN_TOKEN`` unset every route answers 404, as if absent.
+behind a tenant API key: they take a named operator token (``ps-ot-...``,
+with the route's scope) or ``PS_ADMIN_TOKEN`` as break-glass, every use of
+which is audited (collector.operator_auth, #341). With ``PS_ADMIN_TOKEN``
+unset and no operator token presented every route answers 404, as if absent.
+
+Each route below names its scope; GET routes also take ``operator:read``.
 
 Tenants:
 
   POST   /tenants                     create (optionally with a first ingest
-                                      key, returned once); 409 on a name in use
-  GET    /tenants                     list (?status=active|disabled)
-  GET    /tenants/{id}                read
+                                      key, returned once: ingest:write unless
+                                      api_key_scopes says otherwise); 409 on
+                                      a name in use                 operator:tenants
+  GET    /tenants                     list (?status=active|disabled) operator:tenants
+  GET    /tenants/{id}                read                          operator:tenants
   PATCH  /tenants/{id}                name, domain, settings (merged; null
-                                      removes a key), disabled
+                                      removes a key), disabled      operator:tenants
   DELETE /tenants/{id}?confirm={id}   erase the tenant and all its data
-                                      (below; unchanged)
-  POST   /tenants/{id}/admin-tokens   bootstrap a scoped admin token
-  GET|PUT /tenants/{id}/retention     retention override (below)
+                                      (below; unchanged)            operator:erase
+  POST   /tenants/{id}/admin-tokens   bootstrap a scoped admin token operator:tenants
+  GET|PUT /tenants/{id}/retention     retention override (below)   operator:retention
+  POST   /retention/purge             usage-event purge             operator:retention
+  GET    /audit/verify                check the hash chains         operator:audit
+
+Operator tokens (operator:tokens; a caller grants only scopes it holds):
+
+  GET    /token-scopes                the operator scopes
+  POST   /tokens                      issue (token returned once); 409 on a
+                                      name ever used
+  GET    /tokens, /tokens/{id}        list, read (metadata)
+  POST   /tokens/{id}/rotate          new secret, same id; the old one stops
+  DELETE /tokens/{id}                 revoke (row kept; repeat is 204)
 
 Disabling a tenant keeps its data and stops its ingest keys, admin tokens
 and Partner API credentials (403) until it is enabled again.
@@ -23,19 +40,23 @@ and Partner API credentials (403) until it is enabled again.
 Audit trail (collector.audit_trail): purges, retention changes and
 erasures are recorded in the tenant's chain by collector.retention;
 reading a tenant's retention is recorded here; a wrong or missing operator
-token is an ``auth.failure`` on the system chain (rate-limited).
+token is an ``auth.failure`` on the system chain (rate-limited). Every row
+names the caller: ``operator_token`` with the token's name, or
+``operator`` for PS_ADMIN_TOKEN (whose every use is also an
+``operator.break_glass`` row on the system chain). Operator token issue,
+rotate and revoke are ``operator_token.issue|rotate|revoke`` on the system
+chain.
 ``GET /audit/verify`` checks the hash chains.
 """
 
 from __future__ import annotations
 
-import hmac
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from db.models import Tenant
+from db.models import OperatorToken, Tenant
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
@@ -57,6 +78,19 @@ from collector.admin_auth import (
     unknown_scopes,
 )
 from collector.config import settings
+from collector.operator_auth import (
+    OPERATOR_SCOPES,
+    NameTaken,
+    OperatorPrincipal,
+    current_actor,
+    current_label,
+    require_operator_scope,
+    rotate_token,
+)
+from collector.operator_auth import TOKEN_WARNING as OPERATOR_TOKEN_WARNING
+from collector.operator_auth import issue_token as issue_operator_token
+from collector.operator_auth import serialize_token as serialize_operator_token
+from collector.operator_auth import unknown_scopes as unknown_operator_scopes
 from collector.sanitize import BoundedJsonRoute, StorableJson, StorableStr
 
 router = APIRouter(
@@ -76,32 +110,40 @@ def _problem(status: int, title: str, detail: str) -> HTTPException:
     )
 
 
-async def require_operator(request: Request) -> str:
-    """Check the operator token. Returns the actor name used in the audit log.
+def _break_glass_token() -> str:
+    return settings.admin_token
+
+
+def operator_scope(scope: str):
+    """Dependency for an operator route needing ``scope`` (collector.operator_auth:
+    a named operator token with the scope, or PS_ADMIN_TOKEN as break-glass).
+    Returns the actor name used in the audit log.
 
     Operator routes act across tenants, so the request's session bypasses
     row-level security (logged on ``collector.rls``).
     """
-    token = settings.admin_token
-    if not token:
-        raise _problem(404, "Not Found", "Not Found")
-    auth = request.headers.get("Authorization", "")
-    presented = (
-        auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
-    )
-    if not presented or not hmac.compare_digest(presented.encode(), token.encode()):
-        await audit_trail.record_auth_failure(
-            request,
-            realm="operator",
-            reason="invalid_credentials" if presented else "missing_credentials",
-            status_code=401,
+    # Built here, not in the signature: annotations are strings (PEP 563)
+    # resolved against module globals, so a local name cannot appear there.
+    check = Depends(require_operator_scope(scope, _break_glass_token))
+
+    async def _dep(request: Request, principal: OperatorPrincipal = check) -> str:
+        actor = principal.label
+        await rls.bypass(
+            request.state.db,
+            f"operator:{request.method} {request.url.path}",
+            actor=actor,
         )
-        raise _problem(401, "Unauthorized", "Invalid operator token")
-    actor = audit_trail.OPERATOR.id
-    await rls.bypass(
-        request.state.db, f"operator:{request.method} {request.url.path}", actor=actor
-    )
-    return actor
+        return actor
+
+    _dep.operator_scope = scope
+    return _dep
+
+
+_TENANTS = Depends(operator_scope("operator:tenants"))
+_RETENTION = Depends(operator_scope("operator:retention"))
+_ERASE = Depends(operator_scope("operator:erase"))
+_AUDIT = Depends(operator_scope("operator:audit"))
+_TOKENS = Depends(operator_scope("operator:tokens"))
 
 
 class PurgeBody(BaseModel):
@@ -111,7 +153,7 @@ class PurgeBody(BaseModel):
 
 @router.post("/retention/purge", summary="Delete usage events past retention")
 async def purge(
-    body: PurgeBody, request: Request, actor: str = Depends(require_operator)
+    body: PurgeBody, request: Request, actor: str = _RETENTION
 ):
     db = request.state.db
     if body.tenant_id is not None:
@@ -137,7 +179,7 @@ class RetentionBody(BaseModel):
 
 @router.get("/tenants/{tenant_id}/retention", summary="Show a tenant's retention")
 async def get_retention(
-    tenant_id: UUID, request: Request, actor: str = Depends(require_operator)
+    tenant_id: UUID, request: Request, actor: str = _RETENTION
 ):
     row = (
         await request.state.db.execute(
@@ -151,7 +193,7 @@ async def get_retention(
         request.state.db,
         tenant_id=tenant_id,
         action="tenant.retention.read",
-        actor=audit_trail.OPERATOR,
+        actor=current_actor(request),
         target_type="tenant",
         target_id=tenant_id,
         status_code=200,
@@ -168,7 +210,7 @@ async def put_retention(
     tenant_id: UUID,
     body: RetentionBody,
     request: Request,
-    actor: str = Depends(require_operator),
+    actor: str = _RETENTION,
 ):
     days = await retention.set_tenant_retention(
         request.state.db, tenant_id, body.retention_days, actor=actor
@@ -183,7 +225,7 @@ async def erase(
     tenant_id: UUID,
     request: Request,
     confirm: str = Query(..., description="Must repeat the tenant id"),
-    actor: str = Depends(require_operator),
+    actor: str = _ERASE,
 ):
     if confirm.strip().lower() != str(tenant_id):
         raise _problem(400, "Bad Request", "confirm must equal the tenant id")
@@ -242,6 +284,13 @@ def _check_settings(values: dict) -> None:
             raise _problem(400, "Bad Request", "; ".join(errors))
 
 
+def _created_by(request: Request) -> str:
+    """``created_by`` for a token the operator issues: "operator" for
+    PS_ADMIN_TOKEN (as before #341), else ``operator_token:<name>``."""
+    label = current_label(request)
+    return "operator" if label == audit_trail.OPERATOR.id else label
+
+
 def _future(expires_at: datetime | None) -> datetime | None:
     if expires_at is None:
         return None
@@ -277,6 +326,10 @@ class CreateTenantBody(BaseModel):
     # Issue a first ingest key (returned once) named api_key_name.
     issue_api_key: bool = True
     api_key_name: StorableStr = Field(default="default", min_length=1, max_length=100)
+    # tenant_keys.KEY_SCOPES for that key; ingest:write only by default.
+    api_key_scopes: list[str] = Field(
+        default_factory=lambda: list(tenant_keys.DEFAULT_KEY_SCOPES), min_length=1
+    )
 
 
 class UpdateTenantBody(BaseModel):
@@ -312,10 +365,17 @@ class BootstrapAdminTokenBody(BaseModel):
 
 @router.post("/tenants", status_code=201, summary="Create a tenant")
 async def create_tenant(
-    body: CreateTenantBody, request: Request, actor: str = Depends(require_operator)
+    body: CreateTenantBody, request: Request, actor: str = _TENANTS
 ):
     db = request.state.db
     _check_settings(body.settings)
+    bad = tenant_keys.unknown_key_scopes(body.api_key_scopes)
+    if bad:
+        raise _problem(
+            400,
+            "Bad Request",
+            f"Unknown api_key_scopes: {bad}. Allowed: {list(tenant_keys.KEY_SCOPES)}",
+        )
     if await _name_in_use(db, body.name):
         raise _problem(409, "Conflict", "A tenant with this name already exists")
     tenant = Tenant(
@@ -328,7 +388,9 @@ async def create_tenant(
     await db.flush()
     api_key = None
     if body.issue_api_key:
-        row, plaintext = await tenant_keys.issue_key(db, tenant.id, body.api_key_name)
+        row, plaintext = await tenant_keys.issue_key(
+            db, tenant.id, body.api_key_name, scopes=body.api_key_scopes
+        )
         api_key = {**tenant_keys.serialize_key(row), "key": plaintext}
     await add_audit(
         request,
@@ -354,7 +416,7 @@ async def create_tenant(
 async def list_tenants(
     request: Request,
     status: Literal["active", "disabled"] | None = None,
-    actor: str = Depends(require_operator),
+    actor: str = _TENANTS,
 ):
     stmt = select(Tenant).order_by(Tenant.created_at, Tenant.id)
     if status == "active":
@@ -367,7 +429,7 @@ async def list_tenants(
 
 @router.get("/tenants/{tenant_id}", summary="Get a tenant")
 async def get_tenant(
-    tenant_id: UUID, request: Request, actor: str = Depends(require_operator)
+    tenant_id: UUID, request: Request, actor: str = _TENANTS
 ):
     return _tenant_dict(await _get_tenant(request.state.db, tenant_id))
 
@@ -380,7 +442,7 @@ async def update_tenant(
     tenant_id: UUID,
     body: UpdateTenantBody,
     request: Request,
-    actor: str = Depends(require_operator),
+    actor: str = _TENANTS,
 ):
     db = request.state.db
     tenant = await _get_tenant(db, tenant_id)
@@ -436,7 +498,7 @@ async def bootstrap_admin_token(
     tenant_id: UUID,
     body: BootstrapAdminTokenBody,
     request: Request,
-    actor: str = Depends(require_operator),
+    actor: str = _TENANTS,
 ):
     db = request.state.db
     tenant = await _get_tenant(db, tenant_id)
@@ -452,7 +514,7 @@ async def bootstrap_admin_token(
             name=body.name,
             scopes=body.scopes,
             expires_at=_future(body.expires_at),
-            created_by="operator",
+            created_by=_created_by(request),
         )
     except tenant_keys.DuplicateName:
         raise _problem(
@@ -473,11 +535,13 @@ async def bootstrap_admin_token(
     )
     await db.commit()
     return {**out, "token": token, "warning": TOKEN_WARNING}
+
+
 @router.get("/audit/verify", summary="Verify the audit trail hash chains")
 async def verify_audit(
     request: Request,
     tenant_id: UUID | None = None,
-    actor: str = Depends(require_operator),
+    actor: str = _AUDIT,
 ):
     """Walks each chain (one tenant's, or every chain including the system
     chain) and reports the first break. ``ok`` is false if any chain is
@@ -487,3 +551,165 @@ async def verify_audit(
         "ok": all(r.ok for r in results),
         "data": [asdict(r) for r in results],
     }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Operator tokens (#341)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class CreateOperatorTokenBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        ..., min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    )
+    scopes: list[str] = Field(..., min_length=1)
+    expires_at: datetime | None = None
+
+
+async def _audit_token(
+    request: Request, action: str, row: OperatorToken, status_code: int, **details
+) -> None:
+    """operator_token.* on the system chain, in the request's transaction."""
+    await audit_trail.record(
+        request.state.db,
+        tenant_id=audit_trail.SYSTEM_TENANT_ID,
+        export=False,
+        action=action,
+        actor=current_actor(request),
+        target_type="operator_token",
+        target_id=str(row.id),
+        status_code=status_code,
+        details={"name": row.name, **details},
+    )
+
+
+async def _get_operator_token(db, token_id: UUID) -> OperatorToken:
+    row = (
+        await db.execute(select(OperatorToken).where(OperatorToken.id == token_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise _problem(404, "Not Found", "Operator token not found")
+    return row
+
+
+def _caller_scopes(request: Request) -> frozenset[str]:
+    return request.state.operator.scopes
+
+
+@router.get("/token-scopes", summary="List the operator token scopes")
+async def list_operator_token_scopes(actor: str = _TOKENS) -> dict:
+    return {
+        "data": [{"name": k, "description": v} for k, v in OPERATOR_SCOPES.items()]
+    }
+
+
+@router.post("/tokens", status_code=201, summary="Issue a named operator token")
+async def create_operator_token(
+    body: CreateOperatorTokenBody, request: Request, actor: str = _TOKENS
+) -> dict:
+    bad = unknown_operator_scopes(body.scopes)
+    if bad:
+        raise _problem(
+            400,
+            "Bad Request",
+            f"Unknown scopes: {bad}. Allowed: {list(OPERATOR_SCOPES)}",
+        )
+    beyond = sorted(set(body.scopes) - _caller_scopes(request))
+    if beyond:
+        raise _problem(
+            403, "Forbidden", f"Cannot grant scopes the caller does not hold: {beyond}"
+        )
+    db = request.state.db
+    try:
+        row, token = await issue_operator_token(
+            db,
+            name=body.name,
+            scopes=body.scopes,
+            expires_at=_future(body.expires_at),
+            created_by=_created_by(request),
+        )
+    except NameTaken:
+        raise _problem(
+            409,
+            "Conflict",
+            "An operator token with this name exists or existed; names are not reused",
+        ) from None
+    out = serialize_operator_token(row)
+    await _audit_token(
+        request, "operator_token.issue", row, 201, scopes=out["scopes"]
+    )
+    await db.commit()
+    return {**out, "token": token, "warning": OPERATOR_TOKEN_WARNING}
+
+
+@router.get("/tokens", summary="List operator tokens (metadata only)")
+async def list_operator_tokens(
+    request: Request,
+    status: Literal["active", "expired", "revoked"] | None = None,
+    actor: str = _TOKENS,
+) -> dict:
+    rows = (
+        (
+            await request.state.db.execute(
+                select(OperatorToken).order_by(
+                    OperatorToken.created_at, OperatorToken.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    data = [serialize_operator_token(r) for r in rows]
+    return {"data": [d for d in data if status is None or d["status"] == status]}
+
+
+@router.get("/tokens/{token_id}", summary="Get an operator token (metadata only)")
+async def get_operator_token(
+    token_id: UUID, request: Request, actor: str = _TOKENS
+) -> dict:
+    return serialize_operator_token(
+        await _get_operator_token(request.state.db, token_id)
+    )
+
+
+@router.post(
+    "/tokens/{token_id}/rotate",
+    summary="Replace an operator token's secret (same id); the old one stops working",
+)
+async def rotate_operator_token(
+    token_id: UUID, request: Request, actor: str = _TOKENS
+) -> dict:
+    db = request.state.db
+    row = await _get_operator_token(db, token_id)
+    # Rotating hands out the token's scopes, so the caller must hold them.
+    beyond = sorted(set(row.scopes or ()) - _caller_scopes(request))
+    if beyond:
+        raise _problem(
+            403,
+            "Forbidden",
+            f"Cannot rotate a token with scopes the caller does not hold: {beyond}",
+        )
+    try:
+        token = rotate_token(row)
+    except ValueError as exc:
+        raise _problem(409, "Conflict", f"Cannot rotate a {exc} token") from None
+    await _audit_token(request, "operator_token.rotate", row, 200)
+    out = serialize_operator_token(row)
+    await db.commit()
+    return {**out, "token": token, "warning": OPERATOR_TOKEN_WARNING}
+
+
+@router.delete(
+    "/tokens/{token_id}", status_code=204, summary="Revoke an operator token"
+)
+async def revoke_operator_token(
+    token_id: UUID, request: Request, actor: str = _TOKENS
+) -> None:
+    db = request.state.db
+    row = await _get_operator_token(db, token_id)
+    if row.revoked_at is None:
+        row.revoked_at = datetime.now(UTC)
+        await _audit_token(request, "operator_token.revoke", row, 204)
+        await db.commit()

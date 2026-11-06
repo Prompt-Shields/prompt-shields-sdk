@@ -38,6 +38,7 @@ from sqlalchemy import literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import tenant_keys
 from collector.auth import resolve_tenant
 from collector.config import settings
 from collector.ingest import CALL_ID_RE, _enforce_rate_limit
@@ -211,7 +212,7 @@ async def ingest_feedback(
 ):
     """Record feedback on one call: ``{"call_id", "score", "reason",
     "user_id", "source"}``. See the module docstring."""
-    tenant_id = await resolve_tenant(request)
+    tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
     body = await _read_body(request)
     fields = parse_feedback(body)
     _enforce_limits(limiter, tenant_id, fields["user_id"], response)
