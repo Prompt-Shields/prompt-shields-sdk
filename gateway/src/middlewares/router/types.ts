@@ -58,6 +58,8 @@ export interface UseCaseBar {
 
 /** A named ladder of model groups plus the mappings that steer into them. */
 export interface RoutePolicy {
+  /** route-policy.v1 `policy_version`; part of the semantic cache key (#33). */
+  policyVersion?: string;
   /** Group used when no hint applies — the transparent-by-default target. */
   defaultGroup: string;
   /** group name -> ordered tiers (cheapest-first is not required; we sort by cost). */

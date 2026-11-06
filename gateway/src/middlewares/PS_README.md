@@ -117,7 +117,7 @@ with a per-route override.**
 | `X-PS-Quality` | `draft` \| `balanced` \| `critical` | Intent, not a model name. Gateway maps it to a model group. |
 | `X-PS-Max-Cost` | USD float, e.g. `0.02` | Per-call ceiling. The router downgrades to stay under it. |
 | `X-PS-Route` | group name, e.g. `frontier` | Explicit override — bypasses the router and pins a group. |
-| `X-PS-Cache` | `on` \| `off` \| `refresh` | The exact-match response cache (`PS_CACHE_DEFAULT` applies when absent); not part of routing. |
+| `X-PS-Cache` | `on` \| `semantic` \| `off` \| `refresh` | The exact-match response cache, or the semantic cache (`semantic`, see `gateway/docs/semantic-cache.md`; `PS_CACHE_DEFAULT` applies when absent); not part of routing. |
 | `X-PS-Data-Classification` | a sensitivity level, e.g. `confidential` | Declared level for the policy stages below (also telemetry). Does not engage routing by itself. |
 | `X-PS-Use-Case` | use-case name | Selects the policy's per-use-case quality bar (also telemetry). |
 
