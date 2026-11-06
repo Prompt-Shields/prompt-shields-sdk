@@ -89,6 +89,13 @@ class IngestEvent(BaseModel):
     budget_action: str | None = None
     cache_status: str | None = None
     cache_saved_cost: float | None = None
+    est_tokens_saved: int | None = None
+    # Routing learner auto mode (#34): set by the SDK router when the learner
+    # decided the call. Lenient like the route fields.
+    route_learner_mode: str | None = None
+    route_propensity: float | None = None
+    route_learner_version: str | None = None
+    route_learner_frozen: bool | None = None
     # Implicit outcome signals (#44): the SDK's (and gateway's) outcome
     # classes for the call. Known class names only, see _outcome_signals.
     outcome_signals: list[str] | None = None
@@ -223,6 +230,31 @@ class IngestEvent(BaseModel):
     def _cache_status(cls, value: Any) -> str | None:
         return _lenient_choice(value, CACHE_STATUSES)
 
+    @field_validator("route_learner_mode", mode="before")
+    @classmethod
+    def _learner_mode(cls, value: Any) -> str | None:
+        return _lenient_choice(value, LEARNER_MODES)
+
+    @field_validator("route_learner_version", mode="before")
+    @classmethod
+    def _learner_version(cls, value: Any) -> str | None:
+        value = _lenient_str(value, MAX_IDENTIFIER_LENGTH)
+        return value if value is not None and LEARNER_VERSION_RE.fullmatch(value) else None
+
+    @field_validator("route_propensity", mode="before")
+    @classmethod
+    def _propensity(cls, value: Any) -> float | None:
+        # A probability: (0, 1]. 0 would mean the served model could not
+        # have been picked, so it is as invalid as a value above 1.
+        value = _lenient_amount(value, 1.0)
+        return value if value is not None and round(value, 6) > 0 else None
+
+    @field_validator("route_learner_frozen", mode="before")
+    @classmethod
+    def _learner_frozen(cls, value: Any) -> bool | None:
+        # JSON booleans only: "false" or 0 must not be read as a flag.
+        return value if isinstance(value, bool) else None
+
     @field_validator("route_est_cost", "counterfactual_cost", "cache_saved_cost", mode="before")
     @classmethod
     def _route_cost(cls, value: Any) -> float | None:
@@ -247,6 +279,7 @@ class IngestEvent(BaseModel):
         "tokens_cache_write",
         "tokens_cache_write_1h",
         "tokens_reasoning",
+        "est_tokens_saved",
         mode="before",
     )
     @classmethod
@@ -312,6 +345,12 @@ CACHE_STATUSES = frozenset(
     {"hit", "miss", "semantic hit", "semantic miss", "semantic bypass", "refresh", "disabled"}
 )
 CACHE_HIT_STATUSES = ("hit", "semantic hit")
+# Routing learner auto mode (#34): prompt_shields.learner_auto.ChoiceMode.
+# Matched case-insensitively, stored lower-case.
+LEARNER_MODES = frozenset({"policy", "exploit", "explore"})
+LEARNER_EXPLORE = "explore"
+# learner_version of a learner snapshot (collector/learner.py VERSION_RE).
+LEARNER_VERSION_RE = re.compile(r"lv1-[0-9a-f]{16}")
 # cost_source of a response served from the gateway cache (psPricing.ts).
 COST_SOURCE_CACHE = "cache"
 
@@ -345,6 +384,15 @@ BUDGET_CACHE_FIELDS = (
     "budget_action",
     "cache_status",
     "cache_saved_cost",
+    "est_tokens_saved",
+)
+
+# Routing learner auto-mode fields (#34), stored as sent once validated.
+LEARNER_FIELDS = (
+    "route_learner_mode",
+    "route_propensity",
+    "route_learner_version",
+    "route_learner_frozen",
 )
 
 # Lenient fields whose dropped values are reported in ignored_fields as
@@ -371,7 +419,7 @@ LENIENT_FIELDS = (
     "call_id",
     "outcome_signals",
     "outcome_signals_version",
-) + ROUTE_FIELDS + BUDGET_CACHE_FIELDS
+) + ROUTE_FIELDS + BUDGET_CACHE_FIELDS + LEARNER_FIELDS
 
 
 def _lenient_str(value: Any, max_length: int) -> str | None:
@@ -637,7 +685,10 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             call_id=event.call_id,
             outcome_signals=event.outcome_signals,
             outcome_signals_version=event.outcome_signals_version,
-            **{name: getattr(event, name) for name in ROUTE_FIELDS + BUDGET_CACHE_FIELDS},
+            **{
+                name: getattr(event, name)
+                for name in ROUTE_FIELDS + BUDGET_CACHE_FIELDS + LEARNER_FIELDS
+            },
         )
         db.add(usage_event)
         await record_event_flows(

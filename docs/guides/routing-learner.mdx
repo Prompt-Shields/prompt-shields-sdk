@@ -209,9 +209,18 @@ Failover starts from the chosen model and stays inside the data policy.
 `resp.ps.route.learner` records the choice: model, `exploit` / `explore` /
 `policy`, the propensity, the rate, the policy's pick and the snapshot
 version. The route reason ends in `+learner-exploit` or `+learner-explore`.
-The telemetry event carries `route_learner_mode`, `route_propensity` and
-`route_learner_version` for your own logs. The collector does not store
-these three fields yet.
+The telemetry event carries `route_learner_mode`, `route_propensity`,
+`route_learner_version` (null when no snapshot is active, for example after
+a rollback to the plain policy) and `route_learner_frozen`. The collector
+stores them on the usage event; an invalid value is stored as null and
+counted as `<field>:invalid` in `/telemetry/loss`, and the rest of the
+batch is kept. The Partner API usage summary
+(`GET /partner/v1/assets/{id}/usage-summary`) reports `learner_requests`,
+`learner_routed_share` (the share of all calls the learner decided) and
+`learner_explore_share` (the share of those it explored). The teardown's
+`--learning-tuples` export carries the logged `propensity`,
+`learner_mode` and `learner_version` on calls the learner routed, so a
+retrain over logged events can use the doubly robust estimate.
 
 ### The enablement gate
 

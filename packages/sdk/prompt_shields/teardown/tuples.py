@@ -21,6 +21,13 @@ eval results, that model's parity for the use case. ``replay`` is a
 counterfactual arm for the same call, not a second logged call, so it adds
 no traffic. Aggregated usage-export rows are not calls and are not
 exported.
+
+A call the routing learner routed in auto mode (#34; a ps-events row with
+``route_learner_mode`` and a ``route_propensity`` in (0, 1]) also carries
+``propensity`` (the probability the logging policy picked the served
+model, which the offline learner reads for its doubly robust estimate),
+``learner_mode`` and ``learner_version``. Other tuples have none of these
+keys.
 """
 
 from __future__ import annotations
@@ -109,6 +116,18 @@ def _replay(p: PricedRecord, c: Any, policy: Mapping[str, Any],
     }
 
 
+def _learner_fields(r: Any) -> dict[str, Any]:
+    """The auto-mode learner's logged choice (#34), when there is one."""
+    prop = r.route_propensity
+    if r.route_learner_mode is None or prop is None or not 0.0 < prop <= 1.0:
+        return {}
+    return {
+        "propensity": prop,
+        "learner_mode": r.route_learner_mode,
+        "learner_version": r.route_learner_version,
+    }
+
+
 def learning_tuples(
     priced: Iterable[PricedRecord],
     *,
@@ -148,6 +167,7 @@ def learning_tuples(
             "tokens_in": r.tokens_in,
             "tokens_out": r.tokens_out,
         }
+        t.update(_learner_fields(r))
         if replays is not None:
             c = replays[i]
             t["sensitivity_level"] = c.sensitivity_level

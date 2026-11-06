@@ -26,6 +26,7 @@ import {
   responseModel,
   toResponsesStatus,
 } from './responseTransform';
+import { carriesThinking, encodeThinkingCarry } from './thinkingCarry';
 
 type OutputKind = 'message' | 'reasoning' | 'function_call';
 
@@ -39,6 +40,10 @@ interface OutputItem {
   done: boolean;
   call_id?: string;
   name?: string;
+  /** PS fork (#73): provider thinking blocks, by stream content block */
+  thinking?: { index: unknown; block: any }[];
+  /** PS fork (#73): the provider, to tag the carried thinking */
+  provider?: string;
 }
 
 interface StreamState {
@@ -74,6 +79,8 @@ interface StreamState {
   requestedModel: string;
   /** PS fork (#73): request fields every snapshot echoes */
   requestEcho: ReturnType<typeof echoRequestFields>;
+  /** PS fork (#73): the provider; signed thinking is carried for some */
+  provider: string;
 }
 
 function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
@@ -96,12 +103,23 @@ function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
             ]
           : [],
       };
-    case 'reasoning':
+    case 'reasoning': {
+      // PS fork (#73): signed thinking travels in encrypted_content
+      const encrypted =
+        final && item.thinking?.length
+          ? encodeThinkingCarry(
+              item.provider || '',
+              item.thinking.map((t) => t.block)
+            )
+          : undefined;
       return {
         id: item.id,
         type: 'reasoning',
-        summary: final ? [{ type: 'summary_text', text: item.text }] : [],
+        summary:
+          final && item.text ? [{ type: 'summary_text', text: item.text }] : [],
+        ...(encrypted ? { encrypted_content: encrypted } : {}),
       };
+    }
     case 'function_call':
       return {
         id: item.id,
@@ -224,6 +242,47 @@ function closeItem(state: StreamState, events: string[], item: OutputItem) {
   );
 }
 
+/** The open message or reasoning item of this kind, opening one. */
+function ensureOpen(
+  state: StreamState,
+  events: string[],
+  kind: 'message' | 'reasoning'
+): OutputItem {
+  let item = state.openItem;
+  if (item?.kind !== kind) {
+    if (item) closeItem(state, events, item);
+    item = openItem(state, events, kind, {
+      ...(kind === 'reasoning' && { provider: state.provider }),
+    });
+    state.openItem = item;
+  }
+  return item;
+}
+
+/**
+ * PS fork (#73): the thinking block of stream content block `index` in the
+ * open reasoning item, starting one when the index or type changes.
+ */
+function carriedBlock(
+  state: StreamState,
+  events: string[],
+  index: unknown,
+  type: 'thinking' | 'redacted_thinking'
+): any {
+  const item = ensureOpen(state, events, 'reasoning');
+  item.thinking ??= [];
+  const last = item.thinking[item.thinking.length - 1];
+  if (last && last.index === index && last.block.type === type) {
+    return last.block;
+  }
+  const block =
+    type === 'thinking'
+      ? { type, thinking: '', signature: '' }
+      : { type, data: '' };
+  item.thinking.push({ index, block });
+  return block;
+}
+
 /** Append text to the open message or reasoning item, opening one. */
 function appendText(
   state: StreamState,
@@ -231,12 +290,7 @@ function appendText(
   kind: 'message' | 'reasoning',
   text: string
 ) {
-  let item = state.openItem;
-  if (item?.kind !== kind) {
-    if (item) closeItem(state, events, item);
-    item = openItem(state, events, kind);
-    state.openItem = item;
-  }
+  const item = ensureOpen(state, events, kind);
   item.text += text;
   const base = { item_id: item.id, output_index: item.outputIndex };
   if (kind === 'message') {
@@ -398,12 +452,29 @@ export function transformStreamChunk(
 
   // PS fork (#73): reasoning, from content_blocks (Anthropic, Gemini,
   // OpenRouter transforms) or reasoning_content / reasoning strings
+  // and, for providers that sign thinking, the signature and redacted
+  // thinking to carry to the next turn (thinkingCarry.ts)
   let sawBlockThinking = false;
+  const carry = carriesThinking(state.provider);
   for (const block of delta?.content_blocks || []) {
-    const thinking = block?.delta?.thinking;
-    if (typeof thinking === 'string' && thinking) {
+    const d = block?.delta || {};
+    if (typeof d.thinking === 'string' && d.thinking) {
       sawBlockThinking = true;
-      appendText(state, events, 'reasoning', thinking);
+      appendText(state, events, 'reasoning', d.thinking);
+      if (carry) {
+        carriedBlock(state, events, block.index, 'thinking').thinking +=
+          d.thinking;
+      }
+    }
+    if (carry && typeof d.signature === 'string' && d.signature) {
+      sawBlockThinking = true;
+      carriedBlock(state, events, block.index, 'thinking').signature +=
+        d.signature;
+    }
+    if (carry && typeof d.data === 'string' && d.data) {
+      sawBlockThinking = true;
+      carriedBlock(state, events, block.index, 'redacted_thinking').data +=
+        d.data;
     }
   }
   if (!sawBlockThinking) {
@@ -468,9 +539,13 @@ export function transformStreamChunk(
 
 /**
  * Create initial stream state. PS fork (#73): `originalRequest` is the
- * client's Responses request, echoed in every response snapshot.
+ * client's Responses request, echoed in every response snapshot; `provider`
+ * is the target, whose signed thinking is carried in encrypted_content.
  */
-export function createStreamState(originalRequest?: any): StreamState {
+export function createStreamState(
+  originalRequest?: any,
+  provider?: string
+): StreamState {
   return {
     responseId: '',
     outputItemId: '',
@@ -494,5 +569,6 @@ export function createStreamState(originalRequest?: any): StreamState {
     error: null,
     requestedModel: responseModel(originalRequest),
     requestEcho: echoRequestFields(originalRequest),
+    provider: provider || '',
   };
 }

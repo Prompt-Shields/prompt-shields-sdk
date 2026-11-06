@@ -1433,6 +1433,7 @@ class _RouterCore:
             if plan.learner is not None:
                 event["route_learner_mode"] = plan.learner.mode
                 event["route_propensity"] = plan.learner.propensity
+                event["route_learner_frozen"] = plan.learner.frozen
                 if plan.learner.learner_version is not None:
                     event["route_learner_version"] = plan.learner.learner_version
             # Pseudonymised: the client scanned the placeholders. Report the

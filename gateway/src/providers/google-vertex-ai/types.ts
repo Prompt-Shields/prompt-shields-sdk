@@ -59,8 +59,10 @@ export interface GoogleResponseCandidate {
 export interface GoogleGenerateContentResponse {
   modelVersion: string;
   candidates: GoogleResponseCandidate[];
-  promptFeedback: {
-    safetyRatings: {
+  promptFeedback?: {
+    blockReason?: string;
+    blockReasonMessage?: string;
+    safetyRatings?: {
       category: string;
       probability: string;
       probabilityScore: number;
@@ -265,6 +267,8 @@ export enum VERTEX_GEMINI_GENERATE_CONTENT_FINISH_REASON {
   SPII = 'SPII',
   MALFORMED_FUNCTION_CALL = 'MALFORMED_FUNCTION_CALL',
   IMAGE_SAFETY = 'IMAGE_SAFETY',
+  IMAGE_PROHIBITED_CONTENT = 'IMAGE_PROHIBITED_CONTENT',
+  MODEL_ARMOR = 'MODEL_ARMOR',
 }
 
 export interface PortkeyGeminiParams extends Params {
