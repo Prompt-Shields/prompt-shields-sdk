@@ -24,6 +24,8 @@ import {
   transformOpenAIRoleToGoogleRole,
   transformToolChoiceForGemini,
   transformGeminiFinishReason,
+  geminiBlockedPromptChoice,
+  geminiChoicesOrBlocked,
   geminiStreamToolCalls,
   transformGeminiStreamParts,
   assistantToolCallTextParts,
@@ -520,16 +522,24 @@ export const GoogleChatCompleteResponseTransform: (
   }
 
   // sometimes vertex gemini returns usageMetadata without candidates
+  const blockedPromptChoice = geminiBlockedPromptChoice(
+    (response as GoogleGenerateContentResponse).promptFeedback,
+    strictOpenAiCompliance,
+    false
+  );
   const isValidResponse =
-    'candidates' in response || 'usageMetadata' in response;
+    'candidates' in response ||
+    'usageMetadata' in response ||
+    !!blockedPromptChoice;
   if (isValidResponse) {
+    response = response as GoogleGenerateContentResponse;
     const {
       promptTokenCount = 0,
       cachedContentTokenCount = 0,
       candidatesTokenCount = 0,
       totalTokenCount = 0,
       thoughtsTokenCount = 0,
-    } = response.usageMetadata;
+    } = response.usageMetadata ?? {};
 
     const completionTokens = candidatesTokenCount + thoughtsTokenCount;
 
@@ -539,7 +549,7 @@ export const GoogleChatCompleteResponseTransform: (
       created: Math.floor(Date.now() / 1000),
       model: response.modelVersion,
       provider: GOOGLE_VERTEX_AI,
-      choices:
+      choices: geminiChoicesOrBlocked(
         response.candidates?.map((generation, index) => {
           // transform tool calls and content by iterating over the content parts
           const toolCalls: ToolCall[] = [];
@@ -618,7 +628,9 @@ export const GoogleChatCompleteResponseTransform: (
               ? { groundingMetadata: generation.groundingMetadata }
               : {}),
           };
-        }) ?? [],
+        }),
+        blockedPromptChoice
+      ),
       usage: {
         prompt_tokens: promptTokenCount,
         completion_tokens: completionTokens,
@@ -712,6 +724,11 @@ export const GoogleChatCompleteStreamChunkTransform: (
   }
 
   const parsedChunk: GoogleGenerateContentResponse = JSON.parse(chunk);
+  const blockedPromptChoice = geminiBlockedPromptChoice(
+    parsedChunk.promptFeedback,
+    strictOpenAiCompliance,
+    true
+  );
 
   let usageMetadata;
   if (parsedChunk.usageMetadata) {
@@ -743,7 +760,7 @@ export const GoogleChatCompleteStreamChunkTransform: (
     created: Math.floor(Date.now() / 1000),
     model: parsedChunk.modelVersion,
     provider: GOOGLE_VERTEX_AI,
-    choices:
+    choices: geminiChoicesOrBlocked(
       parsedChunk.candidates?.map((generation, index) => {
         let message: any = { role: 'assistant', content: '' };
         const partsMessage = transformGeminiStreamParts(
@@ -784,8 +801,11 @@ export const GoogleChatCompleteStreamChunkTransform: (
             ? { groundingMetadata: generation.groundingMetadata }
             : {}),
         };
-      }) ?? [],
-    ...(parsedChunk.usageMetadata?.candidatesTokenCount && {
+      }),
+      blockedPromptChoice
+    ),
+    ...((parsedChunk.usageMetadata?.candidatesTokenCount ||
+      blockedPromptChoice) && {
       usage: usageMetadata,
     }),
   };
