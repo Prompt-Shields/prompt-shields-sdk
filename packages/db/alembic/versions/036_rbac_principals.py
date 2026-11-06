@@ -18,11 +18,10 @@ unchanged.
 Each new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Follows 034 on main; 035 (#334) is expected to merge first, in which case
-this is re-chained onto it.
+Follows 035 (identity fields, #334).
 
 Revision ID: 036
-Revises: 034
+Revises: 035
 Create Date: 2026-11-06
 """
 
@@ -33,7 +32,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "036"
-down_revision: str | None = "034"
+down_revision: str | None = "035"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

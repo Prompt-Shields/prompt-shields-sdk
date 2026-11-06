@@ -34,17 +34,25 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def _legacy_admin_ingest_keys(request, monkeypatch):
+def _legacy_admin_ingest_keys(request):
     """PS_ADMIN_REQUIRE_SCOPED_TOKENS defaults to true since roles shipped
     (#338). Most route tests predate that and use the tenant ingest key on
     /api/v1/admin for brevity, so they run with it off. Tests of the default
     itself (and of roles) opt out with ``@pytest.mark.scoped_admin_default``
-    and get the real setting; tests that set it themselves still can."""
+    and get the real setting; tests that set it themselves still can.
+
+    Not through ``monkeypatch``: an autouse fixture that requests it makes
+    every test's monkeypatch undo run last, after the test's own
+    ``patch()`` fixtures exit, and re-installs their mocks."""
     if request.node.get_closest_marker("scoped_admin_default"):
+        yield
         return
     from collector.config import settings
 
-    monkeypatch.setattr(settings, "admin_require_scoped_tokens", False)
+    before = settings.admin_require_scoped_tokens
+    settings.admin_require_scoped_tokens = False
+    yield
+    settings.admin_require_scoped_tokens = before
 
 
 @pytest.fixture

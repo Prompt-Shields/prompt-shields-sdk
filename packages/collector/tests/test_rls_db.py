@@ -52,6 +52,7 @@ from db.models import (
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
+    TenantSecret,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -214,6 +215,7 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     created_by="operator",
                 ),
                 _audit_seed(tenant_id),
+                TenantSecret(tenant_id=tenant_id, user_id_salt=f"seed-salt-{name}"),
             ]
         )
         sub = WebhookSubscription(
@@ -730,6 +732,52 @@ async def test_cache_tokens_saved_summary_is_tenant_scoped_under_rls(rls_db):
         resp = await c.get(f"/partner/v1/assets/{assets[a]}/usage-summary",
                            headers={"Authorization": f"Bearer {PARTNER_KEY_B}"})
         assert resp.status_code == 404
+
+
+async def test_identity_trace_fields_and_salt_under_rls(rls_db):
+    """#334: ingest in tenant context creates each tenant's user_id salt in
+    tenant_secrets and stores the salted hash; neither tenant sees the
+    other's rows or salt."""
+    import hashlib
+    import hmac
+
+    a, b = rls_db["a"], rls_db["b"]
+    # Drop the seeded salts so ingest takes the insert path under RLS.
+    async with rls_db["admin"]() as s:
+        await s.execute(text("DELETE FROM tenant_secrets"))
+        await s.commit()
+    event = {
+        "vendor": "openai", "model": "gpt-4o", "source": "gateway",
+        "user_id": "sub-123", "user_group": "eng", "trace_id": "t-rls",
+        "retry_count": 0, "attempts": [{"attempt": 1, "latency_ms": 9, "status": 200}],
+        "stream_truncated": False, "route_sensitivity_level": "internal",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key in (KEY_A, KEY_B):
+            resp = await c.post("/ingest/events", headers={"Authorization": f"Bearer {key}"},
+                                json={"events": [event]})
+            assert resp.status_code == 200, resp.text
+
+    salts = {}
+    for tenant in (a, b):
+        async with rls_db["plain"]() as s:
+            await rls.set_tenant(s, tenant)
+            rows = (await s.execute(select(Tenant.id))).scalars().all()
+            assert rows == [tenant]
+            secrets = (await s.execute(
+                select(TenantSecret.tenant_id, TenantSecret.user_id_salt)
+            )).all()
+            assert [r[0] for r in secrets] == [tenant]
+            salts[tenant] = secrets[0][1]
+            ev = (await s.execute(
+                select(AIUsageEvent).where(AIUsageEvent.trace_id == "t-rls")
+            )).scalar_one()
+        assert ev.tenant_id == tenant
+        assert ev.user_id_hash == hmac.new(
+            salts[tenant].encode(), b"sub-123", hashlib.sha256).hexdigest()
+        assert ev.user_id_raw is None and ev.sensitivity_level == "internal"
+    assert salts[a] != salts[b]
+    assert all(len(salt) == 64 for salt in salts.values())
 
 
 async def test_learner_route_fields_under_rls(rls_db):

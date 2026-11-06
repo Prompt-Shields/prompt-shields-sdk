@@ -95,9 +95,10 @@ async def test_gateway_and_policy_fields_round_trip(seeded_db):
     assert ev.counterfactual_cost == Decimal("0.0123")
     assert ev.baseline_id == "gpt-4o"
 
-    # Only the per-attempt detail (#78) is still out of scope.
+    # The per-attempt detail (#78) is stored too since #334.
     (stats,) = loss["clients"]
-    assert set(stats["ignored_fields"]) == {"trace_id", "retry_count", "attempts"}
+    assert not stats["ignored_fields"]
+    assert ev.trace_id and ev.retry_count is not None and ev.attempts
 
 
 @pytest.mark.asyncio

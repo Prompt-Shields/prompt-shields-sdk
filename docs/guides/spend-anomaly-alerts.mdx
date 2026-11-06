@@ -42,7 +42,7 @@ An invalid value is refused by the API (400); setting `spend_anomaly` to `null` 
 
 ## Running the job
 
-There is no scheduler in the collector. Run the job once a day after midnight UTC, from cron or a Kubernetes CronJob:
+There is no scheduler in the collector. The Helm chart (0.4.11 and later) runs it daily as the `spendAnomaly` CronJob (`57 3 * * *`, on by default; `cronJobs.jobs.spendAnomaly` in the chart values). Elsewhere, run the job once a day after midnight UTC, from cron or a Kubernetes CronJob:
 
 ```bash
 python -m collector.spend_anomalies --all-tenants            # yesterday (UTC)

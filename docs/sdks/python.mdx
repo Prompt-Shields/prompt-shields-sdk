@@ -160,7 +160,7 @@ response = client.chat.completions.create(
 | `output_destination` | Where AI output goes — completes the lineage graph |
 | `risk_tags` | Free-form tags for governance filtering (`gdpr`, `hipaa`, ...) |
 | `session_id` | Groups related calls in a multi-turn conversation |
-| `user_id` | Opaque identifier (hash before passing if you need to anonymize) |
+| `user_id` | Opaque identifier. The collector stores an HMAC of it keyed with a per-tenant salt, and the value itself only if the tenant sets `store_raw_user_ids` (see [Data retention](/guides/data-retention#user-ids)) |
 
 ## Auto-Instrumentation
 
@@ -559,6 +559,35 @@ detect_pii_categories("Email jane@acme.com about SSN 123-45-6789")
 ```
 
 Detected categories: `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `health_data`, `financial_data`.
+
+### Opt-in: names, addresses and multilingual vocabulary
+
+`detect_pii_categories_extended` is a separate, opt-in detector. It returns
+everything `detect_pii_categories` returns, plus `person_name` and
+`postal_address`, and it matches `health_data` and `financial_data` with wider
+keyword lists in Swedish, Norwegian, Danish, Finnish, German, French, Dutch,
+Spanish, Italian, Polish and English. Nothing else calls it: telemetry, the
+router and the pseudonymiser keep using the default detector.
+
+```python
+from prompt_shields import detect_pii_categories_extended
+
+detect_pii_categories_extended("Leverans till Lars Andersson, Storgatan 12, 114 55 Stockholm")
+# → ['person_name', 'postal_address']
+```
+
+The default is rule-based: pure Python, no dependencies, about 0.1 ms per
+prompt. Names are a common given name followed by a capitalised surname, a
+title ("Frau Weber") or a cue ("my name is", "jag heter"). Addresses are a
+street with a house number, or a UK postcode. `names=`, `addresses=` and
+`vocabulary=` turn each part off. `ner="spacy"` also adds the `PER` entities
+of a spaCy model. That needs `pip install 'prompt-shields[ner]'` and a model
+(`python -m spacy download xx_ent_wiki_sm`). It finds more names, but it also
+reports many more false positives.
+
+Recall per category and locale is in `benchmarks/pii/README.md`. Use these
+categories for detection and telemetry only. They must not be used to block
+requests until security signs off their thresholds.
 
 ## Cost Estimation
 

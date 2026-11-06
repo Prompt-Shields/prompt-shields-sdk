@@ -76,6 +76,7 @@ from db.models import (
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
+    TenantSecret,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -124,6 +125,7 @@ ERASE_ORDER: tuple[type, ...] = (
     SpendAlert,
     TenantApiKey,
     AdminToken,
+    TenantSecret,
     # After the credentials that may name a principal (#338).
     Membership,
     Project,

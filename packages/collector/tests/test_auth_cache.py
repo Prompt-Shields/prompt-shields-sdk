@@ -12,7 +12,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from collector import auth, rls
 from collector.app import app
-from collector.auth_cache import FailedAuthLimiter, VerifiedKeyCache, client_key
+from collector.auth_cache import (
+    FailedAuthLimiter,
+    VerifiedKeyCache,
+    client_key,
+    get_failed_auth_limiter,
+)
 from collector.config import settings
 from db.api_keys import verify_api_key
 from db.models import Tenant, TenantApiKey
@@ -167,6 +172,20 @@ def _settings(monkeypatch):
     monkeypatch.setattr(settings, "admin_require_scoped_tokens", False)
     monkeypatch.setattr(settings, "ingest_key_cache_ttl_seconds", 30.0)
     monkeypatch.setattr(settings, "auth_failure_limit_per_minute", 60)
+
+
+# 30 s into a 60 s failed-auth window (1_800_000_000 is a multiple of 60).
+WINDOW_MID = 1_800_000_030.0
+
+
+@pytest.fixture(autouse=True)
+def auth_clock(monkeypatch):
+    """Pin the process-wide failed-auth limiter's clock mid-window. On the
+    real clock a test that crosses a window boundary sees its failure count
+    reset, and a request expected to get 429 gets 401."""
+    clock = Clock(WINDOW_MID)
+    monkeypatch.setattr(get_failed_auth_limiter(), "clock", clock)
+    return clock
 
 
 @pytest.fixture
@@ -324,7 +343,7 @@ async def test_failed_auth_limiter(client, bcrypt_calls, monkeypatch):
     before = len(bcrypt_calls)
     resp = await client.get("/api/v1/registry/assets", headers=H("ps-bad-x"))
     assert resp.status_code == 429
-    assert 1 <= int(resp.headers["Retry-After"]) <= 60
+    assert resp.headers["Retry-After"] == "30"  # rest of the pinned window
     assert resp.json()["detail"]["title"] == "Too Many Requests"
     assert len(bcrypt_calls) == before  # no bcrypt for the refused request
     # A valid key already verified from this address still gets in.
@@ -353,7 +372,7 @@ async def test_failed_admin_tokens_limited(client, monkeypatch):
         assert resp.status_code == 401
     resp = await client.get("/api/v1/admin/tokens", headers=H("ps-at-bad"))
     assert resp.status_code == 429
-    assert "Retry-After" in resp.headers
+    assert resp.headers["Retry-After"] == "30"
 
 
 async def test_limited_address_still_admits_uncached_valid_key(
@@ -370,6 +389,24 @@ async def test_limited_address_still_admits_uncached_valid_key(
     assert await _status(client, TENANT_KEY) == 200
     assert bcrypt_calls.count(TENANT_KEY) == before + 1
     assert await _status(client, "ps-bad-y") == 429
+
+
+async def test_window_boundary_resets_failure_count(client, auth_clock, monkeypatch):
+    """Why the tests here pin the limiter's clock. This is the sequence of
+    test_limited_address_still_admits_uncached_valid_key with the clock just
+    before a window boundary, moving on as wall time does on a slow runner:
+    the failures land in the old window, the request expected to get 429
+    lands in a fresh one and gets 401 (the CI failure ``assert 401 == 429``)."""
+    monkeypatch.setattr(settings, "auth_failure_limit_per_minute", 2)
+    monkeypatch.setattr(settings, "ingest_key_cache_ttl_seconds", 0)
+    auth_clock.now = WINDOW_MID + 29.5  # half a second before the boundary
+    for i in range(2):
+        assert await _status(client, f"ps-bad-{i}") == 401
+    auth_clock.now += 1.0  # past the boundary: the count starts again
+    assert await _status(client, "ps-bad-x") == 401
+    # The limit itself still holds within the new window.
+    assert await _status(client, "ps-bad-y") == 401
+    assert await _status(client, "ps-bad-z") == 429
 
 
 async def test_limited_address_holds_back_revoked_key(client, monkeypatch):

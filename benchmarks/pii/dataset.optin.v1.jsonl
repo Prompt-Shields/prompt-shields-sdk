@@ -1,0 +1,141 @@
+{"id": "se-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "sv", "locale": "se", "text": "Mötet leds av Gunnel Svensson från ekonomi."}
+{"id": "se-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "sv", "locale": "se", "text": "Skicka avtalet till Torbjörn Ek innan fredag."}
+{"id": "se-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "sv", "locale": "se", "text": "Fråga Sara Lindgren om nycklarna."}
+{"id": "se-optin-004", "kind": "positive", "labels": ["person_name"], "lang": "sv", "locale": "se", "text": "Hej, jag heter Viktor och ringer om fakturan."}
+{"id": "se-optin-005", "kind": "positive", "labels": ["postal_address"], "lang": "sv", "locale": "se", "text": "Adressen är Drottninggatan 53, 111 21 Stockholm."}
+{"id": "se-optin-006", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "sv", "locale": "se", "text": "Skicka paketet till Malin Ek, Södra vägen 7, 412 54 Göteborg."}
+{"id": "se-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "sv", "locale": "se", "text": "Hon är sjukskriven sedan i måndags på grund av depression."}
+{"id": "se-optin-008", "kind": "positive", "labels": ["health_data", "person_name"], "lang": "sv", "locale": "se", "text": "Läkaren konstaterade att Per Holm har förhöjt blodtryck."}
+{"id": "se-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "sv", "locale": "se", "text": "Lönen betalas till mitt bankkonto hos Nordea."}
+{"id": "se-optin-010", "kind": "positive", "labels": ["financial_data"], "lang": "sv", "locale": "se", "text": "Ange clearingnummer och kontonummer på blanketten."}
+{"id": "se-optin-011", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Vi har möte i Stora Konferensrummet klockan tio."}
+{"id": "se-optin-012", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Drottninggatan är avstängd för biltrafik i helgen."}
+{"id": "se-optin-013", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Kör diagnostiken på servern igen."}
+{"id": "se-optin-014", "kind": "hard_negative", "labels": [], "lang": "sv", "locale": "se", "text": "Receptet på kanelbullar finns i bilagan."}
+{"id": "no-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "nb", "locale": "no", "text": "Prosjektet ledes av Bjørg Nilsen."}
+{"id": "no-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "nb", "locale": "no", "text": "Kan du sende rapporten til Ola Nordmann?"}
+{"id": "no-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "nb", "locale": "no", "text": "Møtet med Kjetil Bakke er flyttet til torsdag."}
+{"id": "no-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "nb", "locale": "no", "text": "Kontoret ligger i Karl Johans gate 22, 0159 Oslo."}
+{"id": "no-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "nb", "locale": "no", "text": "Leveres til Silje Moe, Bryggen 3, 5003 Bergen."}
+{"id": "no-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "nb", "locale": "no", "text": "Fastlegen ga ham en ny resept på blodtrykksmedisin."}
+{"id": "no-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "nb", "locale": "no", "text": "Hun har vært sykemeldt i tre uker etter operasjonen."}
+{"id": "no-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "nb", "locale": "no", "text": "Oppgi kontonummeret ditt for refusjon."}
+{"id": "no-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "nb", "locale": "no", "text": "Lønnen går inn på bankkontoen min i DNB."}
+{"id": "no-optin-010", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Les mer om Statens vegvesen på nettsiden."}
+{"id": "no-optin-011", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Kongens gate er stengt på grunn av veiarbeid."}
+{"id": "no-optin-012", "kind": "hard_negative", "labels": [], "lang": "nb", "locale": "no", "text": "Oppskriften trenger to dl melk."}
+{"id": "dk-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "da", "locale": "dk", "text": "Kontakt venligst Jens Hansen i HR."}
+{"id": "dk-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "da", "locale": "dk", "text": "Dorthe Lund godkender budgettet."}
+{"id": "dk-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "da", "locale": "dk", "text": "Jeg hedder Mads og arbejder på lageret."}
+{"id": "dk-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "da", "locale": "dk", "text": "Butikken ligger på Nørregade 14, 1165 København K."}
+{"id": "dk-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "da", "locale": "dk", "text": "Send fakturaen til Rikke Holm, Strøget 2, 5000 Odense C."}
+{"id": "dk-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "da", "locale": "dk", "text": "Lægen ordinerede antibiotika mod lungebetændelsen."}
+{"id": "dk-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "da", "locale": "dk", "text": "Han er sygemeldt med stress i to uger."}
+{"id": "dk-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "da", "locale": "dk", "text": "Hvad er dit reg.nr. og kontonummer?"}
+{"id": "dk-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "da", "locale": "dk", "text": "Lønnen overføres til min bankkonto."}
+{"id": "dk-optin-010", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Tivoli Gardens åbner igen i april."}
+{"id": "dk-optin-011", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Strøget er fyldt med turister i dag."}
+{"id": "dk-optin-012", "kind": "hard_negative", "labels": [], "lang": "da", "locale": "dk", "text": "Kør en diagnose på printeren."}
+{"id": "fi-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "fi", "locale": "fi", "text": "Kokouksen vetää Pirkko Lehtonen."}
+{"id": "fi-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "fi", "locale": "fi", "text": "Lähetä sopimus Mikko Heikkiselle."}
+{"id": "fi-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "fi", "locale": "fi", "text": "Nimeni on Satu ja soitan laskusta."}
+{"id": "fi-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "fi", "locale": "fi", "text": "Toimisto on osoitteessa Aleksanterinkatu 15, 00100 Helsinki."}
+{"id": "fi-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "fi", "locale": "fi", "text": "Paketti: Timo Salo, Kauppakatu 8, 40100 Jyväskylä."}
+{"id": "fi-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "fi", "locale": "fi", "text": "Lääkäri kirjoitti hänelle uuden reseptin."}
+{"id": "fi-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "fi", "locale": "fi", "text": "Hän on ollut sairauslomalla masennuksen takia."}
+{"id": "fi-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "fi", "locale": "fi", "text": "Ilmoita tilinumerosi palkanmaksua varten."}
+{"id": "fi-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "fi", "locale": "fi", "text": "Rahat siirretään pankkitilillesi."}
+{"id": "fi-optin-010", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Helsingin Sanomat julkaisi uuden raportin."}
+{"id": "fi-optin-011", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Aleksanterinkatu on suljettu remontin vuoksi."}
+{"id": "fi-optin-012", "kind": "hard_negative", "labels": [], "lang": "fi", "locale": "fi", "text": "Aja diagnostiikka uudelleen palvelimella."}
+{"id": "de-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "de", "locale": "de", "text": "Bitte wenden Sie sich an Herrn Schulz."}
+{"id": "de-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "de", "locale": "de", "text": "Das Protokoll schreibt Katrin Hoffmann."}
+{"id": "de-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "de", "locale": "de", "text": "Frau Dr. Wagner ist heute nicht im Haus."}
+{"id": "de-optin-004", "kind": "positive", "labels": ["person_name"], "lang": "de", "locale": "de", "text": "Mein Name ist Lukas Becker."}
+{"id": "de-optin-005", "kind": "positive", "labels": ["postal_address"], "lang": "de", "locale": "de", "text": "Unsere Adresse: Lindenstraße 12, 50674 Köln."}
+{"id": "de-optin-006", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "de", "locale": "de", "text": "Lieferung an Jonas Koch, Am Markt 5, 28195 Bremen."}
+{"id": "de-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "de", "locale": "de", "text": "Die Hausärztin hat ihn für zwei Wochen krankgeschrieben."}
+{"id": "de-optin-008", "kind": "positive", "labels": ["health_data"], "lang": "de", "locale": "de", "text": "Bei der Untersuchung wurde eine Allergie gegen Penicillin festgestellt."}
+{"id": "de-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "de", "locale": "de", "text": "Bitte senden Sie mir Ihre Bankverbindung."}
+{"id": "de-optin-010", "kind": "positive", "labels": ["financial_data"], "lang": "de", "locale": "de", "text": "Die Steuer-ID steht auf dem Lohnzettel."}
+{"id": "de-optin-011", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Die Deutsche Bahn meldet Verspätungen."}
+{"id": "de-optin-012", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Die Lindenstraße ist eine bekannte Fernsehserie."}
+{"id": "de-optin-013", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Das Rezept für Apfelstrudel ist ganz einfach."}
+{"id": "de-optin-014", "kind": "hard_negative", "labels": [], "lang": "de", "locale": "de", "text": "Die neue Verordnung tritt im Januar in Kraft."}
+{"id": "fr-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "fr", "locale": "fr", "text": "Merci de contacter Mme Girard au service client."}
+{"id": "fr-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "fr", "locale": "fr", "text": "Le rapport a été rédigé par Julien Roux."}
+{"id": "fr-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "fr", "locale": "fr", "text": "Je m'appelle Élise et j'appelle pour ma commande."}
+{"id": "fr-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "fr", "locale": "fr", "text": "Le siège est au 8 boulevard Haussmann, 75009 Paris."}
+{"id": "fr-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "fr", "locale": "fr", "text": "Livrer à Nicolas Petit, 3 rue des Lilas, 31000 Toulouse."}
+{"id": "fr-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "fr", "locale": "fr", "text": "Le médecin lui a prescrit un arrêt maladie de dix jours."}
+{"id": "fr-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "fr", "locale": "fr", "text": "Elle suit un traitement contre le diabète depuis 2019."}
+{"id": "fr-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "fr", "locale": "fr", "text": "Envoyez-moi votre RIB pour le remboursement."}
+{"id": "fr-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "fr", "locale": "fr", "text": "Indiquez votre numéro de compte sur le formulaire."}
+{"id": "fr-optin-010", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "La Tour Eiffel ferme à 23 heures."}
+{"id": "fr-optin-011", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Le boulevard Haussmann est très animé le samedi."}
+{"id": "fr-optin-012", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Lance un diagnostic complet du réseau."}
+{"id": "fr-optin-013", "kind": "hard_negative", "labels": [], "lang": "fr", "locale": "fr", "text": "Branche l'enceinte Bluetooth dans le salon."}
+{"id": "nl-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "nl", "locale": "nl", "text": "Neem contact op met mevrouw Visser."}
+{"id": "nl-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "nl", "locale": "nl", "text": "Het verslag is van Pieter Smit."}
+{"id": "nl-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "nl", "locale": "nl", "text": "Mijn naam is Anouk Mulder."}
+{"id": "nl-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "nl", "locale": "nl", "text": "Ons kantoor is gevestigd aan de Keizersgracht 123, 1015 CJ Amsterdam."}
+{"id": "nl-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "nl", "locale": "nl", "text": "Stuur het naar Thijs Meijer, Oudegracht 45, 3511 AB Utrecht."}
+{"id": "nl-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "nl", "locale": "nl", "text": "De huisarts heeft hem medicijnen tegen migraine voorgeschreven."}
+{"id": "nl-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "nl", "locale": "nl", "text": "Zij is ziekgemeld na de operatie."}
+{"id": "nl-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "nl", "locale": "nl", "text": "Wat is je rekeningnummer voor de terugbetaling?"}
+{"id": "nl-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "nl", "locale": "nl", "text": "Vul het btw-nummer in op de factuur."}
+{"id": "nl-optin-010", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "De Nederlandse Spoorwegen rijden vandaag minder treinen."}
+{"id": "nl-optin-011", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "De Keizersgracht is druk met boten."}
+{"id": "nl-optin-012", "kind": "hard_negative", "labels": [], "lang": "nl", "locale": "nl", "text": "Het recept voor appeltaart staat online."}
+{"id": "es-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "es", "locale": "es", "text": "Por favor, contacta con la Sra. Ruiz."}
+{"id": "es-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "es", "locale": "es", "text": "El informe lo firma Alberto Navarro."}
+{"id": "es-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "es", "locale": "es", "text": "Me llamo Marta y llamo por el pedido."}
+{"id": "es-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "es", "locale": "es", "text": "La oficina está en Calle de Alcalá 45, 28014 Madrid."}
+{"id": "es-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "es", "locale": "es", "text": "Enviar a Laura Gómez, Avenida Diagonal 210, 08018 Barcelona."}
+{"id": "es-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "es", "locale": "es", "text": "El médico le recetó antibióticos para la infección."}
+{"id": "es-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "es", "locale": "es", "text": "Está de baja médica desde el lunes."}
+{"id": "es-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "es", "locale": "es", "text": "Necesito tu número de cuenta para la transferencia."}
+{"id": "es-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "es", "locale": "es", "text": "Indica el NIF en la factura."}
+{"id": "es-optin-010", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "El Real Madrid juega el domingo."}
+{"id": "es-optin-011", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "La Calle de Alcalá estará cortada por obras."}
+{"id": "es-optin-012", "kind": "hard_negative", "labels": [], "lang": "es", "locale": "es", "text": "La receta de la paella lleva azafrán."}
+{"id": "it-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "it", "locale": "it", "text": "Per informazioni rivolgersi al Sig. Ferrari."}
+{"id": "it-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "it", "locale": "it", "text": "Il verbale è stato scritto da Elena Ricci."}
+{"id": "it-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "it", "locale": "it", "text": "Mi chiamo Davide e chiamo per l'ordine."}
+{"id": "it-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "it", "locale": "it", "text": "La sede è in Via Garibaldi 12, 10122 Torino."}
+{"id": "it-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "it", "locale": "it", "text": "Spedire a Chiara Greco, Piazza Navona 4, 00186 Roma."}
+{"id": "it-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "it", "locale": "it", "text": "Il medico le ha prescritto farmaci per la pressione alta."}
+{"id": "it-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "it", "locale": "it", "text": "È in malattia da una settimana per l'influenza."}
+{"id": "it-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "it", "locale": "it", "text": "Mi serve il numero di conto per il bonifico."}
+{"id": "it-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "it", "locale": "it", "text": "Inserisci il codice fiscale nel modulo."}
+{"id": "it-optin-010", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "La Gazzetta dello Sport esce ogni giorno."}
+{"id": "it-optin-011", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Via Garibaldi è chiusa al traffico."}
+{"id": "it-optin-012", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "La ricetta della carbonara non prevede la panna."}
+{"id": "it-optin-013", "kind": "hard_negative", "labels": [], "lang": "it", "locale": "it", "text": "Il reato è caduto in prescrizione."}
+{"id": "pl-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "pl", "locale": "pl", "text": "Proszę skontaktować się z Panią Kowalczyk."}
+{"id": "pl-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "pl", "locale": "pl", "text": "Raport przygotował Tomasz Zieliński."}
+{"id": "pl-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "pl", "locale": "pl", "text": "Nazywam się Agnieszka i dzwonię w sprawie zamówienia."}
+{"id": "pl-optin-004", "kind": "positive", "labels": ["postal_address"], "lang": "pl", "locale": "pl", "text": "Biuro mieści się przy ul. Marszałkowska 10, 00-590 Warszawa."}
+{"id": "pl-optin-005", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "pl", "locale": "pl", "text": "Wysłać do Piotra Lewandowskiego, ul. Floriańska 3, 31-019 Kraków."}
+{"id": "pl-optin-006", "kind": "positive", "labels": ["health_data"], "lang": "pl", "locale": "pl", "text": "Lekarz przepisał mu nowe leki na nadciśnienie."}
+{"id": "pl-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "pl", "locale": "pl", "text": "Jest na zwolnieniu lekarskim od poniedziałku."}
+{"id": "pl-optin-008", "kind": "positive", "labels": ["financial_data"], "lang": "pl", "locale": "pl", "text": "Podaj numer rachunku do zwrotu."}
+{"id": "pl-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "pl", "locale": "pl", "text": "Wpisz NIP na fakturze."}
+{"id": "pl-optin-010", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Polskie Koleje Państwowe zmieniły rozkład."}
+{"id": "pl-optin-011", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Ulica Marszałkowska jest zakorkowana."}
+{"id": "pl-optin-012", "kind": "hard_negative", "labels": [], "lang": "pl", "locale": "pl", "text": "Przepis na pierogi jest w załączniku."}
+{"id": "gb-optin-001", "kind": "positive", "labels": ["person_name"], "lang": "en", "locale": "gb", "text": "Please forward this to Mrs Patel in accounts."}
+{"id": "gb-optin-002", "kind": "positive", "labels": ["person_name"], "lang": "en", "locale": "gb", "text": "The minutes were taken by Harriet Wilson."}
+{"id": "gb-optin-003", "kind": "positive", "labels": ["person_name"], "lang": "en", "locale": "gb", "text": "My name is Callum Reid and I'm calling about my order."}
+{"id": "gb-optin-004", "kind": "positive", "labels": ["person_name"], "lang": "en", "locale": "gb", "text": "Ask Priya Sharma to approve the budget."}
+{"id": "gb-optin-005", "kind": "positive", "labels": ["postal_address"], "lang": "en", "locale": "gb", "text": "Our office is at 42 Queen Street, Edinburgh EH2 1JX."}
+{"id": "gb-optin-006", "kind": "positive", "labels": ["person_name", "postal_address"], "lang": "en", "locale": "gb", "text": "Ship to Tom Evans, 7 Mill Lane, Cambridge CB2 1RX."}
+{"id": "gb-optin-007", "kind": "positive", "labels": ["health_data"], "lang": "en", "locale": "gb", "text": "She was diagnosed with epilepsy last year and takes medication daily."}
+{"id": "gb-optin-008", "kind": "positive", "labels": ["health_data"], "lang": "en", "locale": "gb", "text": "He has been off sick with depression since March."}
+{"id": "gb-optin-009", "kind": "positive", "labels": ["financial_data"], "lang": "en", "locale": "gb", "text": "Please send your sort code and account number."}
+{"id": "gb-optin-010", "kind": "positive", "labels": ["financial_data"], "lang": "en", "locale": "gb", "text": "What are your bank details for the refund?"}
+{"id": "gb-optin-011", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Microsoft Teams will restart for an update tonight."}
+{"id": "gb-optin-012", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Queen Street station is closed this weekend."}
+{"id": "gb-optin-013", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Run the diagnostics on the build server."}
+{"id": "gb-optin-014", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "The recipe calls for two eggs."}
+{"id": "gb-optin-015", "kind": "hard_negative", "labels": [], "lang": "en", "locale": "gb", "text": "Update your account settings to enable dark mode."}

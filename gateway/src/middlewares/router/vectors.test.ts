@@ -14,8 +14,10 @@
  * the test name.
  *
  * ajv is not a gateway dependency, so the schema check uses the small
- * validator below. It covers exactly the keywords the two schemas use, and a
- * test fails if a schema starts using a keyword it does not understand.
+ * validator in ./jsonSchema.ts (the gateway also validates
+ * PS_ROUTE_POLICY_FILE with it). It covers exactly the keywords the two
+ * schemas use, and a test fails if a schema starts using a keyword it does
+ * not understand.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -27,6 +29,7 @@ import {
   PolicyViolation,
   resolveRoute,
 } from './index';
+import { ANNOTATIONS, ASSERTIONS, keywordsIn, validate } from './jsonSchema';
 
 const SCHEMA_DIR = path.resolve(__dirname, '../../../../schemas/route-policy');
 
@@ -44,144 +47,6 @@ const POLICY_SCHEMA = readJson(
 const VECTORS_SCHEMA = readJson(path.join(SCHEMA_DIR, 'vectors.schema.json'));
 const EXAMPLES = listJson('examples');
 const VECTOR_FILES = listJson('vectors');
-
-// --- minimal JSON Schema (2020-12 subset) validator -------------------------
-
-const ANNOTATIONS = new Set([
-  '$schema',
-  '$id',
-  '$defs',
-  'title',
-  'description',
-  'default',
-]);
-const ASSERTIONS = new Set([
-  '$ref',
-  'type',
-  'properties',
-  'required',
-  'additionalProperties',
-  'propertyNames',
-  'minProperties',
-  'items',
-  'minItems',
-  'uniqueItems',
-  'enum',
-  'const',
-  'minLength',
-  'pattern',
-  'minimum',
-  'maximum',
-]);
-
-function typeOf(v: unknown): string {
-  if (v === null) return 'null';
-  if (Array.isArray(v)) return 'array';
-  if (typeof v === 'number') return Number.isInteger(v) ? 'integer' : 'number';
-  return typeof v;
-}
-
-function validate(
-  root: any,
-  schema: any,
-  value: any,
-  at = '$',
-  errors: string[] = []
-): string[] {
-  if (schema === true) return errors;
-  if (schema === false) {
-    errors.push(`${at}: not allowed`);
-    return errors;
-  }
-  if (schema.$ref) {
-    const name = String(schema.$ref).replace(/^#\/\$defs\//, '');
-    validate(root, root.$defs[name], value, at, errors);
-  }
-  const t = typeOf(value);
-  if (schema.type) {
-    const ok =
-      schema.type === t || (schema.type === 'number' && t === 'integer');
-    if (!ok) {
-      errors.push(`${at}: expected ${schema.type}, got ${t}`);
-      return errors;
-    }
-  }
-  if (
-    schema.enum &&
-    !schema.enum.some((e: any) => JSON.stringify(e) === JSON.stringify(value))
-  ) {
-    errors.push(`${at}: not one of ${JSON.stringify(schema.enum)}`);
-  }
-  if (
-    'const' in schema &&
-    JSON.stringify(schema.const) !== JSON.stringify(value)
-  ) {
-    errors.push(`${at}: must be ${JSON.stringify(schema.const)}`);
-  }
-  if (t === 'string') {
-    if (schema.minLength != null && value.length < schema.minLength)
-      errors.push(`${at}: shorter than ${schema.minLength}`);
-    if (schema.pattern && !new RegExp(schema.pattern, 'u').test(value))
-      errors.push(`${at}: does not match ${schema.pattern}`);
-  }
-  if (t === 'number' || t === 'integer') {
-    if (schema.minimum != null && value < schema.minimum)
-      errors.push(`${at}: below ${schema.minimum}`);
-    if (schema.maximum != null && value > schema.maximum)
-      errors.push(`${at}: above ${schema.maximum}`);
-  }
-  if (t === 'array') {
-    if (schema.minItems != null && value.length < schema.minItems)
-      errors.push(`${at}: fewer than ${schema.minItems} items`);
-    if (schema.uniqueItems) {
-      const seen = value.map((v: any) => JSON.stringify(v));
-      if (new Set(seen).size !== seen.length)
-        errors.push(`${at}: items not unique`);
-    }
-    if (schema.items) {
-      value.forEach((v: any, i: number) =>
-        validate(root, schema.items, v, `${at}[${i}]`, errors)
-      );
-    }
-  }
-  if (t === 'object') {
-    const keys = Object.keys(value);
-    for (const r of schema.required || []) {
-      if (!(r in value)) errors.push(`${at}: missing ${r}`);
-    }
-    if (schema.minProperties != null && keys.length < schema.minProperties)
-      errors.push(`${at}: fewer than ${schema.minProperties} properties`);
-    for (const k of keys) {
-      const sub = `${at}.${k}`;
-      if (schema.propertyNames)
-        validate(root, schema.propertyNames, k, `${sub} (name)`, errors);
-      if (schema.properties && k in schema.properties) {
-        validate(root, schema.properties[k], value[k], sub, errors);
-      } else if (schema.additionalProperties !== undefined) {
-        validate(root, schema.additionalProperties, value[k], sub, errors);
-      }
-    }
-  }
-  return errors;
-}
-
-/** Every keyword used anywhere in a schema, so unsupported ones fail loudly. */
-function keywordsIn(schema: any, out = new Set<string>()): Set<string> {
-  if (!schema || typeof schema !== 'object') return out;
-  for (const [k, v] of Object.entries(schema)) {
-    out.add(k);
-    if (k === 'properties' || k === '$defs') {
-      for (const sub of Object.values(v as object)) keywordsIn(sub, out);
-    } else if (
-      k === 'items' ||
-      k === 'additionalProperties' ||
-      k === 'propertyNames'
-    ) {
-      keywordsIn(v, out);
-    }
-  }
-  return out;
-}
 
 // RouteHint field -> wire header. Mirrors packages/sdk RouteHint.to_headers.
 const HINT_HEADERS: Record<string, string> = {

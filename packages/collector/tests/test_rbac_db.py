@@ -207,7 +207,7 @@ def test_migration_revision_chain():
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     assert m.revision == "036"
-    assert m.down_revision == "034"
+    assert m.down_revision == "035"
     assert set(m.TABLES) == {"principals", "teams", "projects", "memberships"}
 
 

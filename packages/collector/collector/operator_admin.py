@@ -47,6 +47,7 @@ from collector import (
     rls,
     spend_anomalies,
     tenant_keys,
+    user_identity,
 )
 from collector.admin_auth import (
     ADMIN_SCOPES,
@@ -197,8 +198,10 @@ async def erase(
 # ──────────────────────────────────────────────────────────────────────
 
 # Settings keys the tenants API never stores: a plaintext ingest key lived
-# under "api_key" before migration 004.
-_FORBIDDEN_SETTINGS = frozenset({"api_key"})
+# under "api_key" before migration 004. "user_id_salt" is refused so no one
+# believes they set the #334 salt: it lives in tenant_secrets, which no API
+# reads or writes.
+_FORBIDDEN_SETTINGS = frozenset({"api_key"}) | user_identity.PROTECTED_SETTINGS
 
 
 def _tenant_dict(t: Tenant) -> dict:
@@ -236,6 +239,11 @@ def _check_settings(values: dict) -> None:
                 f"settings.retention_days must be an integer between "
                 f"{retention.MIN_RETENTION_DAYS} and {retention.MAX_RETENTION_DAYS}",
             )
+    raw_ids = values.get(user_identity.STORE_RAW_KEY)
+    if raw_ids is not None and not isinstance(raw_ids, bool):
+        raise _problem(
+            400, "Bad Request", f"settings.{user_identity.STORE_RAW_KEY} must be a boolean"
+        )
     if spend_anomalies.SETTINGS_KEY in values:
         errors = spend_anomalies.settings_errors(values[spend_anomalies.SETTINGS_KEY])
         if errors:
@@ -259,10 +267,12 @@ async def _name_in_use(db, name: str, exclude: UUID | None = None) -> bool:
     return (await db.execute(stmt)).first() is not None
 
 
-async def _get_tenant(db, tenant_id: UUID) -> Tenant:
-    row = (
-        await db.execute(select(Tenant).where(Tenant.id == tenant_id))
-    ).scalar_one_or_none()
+async def _get_tenant(db, tenant_id: UUID, for_update: bool = False) -> Tenant:
+    stmt = select(Tenant).where(Tenant.id == tenant_id)
+    if for_update:
+        # Concurrent settings merges must not overwrite each other's keys.
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise _problem(404, "Not Found", "Tenant not found")
     return row
@@ -383,7 +393,7 @@ async def update_tenant(
     actor: str = Depends(require_operator),
 ):
     db = request.state.db
-    tenant = await _get_tenant(db, tenant_id)
+    tenant = await _get_tenant(db, tenant_id, for_update=True)
     changed: list[str] = []
     if body.name is not None and body.name.strip() != tenant.name:
         if await _name_in_use(db, body.name, exclude=tenant.id):
