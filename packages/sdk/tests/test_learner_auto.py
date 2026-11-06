@@ -413,6 +413,43 @@ def test_router_takes_outcome_signals_from_the_call():
     assert rb and rb[0]["reason"] == "parity"
 
 
+
+def test_learner_pick_the_request_cannot_go_to_falls_back_to_the_policy():
+    # An Anthropic recommendation for a call with OpenAI-only parameters:
+    # the call is routed as the policy would, not refused.
+    claude = "anthropic:claude-sonnet-4-20250514"
+    snap = _snapshot([_recommend(model=claude, sensitivity="internal")])
+    al = _learner(snapshot=snap, guard=GUARD)
+    router, _ = _router(learner=al)
+    assert router.route(_msg(), use_case="support",
+                        data_classification="internal").model == "claude-sonnet-4-20250514"
+    resp = router.chat.completions.create(
+        messages=_msg(), use_case="support", data_classification="internal",
+        response_format={"type": "json_object"})
+    assert resp.ps.route.provider != "anthropic" and resp.ps.route.learner is None
+    # Without such parameters the recommendation is served.
+    resp = router.chat.completions.create(messages=_msg(), use_case="support",
+                                          data_classification="internal")
+    assert resp.ps.route.provider == "anthropic"
+
+
+def test_calls_that_fail_outright_count_against_the_learner():
+    al = _learner(snapshot=_snapshot([_recommend()]), guard=GUARD)
+    router, _ = _router(learner=al, failover=False)
+
+    def down(**kw):
+        raise RuntimeError("upstream down")
+
+    router._client("mistral-eu")._upstream.chat.completions.create = down
+    for _ in range(GUARD.min_samples):
+        with pytest.raises(RuntimeError):
+            router.chat.completions.create(messages=_msg(), use_case="support",
+                                           data_classification="confidential")
+    rb = [e for e in al.events if e["event"] == "rollback"]
+    assert rb and rb[0]["reason"] == "implicit_failure"
+    assert al.active_version is None
+
+
 # --- freezing ------------------------------------------------------------------------------
 
 

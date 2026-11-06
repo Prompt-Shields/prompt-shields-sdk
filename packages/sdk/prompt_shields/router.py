@@ -91,7 +91,7 @@ from prompt_shields.failover import (
     default_registry,
 )
 from prompt_shields.learner import context_vector
-from prompt_shields.learner_auto import AutoLearner, LearnerChoice
+from prompt_shields.learner_auto import CALL_FAILED, AutoLearner, LearnerChoice
 from prompt_shields.pii import detect_pii_categories
 from prompt_shields.pricing import (
     COST_SOURCE_PRICING_TABLE,
@@ -662,6 +662,9 @@ class _Plan:
     detected_level: str | None = None
     anonymised_route: bool = False
     learner: LearnerChoice | None = None
+    #: Auto mode moved the pick: the policy's own (decision, tier, provider),
+    #: used when the learner's model cannot take the request.
+    policy_pick: tuple | None = None
 
 
 class _AttemptLimit(Exception):
@@ -1148,6 +1151,8 @@ class _RouterCore:
                     req, decision, tier, provider, extra["messages"]
                 )
                 if learned is not None:
+                    if learned[1] is not tier:
+                        extra["policy_pick"] = (decision, tier, provider)
                     decision, tier, provider, extra["learner"] = learned
         except BaseException:
             if pseudo is not None:
@@ -1309,7 +1314,18 @@ class _RouterCore:
         parameters on an Anthropic model) is left out; the chosen candidate
         raises ``RouterError`` as before.
         """
-        plans = [(plan, self._call_args(plan, messages, max_tokens, kwargs))]
+        try:
+            first = self._call_args(plan, messages, max_tokens, kwargs)
+        except RouterError:
+            if plan.policy_pick is None:
+                raise
+            # The learner's model cannot take this request (an Anthropic
+            # model and OpenAI-only parameters): route as the policy would.
+            d, t, p = plan.policy_pick
+            plan = replace(plan, decision=d, tier=t, provider=p,
+                           learner=None, policy_pick=None)
+            first = self._call_args(plan, messages, max_tokens, kwargs)
+        plans = [(plan, first)]
         if self.failover:
             for fallback in self._fallback_plans(plan)[1:]:
                 try:
@@ -1549,6 +1565,11 @@ class _RouterCore:
         )
         return out
 
+    def _learner_failed(self, plan: _Plan) -> None:
+        """Auto mode: the call failed outright (no candidate served it)."""
+        if plan.learner is not None and self.learner is not None:
+            self.learner.observe(None, plan.learner, [CALL_FAILED])
+
     def _routed(self, candidate: Candidate, response: Any, captured: dict,
                 attempts: tuple[Attempt, ...]) -> RoutedChatCompletion:
         plan = candidate.data[0]
@@ -1756,6 +1777,17 @@ class _RouterCompletions:
               ps_metadata: PSMetadata | None, captured: dict) -> Any:
         r = self._router
         candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
+        try:
+            return self._dispatch(candidates, ps_metadata, captured)
+        except Exception:
+            # Auto mode: a call that failed outright counts against the
+            # learner's pick (the rollback guard sees it).
+            r._learner_failed(candidates[0].data[0])
+            raise
+
+    def _dispatch(self, candidates: list[Candidate],
+                  ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
         tracker = _AttemptTracker()
 
         def call(c: Candidate) -> Any:
@@ -1845,6 +1877,17 @@ class _AsyncRouterCompletions:
               ps_metadata: PSMetadata | None, captured: dict) -> Any:
         r = self._router
         candidates = r._candidates(plan, plan.messages, max_tokens, kwargs)
+        try:
+            return await self._dispatch(candidates, ps_metadata, captured)
+        except Exception:
+            # Auto mode: a call that failed outright counts against the
+            # learner's pick (the rollback guard sees it).
+            r._learner_failed(candidates[0].data[0])
+            raise
+
+    async def _dispatch(self, candidates: list[Candidate],
+                  ps_metadata: PSMetadata | None, captured: dict) -> Any:
+        r = self._router
         tracker = _AttemptTracker()
 
         async def call(c: Candidate) -> Any:

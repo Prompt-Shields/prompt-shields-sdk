@@ -25,7 +25,9 @@ limited to configured providers and to the ``max_cost`` / budget clamp, plus
 the policy's own pick. A pinned model, an explicit group (``X-PS-Route``) or
 a quality hint is the caller's choice and is never changed. Failover then
 works as before from the chosen candidate, and the engine re-checks every
-candidate against the data policy.
+candidate against the data policy. When the learner's model cannot take the
+request (OpenAI-only parameters on an Anthropic model), the call is routed
+as the policy would and not recorded as learner-routed.
 
 Per call (for an enabled use case):
 
@@ -63,7 +65,8 @@ router controls its code).
 Auto-rollback
 -------------
 Every call the learner routed is observed: its outcome signals right away
-(from the telemetry event), explicit quality later through
+(from the telemetry event; a call no candidate served counts as a strong
+failure, :data:`CALL_FAILED`), explicit quality later through
 :meth:`AutoLearner.record_outcome` (feedback, eval-parity or shadow-eval
 scores). Per (use case, sensitivity), over the last ``window`` observations
 of the active snapshot, *treated* calls are the exploit calls the learner
@@ -146,6 +149,9 @@ GATE_MAX_DELTA_POINTS = 5.0
 GATE_QUALITY_TOLERANCE = 0.05
 
 RECOMMENDATIONS_PATH = "/partner/v1/learner/recommendations"
+#: Outcome signal the router reports for a learner-routed call that failed
+#: outright (every candidate failed or was skipped): a strong failure.
+CALL_FAILED = "call_failed"
 _MAX_PENDING = 10_000
 
 ChoiceMode = Literal["policy", "exploit", "explore"]
@@ -632,10 +638,13 @@ class AutoLearner:
             obs.quality, obs.explicit = q, True
         if signals is not None:
             names = {s for s in signals if isinstance(s, str)}
-            if names & STRONG_FAILURES:
+            if names & STRONG_FAILURES or CALL_FAILED in names:
                 obs.failure = True
             if not obs.explicit:
-                implicit, _ = row_quality({"outcome_signals": sorted(names)})
+                implicit = (
+                    0.0 if CALL_FAILED in names
+                    else row_quality({"outcome_signals": sorted(names)})[0]
+                )
                 obs.quality = implicit if obs.quality is None else min(obs.quality, implicit)
         self._evaluate(key)
 
@@ -762,6 +771,7 @@ def poisoning_signals(
 
 
 __all__ = [
+    "CALL_FAILED",
     "DEFAULT_EXPLORE_RATE",
     "GATE_MAX_DELTA_POINTS",
     "GATE_MIN_ACCURACY",
