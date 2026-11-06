@@ -30,9 +30,10 @@ const PATTERNS: [string, RegExp][] = [
   ],
   [
     'phone',
-    // Not inside a longer word or digit run (card numbers, IBANs).
+    // Not inside a longer digit run (card numbers, IBANs); letters next to
+    // it are fine ("Tel:5551234567", "555-123-4567x89").
     re(
-      String.raw`(?<!${W})(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}(?!${W})`
+      String.raw`(?<!\p{Nd})(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}(?!\p{Nd})`
     ),
   ],
   ['ssn', re(String.raw`\b\d{3}-\d{2}-\d{4}\b`)],
@@ -65,8 +66,22 @@ const TRUNK_PHONE_RE = new RegExp(
   'gu'
 );
 
-function validCard(m: RegExpExecArray): boolean {
-  return luhnOk(m[0].replace(/\D/g, ''));
+function hasCard(text: string): boolean {
+  CARD_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CARD_RE.exec(text)) !== null) {
+    if (luhnOk(m[0].replace(/\D/g, ''))) {
+      CARD_RE.lastIndex = 0;
+      return true;
+    }
+    // The match can start with an unrelated digit group ("Ref 12 4111
+    // 1111 1111 1111"): retry from the next group, not after the match.
+    const sep = /[ -]+/.exec(m[0]);
+    CARD_RE.lastIndex = sep
+      ? m.index + sep.index + sep[0].length
+      : m.index + m[0].length;
+  }
+  return false;
 }
 
 function ibanOk(compact: string): boolean {
@@ -81,15 +96,20 @@ function ibanOk(compact: string): boolean {
   return rest === 1;
 }
 
-function validIban(match: string): boolean {
-  // A following upper-case word ("... 7466 BIC") can join the last group:
-  // drop trailing space-separated groups until the checksum holds.
+function maskIban(match: string): string {
+  // A following word or digit group ("... 7466 BIC", "... 7466 4111 1111")
+  // can join the last group: drop trailing space-separated groups until the
+  // checksum holds, and blank only that prefix so what follows is still
+  // scanned (a card number right after an IBAN must not be hidden).
   const groups = match.split(' ');
   while (groups.length) {
-    if (ibanOk(groups.join(''))) return true;
+    if (ibanOk(groups.join(''))) {
+      const n = groups.join(' ').length;
+      return ' '.repeat(n) + match.slice(n);
+    }
     groups.pop();
   }
-  return false;
+  return match;
 }
 
 function phoneShapeOk(s: string, min: number, max: number): boolean {
@@ -102,7 +122,6 @@ function phoneShapeOk(s: string, min: number, max: number): boolean {
 }
 
 const VALIDATED: [string, RegExp, (m: RegExpExecArray) => boolean][] = [
-  ['credit_card', CARD_RE, validCard],
   ['phone', INTL_PHONE_RE, (m) => phoneShapeOk(m[0], 8, 15)],
   [
     'phone',
@@ -301,10 +320,9 @@ export function detectPiiCategories(text: string | undefined | null): string[] {
   // IBANs first: a checksum-valid IBAN is blanked out before the other
   // patterns run, so its digits never also count as a card or phone number.
   const original = text;
-  const masked = text.replace(IBAN_RE, (m) =>
-    validIban(m) ? ' '.repeat(m.length) : m
-  );
+  const masked = text.replace(IBAN_RE, maskIban);
   if (masked !== original) found.add('iban');
+  if (hasCard(masked)) found.add('credit_card');
   for (const [name, pattern] of PATTERNS) {
     if (pattern.test(masked)) found.add(name);
   }

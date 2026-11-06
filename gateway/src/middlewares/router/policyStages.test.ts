@@ -287,6 +287,12 @@ describe('detectPiiCategories (port of the SDK detector)', () => {
     ['Card 4111 1111 1111 1111', ['credit_card', 'phone']],
     ['Card 4111 1111 1111 1112', ['phone']],
     ['Ring 070-174 06 12 eller +46 70 174 06 13', ['phone']],
+    ['Ref 12 4111 1111 1111 1111', ['credit_card', 'phone']],
+    [
+      'SE45 5000 0000 0583 9825 7466 4111 1111 1111 1111',
+      ['credit_card', 'iban', 'phone'],
+    ],
+    ['call +1-555-123-4567x89', ['phone']],
     ['Datum 05.03.2024 14.30', []],
     ['Mitt personnummer är 19121212-1212.', ['national_id', 'phone']],
     ['fødselsnummer 01818510078', ['national_id', 'phone']],

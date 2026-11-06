@@ -55,7 +55,7 @@ reports them, so they are listed and not gated.
 | iban | 82 | 82 | 0 | 0 | 1.000 | 1.000 | 1.000 | 1.00 |
 | ip_address | 44 | 38 | 14 | 6 | 0.731 | 0.864 | 0.792 | 0.86 |
 | national_id | 68 | 60 | 13 | 8 | 0.822 | 0.882 | 0.851 | 0.88 (1.00 for each of se/no/dk/fi) |
-| phone | 132 | 109 | 144 | 23 | 0.431 | 0.826 | 0.566 | 0.82 |
+| phone | 132 | 109 | 155 | 23 | 0.413 | 0.826 | 0.551 | 0.82 |
 | person_name | 104 | 0 | 0 | 104 | - | 0.000 | - | not detected |
 | postal_address | 22 | 0 | 0 | 22 | - | 0.000 | - | not detected |
 
@@ -72,9 +72,9 @@ are a proposal and still need sign-off from security.
 
 The other categories did not change. The fixes, made in both the SDK and the gateway:
 
-- **IBAN:** grouped (`SE45 5000 0000 …`) as well as compact form, with a mod-97 check. An IBAN that passes the checksum is masked before the other patterns run, so its digits never also count as a card or phone number. A spaced IBAN used to be reported as `credit_card` only.
-- **Credit card:** Luhn check.
-- **Phone:** grouped international (`+46 70 174 06 12`) and trunk-0 national (`070-174 06 12`, `06 39 98 22 48`, `(07700) 900 290`) formats. The US-shaped pattern no longer matches inside longer digit runs.
+- **IBAN:** grouped (`SE45 5000 0000 …`) as well as compact form, with a mod-97 check. An IBAN that passes the checksum is masked before the other patterns run, so its digits never also count as a card or phone number. Only the checksum-valid part is masked, so a card number written right after an IBAN is still found. A spaced IBAN used to be reported as `credit_card` only.
+- **Credit card:** Luhn check. When a 13-19 digit match fails it, the search retries from the match's next digit group, so a card number after an unrelated number (`Ref 12 4111 1111 1111 1111`) is still found.
+- **Phone:** grouped international (`+46 70 174 06 12`) and trunk-0 national (`070-174 06 12`, `06 39 98 22 48`, `(07700) 900 290`) formats. The US-shaped pattern no longer matches inside longer digit runs (letters next to it are still allowed, as in `555-123-4567x89`).
 - **Email (SDK):** the regex is anchored like the gateway's (#245). The unanchored one was quadratic: about 0.5 s on 20 KB, and seconds on 100 KB.
 
 ## Known gaps (not fixed here)

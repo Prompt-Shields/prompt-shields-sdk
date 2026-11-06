@@ -24,8 +24,9 @@ _PATTERNS = {
     ),
     "phone": re.compile(
         # international + US formats, 10-15 digits with optional separators.
-        # Not inside a longer word or digit run (card numbers, IBANs).
-        r"(?<!\w)(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}(?!\w)",
+        # Not inside a longer digit run (card numbers, IBANs); letters next
+        # to it are fine ("Tel:5551234567", "555-123-4567x89").
+        r"(?<!\d)(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}(?!\d)",
     ),
     "ssn": re.compile(
         r"\b\d{3}-\d{2}-\d{4}\b",
@@ -39,6 +40,7 @@ _PATTERNS = {
 
 # Card numbers: 13-19 digits with optional separators, Luhn checked.
 _CARD_RE = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+_CARD_SEP = re.compile(r"[ -]+")
 
 # IBAN, compact or in groups of four ("SE45 5000 0000 ..."), mod-97 checked.
 _IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b")
@@ -61,8 +63,16 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
-def _valid_card(m: re.Match) -> bool:
-    return _luhn_ok(re.sub(r"\D", "", m.group()))
+def _has_card(text: str) -> bool:
+    pos = 0
+    while m := _CARD_RE.search(text, pos):
+        if _luhn_ok(re.sub(r"\D", "", m.group())):
+            return True
+        # The match can start with an unrelated digit group ("Ref 12 4111
+        # 1111 1111 1111"): retry from the next group, not after the match.
+        sep = _CARD_SEP.search(m.group())
+        pos = m.start() + sep.end() if sep else m.end()
+    return False
 
 
 def _iban_ok(compact: str) -> bool:
@@ -72,15 +82,19 @@ def _iban_ok(compact: str) -> bool:
     return int("".join(str(int(c, 36)) for c in rearranged)) % 97 == 1
 
 
-def _valid_iban(m: re.Match) -> bool:
-    # A following upper-case word ("... 7466 BIC") can join the last group:
-    # drop trailing space-separated groups until the checksum holds.
-    groups = m.group().split(" ")
+def _mask_iban(m: re.Match) -> str:
+    # A following word or digit group ("... 7466 BIC", "... 7466 4111 1111")
+    # can join the last group: drop trailing space-separated groups until the
+    # checksum holds, and blank only that prefix so what follows is still
+    # scanned (a card number right after an IBAN must not be hidden).
+    match = m.group()
+    groups = match.split(" ")
     while groups:
         if _iban_ok("".join(groups)):
-            return True
+            n = len(" ".join(groups))
+            return " " * n + match[n:]
         groups.pop()
-    return False
+    return match
 
 
 def _phone_shape_ok(s: str, min_digits: int, max_digits: int) -> bool:
@@ -107,7 +121,6 @@ def _valid_trunk_phone(m: re.Match) -> bool:
 
 
 _VALIDATED = (
-    ("credit_card", _CARD_RE, _valid_card),
     ("phone", _INTL_PHONE_RE, _valid_intl_phone),
     ("phone", _TRUNK_PHONE_RE, _valid_trunk_phone),
 )
@@ -141,9 +154,11 @@ def detect_pii_categories(text: str | None) -> list[str]:
     # patterns run, so its digits never also count as a card or phone number
     # (a spaced IBAN can pass Luhn).
     original = text
-    text = _IBAN_RE.sub(lambda m: " " * len(m.group()) if _valid_iban(m) else m.group(), text)
+    text = _IBAN_RE.sub(_mask_iban, text)
     if text != original:
         found.add("iban")
+    if _has_card(text):
+        found.add("credit_card")
 
     for name, pattern in _PATTERNS.items():
         if pattern.search(text):

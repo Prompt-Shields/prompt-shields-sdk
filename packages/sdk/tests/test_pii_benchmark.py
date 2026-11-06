@@ -116,6 +116,22 @@ def test_card_luhn_required():
     assert "credit_card" not in detect_pii_categories("card 4111-1111-1111-1112")
 
 
+
+@pytest.mark.parametrize("text", [
+    "Ref 12 4111 1111 1111 1111",
+    "id 2024-4111-1111-1111-1111",
+    # Only the checksum-valid IBAN is masked, not a card joined to its groups.
+    "SE45 5000 0000 0583 9825 7466 4111 1111 1111 1111",
+])
+def test_card_found_next_to_other_digits(text):
+    assert "credit_card" in detect_pii_categories(text)
+
+
+def test_phone_with_letters_attached():
+    assert "phone" in detect_pii_categories("call +1-555-123-4567x89")
+    assert "phone" in detect_pii_categories("Tel:5551234567")
+
+
 @pytest.mark.parametrize("phone", [
     "+46 70 174 06 12", "070-174 06 12", "+45 26 73 64 47", "06 39 98 22 48",
     "+33 6 39 98 43 15", "(07700) 900 290", "+44 7700 900123", "0151/31524677",
