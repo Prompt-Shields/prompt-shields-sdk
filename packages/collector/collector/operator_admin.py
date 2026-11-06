@@ -40,7 +40,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 
-from collector import audit_trail, auth_cache, retention, rls, tenant_keys
+from collector import (
+    audit_trail,
+    auth_cache,
+    retention,
+    rls,
+    spend_anomalies,
+    tenant_keys,
+)
 from collector.admin_auth import (
     ADMIN_SCOPES,
     TOKEN_WARNING,
@@ -229,6 +236,10 @@ def _check_settings(values: dict) -> None:
                 f"settings.retention_days must be an integer between "
                 f"{retention.MIN_RETENTION_DAYS} and {retention.MAX_RETENTION_DAYS}",
             )
+    if spend_anomalies.SETTINGS_KEY in values:
+        errors = spend_anomalies.settings_errors(values[spend_anomalies.SETTINGS_KEY])
+        if errors:
+            raise _problem(400, "Bad Request", "; ".join(errors))
 
 
 def _future(expires_at: datetime | None) -> datetime | None:
