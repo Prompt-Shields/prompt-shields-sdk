@@ -21,6 +21,11 @@ import {
   tryTargetsRecursively,
 } from './handlerUtils';
 import { RouterError } from '../errors/RouterError';
+import {
+  classifyProxyRequest,
+  configHasHooks,
+  proxyGuardrailsUnsupportedResponse,
+} from './proxyGuardrails';
 
 export interface OpenAIModel {
   id: string;
@@ -276,9 +281,19 @@ async function proxyModelsRequest(c: Context): Promise<Response> {
     // caller sends no content-type (as SDK GETs often do), which tryPost
     // cannot handle.
     const requestHeaders = Object.fromEntries(c.req.raw.headers);
+    const config = constructConfigFromRequestHeaders(requestHeaders);
+    // Same up-front guardrail gate as proxyHandler (the /v1 catch-all): a
+    // lookup the hooks cannot classify (e.g. an id with slashes) is refused
+    // before any target, so a fallback order cannot reach an upstream first.
+    if (configHasHooks(config)) {
+      const decision = classifyProxyRequest(c, 'GET', {}, requestHeaders);
+      if (decision.kind === 'unsupported') {
+        return proxyGuardrailsUnsupportedResponse(decision.reason, c);
+      }
+    }
     return await tryTargetsRecursively(
       c,
-      constructConfigFromRequestHeaders(requestHeaders),
+      config,
       {},
       requestHeaders,
       'proxy',

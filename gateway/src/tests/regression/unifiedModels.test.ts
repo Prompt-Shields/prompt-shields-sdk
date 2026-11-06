@@ -201,6 +201,46 @@ describe('GET /v1/models (#79)', () => {
     expect(await res.json()).toEqual(error);
   });
 
+  test('retrieve keeps the proxy guardrail gate for ids with slashes', async () => {
+    // With guardrails configured, the /v1 catch-all refuses a GET it cannot
+    // classify as model lookup; the models route must not widen that.
+    upstream(/^https:\/\/api\.openai\.com\/v1\/models\//, () =>
+      json({ id: 'x', object: 'model', created: 0, owned_by: 'system' })
+    );
+    const guarded = {
+      'x-portkey-config': JSON.stringify({
+        provider: 'openai',
+        api_key: 'sk-regression',
+        input_guardrails: [
+          { 'default.contains': { words: ['X'], operator: 'none' }, deny: true },
+        ],
+      }),
+    };
+    // Refused before any target, also when an unguarded target comes first.
+    const fallback = {
+      'x-portkey-config': JSON.stringify({
+        strategy: { mode: 'fallback' },
+        targets: [
+          { provider: 'openai', api_key: 'sk-regression' },
+          JSON.parse(guarded['x-portkey-config']),
+        ],
+      }),
+    };
+    const first = await list('/v1/models/org/x', fallback);
+    expect(first.status).toBe(400);
+    expect(upstreamCalls).toHaveLength(0);
+    const nested = await list('/v1/models/org/x', guarded);
+    expect(nested.status).toBe(400);
+    expect(((await nested.json()) as any).error.code).toBe(
+      'unsupported_guardrail'
+    );
+    expect(upstreamCalls).toHaveLength(0);
+    // A plain model id is a lookup with no content and still proxies.
+    const plain = await list('/v1/models/gpt-4o', guarded);
+    expect(plain.status).toBe(200);
+    expect(upstreamCalls).toHaveLength(1);
+  });
+
   test('without a provider or config it is a 400 and nothing is called', async () => {
     const res = await list('/v1/models', {
       'anthropic-version': '2023-06-01',
