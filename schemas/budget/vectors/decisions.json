@@ -1,0 +1,65 @@
+{
+  "description": "Budget decisions every enforcement point must reach (SDK and gateway). 'spent' is each matching budget's counter in USD (null: the store could not be read); budgets on the same scope, subject and window share one counter, so they have the same value. Runners compare only the fields present in 'expected'. 'matched' lists the budgets that apply, in document order. A call's action is block if any block budget is exhausted, else downgrade if any downgrade budget is; ceiling_usd is the least remaining amount of the matching downgrade budgets (routers clamp the call's estimated cost to it).",
+  "budgets": {
+    "schema_version": "budget.v1",
+    "namespace": "acme",
+    "budgets": [
+      { "id": "org-monthly", "scope": "global", "window": "month", "limit_usd": 1000, "mode": "warn" },
+      { "id": "support-daily", "scope": "use_case", "subject": "support-bot", "window": "day", "limit_usd": 10, "mode": "downgrade", "warn_at": 0.5, "downgrade_model": "gpt-4o-mini" },
+      { "id": "per-use-case-daily", "scope": "use_case", "subject": "*", "window": "day", "limit_usd": 50, "mode": "block" },
+      { "id": "finance-weekly", "scope": "business_unit", "subject": "finance", "window": "week", "limit_usd": 100, "mode": "block" },
+      { "id": "ml-team-monthly", "scope": "owner", "subject": "ml-team@example.com", "window": "month", "limit_usd": 200, "mode": "downgrade" }
+    ]
+  },
+  "vectors": [
+    {
+      "id": "only-global-matches",
+      "attributes": {},
+      "spent": { "org-monthly": 10 },
+      "expected": { "matched": ["org-monthly"], "state": "ok", "budget_id": "org-monthly", "action": "none", "ceiling_usd": null }
+    },
+    {
+      "id": "warn-at-fraction",
+      "attributes": { "use_case": "support-bot" },
+      "spent": { "org-monthly": 100, "support-daily": 6, "per-use-case-daily": 6 },
+      "expected": { "matched": ["org-monthly", "support-daily", "per-use-case-daily"], "state": "warn", "budget_id": "support-daily", "action": "none", "ceiling_usd": 4 }
+    },
+    {
+      "id": "downgrade-when-exhausted",
+      "attributes": { "use_case": "support-bot" },
+      "spent": { "org-monthly": 100, "support-daily": 10, "per-use-case-daily": 10 },
+      "expected": { "state": "exceeded", "budget_id": "support-daily", "action": "downgrade", "ceiling_usd": 0, "downgrade_model": "gpt-4o-mini" }
+    },
+    {
+      "id": "block-wins-over-downgrade",
+      "attributes": { "use_case": "support-bot", "business_unit": "finance" },
+      "spent": { "org-monthly": 100, "support-daily": 1, "per-use-case-daily": 1, "finance-weekly": 100 },
+      "expected": { "matched": ["org-monthly", "support-daily", "per-use-case-daily", "finance-weekly"], "state": "exceeded", "budget_id": "finance-weekly", "action": "block", "ceiling_usd": 9 }
+    },
+    {
+      "id": "wildcard-subject-other-use-case",
+      "attributes": { "use_case": "chat" },
+      "spent": { "org-monthly": 1000, "per-use-case-daily": 1 },
+      "expected": { "matched": ["org-monthly", "per-use-case-daily"], "state": "exceeded", "budget_id": "org-monthly", "action": "none", "ceiling_usd": null }
+    },
+    {
+      "id": "owner-budget-under-warn",
+      "attributes": { "owner": "ml-team@example.com" },
+      "spent": { "org-monthly": 0, "ml-team-monthly": 150 },
+      "expected": { "state": "ok", "action": "none", "ceiling_usd": 50 }
+    },
+    {
+      "id": "store-error-fail-open",
+      "attributes": { "use_case": "support-bot" },
+      "spent": { "org-monthly": null, "support-daily": null, "per-use-case-daily": null },
+      "expected": { "state": "unknown", "budget_id": "org-monthly", "action": "none", "ceiling_usd": null }
+    },
+    {
+      "id": "store-error-fail-closed",
+      "on_store_error": "closed",
+      "attributes": { "use_case": "support-bot" },
+      "spent": { "org-monthly": null, "support-daily": null, "per-use-case-daily": null },
+      "expected": { "state": "unknown", "budget_id": "org-monthly", "action": "block", "ceiling_usd": 0 }
+    }
+  ]
+}
