@@ -7,7 +7,7 @@ from db.models import AIUsageEvent
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, PrivateAttr, field_validator, model_validator
 
-from collector import loss_accounting, metrics
+from collector import loss_accounting, metrics, user_identity
 from collector.auth import resolve_tenant
 from collector.config import settings
 from collector.data_flows import record_event_flows
@@ -100,6 +100,16 @@ class IngestEvent(BaseModel):
     # classes for the call. Known class names only, see _outcome_signals.
     outcome_signals: list[str] | None = None
     outcome_signals_version: int | None = None
+    # Gateway identity and trace fields (#334). user_id is never stored as
+    # sent unless the tenant opted in: see collector/user_identity.py.
+    # Lenient like the route fields.
+    user_id: str | None = None
+    user_group: str | None = None
+    trace_id: str | None = None
+    retry_count: int | None = None
+    attempts: list[dict] | None = None
+    stream_truncated: bool | None = None
+    stream_cancelled: bool | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -107,6 +117,8 @@ class IngestEvent(BaseModel):
         # A value the database cannot store (NUL, lone surrogate; see
         # collector/sanitize.py) is dropped as if not sent, so it costs that
         # field rather than the batch. It is counted as "<field>:invalid".
+        # Aliases (the gateway's route_sensitivity_*) are applied first.
+        data = canonical_event(data)
         if not isinstance(data, dict):
             return data
         bad = [k for k in SANITISED_FIELDS if k in data and not is_storable(data[k])]
@@ -155,6 +167,53 @@ class IngestEvent(BaseModel):
         if self.outcome_signals is None:
             self.outcome_signals_version = None
         return self
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def _user_id(cls, value: Any) -> str | None:
+        return _lenient_str(value, MAX_USER_ID_LENGTH)
+
+    @field_validator("user_group", mode="before")
+    @classmethod
+    def _user_group(cls, value: Any) -> str | None:
+        # The gateway sends the operator-chosen name of its policy group.
+        value = _lenient_str(value, MAX_LABEL_LENGTH)
+        return value if value is not None and USER_GROUP_RE.fullmatch(value) else None
+
+    @field_validator("trace_id", mode="before")
+    @classmethod
+    def _trace_id(cls, value: Any) -> str | None:
+        # The gateway's traceIdOf: a caller's short token or a UUID.
+        return value if isinstance(value, str) and CALL_ID_RE.fullmatch(value) else None
+
+    @field_validator("retry_count", mode="before")
+    @classmethod
+    def _retry_count(cls, value: Any) -> int | None:
+        return _lenient_count(value)
+
+    @field_validator("attempts", mode="before")
+    @classmethod
+    def _attempts(cls, value: Any) -> list[dict] | None:
+        # The gateway's AttemptRecord list (psAttempts.ts): metadata only.
+        # Known keys are kept once validated and others left out; a record
+        # that is not an object, lacks its attempt number or latency, or has
+        # a bad known value drops the whole field (attempts:invalid), so
+        # content such as an error message can never be stored here.
+        if not isinstance(value, list) or len(value) > MAX_FALLBACK_CHAIN:
+            return None
+        records = []
+        for raw in value:
+            record = _attempt_record(raw)
+            if record is None:
+                return None
+            records.append(record)
+        return records
+
+    @field_validator("stream_truncated", "stream_cancelled", mode="before")
+    @classmethod
+    def _stream_flag(cls, value: Any) -> bool | None:
+        # JSON booleans only: "false" or 0 must not be read as a flag.
+        return value if isinstance(value, bool) else None
 
     @field_validator("requested_model", "served_model", mode="before")
     @classmethod
@@ -310,6 +369,12 @@ FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
 # takes a caller's X-PS-Call-Id of this shape).
 CALL_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 MAX_REASON_LENGTH = 256
+# user_id: an opaque identifier (the gateway's 32-hex OIDC subject hash, a
+# raw `sub` claim, or the SDK's ps_metadata.user_id).
+MAX_USER_ID_LENGTH = 256
+# The gateway's policy group names; as collector/mcp_usage.py USER_GROUP_RE.
+USER_GROUP_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+HTTP_STATUS_MIN, HTTP_STATUS_MAX = 100, 599
 MAX_IDENTIFIER_LENGTH = 128
 # The gateway keeps at most MAX_ATTEMPT_RECORDS (32) attempts per request.
 MAX_FALLBACK_CHAIN = 32
@@ -395,6 +460,40 @@ LEARNER_FIELDS = (
     "route_learner_frozen",
 )
 
+# Gateway identity and trace fields (#334). user_id is stored as
+# user_id_hash or user_id_raw (collector/user_identity.py), the rest as sent
+# once validated.
+IDENTITY_TRACE_FIELDS = (
+    "user_id",
+    "user_group",
+    "trace_id",
+    "retry_count",
+    "attempts",
+    "stream_truncated",
+    "stream_cancelled",
+)
+STORED_AS_SENT_IDENTITY_FIELDS = tuple(f for f in IDENTITY_TRACE_FIELDS if f != "user_id")
+
+# Other names emitters use for a field: the gateway sends its effective
+# sensitivity as route_sensitivity_level / route_sensitivity_source. The
+# canonical name wins when an event carries both.
+FIELD_ALIASES = {
+    "route_sensitivity_level": "sensitivity_level",
+    "route_sensitivity_source": "sensitivity_source",
+}
+
+
+def canonical_event(data: Any) -> Any:
+    """The raw event with aliased keys renamed to their canonical field."""
+    if not isinstance(data, dict) or not any(a in data for a in FIELD_ALIASES):
+        return data
+    out = {k: v for k, v in data.items() if k not in FIELD_ALIASES}
+    for alias, name in FIELD_ALIASES.items():
+        if alias in data and out.get(name) is None:
+            out[name] = data[alias]
+    return out
+
+
 # Lenient fields whose dropped values are reported in ignored_fields as
 # "<field>:invalid", so a client sending bad values shows up in
 # /telemetry/loss instead of losing the data silently.
@@ -419,7 +518,7 @@ LENIENT_FIELDS = (
     "call_id",
     "outcome_signals",
     "outcome_signals_version",
-) + ROUTE_FIELDS + BUDGET_CACHE_FIELDS + LEARNER_FIELDS
+) + ROUTE_FIELDS + BUDGET_CACHE_FIELDS + LEARNER_FIELDS + IDENTITY_TRACE_FIELDS
 
 
 def _lenient_str(value: Any, max_length: int) -> str | None:
@@ -447,6 +546,34 @@ def _lenient_count(value: Any) -> int | None:
     if not isinstance(value, int) or value < 0 or value > MAX_TOKEN_COUNT:
         return None
     return value
+
+
+def _attempt_record(raw: Any) -> dict | None:
+    """One validated attempt record, or None if it is not one."""
+    if not isinstance(raw, dict):
+        return None
+    attempt = _lenient_count(raw.get("attempt"))
+    latency = _lenient_count(raw.get("latency_ms"))
+    if not attempt or latency is None:
+        return None
+    record: dict = {"attempt": attempt, "latency_ms": latency}
+    if raw.get("status") is not None:
+        status = _lenient_count(raw["status"])
+        if status is None or not HTTP_STATUS_MIN <= status <= HTTP_STATUS_MAX:
+            return None
+        record["status"] = status
+    for key, max_length in (("provider", MAX_IDENTIFIER_LENGTH), ("model", MAX_MODEL_NAME_LENGTH)):
+        if raw.get(key) is not None:
+            text = _lenient_str(raw[key], max_length)
+            if text is None:
+                return None
+            record[key] = text
+    if raw.get("error_class") is not None:
+        error_class = raw["error_class"]
+        if not isinstance(error_class, str) or not ERROR_CLASS_RE.fullmatch(error_class):
+            return None
+        record["error_class"] = error_class
+    return record
 
 
 def _lenient_amount(value: Any, maximum: float) -> float | None:
@@ -571,7 +698,10 @@ async def ingest_events(
     try:
         assets_created = await _store_events(db, tenant_id, body.events)
         if body.events:
-            raw_events = storable_events((await request.json()).get("events"))
+            raw_events = [
+                canonical_event(e)
+                for e in storable_events((await request.json()).get("events"))
+            ]
             ignored = loss_accounting.ignored_fields(
                 raw_events, set(IngestEvent.model_fields)
             )
@@ -609,6 +739,13 @@ async def ingest_events(
 async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
     assets_created = 0
     changes = AssetChanges()
+    # Only a batch that carries a user_id reads (and on first use creates)
+    # the tenant's salt.
+    user_ids = (
+        await user_identity.policy_for(db, tenant_id)
+        if any(e.user_id is not None for e in events)
+        else None
+    )
     await lock_asset_keys(
         db,
         tenant_id,
@@ -687,8 +824,12 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             outcome_signals_version=event.outcome_signals_version,
             **{
                 name: getattr(event, name)
-                for name in ROUTE_FIELDS + BUDGET_CACHE_FIELDS + LEARNER_FIELDS
+                for name in ROUTE_FIELDS
+                + BUDGET_CACHE_FIELDS
+                + LEARNER_FIELDS
+                + STORED_AS_SENT_IDENTITY_FIELDS
             },
+            **(user_ids.columns(event.user_id) if user_ids else {}),
         )
         db.add(usage_event)
         await record_event_flows(

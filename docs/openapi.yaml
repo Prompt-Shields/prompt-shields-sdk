@@ -2453,7 +2453,7 @@ components:
           type: [string, 'null']
         settings:
           type: object
-          description: Tenant settings, e.g. `retention_days`
+          description: Tenant settings, e.g. `retention_days` or `store_raw_user_ids`. The collector's `user_id_salt` is never returned and cannot be set.
         status:
           type: string
           enum: [active, disabled]

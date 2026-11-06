@@ -218,6 +218,25 @@ class AIUsageEvent(Base):
     # SDK's OUTCOME_SIGNALS_VERSION that defined them.
     outcome_signals = Column(JSONB(none_as_null=True))
     outcome_signals_version = Column(SmallInteger)
+    # Gateway identity and trace fields (#334), all optional. user_id_hash is
+    # HMAC-SHA256 of the caller's user_id with the tenant's salt
+    # (tenants.settings["user_id_salt"], never returned by any API);
+    # user_id_raw is the value as sent, set instead of the hash only when the
+    # tenant's settings["store_raw_user_ids"] is true. See
+    # collector/user_identity.py. user_group: the gateway policy group.
+    user_id_hash = Column(Text)
+    user_id_raw = Column(Text)
+    user_group = Column(Text)
+    # Retries and fallbacks: the request's trace id, attempts - 1, and the
+    # per-attempt metadata (attempt, provider, model, status, latency_ms,
+    # error_class; never content). none_as_null: absent stores SQL NULL.
+    trace_id = Column(Text)
+    retry_count = Column(Integer)
+    attempts = Column(JSONB(none_as_null=True))
+    # Streamed responses: upstream closed without a terminal event, and the
+    # client disconnected before the stream ended.
+    stream_truncated = Column(Boolean)
+    stream_cancelled = Column(Boolean)
 
     asset = relationship("AIAsset", back_populates="usage_events")
 
@@ -226,6 +245,18 @@ class AIUsageEvent(Base):
         Index("ix_usage_events_asset_ts", "asset_id", "timestamp"),
         Index("ix_usage_events_tenant_key_fp", "tenant_id", "api_key_fingerprint"),
         Index("ix_usage_events_tenant_call_id", "tenant_id", "call_id"),
+        Index(
+            "ix_usage_events_tenant_user_hash",
+            "tenant_id",
+            "user_id_hash",
+            postgresql_where=text("user_id_hash IS NOT NULL"),
+        ),
+        Index(
+            "ix_usage_events_tenant_trace_id",
+            "tenant_id",
+            "trace_id",
+            postgresql_where=text("trace_id IS NOT NULL"),
+        ),
     )
 
 
