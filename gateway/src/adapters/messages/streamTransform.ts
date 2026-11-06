@@ -11,7 +11,12 @@
  */
 
 import { randomUUID } from 'crypto';
-import { normalizeUsage, plainReasoningText, toMessagesUsage } from '../shared';
+import {
+  normalizeUsage,
+  plainReasoningText,
+  toMessagesUsage,
+  toolCallKey,
+} from '../shared';
 import { toAnthropicStopReason } from './responseTransform';
 
 type BlockType = 'thinking' | 'text' | 'tool_use';
@@ -40,8 +45,8 @@ interface StreamState {
   contentBlockIndex: number;
   /** Currently open content block, if any */
   openBlock: { index: number; type: BlockType } | null;
-  /** Chat tool_call index → its tool call */
-  toolBlocks: Record<number, ToolCall>;
+  /** Chat tool_call index → its tool call. PS fork (#73): a Map (toolCallKey) */
+  toolBlocks: Map<string, ToolCall>;
   /**
    * PS fork (#73): tool calls that started while another tool_use block was
    * open. Anthropic blocks never interleave, but OpenAI-compatible streams
@@ -52,6 +57,11 @@ interface StreamState {
   hasToolUse: boolean;
   finishReason: string | null;
   stopReason: string | null;
+}
+
+/** PS fork (#73): a plain (non-null, non-array) object. */
+function isRecord(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function sse(event: string, data: Record<string, unknown>): string {
@@ -169,20 +179,22 @@ export function transformStreamChunk(
   } catch {
     return undefined;
   }
+  // PS fork (#73): a chunk that is not an object carries nothing
+  if (!isRecord(parsed)) return undefined;
 
   const events: string[] = [];
 
   // PS fork (#73): a mid-stream provider error becomes an Anthropic `error`
   // event, and the stream ends without message_stop (as Anthropic does).
-  if (parsed?.error) {
+  if (parsed.error) {
     if (state.completed) return undefined;
     state.completed = true;
     const err = parsed.error;
+    const message = typeof err === 'string' ? err : err?.message;
     return sse('error', {
       error: {
-        type: err?.type || 'api_error',
-        message:
-          (typeof err === 'string' ? err : err?.message) || 'Stream error',
+        type: (typeof err?.type === 'string' && err.type) || 'api_error',
+        message: (typeof message === 'string' && message) || 'Stream error',
       },
     });
   }
@@ -206,7 +218,9 @@ export function transformStreamChunk(
     // PS fork (#208, from the Portkey enterprise changelog 2.31): providers
     // whose chunks carry no model (e.g. Vertex Gemini) used to get an empty
     // message_start.model, which breaks clients that group by model.
-    state.model = parsed.model || state.requestedModel;
+    state.model =
+      (typeof parsed.model === 'string' && parsed.model) ||
+      state.requestedModel;
 
     events.push(
       sse('message_start', {
@@ -224,14 +238,25 @@ export function transformStreamChunk(
     );
   }
 
-  const choice = parsed.choices?.[0];
-  const delta = choice?.delta;
+  // PS fork (#73): null or badly typed entries in the provider's arrays are
+  // skipped, never dereferenced
+  const first = Array.isArray(parsed.choices) ? parsed.choices[0] : undefined;
+  const choice: Record<string, any> | undefined = isRecord(first)
+    ? first
+    : undefined;
+  const delta: Record<string, any> | undefined = isRecord(choice?.delta)
+    ? choice.delta
+    : undefined;
 
   // Thinking: content_blocks (Anthropic/Gemini/OpenRouter transforms) first,
   // otherwise OpenAI-compatible reasoning_content / reasoning strings.
   let sawBlockThinking = false;
-  for (const block of delta?.content_blocks || []) {
-    const d = block?.delta ?? {};
+  const blocks: unknown[] = Array.isArray(delta?.content_blocks)
+    ? delta.content_blocks
+    : [];
+  for (const block of blocks) {
+    if (!isRecord(block)) continue;
+    const d = isRecord(block.delta) ? block.delta : {};
     if (typeof d.thinking === 'string' && d.thinking) {
       sawBlockThinking = true;
       const index = ensureBlock(state, events, 'thinking');
@@ -280,17 +305,19 @@ export function transformStreamChunk(
   // Tool calls
   if (Array.isArray(delta?.tool_calls)) {
     for (const tc of delta.tool_calls) {
-      if (!tc) continue;
-      const toolIdx = tc.index ?? 0;
-      let call: ToolCall | undefined = state.toolBlocks[toolIdx];
+      if (!isRecord(tc)) continue;
+      const fn = isRecord(tc.function) ? tc.function : {};
+      const id = typeof tc.id === 'string' ? tc.id : '';
+      const toolIdx = toolCallKey(tc.index);
+      let call: ToolCall | undefined = state.toolBlocks.get(toolIdx);
       // A new id on a known index is a new call (Gemini restarts at 0)
-      if (!call || (tc.id && tc.id !== call.id)) {
+      if (!call || (id && id !== call.id)) {
         call = {
-          id: tc.id || `toolu_${randomUUID()}`,
-          name: tc.function?.name || '',
+          id: id || `toolu_${randomUUID()}`,
+          name: typeof fn.name === 'string' ? fn.name : '',
           args: '',
         };
-        state.toolBlocks[toolIdx] = call;
+        state.toolBlocks.set(toolIdx, call);
         state.hasToolUse = true;
         // PS fork (#73): stream it live unless another tool_use block is
         // open (its arguments may still be coming); buffer it otherwise.
@@ -309,7 +336,7 @@ export function transformStreamChunk(
         }
       }
 
-      const args = tc.function?.arguments;
+      const args = typeof fn.arguments === 'string' ? fn.arguments : '';
       if (args) {
         if (call.index === undefined) {
           call.args += args;
@@ -326,7 +353,7 @@ export function transformStreamChunk(
   }
 
   // Track stop reason; close the open block once the choice finishes
-  if (choice?.finish_reason) {
+  if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {
     state.finishReason = choice.finish_reason;
     state.stopReason = toAnthropicStopReason(
       state.finishReason,
@@ -355,7 +382,7 @@ export function createStreamState(requestedModel?: unknown): StreamState {
     cacheCreationTokens: 0,
     contentBlockIndex: 0,
     openBlock: null,
-    toolBlocks: {},
+    toolBlocks: new Map(),
     bufferedTools: [],
     hasToolUse: false,
     finishReason: null,

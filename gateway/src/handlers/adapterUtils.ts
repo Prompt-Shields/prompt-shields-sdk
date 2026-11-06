@@ -462,6 +462,11 @@ export async function adaptResponse(
   return adaptNonStreamingResponse(response, adapterCtx, c);
 }
 
+/** PS fork (#73): a plain (non-null, non-array) object. */
+function isPlainObject(value: unknown): boolean {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 /**
  * Transform a non-streaming chatComplete JSON response to
  * Messages or Responses API format.
@@ -512,12 +517,16 @@ async function adaptNonStreamingResponse(
       adapterCtx.provider
     );
   } else if (adapterCtx.originalFn === 'messages') {
+    // PS fork (#73): a success whose body is not an object is an invalid
+    // upstream answer (502); the transforms return a failed request for it
+    if (status === 200 && !isPlainObject(json)) outStatus = 502;
     transformedJson = transformChatCompletionsToMessages(
       json,
       status,
       adapterCtx.provider
     );
   } else {
+    if (status === 200 && !isPlainObject(json)) outStatus = 502;
     transformedJson = transformChatCompletionsToResponses(
       json,
       status,

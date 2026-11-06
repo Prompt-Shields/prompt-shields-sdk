@@ -126,6 +126,19 @@ export function plainReasoningText(msg: any): string {
   return '';
 }
 
+/**
+ * PS fork (#73): a streamed chat tool_call `index` as a Map key: a number or
+ * string index as text (as an object key reads it), anything else as call
+ * 0. Stream transforms keep calls in a Map, never a plain object, since the
+ * index comes from the provider (a `__proto__` index must not reach
+ * Object.prototype).
+ */
+export function toolCallKey(index: unknown): string {
+  return typeof index === 'number' || typeof index === 'string'
+    ? String(index)
+    : '0';
+}
+
 const ANTHROPIC_ERROR_TYPE_BY_STATUS: Record<number, string> = {
   400: 'invalid_request_error',
   401: 'authentication_error',

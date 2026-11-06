@@ -77,36 +77,53 @@ export function transformChatCompletionsToMessages(
   responseStatus: number,
   provider: string
 ): MessagesResponse | ErrorResponse {
-  // PS fork (#73): errors use the Anthropic error envelope
+  // PS fork (#73): errors use the Anthropic error envelope; a body that is
+  // not an object is a failed request (api_error), not a 500
+  if (!isRecord(response)) {
+    return toMessagesError(
+      null,
+      responseStatus === 200 ? 502 : responseStatus,
+      provider
+    ) as any;
+  }
   if ('error' in response || responseStatus !== 200) {
     return toMessagesError(response, responseStatus, provider) as any;
   }
+  const body: Record<string, any> = response;
 
   const thinkingBlocks: ContentBlock[] = [];
   const textBlocks: ContentBlock[] = [];
   const toolBlocks: ContentBlock[] = [];
   let finishReason: string | null = null;
 
-  // Process choices
-  for (const choice of response.choices || []) {
-    const msg = (choice.message as any) || {};
-    finishReason = choice.finish_reason ?? finishReason;
+  // Process choices. PS fork (#73): the provider's arrays may hold null or
+  // badly typed entries; those are skipped, never dereferenced.
+  const choices: unknown[] = Array.isArray(body.choices) ? body.choices : [];
+  for (const choice of choices) {
+    if (!isRecord(choice)) continue;
+    const msg: Record<string, any> = isRecord(choice.message)
+      ? choice.message
+      : {};
+    if (typeof choice.finish_reason === 'string') {
+      finishReason = choice.finish_reason;
+    }
 
     // Handle thinking/reasoning from content_blocks (non-standard extension)
-    if (msg.content_blocks?.length) {
-      for (const block of msg.content_blocks) {
-        if (block.type === 'redacted_thinking' && block.data) {
-          thinkingBlocks.push({
-            type: 'redacted_thinking',
-            data: block.data,
-          } as RedactedThinkingBlock);
-        } else if (block.thinking || block.type === 'thinking') {
-          thinkingBlocks.push({
-            type: 'thinking',
-            thinking: block.thinking || block.text || '',
-            signature: block.signature || '',
-          } as ThinkingBlock);
-        }
+    const blocks: Record<string, any>[] = Array.isArray(msg.content_blocks)
+      ? msg.content_blocks.filter(isRecord)
+      : [];
+    for (const block of blocks) {
+      if (block.type === 'redacted_thinking' && stringOr(block.data)) {
+        thinkingBlocks.push({
+          type: 'redacted_thinking',
+          data: block.data,
+        } as RedactedThinkingBlock);
+      } else if (stringOr(block.thinking) || block.type === 'thinking') {
+        thinkingBlocks.push({
+          type: 'thinking',
+          thinking: stringOr(block.thinking) || stringOr(block.text),
+          signature: stringOr(block.signature),
+        } as ThinkingBlock);
       }
     }
     // PS fork (#73): OpenAI-compatible reasoning fields (reasoning_content)
@@ -122,47 +139,37 @@ export function transformChatCompletionsToMessages(
     }
 
     // Handle tool calls
-    if (msg.tool_calls?.length) {
+    if (Array.isArray(msg.tool_calls)) {
       for (const tc of msg.tool_calls) {
-        if (tc.type === 'function' || (!tc.type && tc.function)) {
-          let input: Record<string, unknown> = {};
-          try {
-            const parsed = JSON.parse(tc.function.arguments || '{}');
-            input = parsed !== null && typeof parsed === 'object' ? parsed : {};
-          } catch (err) {
-            logger.warn({
-              message: 'Failed to parse tool arguments as JSON',
-              provider,
-              toolName: tc.function?.name,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-          toolBlocks.push({
-            type: 'tool_use',
-            id: tc.id || `toolu_${randomUUID()}`,
-            name: tc.function.name,
-            input,
-          } as ToolUseBlock);
-        }
+        if (!isRecord(tc) || !isRecord(tc.function)) continue;
+        if (tc.type && tc.type !== 'function') continue;
+        const name = stringOr(tc.function.name);
+        toolBlocks.push({
+          type: 'tool_use',
+          id: stringOr(tc.id) || `toolu_${randomUUID()}`,
+          name,
+          input: toolInput(tc.function.arguments, provider, name),
+        } as ToolUseBlock);
       }
     }
 
     // Handle text content
     const textContent = msg.content;
-    if (textContent != null) {
-      const text =
-        typeof textContent === 'string'
+    const text =
+      typeof textContent === 'string'
+        ? textContent
+        : Array.isArray(textContent)
           ? textContent
-          : Array.isArray(textContent)
-            ? textContent.map((c: any) => c.text || '').join('')
-            : String(textContent);
-
-      if (text) {
-        textBlocks.push({
-          type: 'text',
-          text,
-        } as TextBlock);
-      }
+              .map((c: unknown) => (isRecord(c) ? stringOr(c.text) : ''))
+              .join('')
+          : typeof textContent === 'number' || typeof textContent === 'boolean'
+            ? String(textContent)
+            : '';
+    if (text) {
+      textBlocks.push({
+        type: 'text',
+        text,
+      } as TextBlock);
     }
   }
 
@@ -174,18 +181,53 @@ export function transformChatCompletionsToMessages(
   ];
 
   // PS fork (#73): cache reads/writes reported separately from input_tokens
-  const usage: Usage = toMessagesUsage(normalizeUsage(response.usage));
+  const usage: Usage = toMessagesUsage(normalizeUsage(body.usage));
 
   return {
-    id: response.id || `msg_${randomUUID()}`,
+    id: stringOr(body.id) || `msg_${randomUUID()}`,
     type: 'message',
     role: 'assistant',
     content,
-    model: response.model,
+    model: typeof body.model === 'string' ? body.model : (undefined as any),
     stop_reason: toAnthropicStopReason(finishReason, toolBlocks.length > 0),
     stop_sequence: null,
     usage,
   };
+}
+
+/** PS fork (#73): a plain (non-null, non-array) object. */
+function isRecord(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** PS fork (#73): `value` if it is a string, else ''. */
+function stringOr(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+/**
+ * PS fork (#73): tool_use `input` from Chat Completions arguments: JSON text
+ * (or an already parsed object) that holds an object, else `{}`.
+ */
+function toolInput(
+  args: unknown,
+  provider: string,
+  toolName: string
+): Record<string, unknown> {
+  if (isRecord(args)) return args;
+  if (typeof args !== 'string') return {};
+  try {
+    const parsed = JSON.parse(args || '{}');
+    return parsed !== null && typeof parsed === 'object' ? parsed : {};
+  } catch (err) {
+    logger.warn({
+      message: 'Failed to parse tool arguments as JSON',
+      provider,
+      toolName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {};
+  }
 }
 
 export default transformChatCompletionsToMessages;
