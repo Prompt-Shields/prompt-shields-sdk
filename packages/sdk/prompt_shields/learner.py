@@ -50,6 +50,33 @@ failure class scores 0, a weak one 0.5, an empty list 1; weighted below
 explicit scores, as the PRD asks). A row with none of these is unscored: it
 counts as traffic but does not train the arms.
 
+Teardown tuple fields (#42)
+---------------------------
+An eval ``quality_score`` is the parity of a whole (use case, model) eval
+cell, copied onto every call in it, so its weight scales with the cell size
+``quality_samples``: ``min(1, n / full_weight_quality_samples)``
+(:class:`TupleInputs`). A cell below ``min_quality_samples`` (ps-eval's
+``insufficient_sample``; default 30, as in ps-eval) is **ignored**, not
+down-weighted: its parity is too noisy to move a route, and repeating it on
+every call in the cell would let a handful of eval items look like
+thousands of observations. The row falls back to its implicit outcome
+signals, if any, else it is unscored (traffic only). Tuples without
+``quality_samples`` keep weight 1, as before.
+
+A tuple's ``replay`` object (the route policy's replayed decision for the
+same call) is a **counterfactual** row: the replayed model, the logged
+context and latency, the replayed projected cost and that model's eval
+parity as the quality, weighted ``replay_weight`` times the sample weight
+above. It trains the replayed arm but is not traffic: it adds nothing to
+``calls``, the current route, the context mean or the doubly robust
+(propensity) term, and it counts in the arm's ``replay_n``, not ``n``; the
+``min_arm_samples`` gate counts both. A replay row is used only when the
+replayed ``provider:model`` is one of the group's policy candidates,
+differs from the logged model, and has a measured parity from a sufficient
+cell. Without these fields nothing in the snapshot changes, so an existing
+snapshot's version is unchanged; with them the snapshot carries an
+``inputs`` block with these settings and the rows used and skipped.
+
 Snapshots
 ---------
 :func:`train` returns a snapshot dict (:data:`SNAPSHOT_SCHEMA`) holding the
@@ -71,7 +98,7 @@ import random
 import zlib
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -131,6 +158,18 @@ class RewardWeights:
 
 
 @dataclass(frozen=True)
+class TupleInputs:
+    """How a tuple's ``quality_samples`` and ``replay`` fields train the arms."""
+
+    #: Eval cells smaller than this are ``insufficient_sample``: ignored.
+    min_quality_samples: int = 30
+    #: Cell size at which an eval score gets its full weight.
+    full_weight_quality_samples: int = 100
+    #: Weight of a counterfactual replay row relative to a logged eval row.
+    replay_weight: float = 0.5
+
+
+@dataclass(frozen=True)
 class LearnerConfig:
     reward: RewardWeights = field(default_factory=RewardWeights)
     #: Use case -> its own weights (e.g. a ``critical`` one with λ near 0).
@@ -145,12 +184,16 @@ class LearnerConfig:
     min_prob_best: float = 0.8
     #: Largest projected quality drop accepted with a recommendation.
     quality_tolerance: float = 0.02
+    #: Teardown tuple fields; reported in the snapshot's ``inputs`` block
+    #: (only when the tuples carry them), not in ``config``.
+    inputs: TupleInputs = field(default_factory=TupleInputs)
 
     def weights_for(self, use_case: str | None) -> RewardWeights:
         return self.use_case_rewards.get(use_case or "", self.reward)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        d.pop("inputs")
         d["use_case_rewards"] = {
             k: asdict(v) for k, v in sorted(self.use_case_rewards.items())
         }
@@ -294,7 +337,27 @@ def _int(v: Any) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 
 
-def _parse(t: Mapping[str, Any], policy: Mapping[str, Any]) -> _Row | None:
+def _sample_weight(n: Any, inputs: TupleInputs) -> float | None:
+    """Weight factor of an eval score from a cell of ``n`` samples, or None
+    when the cell is too small (or ``n`` is not a count)."""
+    n = _int(n)
+    if n is None or n < inputs.min_quality_samples:
+        return None
+    full = inputs.full_weight_quality_samples
+    return min(1.0, n / full) if full > 0 else 1.0
+
+
+def _eval_insufficient(t: Mapping[str, Any], inputs: TupleInputs) -> bool:
+    """True when the tuple's quality is an eval score from a too-small cell."""
+    return (
+        row_quality(t)[1] == "eval" and t.get("quality_samples") is not None
+        and _sample_weight(t["quality_samples"], inputs) is None
+    )
+
+
+def _parse(
+    t: Mapping[str, Any], policy: Mapping[str, Any], inputs: TupleInputs | None = None,
+) -> _Row | None:
     arm = _label(t.get("provider"), t.get("model"))
     if arm is None:
         return None
@@ -313,6 +376,15 @@ def _parse(t: Mapping[str, Any], policy: Mapping[str, Any]) -> _Row | None:
     features = t.get("features") if isinstance(t.get("features"), Mapping) else {}
     use_case = t.get("use_case") or features.get("use_case")
     quality, source = row_quality(t)
+    weight = SOURCE_WEIGHTS[source] if source else 0.0
+    if source == "eval" and t.get("quality_samples") is not None:
+        factor = _sample_weight(t["quality_samples"], inputs or TupleInputs())
+        if factor is None:
+            # insufficient_sample: ignore the eval score (see module doc).
+            quality, source = row_quality({k: v for k, v in t.items() if k != "quality_score"})
+            weight = SOURCE_WEIGHTS[source] if source else 0.0
+        else:
+            weight *= factor
     latency = _num(t.get("latency_ms"))
     prop = _num(t.get("propensity"))
     return _Row(
@@ -321,7 +393,7 @@ def _parse(t: Mapping[str, Any], policy: Mapping[str, Any]) -> _Row | None:
         arm=arm,
         x=context_vector(features),
         quality=quality,
-        weight=SOURCE_WEIGHTS[source] if source else 0.0,
+        weight=weight,
         source=source,
         cost=_num(t.get("cost_usd", t.get("cost"))),
         latency_s=latency / 1000.0 if latency is not None and latency >= 0 else None,
@@ -329,6 +401,38 @@ def _parse(t: Mapping[str, Any], policy: Mapping[str, Any]) -> _Row | None:
         tokens_out=_int(t.get("tokens_out")),
         propensity=prop if prop is not None and 0.0 < prop <= 1.0 else None,
     )
+
+
+def _replay_row(
+    t: Mapping[str, Any], row: _Row, inputs: TupleInputs,
+) -> tuple[_Row | None, str | None]:
+    """(counterfactual row, None) for a tuple's ``replay``, or (None, why not).
+
+    (None, None) when the tuple has no replay. The policy-candidate check is
+    per group, in :func:`train`.
+    """
+    rp = t.get("replay")
+    if not isinstance(rp, Mapping):
+        return None, None
+    if not inputs.replay_weight > 0:
+        return None, "disabled"
+    # A bare model id never names a vendor, so it can never be a candidate.
+    arm = _label(rp.get("provider"), rp.get("model")) if rp.get("provider") else None
+    if arm is None:
+        return None, "no_model"
+    if arm == row.arm or rp.get("outcome") == "unchanged":
+        return None, "same_as_logged"
+    quality = _unit(rp.get("quality_score"))
+    if quality is None:
+        return None, "not_measured"
+    factor = _sample_weight(rp.get("quality_samples"), inputs)
+    if factor is None:
+        return None, "insufficient_sample"
+    return replace(
+        row, arm=arm, quality=quality, source="replay",
+        weight=SOURCE_WEIGHTS["eval"] * inputs.replay_weight * factor,
+        cost=_num(rp.get("cost_usd")), propensity=None,
+    ), None
 
 
 def _row_key(r: _Row) -> str:
@@ -391,6 +495,8 @@ class ArmStats:
     b: dict[str, list[float]] = field(default_factory=dict)
     #: Σ w·yᵢ·yⱼ over the targets, for the residual noise.
     S: dict[str, float] = field(default_factory=dict)
+    #: Counterfactual (replay) rows added; ``n`` counts logged rows only.
+    replay_n: int = 0
 
     def __post_init__(self):
         if not self.A:
@@ -401,8 +507,12 @@ class ArmStats:
         for k in ("qq", "ll", "ql"):
             self.S.setdefault(k, 0.0)
 
-    def add(self, x: Sequence[float], w: float, q: float, c: float, lat: float) -> None:
-        self.n += 1
+    def add(self, x: Sequence[float], w: float, q: float, c: float, lat: float,
+            *, counterfactual: bool = False) -> None:
+        if counterfactual:
+            self.replay_n += 1
+        else:
+            self.n += 1
         self.weight += w
         for i in range(self.d):
             wxi = w * x[i]
@@ -418,20 +528,29 @@ class ArmStats:
 
     def to_dict(self) -> dict[str, Any]:
         r = _round
-        return {
+        out: dict[str, Any] = {
             "n": self.n,
             "weight": r(self.weight),
             "A": [[r(v) for v in row] for row in self.A],
             "b": {k: [r(v) for v in vs] for k, vs in sorted(self.b.items())},
             "S": {k: r(v) for k, v in sorted(self.S.items())},
         }
+        if self.replay_n:  # absent when zero: older snapshots hash the same
+            out["replay_n"] = self.replay_n
+        return out
+
+    @property
+    def samples(self) -> int:
+        """Logged plus counterfactual rows (the ``min_arm_samples`` gate)."""
+        return self.n + self.replay_n
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any], ridge: float) -> ArmStats:
         return cls(d=len(d["A"]), ridge=ridge, n=int(d["n"]), weight=float(d["weight"]),
                    A=[list(map(float, row)) for row in d["A"]],
                    b={k: list(map(float, v)) for k, v in d["b"].items()},
-                   S={k: float(v) for k, v in d["S"].items()})
+                   S={k: float(v) for k, v in d["S"].items()},
+                   replay_n=int(d.get("replay_n", 0)))
 
 
 def _round(v: float) -> float:
@@ -573,22 +692,45 @@ def train(
     skipped = {"no_model": 0}
     data_hash = hashlib.sha256()
     parsed = []
+    replay_parsed = []
+    replay_skipped: dict[str, int] = defaultdict(int)
+    uses_inputs = False
+    insufficient = 0
     for t in tuples:
-        r = _parse(t, route_policy) if isinstance(t, Mapping) else None
+        r = _parse(t, route_policy, cfg.inputs) if isinstance(t, Mapping) else None
         if r is None:
             skipped["no_model"] += 1
             continue
         parsed.append((_row_key(r), r))
+        if "replay" in t or t.get("quality_samples") is not None:
+            uses_inputs = True
+        insufficient += _eval_insufficient(t, cfg.inputs)
+        rp, why = _replay_row(t, r, cfg.inputs)
+        if rp is not None:
+            replay_parsed.append((_row_key(rp), rp))
+        elif why is not None:
+            replay_skipped[why] += 1
     # Sorted, so the input order changes nothing (sums included).
     parsed.sort(key=lambda kr: kr[0])
     for key, r in parsed:
         data_hash.update(key.encode())
         data_hash.update(b"\n")
         rows.append(r)
+    # Counterfactual rows hash after the logged ones, and only when present.
+    replay_parsed.sort(key=lambda kr: kr[0])
+    if replay_parsed:
+        data_hash.update(b"replay\n")
+    for key, _ in replay_parsed:
+        data_hash.update(key.encode())
+        data_hash.update(b"\n")
 
     by_group: dict[str, list[_Row]] = defaultdict(list)
     for r in rows:
         by_group[_group_key(r.use_case, r.sensitivity)].append(r)
+    replay_by_group: dict[str, list[_Row]] = defaultdict(list)
+    for _, r in replay_parsed:
+        replay_by_group[_group_key(r.use_case, r.sensitivity)].append(r)
+    replay_used = 0
 
     prior_arms: dict[str, dict[str, ArmStats]] = {}
     parent = None
@@ -627,6 +769,16 @@ def train(
                 continue
             s = arms.setdefault(r.arm, ArmStats(d=d, ridge=cfg.ridge))
             s.add(r.x, r.weight, r.quality, r.cost or 0.0, r.latency_s or 0.0)
+        # Counterfactual replay rows: only for the group's policy candidates,
+        # and never traffic (calls, current route, context mean, DR term).
+        for r in replay_by_group.get(key, ()):
+            if r.arm not in candidate_set:
+                replay_skipped["outside_policy"] += 1
+                continue
+            replay_used += 1
+            s = arms.setdefault(r.arm, ArmStats(d=d, ridge=cfg.ridge))
+            s.add(r.x, r.weight, r.quality, r.cost or 0.0, r.latency_s or 0.0,
+                  counterfactual=True)
 
         traffic: dict[str, int] = defaultdict(int)
         for r in g_rows:
@@ -654,7 +806,7 @@ def train(
 
         evaluable = sorted(
             a for a in candidate_set
-            if a in arms and arms[a].n >= cfg.min_arm_samples
+            if a in arms and arms[a].samples >= cfg.min_arm_samples
         )
         group["unevaluated_candidates"] = [a for a in candidates if a not in evaluable]
         if not n_calls or not evaluable:
@@ -676,7 +828,7 @@ def train(
         group["best_model"] = best
 
         proj_best = _projection(best, fits[best], g_rows, xbar, costs[best], w)
-        cur_ok = current in arms and arms[current].n >= cfg.min_arm_samples
+        cur_ok = current in arms and arms[current].samples >= cfg.min_arm_samples
         if best == current:
             group["status"] = "keep_current"
         elif not cur_ok:
@@ -693,6 +845,9 @@ def train(
             else:
                 group["status"] = "recommend"
                 saving = proj_cur["cost_per_call"] - proj_best["cost_per_call"]
+                replay_samples = {
+                    a: arms[a].replay_n for a in (current, best) if arms[a].replay_n
+                }
                 recommendations.append({
                     "use_case": use_case,
                     "sensitivity": sensitivity,
@@ -715,6 +870,8 @@ def train(
                         "arm_samples": {
                             current: arms[current].n, best: arms[best].n,
                         },
+                        **({"counterfactual_samples": replay_samples}
+                           if replay_samples else {}),
                     },
                 })
         groups_out.append(group)
@@ -737,6 +894,12 @@ def train(
         "groups": groups_out,
         "recommendations": recommendations,
     }
+    if uses_inputs:  # absent for tuples without these fields: same version
+        snapshot["inputs"] = {
+            **asdict(cfg.inputs),
+            "insufficient_sample_rows": insufficient,
+            "replay": {"rows": replay_used, "skipped": dict(sorted(replay_skipped.items()))},
+        }
     snapshot["learner_version"] = VERSION_PREFIX + snapshot_digest(snapshot)[:16]
     return snapshot
 
@@ -875,6 +1038,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--mu-latency", type=float, default=RewardWeights.mu_latency)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-arm-samples", type=int, default=LearnerConfig.min_arm_samples)
+    ap.add_argument("--min-quality-samples", type=int,
+                    default=TupleInputs.min_quality_samples,
+                    help="eval cells smaller than this are insufficient_sample and ignored")
+    ap.add_argument("--replay-weight", type=float, default=TupleInputs.replay_weight,
+                    help="weight of a tuple's counterfactual replay row (0 turns it off)")
     ap.add_argument("--upload", action="store_true",
                     help="send the snapshot to the collector (PS_API_KEY, PS_COLLECTOR_URL)")
     args = ap.parse_args(argv)
@@ -895,6 +1063,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg = LearnerConfig(
         reward=RewardWeights(args.lambda_cost, args.mu_latency),
         seed=args.seed, min_arm_samples=args.min_arm_samples,
+        inputs=TupleInputs(min_quality_samples=args.min_quality_samples,
+                           replay_weight=args.replay_weight),
     )
     try:
         snap = train(tuples, policy, cfg, prior=prior)
@@ -927,6 +1097,7 @@ __all__ = [
     "ArmStats",
     "LearnerConfig",
     "RewardWeights",
+    "TupleInputs",
     "canonical_json",
     "context_vector",
     "join_feedback",

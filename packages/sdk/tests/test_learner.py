@@ -359,3 +359,191 @@ def test_cli_writes_a_snapshot(tmp_path, capsys):
     snap = json.loads(out.read_text())
     assert verify_snapshot(snap)
     assert f"recommend {FRONTIER} -> {SMALL}" in capsys.readouterr().out
+
+
+# ─── teardown tuple fields: quality_samples and replay (#42) ──────────
+
+
+def _teardown(
+    *,
+    seed: int = 11,
+    n: int = 600,
+    logged: str = FRONTIER,
+    logged_parity: float = 0.95,
+    logged_samples: int | None = 200,
+    replay: str | None = SMALL,
+    replay_parity: float | None = 0.94,
+    replay_samples: int | None = 200,
+    classification: str = "confidential",
+    use_case: str = "support",
+) -> list[dict]:
+    """Teardown-style tuples: every call on ``logged``, the cell's eval parity
+    as ``quality_score`` (constant per cell, as ps-teardown writes it) and,
+    when ``replay`` is set, the policy's replayed decision for the call."""
+    rows = _traffic(seed=seed, n=n, arms={logged: 1.0}, score_key="quality_score",
+                    classification=classification, use_case=use_case)
+    for r in rows:
+        del r["latency_ms"]  # teardown tuples carry no latency
+        r["quality_score"] = logged_parity
+        r["quality_source"] = "eval_parity"
+        r["quality_samples"] = logged_samples
+        if replay is not None:
+            provider, model = replay.split(":")
+            tier = next(t for ts in POLICY["groups"].values() for t in ts
+                        if t["model"] == model)
+            r["replay"] = {
+                "outcome": "rerouted",
+                "group": "cheap",
+                "provider": provider,
+                "model": model,
+                "cost_usd": r["tokens_in"] / 1000 * tier["input_cost_per_1k"]
+                + r["tokens_out"] / 1000 * tier["output_cost_per_1k"],
+                "cost_source": "policy",
+                "quality_score": replay_parity,
+                "quality_source": "eval_parity" if replay_parity is not None
+                else "not_measured",
+                "quality_samples": replay_samples,
+            }
+    return rows
+
+
+def _strip(rows: list[dict]) -> list[dict]:
+    drop = ("replay", "quality_samples", "quality_source")
+    return [{k: v for k, v in r.items() if k not in drop} for r in rows]
+
+
+def test_inputs_without_the_new_fields_hash_as_before():
+    # Golden versions computed with the learner before #42's fields were read:
+    # an input without replay/quality_samples must keep its snapshot version.
+    a = train(_traffic(arms={FRONTIER: 0.7, SMALL: 0.3}), POLICY)
+    assert a["learner_version"] == "lv1-660c243263417596"
+    assert a["data"]["fingerprint"] == (
+        "22e2e3a1353f501c5f9df4591b60ddc30fb3750a7b381fef197545bffe1c48f9")
+    b = train(_traffic(arms={FRONTIER: 0.7, SMALL: 0.3}, score_key="quality_score",
+                       n=300, seed=3), POLICY, LearnerConfig(min_arm_samples=20))
+    assert b["learner_version"] == "lv1-3dff0607c67f521a"
+    assert "inputs" not in a and "inputs" not in b
+    assert "inputs" not in a["config"]
+    assert all("replay_n" not in s for g in a["groups"] for s in g["arms"].values())
+    # A null quality_samples is "no field" too.
+    rows = _traffic(arms={FRONTIER: 0.7, SMALL: 0.3})
+    assert train([{**r, "quality_samples": None} for r in rows], POLICY) == a
+
+
+def test_replay_arm_moves_the_recommendation_to_the_cheaper_candidate():
+    rows = _teardown()
+    without = train(_strip(rows), POLICY)
+    assert without["recommendations"] == []
+    # Only the logged arm has data, so it is all the learner can keep.
+    assert without["groups"][0]["status"] == "keep_current"
+    assert without["groups"][0]["unevaluated_candidates"] == [SMALL]
+
+    snap = train(rows, POLICY)
+    (rec,) = snap["recommendations"]
+    assert (rec["current_model"], rec["recommended_model"]) == (FRONTIER, SMALL)
+    assert rec["recommended_model"] in policy_candidates(POLICY, "support", "confidential")
+    p = rec["projection"]
+    assert p["savings_pct"] > 0.8
+    assert p["quality_delta"] == pytest.approx(-0.01, abs=0.005)
+    assert p["arm_samples"] == {FRONTIER: len(rows), SMALL: 0}
+    assert p["counterfactual_samples"] == {SMALL: len(rows)}
+    assert snap["inputs"]["replay"] == {"rows": len(rows), "skipped": {}}
+
+
+def test_replay_is_not_traffic():
+    rows = _teardown()
+    for r in rows:
+        r["propensity"] = 1.0
+    with_replay, without = train(rows, POLICY), train(_strip(rows), POLICY)
+    g, g0 = with_replay["groups"][0], without["groups"][0]
+    for k in ("calls", "scored_calls", "current_model", "current_compliant"):
+        assert g[k] == g0[k]
+    assert with_replay["data"]["rows"] == without["data"]["rows"] == len(rows)
+    assert g["arms"][FRONTIER] == g0["arms"][FRONTIER]  # logged arm untouched
+    assert g["arms"][SMALL]["n"] == 0 and g["arms"][SMALL]["replay_n"] == len(rows)
+    # The DR term only sees logged rows: the replayed arm gets no IPS
+    # correction from calls it never served.
+    (rec,) = with_replay["recommendations"]
+    assert rec["projection"]["recommended"]["quality_method"] == "dr"
+    assert rec["projection"]["recommended"]["quality"] == pytest.approx(0.94, abs=0.005)
+
+
+def test_a_worse_replayed_model_is_not_recommended():
+    snap = train(_teardown(replay_parity=0.6), POLICY)
+    assert snap["recommendations"] == []
+    assert snap["groups"][0]["status"] == "keep_current"
+    assert snap["groups"][0]["best_model"] == FRONTIER
+
+
+def test_replay_outside_the_policy_is_ignored():
+    # Confidential data: EEA only, so a US replay never trains an arm.
+    rows = _teardown(replay=CHEAP_US, replay_parity=0.99)
+    snap = train(rows, POLICY)
+    assert snap["recommendations"] == []
+    assert CHEAP_US not in snap["groups"][0]["arms"]
+    assert snap["inputs"]["replay"] == {"rows": 0, "skipped": {"outside_policy": len(rows)}}
+    # min_group: legal-review only allows the frontier group.
+    legal = train(_teardown(use_case="legal-review"), POLICY)
+    assert legal["recommendations"] == []
+    assert SMALL not in legal["groups"][0]["arms"]
+    # A replay without a provider is never matched to a candidate.
+    bare = _teardown()
+    for r in bare:
+        r["replay"]["provider"] = None
+    assert train(bare, POLICY)["inputs"]["replay"]["skipped"] == {"no_model": len(bare)}
+
+
+def test_replay_needs_a_measured_sufficient_different_arm():
+    unmeasured = train(_teardown(replay_parity=None, replay_samples=None), POLICY)
+    assert unmeasured["inputs"]["replay"]["skipped"] == {"not_measured": 600}
+    small_cell = train(_teardown(replay_samples=12), POLICY)
+    assert small_cell["recommendations"] == []
+    assert small_cell["inputs"]["replay"]["skipped"] == {"insufficient_sample": 600}
+    same = train(_teardown(replay=FRONTIER), POLICY)
+    assert same["inputs"]["replay"]["skipped"] == {"same_as_logged": 600}
+    off = train(_teardown(), POLICY,
+                LearnerConfig(inputs=learner.TupleInputs(replay_weight=0)))
+    assert off["recommendations"] == [] and SMALL not in off["groups"][0]["arms"]
+
+
+def test_quality_samples_weight_and_insufficient_cells():
+    big = train(_teardown(replay=None, logged_samples=200), POLICY)
+    half = train(_teardown(replay=None, logged_samples=50), POLICY)
+    assert big["groups"][0]["arms"][FRONTIER]["weight"] == pytest.approx(600.0)
+    assert half["groups"][0]["arms"][FRONTIER]["weight"] == pytest.approx(300.0)
+    # Below min_quality_samples the eval score is ignored: the row falls
+    # back to its outcome signals, else it is traffic only.
+    rows = _teardown(replay=None, logged_samples=10)
+    for r in rows[:100]:
+        r["outcome_signals"] = []
+    snap = train(rows, POLICY)
+    g = snap["groups"][0]
+    assert g["calls"] == 600 and g["scored_calls"] == 100
+    assert g["arms"][FRONTIER]["weight"] == pytest.approx(
+        100 * learner.SOURCE_WEIGHTS["implicit"])
+    assert snap["inputs"]["insufficient_sample_rows"] == 600
+    assert snap["inputs"]["min_quality_samples"] == 30
+
+
+def test_insufficient_cells_cannot_drive_a_recommendation():
+    # The cheap arm is logged too, but its eval cell is tiny: no recommendation.
+    def cheap(samples: int) -> list[dict]:
+        return _teardown(seed=12, n=300, logged=SMALL, logged_parity=0.99,
+                         logged_samples=samples, replay=None)
+
+    assert train(_teardown(replay=None) + cheap(5), POLICY)["recommendations"] == []
+    ok = train(_teardown(replay=None) + cheap(200), POLICY)
+    assert [r["recommended_model"] for r in ok["recommendations"]] == [SMALL]
+
+
+def test_replay_snapshots_are_deterministic_and_warm_start():
+    rows = _teardown()
+    a, b = train(rows, POLICY), train(list(reversed(rows)), POLICY)
+    assert a == b and verify_snapshot(a)
+    assert a["data"]["fingerprint"] != train(_strip(rows), POLICY)["data"]["fingerprint"]
+    other = train(rows, POLICY, LearnerConfig(inputs=learner.TupleInputs(replay_weight=0.25)))
+    assert other["learner_version"] != a["learner_version"]
+    prior = json.loads(learner.canonical_json(a))
+    second = train(_teardown(seed=12, n=50), POLICY, prior=prior)
+    assert second["groups"][0]["arms"][SMALL]["replay_n"] == 650
+    assert second["groups"][0]["arms"][SMALL]["n"] == 0

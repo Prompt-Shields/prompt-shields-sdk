@@ -43,6 +43,25 @@ aggregates over the prompt features and the recommendations.
   signals (a failure class such as `refusal` or `schema_invalid` scores 0, a
   retry or regenerate 0.5, no signal 1). Implicit signals count a quarter as
   much as explicit ones. Rows with no signal count as traffic only.
+* **Eval cell size.** A teardown tuple's eval score is the parity of a whole
+  (use case, model) eval cell, so it is weighted by the cell size
+  `quality_samples`: full weight from 100 samples, proportionally less below.
+  A cell under 30 samples (`--min-quality-samples`; ps-eval's
+  `insufficient_sample`) is ignored rather than down-weighted: its parity is
+  too noisy to move a route, and copying it onto every call would make a few
+  eval items look like thousands of observations. The row then falls back to
+  its outcome signals, or counts as traffic only.
+* **Replayed route as a counterfactual arm.** With `ps-teardown --policy`,
+  each tuple's `replay` says which model the policy would have chosen, its
+  projected cost and that model's eval parity. The learner trains that arm
+  from it at half the weight of a logged eval row (`--replay-weight`; 0 turns
+  it off). It is not traffic: it changes no call count, current route or
+  propensity term, and shows up as the arm's `replay_n` (not `n`). It is used
+  only when the replayed model is one of the group's policy candidates,
+  differs from the logged model and has a measured parity from a large
+  enough cell. Snapshots of tuples without these fields are unchanged; with
+  them the snapshot carries an `inputs` block with these settings and the
+  replay rows used and skipped.
 * **Thompson sampling.** Each arm keeps a Bayesian linear regression. The
   learner draws every arm's parameters from its posterior many times (seeded,
   so a run is reproducible) and counts how often each arm has the best mean
@@ -61,7 +80,7 @@ logged contexts as if every call had gone to that model:
   call cannot be priced, the cost regression is used.
 
 A group gets a recommendation only when both models have enough scored rows
-(`min_arm_samples`, default 30), `prob_best` is at least 0.8, projected
+(`min_arm_samples`, default 30; replay rows count here), `prob_best` is at least 0.8, projected
 quality drops by no more than 0.02, and the reward improves. Otherwise the
 group's `status` says why: `keep_current`, `not_confident`,
 `quality_below_parity` or `insufficient_data`.
