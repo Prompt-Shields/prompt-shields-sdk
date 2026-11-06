@@ -148,9 +148,15 @@ class TestJWT:
 # ──────────────────────────────────────────────────────────────────────
 
 
+RL_NOW = 1_800_000_030.0  # 30 s into a minute
+
+
 class TestRateLimiter:
+    """On a pinned clock: with the real one a test straddling a minute
+    boundary starts a fresh window and an expected block is allowed."""
+
     def test_under_limit_allowed(self):
-        limiter = FixedWindowRateLimiter()
+        limiter = FixedWindowRateLimiter(clock=lambda: RL_NOW)
         partner = uuid.uuid4()
         result = limiter.check(partner, limit=10)
         assert result.allowed is True
@@ -159,7 +165,7 @@ class TestRateLimiter:
         assert result.retry_after == 0
 
     def test_at_limit_still_allowed(self):
-        limiter = FixedWindowRateLimiter()
+        limiter = FixedWindowRateLimiter(clock=lambda: RL_NOW)
         partner = uuid.uuid4()
         for _ in range(9):
             limiter.check(partner, 10)
@@ -168,7 +174,7 @@ class TestRateLimiter:
         assert result.remaining == 0
 
     def test_over_limit_blocked(self):
-        limiter = FixedWindowRateLimiter()
+        limiter = FixedWindowRateLimiter(clock=lambda: RL_NOW)
         partner = uuid.uuid4()
         for _ in range(10):
             limiter.check(partner, 10)
@@ -177,7 +183,7 @@ class TestRateLimiter:
         assert result.retry_after > 0
 
     def test_separate_partners_separate_buckets(self):
-        limiter = FixedWindowRateLimiter()
+        limiter = FixedWindowRateLimiter(clock=lambda: RL_NOW)
         a, b = uuid.uuid4(), uuid.uuid4()
         for _ in range(10):
             limiter.check(a, 10)
@@ -187,10 +193,24 @@ class TestRateLimiter:
         assert result_b.remaining == 9
 
     def test_reset_at_is_future(self):
-        limiter = FixedWindowRateLimiter()
+        limiter = FixedWindowRateLimiter(clock=lambda: RL_NOW)
         result = limiter.check(uuid.uuid4(), 10)
-        assert result.reset_at > int(time.time())
-        assert result.reset_at <= int(time.time()) + 60
+        assert result.reset_at > int(RL_NOW)
+        assert result.reset_at <= int(RL_NOW) + 60
+
+    def test_window_boundary_starts_a_fresh_count(self):
+        """Why the clock is pinned: the 11th call one second after the
+        10th, across a minute boundary, is allowed."""
+        now = [RL_NOW + 29.5]  # half a second before the minute ends
+        limiter = FixedWindowRateLimiter(clock=lambda: now[0])
+        partner = uuid.uuid4()
+        for _ in range(10):
+            limiter.check(partner, 10)
+        assert limiter.check(partner, 10).allowed is False
+        now[0] += 1.0
+        result = limiter.check(partner, 10)
+        assert result.allowed is True
+        assert result.remaining == 9
 
 
 # ──────────────────────────────────────────────────────────────────────
