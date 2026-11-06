@@ -243,6 +243,10 @@ describe('loadRoutePolicyFile', () => {
     expect(reloadIntervalMs({ PS_ROUTE_POLICY_RELOAD_SECONDS: '0.2' })).toBe(
       1000
     );
+    // Above 2^31-1 ms setInterval fires every 1 ms; capped at one day.
+    expect(
+      reloadIntervalMs({ PS_ROUTE_POLICY_RELOAD_SECONDS: '3000000' })
+    ).toBe(86_400_000);
     expect(() =>
       reloadIntervalMs({ PS_ROUTE_POLICY_RELOAD_SECONDS: 'soon' })
     ).toThrow(RoutePolicyError);

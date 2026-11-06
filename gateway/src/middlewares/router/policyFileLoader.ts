@@ -53,8 +53,13 @@ export function reloadIntervalMs(
     throw new RoutePolicyError(
       `PS_ROUTE_POLICY_RELOAD_SECONDS must be a number of seconds (0 = off), got "${raw}"`
     );
-  return seconds === 0 ? 0 : Math.max(1, seconds) * 1000;
+  if (seconds === 0) return 0;
+  // setInterval treats delays above 2^31-1 ms (~24.8 days) as 1 ms; cap at a day.
+  return Math.min(Math.max(1, seconds), MAX_RELOAD_SECONDS) * 1000;
 }
+
+/** Longest poll interval honoured: one day. */
+export const MAX_RELOAD_SECONDS = 86_400;
 
 export interface RoutePolicyWatcher {
   /** Re-read the file now; true when a new policy became active. */
