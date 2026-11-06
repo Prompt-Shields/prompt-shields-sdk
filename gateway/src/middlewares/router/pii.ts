@@ -82,9 +82,18 @@ const TRUNK_PHONE_RE = new RegExp(
  * group.
  */
 function hasCard(text: string): boolean {
-  CARD_RUN_RE.lastIndex = 0;
+  return !cardWindows(text).next().done;
+}
+
+/**
+ * The [start, end) offsets of every Luhn-valid window hasCard accepts (see
+ * there), in order; windows of one run may overlap.
+ */
+function* cardWindows(text: string): Generator<[number, number]> {
+  // A private copy: a caller may stop iterating part way.
+  const runRe = new RegExp(CARD_RUN_RE.source, 'g');
   let m: RegExpExecArray | null;
-  while ((m = CARD_RUN_RE.exec(text)) !== null) {
+  while ((m = runRe.exec(text)) !== null) {
     const run = m[0];
     const end = m.index + run.length;
     // A window may end at the run's last group only before a non-word
@@ -114,13 +123,11 @@ function hasCard(text: string): boolean {
           (p < run.length || lastOk) &&
           luhnRangeOk(run, from[i], to[e - 1])
         ) {
-          CARD_RUN_RE.lastIndex = 0;
-          return true;
+          yield [m.index + from[i], m.index + to[e - 1]];
         }
       }
     }
   }
-  return false;
 }
 
 function isDigit(code: number): boolean {
@@ -152,6 +159,12 @@ function mod97(rest: number, c: string): number {
 }
 
 function maskIban(match: string): string {
+  const n = ibanValidLength(match);
+  return n < 0 ? match : ' '.repeat(n) + match.slice(n);
+}
+
+/** Length of the checksum-valid prefix of an IBAN_RE match, else -1. */
+function ibanValidLength(match: string): number {
   // A following word or digit group ("... 7466 BIC", "... 7466 4111 1111")
   // can join the last group: drop trailing space-separated groups until the
   // checksum holds, and blank only that prefix so what follows is still
@@ -171,12 +184,12 @@ function maskIban(match: string): string {
     if (nCompact >= 15 && nCompact <= 34) {
       let rest = body[nCompact - 4];
       for (let k = 0; k < 4; k++) rest = mod97(rest, compact[k]);
-      if (rest === 1) return ' '.repeat(nSpaced) + match.slice(nSpaced);
+      if (rest === 1) return nSpaced;
     }
     nCompact -= groups[g].length;
     nSpaced -= groups[g].length + 1;
   }
-  return match;
+  return -1;
 }
 
 function phoneShapeOk(s: string, min: number, max: number): boolean {
@@ -403,6 +416,114 @@ export function detectPiiCategories(text: string | undefined | null): string[] {
     if (keywords.some((kw) => lower.includes(kw))) found.add(category);
   }
   return [...found].sort();
+}
+
+// --- Span finding, for redaction (#337) -------------------------------------
+
+/** A PII match: text[start, end) is of `category` (a detectPiiCategories name). */
+export interface PiiSpan {
+  start: number;
+  end: number;
+  category: string;
+}
+
+// Where spans overlap, the merged span takes the first of these categories.
+const SPAN_PRIORITY = [
+  'iban',
+  'credit_card',
+  'national_id',
+  'ssn',
+  'email',
+  'ip_address',
+  'phone',
+];
+
+const SPAN_PATTERNS: [string, RegExp][] = PATTERNS.map(([name, pattern]) => [
+  name,
+  new RegExp(pattern.source, 'gu'),
+]);
+
+function* validMatches(
+  pattern: RegExp,
+  text: string,
+  validate: (m: RegExpExecArray) => boolean
+): Generator<RegExpExecArray> {
+  // A private copy: the shared global regexes keep lastIndex.
+  const global = new RegExp(pattern.source, pattern.flags);
+  let m: RegExpExecArray | null;
+  while ((m = global.exec(text)) !== null) {
+    if (validate(m)) yield m;
+    if (m[0] === '') global.lastIndex++;
+  }
+}
+
+/**
+ * Where detectPiiCategories' pattern categories are in `text`: the same
+ * patterns and validators, each match reported instead of presence only.
+ * Overlapping matches are merged (see SPAN_PRIORITY). The keyword
+ * categories (health_data, financial_data) mark context, not a value, and
+ * have no spans. Spans are sorted and disjoint.
+ */
+export function findPiiSpans(text: string | undefined | null): PiiSpan[] {
+  if (!text) return [];
+  const raw: PiiSpan[] = [];
+  const add = (start: number, end: number, category: string) => {
+    if (end > start) raw.push({ start, end, category });
+  };
+  // As in detectPiiCategories: valid IBANs are blanked (same length, so
+  // offsets hold) before the other patterns run.
+  const masked = text.replace(IBAN_RE, (match: string, offset: number) => {
+    const n = ibanValidLength(match);
+    if (n < 0) return match;
+    add(offset, offset + n, 'iban');
+    return ' '.repeat(n) + match.slice(n);
+  });
+  for (const [start, end] of cardWindows(masked))
+    add(start, end, 'credit_card');
+  for (const [name, pattern] of SPAN_PATTERNS)
+    for (const m of validMatches(pattern, masked, () => true))
+      add(m.index, m.index + m[0].length, name);
+  for (const [name, pattern, validate] of VALIDATED)
+    for (const m of validMatches(pattern, masked, validate))
+      add(m.index, m.index + m[0].length, name);
+  for (const [pattern, validate] of DETECTORS)
+    for (const m of validMatches(pattern, masked, validate))
+      add(m.index, m.index + m[0].length, 'national_id');
+
+  raw.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged: PiiSpan[] = [];
+  for (const span of raw) {
+    const last = merged[merged.length - 1];
+    if (last && span.start < last.end) {
+      last.end = Math.max(last.end, span.end);
+      if (
+        SPAN_PRIORITY.indexOf(span.category) <
+        SPAN_PRIORITY.indexOf(last.category)
+      )
+        last.category = span.category;
+    } else {
+      merged.push({ ...span });
+    }
+  }
+  return merged;
+}
+
+/** Placeholder for a redacted span: `[EMAIL]`, `[CREDIT_CARD]`, ... */
+export function piiPlaceholder(category: string): string {
+  return `[${category.toUpperCase()}]`;
+}
+
+/** `text` with every findPiiSpans span replaced by its placeholder. */
+export function redactPii(text: string): string {
+  const spans = findPiiSpans(text);
+  if (!spans.length) return text;
+  let out = '';
+  let pos = 0;
+  for (const { start, end, category } of spans) {
+    out += text.slice(pos, start) + piiPlaceholder(category);
+    pos = end;
+  }
+  return out + text.slice(pos);
 }
 
 // Keys whose string values are request text (messages, Responses input and

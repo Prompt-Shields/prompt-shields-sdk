@@ -26,7 +26,7 @@ rely on routing for compliance.
 |---|---|---|
 | Who decides | The SDK, in your process | The gateway |
 | Provider keys | Yours, kept in your process (BYOK) | Forwarded by the gateway |
-| Policy | Any `route-policy.v1` document you pass | The built-in default policy. A custom policy needs code (see [Limits](#limits)) |
+| Policy | Any `route-policy.v1` document you pass | A `route-policy.v1` file named by `PS_ROUTE_POLICY_FILE` (see [Gateway route policy file](#gateway-route-policy-file)), else the built-in default policy |
 | Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
 | Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Yes, to the next compliant model in the routed group on a 5xx, 429 or timeout, with the request's own provider credentials. A gateway config with its own fallback or retry settings takes over instead |
 | Streaming | Yes. Failover only before the first chunk; chunks keep the serving provider's shape (see [Streaming](#streaming)) | Yes. Failover only before the stream starts |
@@ -92,6 +92,36 @@ sensitivity:
 ```
 
 The JSON Schema is `schemas/route-policy/route-policy.v1.schema.json`.
+
+### Gateway route policy file
+
+Point the gateway at a policy document with `PS_ROUTE_POLICY_FILE`:
+
+```bash
+PS_ROUTE_POLICY_FILE=/etc/prompt-shields/route-policy.json \
+  node build/start-server.js --headless
+# Route policy: /etc/prompt-shields/route-policy.json (policy_version nordic-sovereign-1), data policy enforced
+```
+
+- The router is turned on with that policy; `PS_ROUTER_ENABLED` is not
+  needed. Its data policy applies to every model call, including a concrete
+  model sent to a provider: under the example policy, a call declared
+  `X-PS-Data-Classification: confidential` with `model: gpt-4o` and
+  `x-portkey-provider: openai` gets `403` (`error.code: policy_violation`)
+  before anything is sent upstream.
+- The file is checked at start against the schema and the cross-field rules
+  in its description (a `default_group` that is not a group, a
+  `data_policy` level that is not in `sensitivity.levels`, ...). An
+  unreadable or invalid file stops the gateway with exit code 1 and the
+  problems on stderr: it never starts without the data policy you set.
+- `kill -HUP <pid>` re-reads the file; with `PS_ROUTE_POLICY_RELOAD_SECONDS=N`
+  it is also polled every N seconds. A reload that fails (bad JSON, schema
+  error, file missing) is logged and the last good policy stays active.
+- Without the variable the gateway behaves as before.
+
+With the Helm chart, put the document under `gateway.routePolicy` (YAML);
+the chart mounts it from a ConfigMap and sets the variable
+(`charts/prompt-shields/README.md`).
 
 ## How a call is routed
 
@@ -615,13 +645,13 @@ against the code.
   OpenAI-only parameters (`tools`, `response_format`, `n`, ...) raise
   `RouterError` when the call is routed to Anthropic. They are not silently
   dropped.
-- **The gateway's default policy has no data rules.** The gateway mounts
-  `psRouter()` with its built-in default policy, which has no `sensitivity`,
-  `data_policy` or `use_cases` section. Those stages, and the data-policy
-  gate on concrete models and config overrides, only run when a policy with
-  those sections is passed in code (`psRouter(fromRoutePolicyDoc(doc))`).
-  There is no environment variable or file setting for a gateway route policy
-  yet.
+- **The gateway's default policy has no data rules.** Without
+  `PS_ROUTE_POLICY_FILE` the gateway router (`PS_ROUTER_ENABLED=true`) uses
+  its built-in default policy, which has no `sensitivity`, `data_policy` or
+  `use_cases` section, so those stages and the data-policy gate are off.
+  Set [`PS_ROUTE_POLICY_FILE`](#gateway-route-policy-file) to enforce one.
+  The file is read on Node only (the Docker image, `npx`), not in edge
+  builds.
 - **Only the `heuristic` strategy is implemented.** In the SDK, a policy
   whose `strategy` is `cheapest`, `latency` or `learned` raises
   `NotImplementedError` when no hint picks the group.
