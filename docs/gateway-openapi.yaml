@@ -399,6 +399,12 @@ paths:
       operationId: countResponseInputTokens
       tags: [Responses]
       summary: Count input tokens for a Responses request
+      description: |
+        Passed through to providers whose Responses API counts input tokens
+        (`openai`); other providers get a 400. Guardrails and mutators do not
+        run on counts, so a target with any hooks gets a local estimate
+        (`{ "object": "response.input_tokens", "input_tokens": N }`, marked
+        `x-ps-token-count: estimated`) and its prompt is never sent upstream.
       security:
         - ProviderBearer: []
         - ProviderApiKey: []
@@ -413,6 +419,12 @@ paths:
       responses:
         '200':
           description: Token count
+          headers:
+            x-ps-token-count:
+              description: '`estimated` when the count is the gateway''s local estimate; absent when the provider counted'
+              schema:
+                type: string
+                enum: [estimated]
           content:
             application/json:
               schema:
@@ -654,6 +666,9 @@ paths:
         1,600 per image or non-text document, 3 per message and tool
         definition) marked with `x-ps-token-count: estimated`; nothing is
         sent upstream. A provider without a chat or Messages API is a 400.
+        Guardrails and mutators do not run on counts, so a target with any
+        hooks gets the marked local estimate on every provider and its
+        prompt is never sent upstream.
       security:
         - ProviderApiKey: []
         - ProviderBearer: []
