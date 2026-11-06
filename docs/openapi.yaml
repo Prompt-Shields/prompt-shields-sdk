@@ -92,6 +92,7 @@ components:
             risks:review: Confirm or reject risk mappings, with reviewer and comment (never granted by default)
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
             audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events (never granted by default)
+            usage:export: Bulk export AI usage cost in the FinOps FOCUS format (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
@@ -682,6 +683,155 @@ components:
             - sensitivity_level
         - $ref: '#/components/schemas/SovereignShareTotals'
 
+    FocusCostRow:
+      type: object
+      description: |
+        One FOCUS v1.4 Cost and Usage row (JSON Lines). Column meanings and
+        nullability follow the FOCUS specification; see the FOCUS cost
+        export guide for how each column is filled.
+      required:
+        - BilledCost
+        - EffectiveCost
+        - ListCost
+        - ContractedCost
+        - BillingCurrency
+        - BillingAccountId
+        - BillingAccountName
+        - BillingAccountType
+        - BillingPeriodStart
+        - BillingPeriodEnd
+        - ChargePeriodStart
+        - ChargePeriodEnd
+        - ChargeCategory
+        - ChargeClass
+        - ChargeDescription
+        - ChargeFrequency
+        - ServiceProviderName
+        - HostProviderName
+        - InvoiceIssuerName
+        - ServiceName
+        - ServiceCategory
+        - ServiceSubcategory
+        - ResourceId
+        - ResourceName
+        - ResourceType
+        - RegionId
+        - RegionName
+        - AvailabilityZone
+        - SkuId
+        - PricingQuantity
+        - PricingUnit
+        - ConsumedQuantity
+        - ConsumedUnit
+        - AllocatedMethodDetails
+        - Tags
+        - x_EstimatedCost
+        - x_RequestCount
+        - x_InputTokens
+        - x_OutputTokens
+        - x_ModelName
+        - x_BusinessUnit
+        - x_UseCaseName
+        - x_Environment
+      properties:
+        BilledCost:
+          type: number
+        EffectiveCost:
+          type: number
+        ListCost:
+          type: number
+        ContractedCost:
+          type: number
+        BillingCurrency:
+          type: string
+        BillingAccountId:
+          type: string
+        BillingAccountName:
+          type: ["string", "null"]
+        BillingAccountType:
+          type: string
+        BillingPeriodStart:
+          type: string
+          format: date-time
+        BillingPeriodEnd:
+          type: string
+          format: date-time
+        ChargePeriodStart:
+          type: string
+          format: date-time
+        ChargePeriodEnd:
+          type: string
+          format: date-time
+        ChargeCategory:
+          type: string
+        ChargeClass:
+          type: ["string", "null"]
+        ChargeDescription:
+          type: ["string", "null"]
+        ChargeFrequency:
+          type: string
+        ServiceProviderName:
+          type: string
+        HostProviderName:
+          type: ["string", "null"]
+        InvoiceIssuerName:
+          type: string
+        ServiceName:
+          type: string
+        ServiceCategory:
+          type: string
+        ServiceSubcategory:
+          type: string
+        ResourceId:
+          type: ["string", "null"]
+        ResourceName:
+          type: ["string", "null"]
+        ResourceType:
+          type: ["string", "null"]
+        RegionId:
+          type: ["string", "null"]
+        RegionName:
+          type: ["string", "null"]
+        AvailabilityZone:
+          type: ["string", "null"]
+        SkuId:
+          type: ["string", "null"]
+        PricingQuantity:
+          type: ["number", "null"]
+        PricingUnit:
+          type: ["string", "null"]
+        ConsumedQuantity:
+          type: ["number", "null"]
+        ConsumedUnit:
+          type: ["string", "null"]
+        AllocatedMethodDetails:
+          type: ["object", "null"]
+        Tags:
+          type: ["object", "null"]
+        x_EstimatedCost:
+          type: number
+          description: "Estimated cost in USD (the Prompt Shields `cost`), in both cost modes"
+        x_RequestCount:
+          type: integer
+          description: "Calls in the row"
+        x_InputTokens:
+          type: ["integer", "null"]
+          description: "Input tokens; null when no call reported tokens"
+        x_OutputTokens:
+          type: ["integer", "null"]
+          description: "Output tokens; null when no call reported tokens"
+        x_ModelName:
+          type: ["string", "null"]
+          description: "Model that served the calls (same as `SkuId`)"
+        x_BusinessUnit:
+          type: ["string", "null"]
+          description: "Asset business unit"
+        x_UseCaseName:
+          type: ["string", "null"]
+          description: "Asset use case"
+        x_Environment:
+          type: ["string", "null"]
+          description: "Asset environment"
     SovereignShareReport:
       type: object
       description: Tenant-wide sovereign share over the period, in total and per sensitivity level.
@@ -2812,6 +2962,116 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SovereignShareReport'
+
+  /partner/v1/usage/focus-export:
+    get:
+      operationId: exportUsageFocus
+      tags: [Sync]
+      summary: Export AI usage cost (FinOps FOCUS)
+      description: |
+        The tenant's AI usage cost as rows of the FinOps FOCUS **v1.4** Cost
+        and Usage dataset, streamed as CSV or JSON Lines. One row per UTC
+        hour or day (`granularity`), asset, model and provider. Every
+        Mandatory and Recommended FOCUS column is present, plus the
+        Conditional columns that apply and custom `x_` columns
+        (`x_EstimatedCost`, `x_RequestCount`, `x_InputTokens`,
+        `x_OutputTokens`, `x_ModelName`, `x_BusinessUnit`, `x_UseCaseName`,
+        `x_Environment`). Business unit, use case and environment are also in
+        `Tags` (`ps:business_unit`, `ps:use_case`, `ps:environment`).
+
+        Costs are Prompt Shields estimates in USD, not invoiced amounts.
+        With `cost_mode=merge_safe` the FOCUS cost columns are 0, as FOCUS
+        requires of a data generator that is not the invoice issuer, so the
+        rows can be merged with a provider's own FOCUS export; the estimate
+        stays in `x_EstimatedCost`. Events without a cost are left out.
+
+        The window `[start, end)` may span at most 366 days and is clamped
+        to the tenant's retention period; the effective window is in the
+        `X-Export-Window-Start` and `X-Export-Window-End` headers. CSV cells
+        that would start a spreadsheet formula get a leading `'`. The
+        request is audited (row count not recorded). Requires `usage:export`,
+        which `registry:read` does not include.
+      parameters:
+        - name: start
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive start, ISO 8601 date or date-time (UTC when no offset;
+            URL-encode a `+` offset). Default: 30 days before `end`.
+        - name: end
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: "Exclusive end, ISO 8601 date or date-time. Default: now."
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, jsonl]
+            default: csv
+          description: CSV with a header row, or one JSON object per line
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [hour, day]
+            default: day
+          description: Charge period of each row (UTC)
+        - name: cost_mode
+          in: query
+          schema:
+            type: string
+            enum: [estimated, merge_safe]
+            default: estimated
+          description: |
+            `estimated`: `BilledCost`, `EffectiveCost`, `ListCost` and
+            `ContractedCost` carry the estimated cost. `merge_safe`: they
+            are 0 and the estimate is only in `x_EstimatedCost`.
+      security:
+        - OAuth2: [usage:export]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: "`start` is not before `end`, or the window spans more than 366 days"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: FOCUS v1.4 Cost and Usage rows
+          headers:
+            X-Focus-Version:
+              schema:
+                type: string
+                example: "1.4"
+            X-Export-Window-Start:
+              schema:
+                type: string
+                format: date-time
+              description: Effective inclusive start, after the retention clamp
+            X-Export-Window-End:
+              schema:
+                type: string
+                format: date-time
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="focus-cost-20261001T000000Z-20261101T000000Z.csv"
+          content:
+            text/csv:
+              schema:
+                type: string
+              example: |
+                BilledCost,EffectiveCost,ListCost,ContractedCost,BillingCurrency,...,x_EstimatedCost,x_RequestCount,...
+                0.030000,0.030000,0.030000,0.030000,USD,...,0.030000,2,...
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/FocusCostRow'
 
   /partner/v1/telemetry/coverage:
     get:
