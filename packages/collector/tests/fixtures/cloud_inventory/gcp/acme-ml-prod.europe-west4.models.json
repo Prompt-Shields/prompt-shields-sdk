@@ -1,0 +1,19 @@
+[
+  {
+    "baseModelSource": {
+      "modelGardenSource": {"publicModelName": "publishers/google/models/gemma2"}
+    },
+    "containerSpec": {"imageUri": "us-docker.pkg.dev/vertex-ai/vertex-vision-model-garden-dockers/pytorch-vllm-serve:20240620_0916_RC01"},
+    "createTime": "2025-04-10T08:20:01.004512Z",
+    "deployedModels": [
+      {"deployedModelId": "4417203958122938368", "endpoint": "projects/123456789012/locations/europe-west4/endpoints/9001112223334445556"}
+    ],
+    "displayName": "gemma-2-9b-it-1712345678",
+    "etag": "AMEw9yP1q2w3e4r5t6y",
+    "labels": {"department": "claims"},
+    "name": "projects/123456789012/locations/europe-west4/models/gemma-2-9b-it-1712345678",
+    "supportedDeploymentResourcesTypes": ["DEDICATED_RESOURCES"],
+    "updateTime": "2025-04-10T08:41:00.112233Z",
+    "versionId": "1"
+  }
+]

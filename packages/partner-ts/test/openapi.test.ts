@@ -32,6 +32,21 @@ interface Member {
   optional: boolean;
   /** String literals reachable from the member's type (through aliases). */
   literals: Set<string>;
+  /** JSON shape of the member's type, or undefined when it is `unknown`/`any`. */
+  shape?: Shape;
+}
+
+/**
+ * The JSON shape of a value: which primitive kinds it can be (`integer` is
+ * folded into `number`) and whether it can be null.
+ */
+interface Shape {
+  kinds: Set<string>;
+  nullable: boolean;
+}
+
+function showKinds(s: Shape): string {
+  return [...s.kinds].sort().join(' | ') || 'null';
 }
 
 const source = ts.createSourceFile(TYPES_PATH, fs.readFileSync(TYPES_PATH, 'utf8'), ts.ScriptTarget.Latest, true);
@@ -60,6 +75,84 @@ function literalsOf(node: ts.TypeNode | undefined, out = new Set<string>(), seen
   return out;
 }
 
+const TS_KEYWORD_KINDS: Partial<Record<ts.SyntaxKind, string>> = {
+  [ts.SyntaxKind.StringKeyword]: 'string',
+  [ts.SyntaxKind.NumberKeyword]: 'number',
+  [ts.SyntaxKind.BooleanKeyword]: 'boolean',
+  [ts.SyntaxKind.ObjectKeyword]: 'object',
+};
+/** Built-in and utility types, by the JSON kind they stand for. */
+const TS_REFERENCE_KINDS: Record<string, string> = {
+  Array: 'array',
+  ReadonlyArray: 'array',
+  Record: 'object',
+  Omit: 'object',
+  Pick: 'object',
+  Partial: 'object',
+  Required: 'object',
+  Readonly: 'object',
+  Date: 'string', // a Timestamp parameter, sent as an ISO 8601 string
+};
+
+/**
+ * The JSON shape of a type node, following aliases (with their type
+ * arguments) and interfaces. Undefined when the type is `unknown` or `any`,
+ * or names something this reader does not know; such members are skipped.
+ */
+function shapeOf(node: ts.TypeNode | undefined, env = new Map<string, ts.TypeNode>()): Shape | undefined {
+  if (!node) return undefined;
+  const one = (kind: string): Shape => ({ kinds: new Set([kind]), nullable: false });
+  const keyword = TS_KEYWORD_KINDS[node.kind];
+  if (keyword) return one(keyword);
+  if (node.kind === ts.SyntaxKind.UndefinedKeyword) return { kinds: new Set(), nullable: false };
+  if (ts.isParenthesizedTypeNode(node)) return shapeOf(node.type, env);
+  if (ts.isArrayTypeNode(node) || ts.isTupleTypeNode(node)) return one('array');
+  if (ts.isTypeLiteralNode(node) || ts.isMappedTypeNode(node)) return one('object');
+  if (ts.isLiteralTypeNode(node)) {
+    const lit = node.literal;
+    if (lit.kind === ts.SyntaxKind.NullKeyword) return { kinds: new Set(), nullable: true };
+    if (ts.isStringLiteral(lit)) return one('string');
+    if (ts.isNumericLiteral(lit) || ts.isPrefixUnaryExpression(lit)) return one('number');
+    if (lit.kind === ts.SyntaxKind.TrueKeyword || lit.kind === ts.SyntaxKind.FalseKeyword) return one('boolean');
+    return undefined;
+  }
+  if (ts.isUnionTypeNode(node)) {
+    const out: Shape = { kinds: new Set(), nullable: false };
+    for (const t of node.types) {
+      const sub = shapeOf(t, env);
+      if (!sub) return undefined;
+      sub.kinds.forEach((k) => out.kinds.add(k));
+      out.nullable ||= sub.nullable;
+    }
+    return out;
+  }
+  if (ts.isIntersectionTypeNode(node)) {
+    // `string & {}` (OpenString) is a string: a primitive part wins.
+    const parts = node.types.map((t) => shapeOf(t, env));
+    if (parts.some((p) => !p)) return undefined;
+    return (parts as Shape[]).find((p) => [...p.kinds].some((k) => k !== 'object')) ?? one('object');
+  }
+  if (ts.isTypeReferenceNode(node)) {
+    const name = node.typeName.getText(source);
+    const bound = env.get(name);
+    if (bound) return shapeOf(bound);
+    const alias = aliases.get(name);
+    if (alias) {
+      // Bind the alias's type parameters, reading each argument in this scope.
+      const inner = new Map<string, ts.TypeNode>();
+      alias.typeParameters?.forEach((p, i) => {
+        let arg = node.typeArguments?.[i] ?? p.default;
+        if (arg && ts.isTypeReferenceNode(arg)) arg = env.get(arg.typeName.getText(source)) ?? arg;
+        if (arg) inner.set(p.name.text, arg);
+      });
+      return shapeOf(alias.type, inner);
+    }
+    if (interfaces.has(name)) return one('object');
+    if (name in TS_REFERENCE_KINDS) return one(TS_REFERENCE_KINDS[name]);
+  }
+  return undefined;
+}
+
 function membersOf(name: string): Map<string, Member> {
   const decl = interfaces.get(name);
   if (!decl) throw new Error(`src/types.ts has no interface ${name}`);
@@ -72,7 +165,11 @@ function membersOf(name: string): Map<string, Member> {
   }
   for (const m of decl.members) {
     if (!ts.isPropertySignature(m) || !m.name) continue;
-    out.set(m.name.getText(source), { optional: Boolean(m.questionToken), literals: literalsOf(m.type) });
+    out.set(m.name.getText(source), {
+      optional: Boolean(m.questionToken),
+      literals: literalsOf(m.type),
+      shape: shapeOf(m.type),
+    });
   }
   return out;
 }
@@ -93,6 +190,80 @@ function enumOf(prop: Json): string[] {
   return values.filter((v: unknown) => typeof v === 'string');
 }
 
+const SPEC_KINDS: Record<string, string> = {
+  string: 'string',
+  number: 'number',
+  integer: 'number',
+  boolean: 'boolean',
+  array: 'array',
+  object: 'object',
+};
+
+/**
+ * The JSON shape a property schema allows: its `type` (one name or a list,
+ * `'null'` included), OpenAPI 3.0's `nullable: true`, and `oneOf`/`anyOf`
+ * branches. `allOf` narrows, so the first part with a known shape is used.
+ * Undefined when the schema does not say (no `type`); such properties are
+ * skipped.
+ */
+function specShape(node: Json): Shape | undefined {
+  if (!node || typeof node !== 'object') return undefined;
+  const s = deref(node);
+  let shape: Shape | undefined;
+  const branches = s.oneOf ?? s.anyOf;
+  if (branches) {
+    const out: Shape = { kinds: new Set(), nullable: false };
+    for (const b of branches) {
+      const sub = specShape(b);
+      if (!sub) return undefined;
+      sub.kinds.forEach((k) => out.kinds.add(k));
+      out.nullable ||= sub.nullable;
+    }
+    shape = out;
+  } else if (s.type !== undefined) {
+    const out: Shape = { kinds: new Set(), nullable: false };
+    for (const t of Array.isArray(s.type) ? s.type : [s.type]) {
+      if (t === 'null') out.nullable = true;
+      else if (SPEC_KINDS[t]) out.kinds.add(SPEC_KINDS[t]);
+      else return undefined;
+    }
+    shape = out;
+  } else if (s.allOf) {
+    for (const part of s.allOf) {
+      shape = specShape(part);
+      if (shape) break;
+    }
+  } else if (s.properties) {
+    shape = { kinds: new Set(['object']), nullable: false };
+  }
+  if (shape && (node.nullable === true || s.nullable === true)) shape.nullable = true;
+  return shape;
+}
+
+/**
+ * Problems with one member's type against its spec schema: the primitive
+ * kinds must be the same, and the member can be null exactly when the spec
+ * allows null. Optionality (`?`) is checked against `required` separately.
+ *
+ * A query parameter (`query: true`) may accept more than the spec: the
+ * client turns every value into a string and leaves out `null`, so e.g.
+ * `cursor?: string | number | null` for an integer parameter is fine. It
+ * must still accept every kind the spec documents.
+ */
+function compareShape(where: string, prop: Json, m: Member, { query = false } = {}): string[] {
+  const want = specShape(prop);
+  if (!want || !m.shape) return [];
+  const have = m.shape;
+  const problems: string[] = [];
+  const kindsMatch = query
+    ? [...want.kinds].every((k) => have.kinds.has(k))
+    : showKinds(want) === showKinds(have);
+  if (!kindsMatch) problems.push(`${where} is ${showKinds(have)} but ${showKinds(want)} in the spec`);
+  if (want.nullable && !have.nullable) problems.push(`${where} is not nullable but nullable in the spec`);
+  if (!want.nullable && have.nullable && !query) problems.push(`${where} is nullable but not nullable in the spec`);
+  return problems;
+}
+
 /** An object schema's properties and required names, through `allOf`. */
 function flatten(schema: Json): { props: Record<string, Json>; required: Set<string> } {
   const s = deref(schema);
@@ -109,7 +280,8 @@ function flatten(schema: Json): { props: Record<string, Json>; required: Set<str
 /**
  * Compare one object schema with one interface, both ways: every property
  * exists on both sides, a property is optional (`?`) exactly when the spec
- * does not list it in `required`, and every enum value is in the type.
+ * does not list it in `required`, its primitive type and nullability match
+ * (see compareShape), and every enum value is in the type.
  */
 function compareSchema(schema: Json, iface: string, rename: (wire: string) => string = camelKey): string[] {
   const members = membersOf(iface);
@@ -124,6 +296,7 @@ function compareSchema(schema: Json, iface: string, rename: (wire: string) => st
     }
     if (required.has(wire) && m.optional) problems.push(`${iface}.${name} is optional but required in the spec`);
     if (!required.has(wire) && !m.optional) problems.push(`${iface}.${name} is required but optional in the spec`);
+    problems.push(...compareShape(`${iface}.${name}`, prop, m));
     for (const v of enumOf(prop)) {
       if (!m.literals.has(v)) problems.push(`${iface}.${name} does not list enum value '${v}'`);
     }
@@ -539,6 +712,7 @@ describe('docs/openapi.yaml drift check', () => {
         continue;
       }
       if (p.required && m.optional) problems.push(`${op.params}.${name} is optional but required in the spec`);
+      problems.push(...compareShape(`${op.params}.${name}`, p.schema, m, { query: true }));
       for (const v of enumOf(p.schema)) {
         if (!m.literals.has(v)) problems.push(`${op.params}.${name} does not list enum value '${v}'`);
       }
@@ -573,6 +747,76 @@ describe('docs/openapi.yaml drift check', () => {
     expect(
       compareSchema({ required: ['since', 'limit'], properties: { since: {}, limit: {}, after: {} } }, 'ListChangesParams'),
     ).toEqual(['ListChangesParams.limit is optional but required in the spec']);
+  });
+
+  it('catches type and nullability drift (self-test)', () => {
+    const props = {
+      source: { type: 'string' },
+      clients: { type: 'integer' },
+      received_events: { type: 'integer' },
+      dropped_events: { type: 'integer' },
+      unaccounted_events: { type: 'integer' },
+      coverage: { type: ['number', 'null'] },
+      last_seen: { type: 'string', format: 'date-time', nullable: true },
+    };
+    const required = Object.keys(props);
+    expect(compareSchema({ required, properties: props }, 'SourceCoverage')).toEqual([]);
+    expect(
+      compareSchema(
+        {
+          required,
+          properties: {
+            ...props,
+            clients: { type: 'string' }, // integer -> string
+            received_events: { type: ['integer', 'null'] }, // became nullable
+            coverage: { type: 'number' }, // no longer nullable
+            last_seen: { oneOf: [{ type: 'boolean' }, { type: 'null' }] }, // string -> boolean
+          },
+        },
+        'SourceCoverage',
+      ),
+    ).toEqual([
+      'SourceCoverage.clients is number but string in the spec',
+      'SourceCoverage.receivedEvents is not nullable but nullable in the spec',
+      'SourceCoverage.coverage is nullable but not nullable in the spec',
+      'SourceCoverage.lastSeen is string but boolean in the spec',
+    ]);
+    // Aliases, OpenString and references to interfaces resolve to their JSON kind.
+    const shape = (iface: string, name: string) => {
+      const s = membersOf(iface).get(name)?.shape;
+      return s && showKinds(s) + (s.nullable ? ' | null' : '');
+    };
+    expect(shape('AIAsset', 'vendor')).toBe('string'); // OpenString<...>
+    expect(shape('AIAsset', 'dataClassification')).toBe('string | null');
+    expect(shape('AIAsset', 'discoverySource')).toBe('array');
+    expect(shape('SavingsReport', 'total')).toBe('object');
+    expect(shape('SiemAuditParams', 'since')).toBe('string'); // Timestamp = string | Date
+    // Query parameters may accept more kinds and null (the client stringifies
+    // values and drops null), but not fewer.
+    const cursor = membersOf('SiemAuditParams').get('cursor') as Member;
+    expect(compareShape('cursor', { type: 'integer' }, cursor, { query: true })).toEqual([]);
+    expect(compareShape('cursor', { type: 'boolean' }, cursor, { query: true })).toEqual([
+      'cursor is number | string but boolean in the spec',
+    ]);
+  });
+
+  it('compares the type of every mapped field', () => {
+    // A member typed `unknown`, or a property with no `type`, has no shape
+    // and is skipped by compareShape. Keep that list short and deliberate.
+    const skipped: string[] = [];
+    const mapped: [string, string, (wire: string) => string][] = [
+      ...Object.entries(SCHEMAS).map(([s, i]): [string, string, (w: string) => string] => [s, i, camelKey]),
+      ...Object.entries(VERBATIM_SCHEMAS).map(([s, i]): [string, string, (w: string) => string] => [s, i, (w) => w]),
+    ];
+    for (const [schema, iface, rename] of mapped) {
+      const members = membersOf(iface);
+      for (const [wire, prop] of Object.entries(flatten(spec.components.schemas[schema]).props)) {
+        if (!members.get(rename(wire))?.shape || !specShape(prop)) skipped.push(`${iface}.${rename(wire)}`);
+      }
+    }
+    expect(skipped.sort()).toEqual([
+      'Attestation.value', // any JSON value: `unknown` in the type, no `type` in the spec
+    ]);
   });
 
   it('reads allOf schemas (self-test)', () => {

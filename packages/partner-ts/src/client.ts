@@ -406,6 +406,10 @@ export class PartnerClient {
     }
     let reauthed = false;
     let attempt = 0;
+    // True once an attempt may have reached the server and been applied
+    // (a network error or a 5xx we retried after), as opposed to a 429,
+    // which the server refused without acting.
+    let mayHaveApplied = false;
 
     for (;;) {
       if (opts.signal?.aborted) throw new APIConnectionError(`Request to ${method} ${path} was aborted`);
@@ -458,6 +462,7 @@ export class PartnerClient {
         if (retrySafe && attempt < this.maxRetries) {
           await this.sleep(this.backoffMs(attempt));
           attempt++;
+          mayHaveApplied = true;
           continue;
         }
         throw wrapped;
@@ -481,6 +486,13 @@ export class PartnerClient {
         continue;
       }
 
+      // A DELETE retried after a network error or 5xx may have succeeded the
+      // first time with its response lost: a 404 now means the resource is
+      // gone, which is what the caller asked for. Never on the first attempt.
+      if (status === 404 && method === 'DELETE' && mayHaveApplied) {
+        return undefined as T;
+      }
+
       const error: APIError = makeAPIError(status, parsed, resHeaders);
       const retryable = status === 429 || (retrySafe && RETRY_STATUSES.has(status));
       if (attempt < this.maxRetries && retryable) {
@@ -491,6 +503,7 @@ export class PartnerClient {
         }
         await this.sleep(delay);
         attempt++;
+        if (status !== 429) mayHaveApplied = true;
         continue;
       }
       throw error;
@@ -933,7 +946,11 @@ export class ProviderCredentialsResource {
     );
   }
 
-  /** Delete a stored key. Throws `NotFoundError` if none is stored. */
+  /**
+   * Delete a stored key. Throws `NotFoundError` if none is stored.
+   * A 404 on a retry after a network error or 5xx is treated as success
+   * (an earlier attempt may have deleted it).
+   */
   async delete(provider: CredentialProvider): Promise<void> {
     await this.client.send<void>('DELETE', `/partner/v1/provider-credentials/${requireId(provider, 'provider')}`);
   }
@@ -1008,7 +1025,10 @@ export class ProviderKeyFingerprintsResource {
    * replacing the link. Anything that is not 16 lowercase hex characters
    * (a raw key, for example) is refused before it is sent. Idempotent, so
    * it is retried like a GET. `meta.corroboratedAssets` counts the assets
-   * the link verified.
+   * the link verified in the request that answered. After a retry (network
+   * error or 5xx) that is the final attempt's count: if an earlier attempt
+   * was applied but its response lost, those assets were already
+   * corroborated and the count can be 0. Use it as a hint, not a total.
    */
   put(provider: CredentialProvider, apiKeyId: string, request: FingerprintRequest): Promise<FingerprintLinkResult> {
     const apiKeyFingerprint = request?.apiKeyFingerprint;
@@ -1022,7 +1042,11 @@ export class ProviderKeyFingerprintsResource {
     );
   }
 
-  /** Delete a link. Throws `NotFoundError` if absent. */
+  /**
+   * Delete a link. Throws `NotFoundError` if absent.
+   * A 404 on a retry after a network error or 5xx is treated as success
+   * (an earlier attempt may have deleted it).
+   */
   async delete(provider: CredentialProvider, apiKeyId: string): Promise<void> {
     await this.client.send<void>(
       'DELETE',
@@ -1115,7 +1139,10 @@ export class WebhookSubscriptionsResource {
     );
   }
 
-  /** Delete a subscription and its queued and past deliveries. */
+  /**
+   * Delete a subscription and its queued and past deliveries. A 404 on a
+   * retry after a network error or 5xx is treated as success.
+   */
   async delete(subscriptionId: string): Promise<void> {
     await this.client.send<void>(
       'DELETE',

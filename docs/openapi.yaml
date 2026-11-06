@@ -6021,7 +6021,8 @@ paths:
       summary: Import a cloud AI inventory export for a tenant, with no cloud credentials (operator)
       description: >-
         Stores the AI model deployments in an export made with the cloud's own
-        read-only CLI (AWS Bedrock so far; see the discovery sources guide).
+        read-only CLI (AWS Bedrock, Azure OpenAI / AI Foundry and Azure ML,
+        Google Cloud Vertex AI; see the discovery sources guide).
         The collector makes no cloud call. An export that contains a
         credential field is refused with 400, naming the field but not its
         value.
@@ -6039,7 +6040,10 @@ paths:
                   format: uuid
                 export:
                   type: object
-                  description: '{"cloud": "aws", "account_id"?: "...", "regions": {"<region>": {...}}}'
+                  description: >-
+                    {"cloud": "aws", "account_id"?: "...", "regions": {"<region>": {...}}},
+                    {"cloud": "azure", "subscriptions": {"<subscription id>": {...}}} or
+                    {"cloud": "gcp", "projects": {"<project id>": {"<region>": {...}}}}
               required: [tenant_id, export]
       responses:
         '200':
