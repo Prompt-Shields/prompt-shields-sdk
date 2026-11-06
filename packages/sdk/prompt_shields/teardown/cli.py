@@ -2,6 +2,8 @@
 
     ps-teardown run usage.json events.jsonl --out-dir report/ --customer-label "Acme"
     ps-teardown run events.jsonl --policy policy.json --eval-results eval.json
+    ps-teardown reconcile ai_usage_events.csv --invoice invoice.csv
+    ps-teardown reconcile events.jsonl --usage openai_usage.json --fail-on-gap
 
 Reads local files only and makes no network calls. Writes the report as
 Markdown, HTML and JSON (``teardown-report.{md,html,json}``), and with
@@ -9,6 +11,10 @@ Markdown, HTML and JSON (``teardown-report.{md,html,json}``), and with
 sensitivity mix and policy replay; ``--eval-results`` (the JSON a prior
 ``ps-eval`` run wrote) adds quality parity and savings at parity. The
 teardown run itself never executes a prompt.
+
+``reconcile`` compares the cost Prompt Shields recorded (each event's own
+``cost``) with a provider invoice CSV or usage export, per provider, model
+and day, and flags gaps above ``--tolerance`` (2%); see ``reconcile.py``.
 """
 
 from __future__ import annotations
@@ -28,6 +34,16 @@ from prompt_shields.teardown.engine import (
     price_records,
 )
 from prompt_shields.teardown.policy import EvalResultsError, read_eval_results
+from prompt_shields.teardown.reconcile import (
+    DEFAULT_TOLERANCE_PCT,
+    RECONCILED,
+    Side,
+    ps_side,
+    read_invoice_csv,
+    reconcile,
+    render,
+    usage_export_side,
+)
 from prompt_shields.teardown.records import FORMATS, load_records
 from prompt_shields.teardown.render import render_report
 from prompt_shields.teardown.tuples import write_learning_tuples
@@ -81,7 +97,69 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--eval-results", metavar="JSON",
                      help="ps-eval --out-json results (needs --policy): add quality parity "
                           "and savings at parity (#14); no prompt is executed")
+    rec = sub.add_parser(
+        "reconcile",
+        help="compare recorded event costs with a provider invoice or usage export (M§3.1)",
+    )
+    rec.add_argument("events", nargs="+",
+                     help="Prompt Shields events: ai_usage_events rows or SDK / gateway "
+                          "events (JSONL, JSON or CSV)")
+    rec.add_argument("--invoice", action="append", default=[], metavar="CSV",
+                     help="invoice CSV: date, provider, model, amount_usd (repeatable)")
+    rec.add_argument("--usage", action="append", default=[], metavar="FILE",
+                     help="OpenAI / Anthropic usage export, priced at list price (repeatable)")
+    rec.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE_PCT, metavar="PCT",
+                     help="flag gaps above this percentage (default: 2)")
+    rec.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    rec.add_argument("--out", metavar="PATH", help="write the report here (default: stdout)")
+    rec.add_argument("--fail-on-gap", action="store_true",
+                     help="exit with status 3 when anything is flagged")
     return parser
+
+
+def _reconcile(parser: argparse.ArgumentParser, args) -> int:
+    if not args.invoice and not args.usage:
+        parser.error("reconcile: give --invoice and/or --usage")
+    if args.tolerance < 0:
+        parser.error("--tolerance: must not be negative")
+    for path in [*args.events, *args.invoice, *args.usage]:
+        if not Path(path).is_file():
+            parser.error(f"input not found: {path}")
+
+    events = load_records(args.events, fmt="ps-events")
+    ours = ps_side(events.records)
+    ours.sources = events.sources
+
+    theirs = Side()
+    for path in args.invoice:
+        side = read_invoice_csv(path)
+        theirs.lines += side.lines
+        theirs.sources += side.sources
+    if args.usage:
+        loaded = load_records(args.usage)
+        wrong = [s.file for s in loaded.sources
+                 if s.source not in ("openai-usage", "anthropic-usage")]
+        if wrong:
+            parser.error(f"--usage: not an OpenAI or Anthropic usage export: {', '.join(wrong)}")
+        side = usage_export_side(loaded.records)
+        both = {line.provider for line in side.lines} & {line.provider for line in theirs.lines}
+        if both:
+            parser.error(f"--invoice and --usage both cover {', '.join(sorted(both))}; "
+                         "give one per provider")
+        theirs.lines += side.lines
+        theirs.unpriced.update(side.unpriced)
+        theirs.sources += loaded.sources
+
+    report = reconcile(ours, theirs, args.tolerance)
+    text = render(report, args.format)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"ps-teardown: wrote {args.out}", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+    print(f"ps-teardown: reconciliation {report['status']} "
+          f"({report['flagged_rows']} flagged row(s))", file=sys.stderr)
+    return 3 if args.fail_on_gap and report["status"] != RECONCILED else 0
 
 
 def _read_json(parser: argparse.ArgumentParser, flag: str, path: str):
@@ -103,6 +181,8 @@ def _check_policy(parser: argparse.ArgumentParser, policy) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "reconcile":
+        return _reconcile(parser, args)
 
     for path in args.inputs:
         if not Path(path).is_file():

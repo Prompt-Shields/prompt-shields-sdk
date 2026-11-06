@@ -172,7 +172,7 @@
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true,
-          "description": "Models that passed eval_set at min_parity. Written back by the eval harness."
+          "description": "Models that passed eval_set at min_parity. Written back from ps-eval results by ps-eval-apply."
         }
       }
     },

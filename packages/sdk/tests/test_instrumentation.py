@@ -172,6 +172,7 @@ def fakes(monkeypatch):
     monkeypatch.setattr(inst, "BackgroundTelemetrySender", RecordingSender)
     for var in ("PS_API_KEY", "PS_COLLECTOR_URL", "PS_ATLAS_URL",
                 "PS_ATLAS_API_KEY", inst.MCP_TELEMETRY_MODE_ENV,
+                "PS_CREDENTIAL_FINGERPRINT",
                 *inst._METADATA_ENV.values()):
         monkeypatch.delenv(var, raising=False)
     yield NS(chat=chat, responses=responses, messages=messages, beta=beta)
@@ -265,6 +266,14 @@ def test_openai_chat_sync_event(fakes):
     assert len(event["api_key_fingerprint"]) == 16
     assert "prompt_text" not in event
     assert RecordingSender.instances[0].flushes == 1
+
+
+def test_credential_fingerprint_replaces_the_key_hash(fakes, monkeypatch):
+    # Keyless auth (#76): one identity fingerprint, whatever token is used.
+    monkeypatch.setenv("PS_CREDENTIAL_FINGERPRINT", "a2488441e9dcd04f")
+    prompt_shields.instrument(ps_api_key="ps_key")
+    fakes.chat.Completions().create(model="gpt-4o", messages=MESSAGES)
+    assert _events()[0]["api_key_fingerprint"] == "a2488441e9dcd04f"
 
 
 def test_instrumented_calls_get_a_call_id(fakes):

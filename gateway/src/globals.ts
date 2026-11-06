@@ -126,6 +126,7 @@ export const SCALEWAY: string = 'scaleway';
 export const REGOLO: string = 'regolo';
 export const IONOS: string = 'ionos';
 export const STACKIT: string = 'stackit';
+export const INFERCOM: string = 'infercom';
 export const META: string = 'meta';
 export const SCX_AI: string = 'scx-ai';
 export const CLAUDE_PLATFORM_AWS: string = 'claude-platform-aws';
@@ -220,6 +221,7 @@ export const VALID_PROVIDERS = [
   REGOLO,
   IONOS,
   STACKIT,
+  INFERCOM,
   META,
   SCX_AI,
   CLAUDE_PLATFORM_AWS,
