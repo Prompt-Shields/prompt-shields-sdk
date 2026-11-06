@@ -43,6 +43,10 @@ data:
   PS_BUDGET_REDIS_URL: {{ . | quote }}
   {{- end }}
   {{- end }}
+  {{- if .Values.gateway.routePolicy }}
+  PS_ROUTE_POLICY_FILE: /etc/prompt-shields/route-policy/route-policy.json
+  PS_ROUTE_POLICY_RELOAD_SECONDS: {{ toString (int64 .Values.gateway.routePolicyReloadSeconds) | quote }}
+  {{- end }}
 {{- end }}
 ---
 apiVersion: v1

@@ -22,6 +22,7 @@ import { createDrain, shutdownTimeoutMs } from './psShutdown';
 import { loadMcpServersFromEnv } from './mcp/loadConfig';
 import { loadBaselineFromEnv } from './middlewares/router/baselineLoader';
 import { loadBudgetsFromEnv } from './middlewares/psBudget/loader';
+import { loadRoutePolicyFromEnv } from './middlewares/router/policyFileLoader';
 import { psMcpTelemetrySender } from './mcp/telemetry';
 
 // Extract the port number from the command line arguments
@@ -60,6 +61,23 @@ try {
     );
 } catch (err) {
   console.error(`Budget configuration error: ${(err as Error).message}`);
+  process.exit(1);
+}
+// PS fork (#336): the route policy file. An invalid file stops the gateway
+// rather than routing without the operator's data policy; a bad reload
+// (SIGHUP, PS_ROUTE_POLICY_RELOAD_SECONDS) keeps the last good policy.
+try {
+  const routePolicy = await loadRoutePolicyFromEnv();
+  if (routePolicy)
+    console.log(
+      `Route policy: ${process.env.PS_ROUTE_POLICY_FILE}` +
+        (routePolicy.policy.policyVersion
+          ? ` (policy_version ${routePolicy.policy.policyVersion})`
+          : '') +
+        (routePolicy.policy.dataPolicy ? ', data policy enforced' : '')
+    );
+} catch (err) {
+  console.error(`Route policy error: ${(err as Error).message}`);
   process.exit(1);
 }
 const hasAdminToken = Boolean(readAdminToken());

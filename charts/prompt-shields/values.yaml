@@ -225,6 +225,32 @@ gateway:
     #    limit_usd: 500
     #    mode: downgrade           # warn, downgrade, block
     #    warn_at: 0.8
+  # Route policy (#336): a route-policy.v1 document (schemas/route-policy/,
+  # shared with the SDK) as YAML. When set, the chart renders it into a
+  # ConfigMap mounted at /etc/prompt-shields/route-policy and sets
+  # PS_ROUTE_POLICY_FILE, which turns on the router with this policy: its
+  # data_policy is enforced on every model call (403 policy_violation when a
+  # call's sensitivity level forbids the target). An invalid document stops
+  # the gateway at start (the rollout halts, old pods keep serving). Changing
+  # it rolls the pods; the gateway also re-reads the file on SIGHUP.
+  routePolicy: {}
+  #  schema_version: route-policy.v1
+  #  policy_version: acme-2026-11
+  #  default_group: balanced
+  #  quality_to_group: {draft: cheap, balanced: balanced, critical: balanced}
+  #  groups:
+  #    cheap:
+  #      - {model: mistral-small-eu, provider: mistral-eu, input_cost_per_1k: 0.0002, output_cost_per_1k: 0.0006, jurisdiction: EEA, zdr: true}
+  #    balanced:
+  #      - {model: gpt-4o, provider: openai, input_cost_per_1k: 0.0025, output_cost_per_1k: 0.01, jurisdiction: US}
+  #  sensitivity: {levels: [public, internal, confidential, restricted], unclassified_default: internal}
+  #  data_policy:
+  #    confidential: {jurisdictions: [EEA], require_zdr: true}
+  #    restricted: {jurisdictions: [EEA], providers: [mistral-eu]}
+  # PS_ROUTE_POLICY_RELOAD_SECONDS: also poll the mounted file and apply a
+  # changed policy without a restart (kubelet updates a ConfigMap volume
+  # within a minute or so). 0: off. A bad reload keeps the last good policy.
+  routePolicyReloadSeconds: 0
   # Plain (non-secret) environment, rendered into a ConfigMap. Any gateway
   # setting works here; README lists them. Examples:
   #   MAX_JSON_PAYLOAD_SIZE_IN_MB: "100"
