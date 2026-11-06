@@ -149,6 +149,40 @@ first (`created_at`), not the one with the earliest `first_seen`: the usage
 pull backdates `first_seen` to its earliest bucket, which would otherwise
 let a newly created platform_signal asset take over a key.
 
+## Human attestation
+
+`confidence` counts how many independent sources reported an asset. It never
+means a person checked it. Attestation is the separate sign-off: per asset and
+per field (`asset`, `owner`, `data_classification`), someone records that the
+value is right (`attested`), wrong (`disputed`, comment required), no longer
+relevant (`retired`), or resets it to `unreviewed`. Each decision is an
+immutable row with who (`attested_by`, plus the tenant key or partner that
+called), when, the comment and a snapshot of the value. Recording one never
+changes `confidence`.
+
+- Record and read history: `POST`/`GET /api/v1/registry/assets/{id}/attestations`
+  (tenant key) or `/partner/v1/assets/{id}/attestations` (`attestations:write`
+  to record, `assets:read` to read).
+- Every asset in the registry and Partner API lists, detail, search results,
+  `/partner/v1/export` and `/partner/v1/changes` carries `attestation` (the
+  current state of each field, with `value_changed` when the value moved since
+  the sign-off) next to `confidence`. An attestation puts the asset in the delta
+  feed and sends an `asset.attested` webhook.
+- Review queue: filter either asset list with
+  `attestation_field=owner&attestation_state=unreviewed` (fields nobody has
+  attested count as `unreviewed`), or `…&attestation_state=disputed`.
+- The CycloneDX AI-BOM (`/partner/v1/export?format=cyclonedx`) carries
+  `promptshields:attestation:<field>` and, for attested fields,
+  `…:attested_by`, `…:attested_at` and `…:value_changed`. Comments are not
+  exported. `attested_by` is usually an email: like `promptshields:owner`,
+  it is in the BOM because the export needs `export:read`, the same scope as
+  the JSON export, which already carries both. Treat a BOM you pass on as
+  containing personal data. `asset.attested` webhooks leave `attested_by` out.
+
+Rule-based risk suggestions have their own human review (confirm or reject,
+with a comment and history): see `POST /api/v1/admin/risk-mappings/{risk_id}/review`
+and the Partner API `…/risks/{risk_id}/review`.
+
 ## Key Fields
 
 | Field | Description | Example |
