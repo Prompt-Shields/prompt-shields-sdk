@@ -509,6 +509,18 @@ features.embedding   # tuple of 64 floats, local only
 client = ShieldsOpenAI(api_key=..., ps_api_key=..., on_prompt_features=my_learner.observe)
 ```
 
+## Routing Learner (recommend mode)
+
+`ps-learn` (`prompt_shields.learner`) learns, offline and on your machine, which
+policy-compliant model serves each (use case, sensitivity) best from learning tuples, and
+writes a versioned snapshot with recommended route changes and their projected savings and
+quality. It never routes a call. `--upload` sends the snapshot to the collector, where a person
+accepts or rejects each recommendation. See the [Routing Learner guide](/guides/routing-learner).
+
+```bash
+ps-learn --tuples tuples.jsonl --policy route-policy.json --out snapshot.json
+```
+
 ## PII Detection
 
 The SDK runs a local pattern-based scanner before sending telemetry:

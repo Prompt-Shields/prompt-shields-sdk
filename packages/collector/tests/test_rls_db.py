@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from collector import audit_trail, rls
+from collector import audit_trail, learner, rls
 from collector.app import app
 from collector.config import settings
 from collector.partner_auth import hash_secret
@@ -33,6 +33,8 @@ from db.models import (
     Base,
     CallFeedback,
     DataFlow,
+    LearnerRecommendation,
+    LearnerSnapshot,
     McpToolUsage,
     PartnerAuditLog,
     PartnerCredential,
@@ -198,15 +200,39 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
         )
         s.add(sub)
         await s.flush()
-        s.add(
-            WebhookDelivery(
-                tenant_id=tenant_id,
-                subscription_id=sub.id,
-                event_id=uuid.uuid4(),
-                event_type="asset.created",
-                payload={},
-                status="succeeded",
-            )
+        snap = LearnerSnapshot(
+            tenant_id=tenant_id,
+            learner_version=f"lv1-seed{name:0>12}",
+            mode="recommend",
+            algorithm="linear-thompson.v1",
+            data_fingerprint="0" * 64,
+            training_rows=0,
+            scored_rows=0,
+            snapshot={},
+        )
+        s.add(snap)
+        await s.flush()
+        s.add_all(
+            [
+                WebhookDelivery(
+                    tenant_id=tenant_id,
+                    subscription_id=sub.id,
+                    event_id=uuid.uuid4(),
+                    event_type="asset.created",
+                    payload={},
+                    status="succeeded",
+                ),
+                LearnerRecommendation(
+                    tenant_id=tenant_id,
+                    snapshot_id=snap.id,
+                    learner_version=snap.learner_version,
+                    sensitivity_level="internal",
+                    current_model="openai:gpt-4o",
+                    recommended_model="mistral:mistral-small",
+                    candidates=["mistral:mistral-small"],
+                    projection={},
+                ),
+            ]
         )
         await s.commit()
 
@@ -583,6 +609,81 @@ async def test_call_feedback_under_rls(rls_db):
         await s.rollback()
 
 
+def _learner_snapshot() -> dict:
+    snap = {
+        "schema": "ps-learner-snapshot.v1",
+        "mode": "recommend",
+        "algorithm": "linear-thompson.v1",
+        "data": {"fingerprint": "1" * 64, "rows": 10, "scored_rows": 10},
+        "groups": [],
+        "recommendations": [
+            {
+                "use_case": "support",
+                "sensitivity": "internal",
+                "current_model": "openai:gpt-4o",
+                "recommended_model": "mistral:mistral-small",
+                "candidates": ["mistral:mistral-small", "openai:gpt-4o"],
+                "projection": {
+                    "calls": 10,
+                    "current": {"quality": 0.9, "cost_per_call": 0.01},
+                    "recommended": {"quality": 0.9, "cost_per_call": 0.002},
+                    "quality_delta": 0.0,
+                    "savings_per_call": 0.008,
+                    "savings_pct": 0.8,
+                    "prob_best": 0.95,
+                },
+            }
+        ],
+    }
+    snap["learner_version"] = learner.expected_version(snap)
+    return snap
+
+
+async def test_learner_snapshots_under_rls(rls_db):
+    a, b = rls_db["a"], rls_db["b"]
+    snap = _learner_snapshot()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for key in (KEY_A, KEY_B):
+            # The same snapshot is a new row per tenant; nothing is superseded
+            # across tenants.
+            resp = await c.post(
+                "/ingest/learner-snapshots",
+                headers={"Authorization": f"Bearer {key}"},
+                json=snap,
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["created"] is True
+            assert resp.json()["superseded"] == 0
+
+    async with rls_db["admin"]() as s:
+        rows = (
+            await s.execute(
+                select(LearnerRecommendation.tenant_id, LearnerRecommendation.status).where(
+                    LearnerRecommendation.learner_version == snap["learner_version"]
+                )
+            )
+        ).all()
+    assert sorted(str(t) for t, _ in rows) == sorted([str(a), str(b)])
+    assert {st for _, st in rows} == {"pending"}
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        s.add(
+            LearnerSnapshot(
+                tenant_id=b,
+                learner_version="lv1-0000000000000bad",
+                mode="recommend",
+                algorithm="x",
+                data_fingerprint="0" * 64,
+                training_rows=0,
+                scored_rows=0,
+                snapshot={},
+            )
+        )
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+
+
 async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, caplog):
     monkeypatch.setattr(settings, "admin_token", TOKEN)
     a, b = rls_db["a"], rls_db["b"]
@@ -605,6 +706,8 @@ async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, cap
         assert resp.json()["rows_deleted"]["webhook_subscriptions"] == 1
         assert resp.json()["rows_deleted"]["mcp_tool_usage"] == 1
         assert resp.json()["rows_deleted"]["call_feedback"] == 1
+        assert resp.json()["rows_deleted"]["learner_recommendations"] == 1
+        assert resp.json()["rows_deleted"]["learner_snapshots"] == 1
 
     assert any(
         "rls bypass granted reason=operator:POST /api/v1/operator/retention/purge"

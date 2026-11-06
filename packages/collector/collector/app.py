@@ -183,6 +183,13 @@ from collector.risk_reviews import partner_router as risk_reviews_partner_router
 app.include_router(risk_reviews_admin_router)
 app.include_router(risk_reviews_partner_router)
 
+# Routing learner snapshots and recommendation review (#47, #48)
+from collector.learner import ingest_router as learner_ingest_router
+from collector.learner import partner_router as learner_partner_router
+
+app.include_router(learner_ingest_router)
+app.include_router(learner_partner_router)
+
 # Platform signal: provider org usage pull (admin trigger)
 from collector.provider_usage_admin import router as provider_usage_router
 
