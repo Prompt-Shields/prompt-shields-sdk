@@ -422,6 +422,61 @@ describe('hooks keep the prompt off native count APIs', () => {
     expect(upstreamCalls).toHaveLength(0);
   });
 
+  test('default guardrails from the header count as hooks', async () => {
+    stubEveryUpstream();
+    const res = await count(secretBody(), {
+      'x-portkey-config': JSON.stringify(natives[0][1]),
+      'x-portkey-default-input-guardrails': JSON.stringify(
+        DENY.input_guardrails
+      ),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-ps-token-count')).toBe('estimated');
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('output-only hooks also keep the prompt local', async () => {
+    stubEveryUpstream();
+    const res = await count(secretBody(), {
+      'x-portkey-config': JSON.stringify({
+        ...natives[0][1],
+        output_guardrails: [
+          { 'default.contains': { operator: 'none', words: ['x'] } },
+        ],
+      }),
+    });
+    expect(res.headers.get('x-ps-token-count')).toBe('estimated');
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('a conditional config checks the target it actually picks', async () => {
+    const conditional = (model: string) => ({
+      strategy: {
+        mode: 'conditional',
+        conditions: [
+          { query: { 'params.model': { $eq: 'guarded' } }, then: 'g' },
+        ],
+        default: 'open',
+      },
+      targets: [
+        { name: 'g', ...natives[0][1], ...DENY, override_params: { model } },
+        { name: 'open', ...natives[0][1] },
+      ],
+    });
+    stubEveryUpstream();
+    const guarded = await count(
+      { ...secretBody(), model: 'guarded' },
+      { 'x-portkey-config': JSON.stringify(conditional('claude-sonnet-5-5')) }
+    );
+    expect(guarded.headers.get('x-ps-token-count')).toBe('estimated');
+    expect(upstreamCalls).toHaveLength(0);
+    const open = await count(secretBody(), {
+      'x-portkey-config': JSON.stringify(conditional('claude-sonnet-5-5')),
+    });
+    expect(open.headers.get('x-ps-token-count')).toBeNull();
+    expect(upstreamCalls).toHaveLength(1);
+  });
+
   test('/v1/messages on the same target does redact (the contrast)', async () => {
     upstream(/api\.anthropic\.com\/v1\/messages$/, () =>
       json({
