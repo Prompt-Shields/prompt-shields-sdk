@@ -22,7 +22,7 @@ Models are keyed `"<provider>/<model id>"`, for example `openai/gpt-4o` or `berg
 - Cache: `cache_read_input_token_cost`, `cache_creation_input_token_cost` (5-minute writes), `cache_creation_input_token_cost_above_1hr` (1-hour writes).
 - Reasoning: `output_cost_per_reasoning_token`. Where it is set, it equals the output rate, which is what the SDK charges reasoning tokens at.
 - Long context: `*_above_200k_tokens`. When the whole prompt is above 200k tokens, the whole request is priced at these rates.
-- Batch and flex: `*_batches`, `*_flex`.
+- Service tiers: `*_batches`, `*_flex`, `*_priority` (input, output and, optionally, `cache_read_input_token_cost_<tier>`). They price calls whose `service_tier` is `batch`, `flex` or `priority`.
 - Audio: `input_cost_per_audio_token`, `output_cost_per_audio_token`.
 - Limits and capabilities: `max_input_tokens`, `max_output_tokens`, `supports_function_calling`, `supports_response_schema`, `supports_vision`, `supports_reasoning`, `supports_prompt_caching`.
 
