@@ -247,6 +247,26 @@ export interface UsageSummary {
   /** Upstream cost (USD) gateway cache hits avoided. `null` when none reported it. */
   cacheSavedUsd: number | null;
   /**
+   * The gateway's estimate of the prompt tokens cache lookups saved (from
+   * the request size, not a provider count). `null` when none reported it.
+   */
+  cacheTokensSaved: number | null;
+  /**
+   * Events the SDK routing learner decided in auto mode (exploit, explore or
+   * policy). 0 when it decided none.
+   */
+  learnerRequests: number;
+  /**
+   * Share (0 to 1) of all events that the routing learner decided. `null` when
+   * there were no events.
+   */
+  learnerRoutedShare: number | null;
+  /**
+   * Share (0 to 1) of the learner-decided events on which it explored.
+   * `null` when the learner decided none.
+   */
+  learnerExploreShare: number | null;
+  /**
    * Events that reported implicit outcome signals (#44), including those that
    * reported none happened.
    */

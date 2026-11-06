@@ -58,13 +58,16 @@ import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import {
   adaptResponse,
   applyAdapterRequestTransform,
+  estimatedResponseInputTokensResponse,
   messagesCountTokensRoute,
+  RESPONSES_PROVIDER_OPERATIONS,
 } from './adapterUtils';
 import {
   MESSAGES_VIA_RESPONSES_HEADER,
   messagesViaResponsesOverride,
   stripIssuedReasoning,
 } from '../adapters/messagesViaResponses';
+import { stripIssuedThinking } from '../adapters/responses';
 import { pickCredentialHeaders, redactString } from '../utils/redact';
 import { UPSTREAM_REDIRECT_MODE } from '../utils/fetch';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
@@ -420,6 +423,19 @@ export async function tryPost(
     !isRawBody && typeof overrideModel === 'string' && overrideModel
       ? { ...params, model: overrideModel }
       : params;
+  // PS fork (#73 follow-up): hooks do not run on token counts, so a target
+  // with hooks is never sent the prompt to count; it gets a marked local
+  // estimate, as on /v1/messages/count_tokens (messagesCountTokensRoute).
+  if (
+    fn === 'countResponseInputTokens' &&
+    targetHasHooks &&
+    !isRawBody &&
+    RESPONSES_PROVIDER_OPERATIONS.countResponseInputTokens?.providers.includes(
+      providerOption.provider ?? ''
+    )
+  ) {
+    return estimatedResponseInputTokensResponse(routingParams);
+  }
   const adapterResult =
     fn === 'messagesCountTokens' && !isRawBody
       ? // PS fork (#73 follow-up): count_tokens for every provider.
@@ -457,10 +473,16 @@ export async function tryPost(
       c,
       providerOption,
       // PS fork (#73): thinking signed by the Messages → Responses route
-      // means nothing to a native Messages target; drop it there.
-      !isRawBody && (fn === 'messages' || fn === 'messagesCountTokens')
-        ? stripIssuedReasoning(requestBody)
-        : requestBody,
+      // means nothing to a native Messages target; drop it there. Likewise
+      // the thinking the Responses adapter carries in reasoning items means
+      // nothing to a native Responses target.
+      isRawBody
+        ? requestBody
+        : fn === 'messages' || fn === 'messagesCountTokens'
+          ? stripIssuedReasoning(requestBody)
+          : fn === 'createModelResponse' || fn === 'countResponseInputTokens'
+            ? stripIssuedThinking(requestBody)
+            : requestBody,
       requestHeaders,
       fn,
       currentIndex,

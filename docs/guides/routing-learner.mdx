@@ -209,9 +209,18 @@ Failover starts from the chosen model and stays inside the data policy.
 `resp.ps.route.learner` records the choice: model, `exploit` / `explore` /
 `policy`, the propensity, the rate, the policy's pick and the snapshot
 version. The route reason ends in `+learner-exploit` or `+learner-explore`.
-The telemetry event carries `route_learner_mode`, `route_propensity` and
-`route_learner_version` for your own logs. The collector does not store
-these three fields yet.
+The telemetry event carries `route_learner_mode`, `route_propensity`,
+`route_learner_version` (null when no snapshot is active, for example after
+a rollback to the plain policy) and `route_learner_frozen`. The collector
+stores them on the usage event; an invalid value is stored as null and
+counted as `<field>:invalid` in `/telemetry/loss`, and the rest of the
+batch is kept. The Partner API usage summary
+(`GET /partner/v1/assets/{id}/usage-summary`) reports `learner_requests`,
+`learner_routed_share` (the share of all calls the learner decided) and
+`learner_explore_share` (the share of those it explored). The teardown's
+`--learning-tuples` export carries the logged `propensity`,
+`learner_mode` and `learner_version` on calls the learner routed, so a
+retrain over logged events can use the doubly robust estimate.
 
 ### The enablement gate
 
@@ -219,7 +228,11 @@ You can only enable a use case that has a proven `recommend` track record.
 `AutoLearner` takes the Partner API's
 `GET /partner/v1/learner/recommendations?use_case=...` answer
 (`fetch_recommendations`, scope `learner:read`) and counts the following
-recommendations:
+recommendations. `fetch_recommendations` needs `ps_collector_url`, the
+collector's `https://` base URL (plain `http://` only for localhost), and
+raises `AutoModeError` without one, because the request carries your partner
+token. A duplicate record counts once, by its `id` or, without one, by its
+snapshot, use case, sensitivity and models.
 
 * **Evaluated**: accepted recommendations whose realised savings were
   measured on at least 50 calls.
@@ -255,11 +268,17 @@ snapshot is rolled back on either of these:
   mean. With too few control calls, the reference is the recommendation's
   projected quality for the current route.
 
-Rollback restores the last good snapshot. A snapshot is good once it has
-served `promote_after` treated calls (default 200) without a breach. With no
-good snapshot, the router falls back to the route policy's own decisions. A
-rolled-back version is never loaded again. Every threshold is in
-`GuardConfig`.
+Rollback restores the last good snapshot. A snapshot is good once every
+(use case, sensitivity) group it moved calls in has served at least
+`promote_after` treated calls (default 200) of its own without a breach. One
+busy group cannot promote a snapshot for the others. With no good snapshot,
+the router falls back to the route policy's own decisions. A rolled-back
+version is never loaded again. Every threshold is in `GuardConfig`.
+
+If the learner itself raises while choosing a model or recording an outcome,
+the call still goes ahead on the policy's own pick. The router logs only the
+error type and counts the fallback in `learner.fallbacks` (per stage,
+`choose` or `observe`) and in a `learner_error` event.
 
 ### Freezing on drift and poisoning
 

@@ -35,10 +35,12 @@ import {
   transformResponsesStreamChunk,
   createResponsesToMessagesStreamState,
 } from '../adapters/messagesViaResponses';
-import { estimateMessagesInputTokens } from '../adapters/messages/estimateTokens';
+import {
+  estimateMessagesInputTokens,
+  estimateResponsesInputTokens,
+} from '../adapters/messages/estimateTokens';
 import { toMessagesError } from '../adapters/shared';
-import { GOOGLE, GOOGLE_VERTEX_AI, OPEN_AI } from '../globals';
-import { getModelAndProvider } from '../providers/google-vertex-ai/utils';
+import { OPEN_AI } from '../globals';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -177,7 +179,7 @@ export function applyAdapterRequestTransform(
         ? {}
         : { ...(requestBody as Params) };
     const transformedParams = normalizeTokenLimitForProvider(
-      transformResponsesToChatCompletions(params),
+      transformResponsesToChatCompletions(params, provider),
       provider
     );
 
@@ -275,8 +277,32 @@ export function estimatedCountTokensResponse(params: Params): Response {
 }
 
 /**
+ * A Responses `input_tokens` answer estimated in the gateway, for
+ * `POST /v1/responses/input_tokens` on a target with hooks.
+ */
+export function estimatedResponseInputTokensResponse(params: Params): Response {
+  return new Response(
+    JSON.stringify({
+      object: 'response.input_tokens',
+      input_tokens: estimateResponsesInputTokens(params),
+    }),
+    {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        [TOKEN_COUNT_SOURCE_HEADER]: 'estimated',
+      },
+    }
+  );
+}
+
+/**
  * Decide how `POST /v1/messages/count_tokens` reaches one target:
  *
+ * 0. A target with hooks (before/after-request hooks or default input/output
+ *    guardrails) on any provider the Messages endpoint can reach: a local
+ *    estimate, marked `x-ps-token-count: estimated`; nothing is sent
+ *    upstream (see below).
  * 1. `null`: the provider has its own Messages count_tokens config
  *    (anthropic, bedrock, claude-platform-aws, Vertex AI for Claude, and
  *    Gemini on google / vertex-ai via countTokens): call it as is.
@@ -288,9 +314,14 @@ export function estimatedCountTokensResponse(params: Params): Response {
  *    `x-ps-token-count: estimated`; nothing is sent upstream.
  * 4. Anything else: a 400 in Anthropic's error shape.
  *
- * Guardrails and mutators do not run on count requests, so a target with
- * hooks is never sent its content on the routes added here (Gemini, OpenAI):
- * it gets the local estimate, as /v1/messages would redact or deny first.
+ * Guardrails and mutators do not run on count requests (`shouldSkipHook`).
+ * Running them there would call guardrail backends, record guardrail
+ * verdicts and need a fail-open/closed decision for a request that never
+ * generates anything, and a mutator rewrites the shape it was written for,
+ * not each provider's count body. So a target with hooks is never sent the
+ * prompt on any count route, native Anthropic, Bedrock and Vertex AI ones
+ * included: /v1/messages would redact or deny it first. The estimate keeps
+ * every count path uniform and never reaches the upstream.
  */
 export function messagesCountTokensRoute(
   provider: string,
@@ -298,14 +329,18 @@ export function messagesCountTokensRoute(
   customHost?: string,
   targetHasHooks = false
 ): AdapterRequestResult | Response | null {
-  const gemini =
-    provider === GOOGLE ||
-    (provider === GOOGLE_VERTEX_AI &&
-      getModelAndProvider(String(params.model ?? '')).provider === 'google');
-  if (targetHasHooks && (gemini || provider === OPEN_AI)) {
+  const nativeCount = Boolean(
+    providerFnConfig(provider, 'messagesCountTokens', params)
+  );
+  const reachable =
+    nativeCount ||
+    provider === OPEN_AI ||
+    Boolean(providerFnConfig(provider, 'chatComplete', params)) ||
+    Boolean(providerFnConfig(provider, 'messages', params));
+  if (targetHasHooks && reachable) {
     return estimatedCountTokensResponse(params);
   }
-  if (providerFnConfig(provider, 'messagesCountTokens', params)) return null;
+  if (nativeCount) return null;
   if (provider === OPEN_AI && !customHost) {
     let responsesParams: Params;
     try {
@@ -579,7 +614,10 @@ function adaptStreamingResponse(
   } else {
     // Responses API adapter
     // PS fork (#73): snapshots echo the client's request fields
-    const state = responsesCreateStreamState(adapterCtx.originalRequest);
+    const state = responsesCreateStreamState(
+      adapterCtx.originalRequest,
+      adapterCtx.provider
+    );
 
     (async () => {
       try {
