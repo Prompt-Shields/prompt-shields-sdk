@@ -23,6 +23,10 @@ export const GoogleApiConfig: ProviderAPIConfig = {
       case 'embed': {
         return `/${routeVersion}/models/${model}:embedContent?key=${apiKey}`;
       }
+      // PS fork (#73 follow-up): Messages count_tokens.
+      case 'messagesCountTokens': {
+        return `/${routeVersion}/models/${model}:countTokens?key=${apiKey}`;
+      }
       default:
         return '';
     }
