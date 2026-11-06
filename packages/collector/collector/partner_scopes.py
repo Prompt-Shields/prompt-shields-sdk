@@ -52,6 +52,14 @@ SCOPES: dict[str, str] = {
         "Store, rotate and delete provider admin keys (write-only) and "
         "key fingerprint links for the org usage pull"
     ),
+    "learner:read": (
+        "List routing learner snapshots and their recommendations, with "
+        "projected and realised savings"
+    ),
+    "learner:review": (
+        "Accept or reject a routing learner recommendation, with the "
+        "reviewer's name and comment"
+    ),
     "spend-alerts:read": (
         "List spend anomaly alerts and receive them as `spend.anomaly` "
         "webhook events"
