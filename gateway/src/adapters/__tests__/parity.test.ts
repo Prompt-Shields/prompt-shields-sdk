@@ -508,14 +508,14 @@ describe('tool calls and tool results', () => {
         e.event === 'response.output_item.added' &&
         e.data.item.type === 'function_call'
     );
-    expect(added.map((e) => e.data.output_index)).toEqual([1, 2]);
+    expect(added.map((e) => e.data.output_index)).toEqual([0, 1]);
     const firstId = added[0].data.item.id;
 
     const deltas = events.filter(
       (e) => e.event === 'response.function_call_arguments.delta'
     );
     expect(deltas[0].data.item_id).toBe(firstId);
-    expect(deltas[0].data.output_index).toBe(1);
+    expect(deltas[0].data.output_index).toBe(0);
 
     const argsDone = events.filter(
       (e) => e.event === 'response.function_call_arguments.done'
@@ -524,12 +524,12 @@ describe('tool calls and tool results', () => {
 
     const completed = events.find((e) => e.event === 'response.completed')!;
     const output = completed.data.response.output;
+    // No text was streamed, so there is no (empty) message item.
     expect(output.map((o: any) => o.type)).toEqual([
-      'message',
       'function_call',
       'function_call',
     ]);
-    expect(output[1]).toMatchObject({
+    expect(output[0]).toMatchObject({
       id: firstId,
       call_id: 'c1',
       name: 'a',
@@ -893,5 +893,31 @@ describe('error shapes', () => {
     ]);
     // no message_stop after an error
     expect(messagesChunk('data: [DONE]', state)).toBeUndefined();
+  });
+
+  test('Responses stream ends with response.failed on a provider error chunk', () => {
+    const state = responsesState();
+    responsesChunk(
+      data({ model: 'm', choices: [{ index: 0, delta: { content: 'a' } }] }),
+      state
+    );
+    const out = parseEvents(
+      responsesChunk(
+        data({ error: { message: 'overloaded', type: 'server_error' } }),
+        state
+      )!
+    );
+    // The open message item is closed, then the response fails.
+    expect(out.map((e) => e.event)).toEqual([
+      'response.output_text.done',
+      'response.content_part.done',
+      'response.output_item.done',
+      'response.failed',
+    ]);
+    expect(out[3].data.response).toMatchObject({
+      status: 'failed',
+      error: { code: 'server_error', message: 'overloaded' },
+    });
+    expect(responsesChunk('data: [DONE]', state)).toBeUndefined();
   });
 });

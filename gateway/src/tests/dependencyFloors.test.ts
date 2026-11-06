@@ -12,8 +12,9 @@ const FLOORS: Record<string, string> = {
   // GHSA-88fw-hqm2-52qc (CORS), GHSA-p77w-8qqv-26rm (cache), GHSA-9vqf-7f2p-gf9v
   // (bodyLimit), GHSA-g6gw-c38x-mqfc (parseBody) and others below 4.13.7
   hono: '4.13.7',
-  // GHSA-wc8c-qw6v-h7f6, GHSA-92pp-h63x-v22m, GHSA-frvp-7c67-39w9 (serveStatic)
-  '@hono/node-server': '1.19.15',
+  // GHSA-wc8c-qw6v-h7f6, GHSA-92pp-h63x-v22m, GHSA-frvp-7c67-39w9 (serveStatic);
+  // GHSA-rmxm-3fg6-px4f (serveStatic), fixed only on the 2.x line
+  '@hono/node-server': '2.1.6',
   // GHSA-58qx-3vcg-4xpx (memory disclosure), GHSA-96hv-2xvq-fx4p (DoS)
   ws: '8.21.0',
 };

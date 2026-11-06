@@ -369,3 +369,29 @@ def test_ingestion_endpoint_refuses_ip_literals_cleanly():
     for ep in ("https://[::1]", "https://10.0.0.1", "https://[2001:db8::1]"):
         with pytest.raises(ValidationError):
             se.SentinelConnection(**_conn(ingestion_endpoint=ep))
+
+
+@pytest.mark.parametrize(
+    ("statuses", "code"),
+    [(["ok", "not_configured", "ok"], 0), (["ok", "error", "ok"], 1)],
+)
+def test_all_tenants_cli_summarises_and_fails_if_any_tenant_failed(
+    monkeypatch, capsys, statuses, code
+):
+    results = [
+        {"tenant_id": f"t{i}", "status": s, **({"error": "boom"} if s == "error" else {})}
+        for i, s in enumerate(statuses)
+    ]
+
+    async def fake_main(tenant, all_tenants):
+        assert all_tenants and tenant is None
+        return results
+
+    monkeypatch.setattr(se, "_main", fake_main)
+    assert se.main(["--all-tenants"]) == code
+    out = capsys.readouterr()
+    assert json.loads(out.out) == results
+    if code:
+        assert "sentinel export: 3 tenants, 2 ok, 1 failed: t1 (boom)" in out.err
+    else:
+        assert "sentinel export: 3 tenants, 3 ok" in out.err

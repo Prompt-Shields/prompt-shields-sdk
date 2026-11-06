@@ -11,7 +11,15 @@ import type {
   UsageSummary,
   Attestation,
   WebhookSubscription,
+  SpendAlert,
+  FocusCostRow,
+  McpTool,
+  LearnerRecommendation,
+  SiemRecord,
 } from '../src';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { asset, json, token } from './helpers';
 
 type Handler = (url: URL) => Response;
@@ -221,6 +229,194 @@ describe('docs/sdks/typescript.mdx', () => {
     expect(posted).toEqual([{ field: 'owner', state: 'attested', attested_by: 'ciso@acme.com' }]);
   });
 
+  it('Reviewing Risk Suggestions', async () => {
+    const mappingWire = { id: 'r1', risk_category: 'compliance', risk_level: 'high', framework: 'EU_AI_ACT', status: 'confirmed', source: 'rules', framework_ref: 'Annex III, point 4(a)' };
+    const reviewWire = { id: 'rev1', risk_mapping_id: 'r1', asset_id: 'a1', status: 'confirmed', previous_status: 'suggested', comment: null, reviewed_by: 'dpo@acme.com', reviewed_at: '2026-11-04T10:00:00Z', actor_type: 'partner', partner_id: 'p1', mapping: null };
+    const posted: unknown[] = [];
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/oauth/token') return token('docs.jwt.token');
+      if (url.pathname.endsWith('/risks')) return json({ data: [{ ...mappingWire, status: 'suggested' }] });
+      if (url.pathname.endsWith('/risks/r1/review') && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+        return json({ data: reviewWire, meta: { current: mappingWire } }, 201);
+      }
+      if (url.pathname.endsWith('/reviews')) return json({ data: [reviewWire], meta: { total: 1, current: mappingWire } });
+      throw new Error(`unexpected ${url}`);
+    });
+    const client = new PartnerClient({ clientId: 'id', clientSecret: 'secret' });
+    const assetId = '019e1a2b-3c4d-7000-8000-000000000001';
+
+    // ---- begin docs ----
+    // Confirm or reject rule-based suggestions (needs the risks:review scope)
+    for (const risk of await client.assets.risks(assetId, { status: 'suggested' })) {
+      const { meta } = await client.assets.reviewRisk(assetId, risk.id, {
+        status: 'confirmed',
+        reviewedBy: 'dpo@acme.com',
+        comment: 'Candidate screening is an Annex III use',
+      });
+      console.log(`${meta.current.frameworkRef}: ${meta.current.status}`);
+    }
+
+    // Who decided what, newest first (needs risks:read)
+    const reviews = await client.assets.riskReviews(assetId, '<risk mapping id>');
+    for (const review of reviews.data) {
+      console.log(`${review.reviewedBy}: ${review.previousStatus} -> ${review.status}`);
+    }
+    // ---- end docs ----
+
+    expect(posted).toEqual([{ status: 'confirmed', reviewed_by: 'dpo@acme.com', comment: 'Candidate screening is an Annex III use' }]);
+    expect(logs).toEqual(['Annex III, point 4(a): confirmed', 'dpo@acme.com: suggested -> confirmed']);
+  });
+
+  it('Spend Alerts and Cost Export', async () => {
+    const alertWire = { id: 'al1', group_by: 'use_case', group_key: 'interview-screening', day: '2026-11-02', observed_cost: 412.5, baseline_cost: 80.1, baseline_sigma: 21.4, z_score: 15.5, threshold_sigma: 3, history_days: 28, severity: 'critical', status: 'open', acknowledged_at: null, acknowledged_by: null, created_at: '2026-11-03T02:00:04Z' };
+    const acked: string[] = [];
+    const focusHeaders = { 'x-focus-version': '1.4', 'x-export-window-start': '2026-10-01T00:00:00Z', 'x-export-window-end': '2026-11-01T00:00:00Z' };
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/oauth/token') return token('docs.jwt.token');
+      if (url.pathname === '/partner/v1/spend-alerts') {
+        expect(url.searchParams.get('status')).toBe('open');
+        return json({ data: [alertWire], meta: { total: 1 } });
+      }
+      if (url.pathname.endsWith('/acknowledge') && init?.method === 'POST') {
+        acked.push(url.pathname);
+        return json({ data: { ...alertWire, status: 'acknowledged' } });
+      }
+      if (url.pathname === '/partner/v1/usage/focus-export') {
+        if (url.searchParams.get('format') === 'jsonl') {
+          const rows = [{ x_EstimatedCost: 1.25 }, { x_EstimatedCost: 2.5 }].map((r) => JSON.stringify(r)).join('\n');
+          return new Response(rows + '\n', { headers: { 'content-type': 'application/x-ndjson', ...focusHeaders } });
+        }
+        expect(url.searchParams.get('cost_mode')).toBe('merge_safe');
+        return new Response('BilledCost,x_EstimatedCost\n0,1.25\n', {
+          headers: { 'content-type': 'text/csv', 'content-disposition': 'attachment; filename="focus-cost.csv"', ...focusHeaders },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const client = new PartnerClient({ clientId: 'id', clientSecret: 'secret' });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-docs-'));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      // ---- begin docs ----
+      // Spend anomaly alerts (needs spend-alerts:read; acknowledging needs spend-alerts:acknowledge)
+      const { data: alerts } = await client.spendAlerts.list({ status: 'open', severity: 'critical' });
+      for (const alert of alerts) {
+        console.log(`${alert.day} ${alert.groupKey}: $${alert.observedCost} against a $${alert.baselineCost} baseline`);
+        await client.spendAlerts.acknowledge(alert.id);
+      }
+
+      // FinOps FOCUS v1.4 cost export, streamed row by row (needs usage:export)
+      const focus = await client.usage.focusExport({ start: '2026-10-01', end: '2026-11-01', format: 'jsonl' });
+      console.log(`FOCUS ${focus.focusVersion} from ${focus.windowStart} to ${focus.windowEnd}`);
+      let estimated = 0;
+      for await (const row of focus.rows()) {
+        estimated += row.x_EstimatedCost;
+      }
+      console.log(`Estimated cost: $${estimated.toFixed(2)}`);
+
+      // Or stream the CSV straight into a file (Node)
+      const csv = await client.usage.focusExport({ start: '2026-10-01', end: '2026-11-01', costMode: 'merge_safe' });
+      await csv.saveTo(csv.filename ?? 'focus-cost.csv');
+      // ---- end docs ----
+
+      expect(fs.readFileSync(path.join(dir, 'focus-cost.csv'), 'utf8')).toBe('BilledCost,x_EstimatedCost\n0,1.25\n');
+    } finally {
+      process.chdir(cwd);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(acked).toEqual(['/partner/v1/spend-alerts/al1/acknowledge']);
+    expect(logs).toEqual([
+      '2026-11-02 interview-screening: $412.5 against a $80.1 baseline',
+      'FOCUS 1.4 from 2026-10-01T00:00:00Z to 2026-11-01T00:00:00Z',
+      'Estimated cost: $3.75',
+    ]);
+  });
+
+  it('MCP Tools, Routing Learner and SIEM Pull', async () => {
+    const tool = { server_name: 'github', tool_name: 'create_issue', source: 'gateway', calling_service: null, environment: null, transport: null, call_count: 42, error_count: 0, blocked_count: 2, user_hash: null, user_group: null, avg_latency_ms: 100, first_seen: null, last_seen: null, asset_id: null, owner_email: 'platform@acme.com' };
+    const day = { day: '2026-11-05', source: 'gateway', server_name: 'github', tool_name: 'create_issue', call_count: 10, error_count: 0, blocked_count: 3, latency_ms_total: 0, latency_count: 0, avg_latency_ms: null, request_bytes: 0, response_bytes: 0, bytes_count: 0, asset_id: null, owner_email: null };
+    const rec = { id: 'rec1', snapshot_id: 's1', learner_version: 'lv1-0123456789abcdef', use_case: 'support-triage', sensitivity_level: 'internal', current_model: 'openai:gpt-4o', recommended_model: 'mistral:mistral-small', candidates: [], projection: { savings_pct: 75 }, status: 'pending', reviewed_by: null, reviewed_at: null, review_comment: null, reviewer_actor_type: null, created_at: '2026-11-05T08:00:00Z', realised: null };
+    const posted: unknown[] = [];
+    const siemQueries: string[] = [];
+    const call = (n: number) => JSON.stringify({ TimeGenerated: 't', EventUid: `e${n}`, EventType: 'AICall', PsTenantId: 't1' });
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/oauth/token') return token('docs.jwt.token');
+      if (url.pathname === '/partner/v1/mcp/tools') {
+        expect(url.searchParams.get('source')).toBe('gateway');
+        return url.searchParams.get('cursor')
+          ? json({ data: [{ ...tool, tool_name: 'list_repos', call_count: 5 }], meta: { has_more: false, next_cursor: null } })
+          : json({ data: [tool], meta: { has_more: true, next_cursor: 'c1' } });
+      }
+      if (url.pathname === '/partner/v1/mcp/usage') {
+        expect(url.searchParams.get('server_name')).toBe('github');
+        return json({ data: [day, day], meta: { since: '2026-10-01', until: null, has_more: false, next_cursor: null } });
+      }
+      if (url.pathname === '/partner/v1/learner/recommendations') {
+        expect(url.searchParams.get('status')).toBe('pending');
+        return json({ data: [rec], meta: { total: 1 } });
+      }
+      if (url.pathname === '/partner/v1/learner/recommendations/rec1/review' && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+        return json({ data: { ...rec, status: 'accepted', reviewed_by: 'finops@acme.com' } });
+      }
+      if (url.pathname === '/partner/v1/siem/calls') {
+        siemQueries.push(url.search);
+        const first = url.searchParams.get('cursor') === 'saved';
+        return new Response(first ? `${call(1)}\n${call(2)}\n` : `${call(3)}\n`, {
+          headers: { 'content-type': 'application/x-ndjson', 'x-ps-cursor': first ? 'c2' : 'c3', 'x-ps-has-more': String(first) },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const client = new PartnerClient({ clientId: 'id', clientSecret: 'secret' });
+    let savedCursor: string | null = 'saved';
+    const forwarded: string[] = [];
+    const forwardToSiem = async (r: SiemRecord) => void forwarded.push(r.EventUid);
+
+    // ---- begin docs ----
+    // MCP tools seen in telemetry, and daily tool-call metering (needs mcp:read)
+    for await (const tool of client.mcp.listTools({ source: 'gateway' })) {
+      console.log(`${tool.serverName}/${tool.toolName}: ${tool.callCount} calls, owner ${tool.ownerEmail}`);
+    }
+    const days = await client.mcp.listUsage({ since: '2026-10-01', serverName: 'github' });
+    console.log(`${days.reduce((n, d) => n + d.blockedCount, 0)} blocked calls`);
+
+    // Learner recommendations awaiting review (learner:read), accepted or rejected with learner:review
+    const { data: pending } = await client.learner.listRecommendations({ status: 'pending' });
+    for (const rec of pending) {
+      console.log(`${rec.useCase}: ${rec.currentModel} -> ${rec.recommendedModel}, ${rec.projection.savingsPct}% cheaper`);
+      await client.learner.reviewRecommendation(rec.id, {
+        decision: 'accepted',
+        reviewedBy: 'finops@acme.com',
+        comment: 'Quality holds on the eval set',
+      });
+    }
+
+    // Routing evidence as Sentinel-schema records (needs evidence:read), from the last saved cursor
+    const feed = client.siem.callsFeed({ cursor: savedCursor, since: '2026-11-01T00:00:00Z' });
+    for await (const record of feed) {
+      await forwardToSiem(record);
+    }
+    savedCursor = feed.cursor;
+    // ---- end docs ----
+
+    expect(logs).toEqual([
+      'github/create_issue: 42 calls, owner platform@acme.com',
+      'github/list_repos: 5 calls, owner platform@acme.com',
+      '6 blocked calls',
+      'support-triage: openai:gpt-4o -> mistral:mistral-small, 75% cheaper',
+    ]);
+    expect(posted).toEqual([{ decision: 'accepted', reviewed_by: 'finops@acme.com', comment: 'Quality holds on the eval set' }]);
+    expect(forwarded).toEqual(['e1', 'e2', 'e3']);
+    expect(savedCursor).toBe('c3');
+    expect(siemQueries).toEqual(['?cursor=saved', '?cursor=c2']);
+  });
+
   it('Webhook Subscriptions', async () => {
     const sub = { id: 's1', partner_id: 'p1', url: 'https://ea-tool.example.com/hooks/prompt-shields', event_types: [], description: null, is_active: true, rotation_grace_ends_at: null, created_at: null, updated_at: null };
     const calls: string[] = [];
@@ -302,7 +498,20 @@ describe('docs/sdks/typescript.mdx', () => {
   });
 
   it('exports the documented types', () => {
-    const t: [AIAsset?, DataFlow?, RiskMapping?, ChangeEvent?, UsageSummary?, Attestation?, WebhookSubscription?] = [];
+    const t: [
+      AIAsset?,
+      DataFlow?,
+      RiskMapping?,
+      ChangeEvent?,
+      UsageSummary?,
+      Attestation?,
+      WebhookSubscription?,
+      SpendAlert?,
+      FocusCostRow?,
+      McpTool?,
+      LearnerRecommendation?,
+      SiemRecord?,
+    ] = [];
     expect(t).toEqual([]);
   });
 });

@@ -1691,3 +1691,75 @@ async def test_sentinel_export_runs_per_tenant_under_rls(rls_db):
         for t in (a, b):
             state = (await s.get(Tenant, t)).settings["connectors"]["sentinel"]
             assert state["audit_seq"] == 1 and state["calls_cursor"]
+
+
+async def test_sentinel_export_tenant_failure_does_not_stop_the_others(rls_db, caplog):
+    """An unexpected exception in one tenant's export (B) is recorded in
+    B's own status without its message, and A and C are still exported,
+    each under its own RLS context."""
+    from collector import sentinel_export as se
+
+    async with rls_db["admin"]() as s:
+        c = Tenant(name="Third Corp", settings={})
+        s.add(c)
+        await s.commit()
+        c = c.id
+    await _seed(rls_db["admin"], c, "c", "ps-pk-ardoq-tenant-c-key")
+    # Sorted the way the job walks them; the middle one fails.
+    first, failing, last = sorted((rls_db["a"], rls_db["b"], c), key=str)
+    dcr = {first: "a", failing: "b", last: "c"}
+    leak = "upstream-body client_secret=hunter2"
+    uploads: dict[str, list[dict]] = {}
+
+    def azure(r: httpx.Request) -> httpx.Response:
+        if r.headers["host"] == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        if "/dcr-" + "b" * 32 + "/" in r.url.path:
+            raise RuntimeError(leak)
+        rows = json.loads(r.content)
+        uploads.setdefault(rows[0]["PsTenantId"], []).extend(rows)
+        return httpx.Response(204)
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    def conn(tid) -> dict:
+        return {
+            "entra_tenant_id": "22222222-2222-2222-2222-222222222222",
+            "client_id": "33333333-3333-3333-3333-333333333333",
+            "client_secret": "s",
+            "ingestion_endpoint": "https://x.westeurope-1.ingest.monitor.azure.com",
+            "dcr_immutable_id": "dcr-" + dcr[tid] * 32,
+        }
+
+    with caplog.at_level(logging.INFO):
+        results = await se.export_all_tenants(
+            rls_db["plain"],
+            settings=se.SentinelSettings(sentinel_export={str(t): conn(t) for t in dcr}),
+            transport=httpx.MockTransport(azure),
+            resolver=public,
+            now=datetime.now(UTC) + timedelta(hours=1),
+        )
+    by_tenant = {r["tenant_id"]: r for r in results}
+    assert [r["tenant_id"] for r in results] == [str(first), str(failing), str(last)]
+    assert by_tenant[str(failing)] == {
+        "tenant_id": str(failing),
+        "status": "error",
+        "error": "unexpected error (RuntimeError)",
+    }
+    for t in (first, last):
+        assert by_tenant[str(t)]["status"] == "ok", results
+        assert by_tenant[str(t)]["calls"] == 2 and by_tenant[str(t)]["audit"] == 1
+    assert set(uploads) == {str(first), str(last)}
+    assert leak not in caplog.text and leak not in json.dumps(results)
+
+    async with rls_db["admin"]() as s:
+        for t in (first, last):
+            state = (await s.get(Tenant, t)).settings["connectors"]["sentinel"]
+            assert state["last_status"] == "ok" and state["calls_cursor"]
+        state = (await s.get(Tenant, failing)).settings["connectors"]["sentinel"]
+    assert state["last_status"] == "error"
+    assert state["last_error"] == "unexpected error (RuntimeError)"
+    assert "calls_cursor" not in state  # nothing accepted, nothing skipped
+    assert leak not in json.dumps(state)
+    assert "3 tenants, 2 ok, 1 failed: " + str(failing) in se.summarize(results)

@@ -16,8 +16,23 @@ import { Context } from 'hono';
 export async function messagesCountTokensHandler(
   c: Context
 ): Promise<Response> {
+  // PS fork (#73 follow-up): a body that is not JSON is the caller's error.
+  let request: any;
   try {
-    let request = await c.req.json();
+    request = await c.req.json();
+  } catch {
+    return new Response(
+      JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'Request body must be a JSON Messages request',
+        },
+      }),
+      { status: 400, headers: { 'content-type': 'application/json' } }
+    );
+  }
+  try {
     let requestHeaders = Object.fromEntries(c.req.raw.headers);
     const camelCaseConfig = constructConfigFromRequestHeaders(requestHeaders);
     const tryTargetsResponse = await tryTargetsRecursively(
