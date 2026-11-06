@@ -1384,3 +1384,50 @@ async def test_audit_trail_under_rls(rls_db, monkeypatch):
         await rls.set_tenant(s, a)
         actions = (await s.execute(select(AuditEvent.action))).scalars().all()
     assert "auth.failure" not in actions  # on the system chain, not tenant a's
+
+
+async def test_sentinel_export_runs_per_tenant_under_rls(rls_db):
+    """`--all-tenants` exports each configured tenant in a session scoped
+    to it (no bypass): each upload holds only that tenant's calls and
+    audit rows, and each tenant's cursor lands in its own settings."""
+    from collector import sentinel_export as se
+
+    a, b = rls_db["a"], rls_db["b"]
+    uploads: list[list[dict]] = []
+
+    def azure(r: httpx.Request) -> httpx.Response:
+        if r.headers["host"] == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        uploads.append(json.loads(r.content))
+        return httpx.Response(204)
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    def conn(dcr: str) -> dict:
+        return {
+            "entra_tenant_id": "22222222-2222-2222-2222-222222222222",
+            "client_id": "33333333-3333-3333-3333-333333333333",
+            "client_secret": "s",
+            "ingestion_endpoint": "https://x.westeurope-1.ingest.monitor.azure.com",
+            "dcr_immutable_id": "dcr-" + dcr * 32,
+        }
+
+    results = await se.export_all_tenants(
+        rls_db["plain"],
+        settings=se.SentinelSettings(sentinel_export={str(a): conn("a"), str(b): conn("b")}),
+        transport=httpx.MockTransport(azure),
+        resolver=public,
+        # Past the settle time of the seeded call made "now".
+        now=datetime.now(UTC) + timedelta(hours=1),
+    )
+    assert [r["status"] for r in results] == ["ok", "ok"], results
+    for r in results:
+        assert r["calls"] == 2 and r["audit"] == 1, r
+    for batch in uploads:
+        assert len({row["PsTenantId"] for row in batch}) == 1
+    assert {row["PsTenantId"] for batch in uploads for row in batch} == {str(a), str(b)}
+    async with rls_db["admin"]() as s:
+        for t in (a, b):
+            state = (await s.get(Tenant, t)).settings["connectors"]["sentinel"]
+            assert state["audit_seq"] == 1 and state["calls_cursor"]
