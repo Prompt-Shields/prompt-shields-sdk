@@ -329,7 +329,7 @@ client = ShieldsRouter(
 ```
 
 - **block**: once spend reaches the limit, calls raise `BudgetExceeded` and nothing is sent.
-- **downgrade**: the router clamps each call to the remaining budget, like `max_cost` and within the data policy; once exhausted, it serves the cheapest allowed model. A plain client switches to the budget's `downgrade_model`.
+- **downgrade**: the router clamps each call to the remaining budget, like `max_cost` and within the data policy; once exhausted, it serves the cheapest allowed model. A plain client switches to the budget's `downgrade_model` only when built with `allow_budget_downgrade=True`: it runs no data policy, so that switch is not policy-checked (and on a multi-vendor OpenAI-compatible endpoint the model id can pick another provider); without the opt-in the call goes unchanged and a warning is logged.
 - **warn**: the call is never changed.
 
 Events carry `budget_state` (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`; `resp.ps.budget` has the same. **The default store is per process**: each worker, replica or pod counts on its own and a restart resets it, so N processes can together spend N times a limit. `RedisBudgetStore` (`pip install 'prompt-shields[optimizer-redis]'`) shares counters across processes, and with the gateway when it uses the same Redis and namespace. If the store cannot be read, calls go ahead (`on_store_error: "open"`, the default) with `budget_state: "unknown"`; set `"closed"` to refuse or downgrade instead. Spend is recorded after each call, so calls running when the limit is reached can overshoot it, and a plain client's call with no known price (`cost: null`) is not counted.

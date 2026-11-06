@@ -74,7 +74,7 @@
         "downgrade_model": {
           "type": "string",
           "minLength": 1,
-          "description": "mode 'downgrade' only: the model a plain (non-routing) client uses once the budget is exhausted. Routers ignore it. Without it, a plain client cannot downgrade and serves the call unchanged."
+          "description": "mode 'downgrade' only: the model a plain (non-routing) client uses once the budget is exhausted, only when that client opts in with allow_budget_downgrade=True (the switch is not checked against any data policy). Routers ignore it. Without it, a plain client cannot downgrade and serves the call unchanged."
         }
       }
     }

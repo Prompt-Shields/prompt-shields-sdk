@@ -467,7 +467,7 @@ def test_client_block_and_cost_recording():
 def test_client_downgrade_switches_to_downgrade_model():
     enforcer = _enforcer(_budget(mode="downgrade", limit_usd=1,
                                  downgrade_model="gpt-4o-mini"))
-    client, events = _client(enforcer)
+    client, events = _client(enforcer, allow_budget_downgrade=True)
     _spend(enforcer, 1.0)
     client.chat.completions.create(model="gpt-4o", messages=HI)
     assert client._upstream.calls[0]["model"] == "gpt-4o-mini"
@@ -475,6 +475,40 @@ def test_client_downgrade_switches_to_downgrade_model():
     assert events[0]["served_model"] == "gpt-4o-mini"
     assert (events[0]["budget_state"], events[0]["budget_action"]) == (
         "exceeded", "downgraded")
+
+
+def test_client_downgrade_needs_opt_in(caplog):
+    # A plain client runs no data policy: without allow_budget_downgrade the
+    # downgrade_model is never sent to, the call goes unchanged and it is logged.
+    enforcer = _enforcer(_budget(mode="downgrade", limit_usd=1,
+                                 downgrade_model="gpt-4o-mini"))
+    with caplog.at_level("WARNING", logger="prompt_shields.budgets"):
+        client, events = _client(enforcer)
+    assert "allow_budget_downgrade" in caplog.text
+    _spend(enforcer, 1.0)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="prompt_shields.budgets"):
+        client.chat.completions.create(model="gpt-4o", messages=HI)
+    assert client._upstream.calls[0]["model"] == "gpt-4o"
+    assert events[0]["requested_model"] == events[0]["served_model"] == "gpt-4o"
+    assert (events[0]["budget_state"], events[0]["budget_action"]) == (
+        "exceeded", "none")
+    assert "not applied" in caplog.text
+
+
+async def test_async_client_downgrade_opt_in():
+    enforcer = _enforcer(_budget(mode="downgrade", limit_usd=1,
+                                 downgrade_model="gpt-4o-mini"))
+    _spend(enforcer, 1.0)
+    client, events = _client(enforcer, cls=AsyncShieldsClient)
+    await client.chat.completions.create(model="gpt-4o", messages=HI)
+    assert client._upstream.calls[0]["model"] == "gpt-4o"
+    assert events[0]["budget_action"] == "none"
+    client, events = _client(enforcer, cls=AsyncShieldsClient,
+                             allow_budget_downgrade=True)
+    await client.chat.completions.create(model="gpt-4o", messages=HI)
+    assert client._upstream.calls[0]["model"] == "gpt-4o-mini"
+    assert events[0]["budget_action"] == "downgraded"
 
 
 def test_client_downgrade_without_model_serves_unchanged():

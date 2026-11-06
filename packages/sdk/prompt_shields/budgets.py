@@ -599,6 +599,53 @@ def budget_event_hook(
     return hook
 
 
+def plain_client_model(
+    check: BudgetCheck, model: str, allow_downgrade: bool
+) -> tuple[str, str | None, str]:
+    """``(model to send, requested model or None, budget_action)`` for a plain
+    client's call.
+
+    A plain client runs no route policy, so a switch to ``downgrade_model``
+    is not checked against any data policy or sensitivity rule, and on an
+    OpenAI-compatible endpoint that serves many vendors (an aggregator, a
+    proxy) the model id can select a different provider or region. The
+    switch therefore happens only when the client was built with
+    ``allow_budget_downgrade=True``; otherwise the call is sent unchanged
+    (like a ``warn`` budget) and a warning is logged. ``ShieldsRouter``
+    downgrades within its data policy and needs no opt-in.
+    """
+    if (
+        check.action != "downgrade"
+        or not check.downgrade_model
+        or check.downgrade_model == model
+    ):
+        return model, None, "none"
+    if not allow_downgrade:
+        logger.warning(
+            "budget %r is exhausted but its downgrade_model was not applied: "
+            "a plain client switches models only with allow_budget_downgrade=True "
+            "(the switch is not checked against any data policy)",
+            check.budget_id,
+        )
+        return model, None, "none"
+    return check.downgrade_model, model, "downgraded"
+
+
+def warn_unapplied_downgrade(enforcer: BudgetEnforcer | None,
+                             allow_downgrade: bool) -> None:
+    """Log once, at client construction, when a budget names a
+    ``downgrade_model`` that this plain client will not apply."""
+    if enforcer is None or allow_downgrade:
+        return
+    named = [b.id for b in enforcer.policy.budgets if b.downgrade_model]
+    if named:
+        logger.warning(
+            "budget(s) %s name a downgrade_model, which this plain client does "
+            "not apply without allow_budget_downgrade=True; exhausted, they "
+            "only warn", named,
+        )
+
+
 def make_enforcer(budgets: Any, store: BudgetStore | None) -> BudgetEnforcer | None:
     """``budgets`` as an enforcer: None stays None, an enforcer is kept."""
     if budgets is None:
