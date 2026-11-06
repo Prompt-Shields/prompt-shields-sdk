@@ -637,6 +637,214 @@ def build() -> list[dict]:
     return out
 
 
+# --- held-out set for the opt-in categories (#351) -------------------------------
+#
+# Hand-written, independent of the templates above (other names, streets and
+# sentences), to measure the opt-in detectors (prompt_shields.pii_extended)
+# on text they were not tuned on. Only person_name, postal_address,
+# health_data and financial_data are labelled and scored here; other
+# entities are left out of the sentences. Some names are outside the
+# rule-based detector's given-name list, and some are inflected (Finnish,
+# Polish). Hard negatives are capitalised non-names, streets without a house
+# number, and health or money words that are not about anyone's data.
+
+OPTIN_DATASET = HERE / "dataset.optin.v1.jsonl"
+OPTIN_CATEGORIES = ("financial_data", "health_data", "person_name", "postal_address")
+
+# locale -> (lang, [(labels, text)]). No labels: a hard negative.
+OPTIN: dict[str, tuple[str, list[tuple[list[str], str]]]] = {
+    "se": ("sv", [
+        (["person_name"], "Mötet leds av Gunnel Svensson från ekonomi."),
+        (["person_name"], "Skicka avtalet till Torbjörn Ek innan fredag."),
+        (["person_name"], "Fråga Sara Lindgren om nycklarna."),
+        (["person_name"], "Hej, jag heter Viktor och ringer om fakturan."),
+        (["postal_address"], "Adressen är Drottninggatan 53, 111 21 Stockholm."),
+        (["person_name", "postal_address"],
+         "Skicka paketet till Malin Ek, Södra vägen 7, 412 54 Göteborg."),
+        (["health_data"], "Hon är sjukskriven sedan i måndags på grund av depression."),
+        (["health_data", "person_name"],
+         "Läkaren konstaterade att Per Holm har förhöjt blodtryck."),
+        (["financial_data"], "Lönen betalas till mitt bankkonto hos Nordea."),
+        (["financial_data"], "Ange clearingnummer och kontonummer på blanketten."),
+        ([], "Vi har möte i Stora Konferensrummet klockan tio."),
+        ([], "Drottninggatan är avstängd för biltrafik i helgen."),
+        ([], "Kör diagnostiken på servern igen."),
+        ([], "Receptet på kanelbullar finns i bilagan."),
+    ]),
+    "no": ("nb", [
+        (["person_name"], "Prosjektet ledes av Bjørg Nilsen."),
+        (["person_name"], "Kan du sende rapporten til Ola Nordmann?"),
+        (["person_name"], "Møtet med Kjetil Bakke er flyttet til torsdag."),
+        (["postal_address"], "Kontoret ligger i Karl Johans gate 22, 0159 Oslo."),
+        (["person_name", "postal_address"], "Leveres til Silje Moe, Bryggen 3, 5003 Bergen."),
+        (["health_data"], "Fastlegen ga ham en ny resept på blodtrykksmedisin."),
+        (["health_data"], "Hun har vært sykemeldt i tre uker etter operasjonen."),
+        (["financial_data"], "Oppgi kontonummeret ditt for refusjon."),
+        (["financial_data"], "Lønnen går inn på bankkontoen min i DNB."),
+        ([], "Les mer om Statens vegvesen på nettsiden."),
+        ([], "Kongens gate er stengt på grunn av veiarbeid."),
+        ([], "Oppskriften trenger to dl melk."),
+    ]),
+    "dk": ("da", [
+        (["person_name"], "Kontakt venligst Jens Hansen i HR."),
+        (["person_name"], "Dorthe Lund godkender budgettet."),
+        (["person_name"], "Jeg hedder Mads og arbejder på lageret."),
+        (["postal_address"], "Butikken ligger på Nørregade 14, 1165 København K."),
+        (["person_name", "postal_address"],
+         "Send fakturaen til Rikke Holm, Strøget 2, 5000 Odense C."),
+        (["health_data"], "Lægen ordinerede antibiotika mod lungebetændelsen."),
+        (["health_data"], "Han er sygemeldt med stress i to uger."),
+        (["financial_data"], "Hvad er dit reg.nr. og kontonummer?"),
+        (["financial_data"], "Lønnen overføres til min bankkonto."),
+        ([], "Tivoli Gardens åbner igen i april."),
+        ([], "Strøget er fyldt med turister i dag."),
+        ([], "Kør en diagnose på printeren."),
+    ]),
+    "fi": ("fi", [
+        (["person_name"], "Kokouksen vetää Pirkko Lehtonen."),
+        (["person_name"], "Lähetä sopimus Mikko Heikkiselle."),
+        (["person_name"], "Nimeni on Satu ja soitan laskusta."),
+        (["postal_address"], "Toimisto on osoitteessa Aleksanterinkatu 15, 00100 Helsinki."),
+        (["person_name", "postal_address"], "Paketti: Timo Salo, Kauppakatu 8, 40100 Jyväskylä."),
+        (["health_data"], "Lääkäri kirjoitti hänelle uuden reseptin."),
+        (["health_data"], "Hän on ollut sairauslomalla masennuksen takia."),
+        (["financial_data"], "Ilmoita tilinumerosi palkanmaksua varten."),
+        (["financial_data"], "Rahat siirretään pankkitilillesi."),
+        ([], "Helsingin Sanomat julkaisi uuden raportin."),
+        ([], "Aleksanterinkatu on suljettu remontin vuoksi."),
+        ([], "Aja diagnostiikka uudelleen palvelimella."),
+    ]),
+    "de": ("de", [
+        (["person_name"], "Bitte wenden Sie sich an Herrn Schulz."),
+        (["person_name"], "Das Protokoll schreibt Katrin Hoffmann."),
+        (["person_name"], "Frau Dr. Wagner ist heute nicht im Haus."),
+        (["person_name"], "Mein Name ist Lukas Becker."),
+        (["postal_address"], "Unsere Adresse: Lindenstraße 12, 50674 Köln."),
+        (["person_name", "postal_address"], "Lieferung an Jonas Koch, Am Markt 5, 28195 Bremen."),
+        (["health_data"], "Die Hausärztin hat ihn für zwei Wochen krankgeschrieben."),
+        (["health_data"],
+         "Bei der Untersuchung wurde eine Allergie gegen Penicillin festgestellt."),
+        (["financial_data"], "Bitte senden Sie mir Ihre Bankverbindung."),
+        (["financial_data"], "Die Steuer-ID steht auf dem Lohnzettel."),
+        ([], "Die Deutsche Bahn meldet Verspätungen."),
+        ([], "Die Lindenstraße ist eine bekannte Fernsehserie."),
+        ([], "Das Rezept für Apfelstrudel ist ganz einfach."),
+        ([], "Die neue Verordnung tritt im Januar in Kraft."),
+    ]),
+    "fr": ("fr", [
+        (["person_name"], "Merci de contacter Mme Girard au service client."),
+        (["person_name"], "Le rapport a été rédigé par Julien Roux."),
+        (["person_name"], "Je m'appelle Élise et j'appelle pour ma commande."),
+        (["postal_address"], "Le siège est au 8 boulevard Haussmann, 75009 Paris."),
+        (["person_name", "postal_address"],
+         "Livrer à Nicolas Petit, 3 rue des Lilas, 31000 Toulouse."),
+        (["health_data"], "Le médecin lui a prescrit un arrêt maladie de dix jours."),
+        (["health_data"], "Elle suit un traitement contre le diabète depuis 2019."),
+        (["financial_data"], "Envoyez-moi votre RIB pour le remboursement."),
+        (["financial_data"], "Indiquez votre numéro de compte sur le formulaire."),
+        ([], "La Tour Eiffel ferme à 23 heures."),
+        ([], "Le boulevard Haussmann est très animé le samedi."),
+        ([], "Lance un diagnostic complet du réseau."),
+        ([], "Branche l'enceinte Bluetooth dans le salon."),
+    ]),
+    "nl": ("nl", [
+        (["person_name"], "Neem contact op met mevrouw Visser."),
+        (["person_name"], "Het verslag is van Pieter Smit."),
+        (["person_name"], "Mijn naam is Anouk Mulder."),
+        (["postal_address"],
+         "Ons kantoor is gevestigd aan de Keizersgracht 123, 1015 CJ Amsterdam."),
+        (["person_name", "postal_address"],
+         "Stuur het naar Thijs Meijer, Oudegracht 45, 3511 AB Utrecht."),
+        (["health_data"], "De huisarts heeft hem medicijnen tegen migraine voorgeschreven."),
+        (["health_data"], "Zij is ziekgemeld na de operatie."),
+        (["financial_data"], "Wat is je rekeningnummer voor de terugbetaling?"),
+        (["financial_data"], "Vul het btw-nummer in op de factuur."),
+        ([], "De Nederlandse Spoorwegen rijden vandaag minder treinen."),
+        ([], "De Keizersgracht is druk met boten."),
+        ([], "Het recept voor appeltaart staat online."),
+    ]),
+    "es": ("es", [
+        (["person_name"], "Por favor, contacta con la Sra. Ruiz."),
+        (["person_name"], "El informe lo firma Alberto Navarro."),
+        (["person_name"], "Me llamo Marta y llamo por el pedido."),
+        (["postal_address"], "La oficina está en Calle de Alcalá 45, 28014 Madrid."),
+        (["person_name", "postal_address"],
+         "Enviar a Laura Gómez, Avenida Diagonal 210, 08018 Barcelona."),
+        (["health_data"], "El médico le recetó antibióticos para la infección."),
+        (["health_data"], "Está de baja médica desde el lunes."),
+        (["financial_data"], "Necesito tu número de cuenta para la transferencia."),
+        (["financial_data"], "Indica el NIF en la factura."),
+        ([], "El Real Madrid juega el domingo."),
+        ([], "La Calle de Alcalá estará cortada por obras."),
+        ([], "La receta de la paella lleva azafrán."),
+    ]),
+    "it": ("it", [
+        (["person_name"], "Per informazioni rivolgersi al Sig. Ferrari."),
+        (["person_name"], "Il verbale è stato scritto da Elena Ricci."),
+        (["person_name"], "Mi chiamo Davide e chiamo per l'ordine."),
+        (["postal_address"], "La sede è in Via Garibaldi 12, 10122 Torino."),
+        (["person_name", "postal_address"],
+         "Spedire a Chiara Greco, Piazza Navona 4, 00186 Roma."),
+        (["health_data"], "Il medico le ha prescritto farmaci per la pressione alta."),
+        (["health_data"], "È in malattia da una settimana per l'influenza."),
+        (["financial_data"], "Mi serve il numero di conto per il bonifico."),
+        (["financial_data"], "Inserisci il codice fiscale nel modulo."),
+        ([], "La Gazzetta dello Sport esce ogni giorno."),
+        ([], "Via Garibaldi è chiusa al traffico."),
+        ([], "La ricetta della carbonara non prevede la panna."),
+        ([], "Il reato è caduto in prescrizione."),
+    ]),
+    "pl": ("pl", [
+        (["person_name"], "Proszę skontaktować się z Panią Kowalczyk."),
+        (["person_name"], "Raport przygotował Tomasz Zieliński."),
+        (["person_name"], "Nazywam się Agnieszka i dzwonię w sprawie zamówienia."),
+        (["postal_address"], "Biuro mieści się przy ul. Marszałkowska 10, 00-590 Warszawa."),
+        (["person_name", "postal_address"],
+         "Wysłać do Piotra Lewandowskiego, ul. Floriańska 3, 31-019 Kraków."),
+        (["health_data"], "Lekarz przepisał mu nowe leki na nadciśnienie."),
+        (["health_data"], "Jest na zwolnieniu lekarskim od poniedziałku."),
+        (["financial_data"], "Podaj numer rachunku do zwrotu."),
+        (["financial_data"], "Wpisz NIP na fakturze."),
+        ([], "Polskie Koleje Państwowe zmieniły rozkład."),
+        ([], "Ulica Marszałkowska jest zakorkowana."),
+        ([], "Przepis na pierogi jest w załączniku."),
+    ]),
+    "gb": ("en", [
+        (["person_name"], "Please forward this to Mrs Patel in accounts."),
+        (["person_name"], "The minutes were taken by Harriet Wilson."),
+        (["person_name"], "My name is Callum Reid and I'm calling about my order."),
+        (["person_name"], "Ask Priya Sharma to approve the budget."),
+        (["postal_address"], "Our office is at 42 Queen Street, Edinburgh EH2 1JX."),
+        (["person_name", "postal_address"], "Ship to Tom Evans, 7 Mill Lane, Cambridge CB2 1RX."),
+        (["health_data"],
+         "She was diagnosed with epilepsy last year and takes medication daily."),
+        (["health_data"], "He has been off sick with depression since March."),
+        (["financial_data"], "Please send your sort code and account number."),
+        (["financial_data"], "What are your bank details for the refund?"),
+        ([], "Microsoft Teams will restart for an update tonight."),
+        ([], "Queen Street station is closed this weekend."),
+        ([], "Run the diagnostics on the build server."),
+        ([], "The recipe calls for two eggs."),
+        ([], "Update your account settings to enable dark mode."),
+    ]),
+}
+
+
+def build_optin() -> list[dict]:
+    out = []
+    for locale, (lang, rows) in OPTIN.items():
+        for i, (labels, text) in enumerate(rows, 1):
+            out.append({
+                "id": f"{locale}-optin-{i:03d}",
+                "locale": locale,
+                "lang": lang,
+                "kind": "positive" if labels else "hard_negative",
+                "text": text,
+                "labels": sorted(labels),
+            })
+    return out
+
+
 def render(records: list[dict]) -> str:
     return "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in records)
 
@@ -645,14 +853,16 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="fail if the dataset would change")
     args = ap.parse_args(argv)
-    text = render(build())
+    outputs = ((DATASET, render(build())), (OPTIN_DATASET, render(build_optin())))
     if args.check:
-        if not DATASET.exists() or DATASET.read_text(encoding="utf-8") != text:
-            print(f"{DATASET} is out of date: run benchmarks/pii/generate.py", file=sys.stderr)
-            return 1
-        return 0
-    DATASET.write_text(text, encoding="utf-8")
-    print(f"wrote {DATASET} ({text.count(chr(10))} examples)")
+        stale = [p for p, text in outputs
+                 if not p.exists() or p.read_text(encoding="utf-8") != text]
+        for p in stale:
+            print(f"{p} is out of date: run benchmarks/pii/generate.py", file=sys.stderr)
+        return 1 if stale else 0
+    for path, text in outputs:
+        path.write_text(text, encoding="utf-8")
+        print(f"wrote {path} ({text.count(chr(10))} examples)")
     return 0
 
 
