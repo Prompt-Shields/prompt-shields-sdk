@@ -125,6 +125,10 @@ the baseline `unreconciled` (PRD G4). The usual causes are:
 - null-cost calls;
 - price changes inside the window.
 
+`ps-teardown reconcile` does this check on the cost Prompt Shields recorded (per
+provider, model and day, against an invoice CSV or a usage export priced at list price);
+see `cli.md`.
+
 A teardown with an unreconciled baseline can still be delivered. Its headline savings
 must then be given as a percentage of the baseline, not as an absolute amount.
 

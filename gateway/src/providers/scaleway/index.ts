@@ -1,20 +1,11 @@
 import { SCALEWAY } from '../../globals';
-import {
-  chatCompleteParams,
-  embedParams,
-  responseTransformers,
-} from '../open-ai-base';
-import { ProviderConfigs } from '../types';
-import ScalewayAPIConfig from './api';
+import { openAICompatibleProvider } from '../openAICompatible';
+import { SCALEWAY_BASE_URL } from './api';
 
-const ScalewayConfig: ProviderConfigs = {
-  chatComplete: chatCompleteParams([]),
-  embed: embedParams([]),
-  api: ScalewayAPIConfig,
-  responseTransforms: responseTransformers(SCALEWAY, {
-    chatComplete: true,
-    embed: true,
-  }),
-};
+const ScalewayConfig = openAICompatibleProvider({
+  provider: SCALEWAY,
+  baseURL: SCALEWAY_BASE_URL,
+  embed: true,
+});
 
 export default ScalewayConfig;

@@ -39,6 +39,8 @@ from db.models import AIAsset, AIUsageEvent
 from sqlalchemy import String, and_, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector.ingest import OUTCOME_SIGNAL_CLASSES
+
 # Mirrors prompt_shields.route_policy.EEA_COUNTRIES plus the "EEA" region
 # label the catalog uses. The collector image does not ship the SDK, so
 # the set is repeated here; test_usage_reports checks they stay equal.
@@ -82,6 +84,41 @@ def sovereign_share(row: Mapping[str, Any]) -> float | None:
     if not reported:
         return None
     return round(int(row["sovereign_requests"] or 0) / reported, 4)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Outcome signals (#44)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def outcome_signal_columns() -> list:
+    """Labelled aggregates for the usage summary's outcome signal counts:
+    events reporting ``outcome_signals`` (an empty list counts: measured,
+    nothing happened) and, per class, the events that carried it."""
+    return [
+        func.count(AIUsageEvent.outcome_signals).label("outcome_signals_reported"),
+        *(
+            func.count(case((AIUsageEvent.outcome_signals.contains([name]), 1))).label(
+                f"outcome_{name}"
+            )
+            for name in OUTCOME_SIGNAL_CLASSES
+        ),
+    ]
+
+
+def outcome_signal_counts(row: Mapping[str, Any]) -> dict:
+    """``outcome_signals_reported`` and ``outcome_signal_counts`` ({class:
+    events}); the counts are null when no event reported outcome signals,
+    since zeros would claim a measurement never taken."""
+    reported = int(row["outcome_signals_reported"] or 0)
+    return {
+        "outcome_signals_reported": reported,
+        "outcome_signal_counts": (
+            {name: int(row[f"outcome_{name}"] or 0) for name in OUTCOME_SIGNAL_CLASSES}
+            if reported
+            else None
+        ),
+    }
 
 
 def _money(value) -> float | None:

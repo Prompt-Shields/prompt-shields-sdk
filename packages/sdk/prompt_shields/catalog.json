@@ -128,7 +128,7 @@
     "infercom": {
       "name": "Infercom",
       "kind": "sovereign",
-      "api_base": null,
+      "api_base": "https://api.infercom.ai/v1",
       "openai_compatible": true,
       "jurisdiction": "EEA",
       "hosting_countries": [
@@ -139,7 +139,7 @@
       "zdr": null,
       "trains_on_data": null,
       "certifications": [],
-      "notes": "EU inference platform on SambaNova hardware in German data centres. A directory lists Luxembourg as HQ and claims zero data retention; neither is verified. Model ids and prices not yet catalogued."
+      "notes": "EU inference platform on SambaNova hardware in German data centres. A directory lists Luxembourg as HQ and claims zero data retention; neither is verified. The API base URL is from the vendor getting-started page (no API reference was found). Model ids and prices not yet catalogued."
     },
     "regolo": {
       "name": "Regolo.ai (Seeweb)",

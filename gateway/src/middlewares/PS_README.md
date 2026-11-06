@@ -294,7 +294,10 @@ and credentials and `body.model` set per attempt:
 - Every attempt still goes through `tryPost`, so the data-policy gate checks
   the model the attempt actually runs, and the engine re-checks each
   candidate against the gate before calling it. A non-compliant model is never
-  called.
+  called. Under a data policy that includes the provider binding (#20): a
+  candidate whose tier names another provider than the request's is skipped,
+  not attempted, since every attempt goes to the request's provider; with
+  no candidate left, the call gets a 403 `policy_violation`.
 - The engine returns once the upstream answered with its headers; a streamed
   body is read after that, so nothing is retried once bytes may have reached
   the client.
@@ -320,3 +323,17 @@ event also carries `fallback_chain`: the error class of each failed attempt,
 in order (`["server_error", "rate_limited"]`), or `[]` when the first attempt
 succeeded. Classes only, never error messages. The collector stores all of
 these on `ai_usage_events` (#25).
+
+Calls on a text-generation surface (chat, completions, messages, responses)
+also carry `outcome_signals` and `outcome_signals_version` (#44), named and
+versioned as the SDK's: the sorted outcome classes the gateway can see —
+`fallback` (a non-empty `fallback_chain`), `max_tokens` (a `length` /
+`max_tokens` / `max_output_tokens` stop reason), `refusal` (a refusal or
+content-filter stop reason, or a refusal in the answer), `stream_error` (a
+stream that ended without its terminal event) and `abandoned` (the client
+disconnected mid-stream) — or `[]` when none applied. Only stop reasons and
+the presence of a refusal are read; no text leaves the gateway. The SDK-only
+classes (`schema_invalid`, `tool_call_invalid`, `regenerate`, `retry`) need
+the caller's intent or session and are not emitted here. A gateway cache hit
+(`cost_source: cache`) carries no outcome signals: it is not a model call,
+and its answer's outcome was reported by the call that filled the cache.

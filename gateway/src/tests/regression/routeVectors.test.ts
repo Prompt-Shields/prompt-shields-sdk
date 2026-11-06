@@ -12,6 +12,10 @@
  * X-PS-Data-Classification / X-PS-Use-Case. A vector's pii_detected becomes
  * text in the prompt that the gateway's own detector finds (#18). Pending
  * vectors are covered (as skipped) by vectors.test.ts.
+ *
+ * Each call is sent to the provider of the tier the router picks (#20): the
+ * data policy gate holds a tier that names a provider to that provider, so
+ * an EEA tier's model sent to OpenAI is refused, not served.
  */
 jest.mock('jose', () => ({}));
 jest.mock('../../middlewares/router/policy', () => {
@@ -32,6 +36,8 @@ import {
 import app from '../../index';
 import { defaultPolicy } from '../../middlewares/router/policy';
 import { fromRoutePolicyDoc } from '../../middlewares/router/constraints';
+import { psRouterMiddleware } from '../../middlewares/router/middleware';
+import { RoutePolicy } from '../../middlewares/router/types';
 
 const SCHEMA_DIR = path.resolve(__dirname, '../../../../schemas/route-policy');
 const readJson = (p: string) => JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -67,6 +73,51 @@ for (const f of vectorFiles) {
   }
 }
 
+// Route-policy provider id -> gateway provider (psServedTarget.ts).
+const GATEWAY_PROVIDER: Record<string, string> = {
+  'mistral-eu': 'mistral-ai',
+};
+
+/** The gateway provider of the tier the router picks for this request. */
+async function routedProvider(
+  policy: RoutePolicy,
+  headers: Record<string, string>,
+  body: any
+): Promise<string> {
+  const lower = Object.fromEntries(
+    Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])
+  );
+  const req: any = await psRouterMiddleware(policy).beforeRequest({
+    url: 'https://gw/v1/chat/completions',
+    headers: lower,
+    body: JSON.parse(JSON.stringify(body)),
+  });
+  const model = req._psRoute?.servedModel;
+  for (const tiers of Object.values(policy.groups)) {
+    for (const tier of tiers) {
+      if (tier.model === model && tier.provider)
+        return GATEWAY_PROVIDER[tier.provider] ?? tier.provider;
+    }
+  }
+  return 'openai';
+}
+
+const chatCompletion = (model: string) =>
+  json({
+    id: 'chatcmpl-v',
+    object: 'chat.completion',
+    created: 1,
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content: 'ok' },
+        finish_reason: 'stop',
+      },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  });
+
 beforeEach(() => resetHarness());
 
 test('there are active vectors to replay', () => {
@@ -80,21 +131,20 @@ test.each(cases)('%s', async (_name, policyName, v) => {
   for (const k of Object.keys(defaultPolicy)) delete (defaultPolicy as any)[k];
   Object.assign(defaultPolicy, fromRoutePolicyDoc(policyDoc));
 
-  // The provider echoes the model it was asked for, like a real one.
-  upstream(/api\.openai\.com\/v1\/chat\/completions$/, (call) =>
+  // The providers echo the model they were asked for, like a real one.
+  upstream(
+    /(api\.openai\.com|api\.berget\.ai|api\.scaleway\.ai|api\.mistral\.ai)\/v1\/chat\/completions$/,
+    (call) => chatCompletion(call.body.model)
+  );
+  upstream(/api\.anthropic\.com\/v1\/messages$/, (call) =>
     json({
-      id: 'chatcmpl-v',
-      object: 'chat.completion',
-      created: 1,
+      id: 'msg_v',
+      type: 'message',
+      role: 'assistant',
       model: call.body.model,
-      choices: [
-        {
-          index: 0,
-          message: { role: 'assistant', content: 'ok' },
-          finish_reason: 'stop',
-        },
-      ],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
     })
   );
 
@@ -129,13 +179,14 @@ test.each(cases)('%s', async (_name, policyName, v) => {
             : m
         );
   const requested = v.request.model ?? 'auto';
-
-  const res = await post(
-    app,
-    '/v1/chat/completions',
-    { model: requested, messages, max_tokens: v.request.max_tokens },
-    headers
+  const body = { model: requested, messages, max_tokens: v.request.max_tokens };
+  headers['x-portkey-provider'] = await routedProvider(
+    defaultPolicy,
+    headers,
+    body
   );
+
+  const res = await post(app, '/v1/chat/completions', body, headers);
   if (v.expected.error === 'PolicyViolation') {
     expect(res.status).toBe(403);
     expect(((await res.json()) as any).error.code).toBe('policy_violation');
