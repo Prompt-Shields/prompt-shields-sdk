@@ -286,7 +286,7 @@ resource "restapi_object" "tenant" {
 }
 ```
 
-`POST` also issues a first ingest key (in `create_response`, `api_key.key`); send `"issue_api_key": false` to skip it. `PATCH` with `"disabled": true` stops the tenant's keys, admin tokens and partner credentials and keeps its data. Terraform `destroy` does **not** erase a tenant: erasure is `DELETE /api/v1/operator/tenants/{id}?confirm={id}`, irreversible, and deliberately left out of this recipe. Set `destroy_path` to something harmless, or protect the resource with `lifecycle { prevent_destroy = true }`.
+`POST` also issues a first ingest key (in `create_response`, `api_key.key`); send `"issue_api_key": false` to skip it. That key holds `ingest:write` only (since migration 037): it cannot read the registry, attest or call `/api/v1/admin`. Send `"api_key_scopes"` to give it more, and use an admin token for `/api/v1/admin`. `PATCH` with `"disabled": true` stops the tenant's keys, admin tokens and partner credentials and keeps its data. Terraform `destroy` does **not** erase a tenant: erasure is `DELETE /api/v1/operator/tenants/{id}?confirm={id}`, irreversible, and deliberately left out of this recipe. Set `destroy_path` to something harmless, or protect the resource with `lifecycle { prevent_destroy = true }`.
 
 ## 5. State and secrets
 
