@@ -1,0 +1,44 @@
+[
+  {
+    "createTime": "2025-04-10T08:21:37.104512Z",
+    "deployedModels": [
+      {
+        "createTime": "2025-04-10T08:40:11.553201Z",
+        "dedicatedResources": {
+          "machineSpec": {"acceleratorCount": 1, "acceleratorType": "NVIDIA_L4", "machineType": "g2-standard-12"},
+          "maxReplicaCount": 1,
+          "minReplicaCount": 1
+        },
+        "displayName": "gemma-claims",
+        "id": "4417203958122938368",
+        "model": "projects/123456789012/locations/europe-west4/models/gemma-2-9b-it-1712345678",
+        "modelVersionId": "1"
+      },
+      {
+        "createTime": "2025-05-02T14:02:51.000412Z",
+        "dedicatedResources": {
+          "machineSpec": {"machineType": "n1-standard-4"},
+          "maxReplicaCount": 2,
+          "minReplicaCount": 1
+        },
+        "displayName": "fraud-xgb",
+        "id": "5520117736011808768",
+        "model": "projects/123456789012/locations/us-central1/models/3330001112223334445@2",
+        "modelVersionId": "2"
+      }
+    ],
+    "displayName": "claims-endpoint",
+    "etag": "AMEw9yN1a2b3c4d5e6f",
+    "labels": {"owner": "claims-team", "env": "prod"},
+    "name": "projects/123456789012/locations/europe-west4/endpoints/9001112223334445556",
+    "trafficSplit": {"4417203958122938368": 50, "5520117736011808768": 50},
+    "updateTime": "2025-05-02T14:05:12.778201Z"
+  },
+  {
+    "createTime": "2025-06-01T09:00:00.000000Z",
+    "displayName": "empty-endpoint",
+    "etag": "AMEw9yN0z9y8x7w6v5u",
+    "name": "projects/123456789012/locations/europe-west4/endpoints/9001112223334445557",
+    "updateTime": "2025-06-01T09:00:00.000000Z"
+  }
+]

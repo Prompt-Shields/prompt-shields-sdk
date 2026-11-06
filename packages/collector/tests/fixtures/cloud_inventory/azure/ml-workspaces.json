@@ -1,0 +1,42 @@
+[
+  {
+    "changedTime": "2025-05-12T08:01:22.418Z",
+    "createdTime": "2025-05-12T07:58:10.902Z",
+    "extendedLocation": null,
+    "id": "/subscriptions/3f2a8c1e-5b7d-4e2a-9c61-0d4e8f1a2b3c/resourceGroups/rg-ml/providers/Microsoft.MachineLearningServices/workspaces/claims-project",
+    "identity": {"principalId": "1a2b3c4d-0000-4000-8000-5e6f7a8b9c0d", "tenantId": "72f988bf-0000-4000-8000-2d7cd011db47", "type": "SystemAssigned"},
+    "kind": "Project",
+    "location": "westeurope",
+    "managedBy": null,
+    "name": "claims-project",
+    "plan": null,
+    "properties": null,
+    "provisioningState": "Succeeded",
+    "resourceGroup": "rg-ml",
+    "sku": {"name": "Basic", "tier": "Basic"},
+    "tags": {"owner": "claims-ai@acme.com", "environment": "production"},
+    "type": "Microsoft.MachineLearningServices/workspaces"
+  },
+  {
+    "id": "/subscriptions/3f2a8c1e-5b7d-4e2a-9c61-0d4e8f1a2b3c/resourceGroups/rg-ml/providers/Microsoft.MachineLearningServices/workspaces/acme-hub",
+    "kind": "Hub",
+    "location": "westeurope",
+    "name": "acme-hub",
+    "provisioningState": "Succeeded",
+    "resourceGroup": "rg-ml",
+    "sku": {"name": "Basic", "tier": "Basic"},
+    "tags": {},
+    "type": "Microsoft.MachineLearningServices/workspaces"
+  },
+  {
+    "id": "/subscriptions/3f2a8c1e-5b7d-4e2a-9c61-0d4e8f1a2b3c/resourceGroups/rg-uw/providers/Microsoft.MachineLearningServices/workspaces/aml-underwriting",
+    "kind": "Default",
+    "location": "northeurope",
+    "name": "aml-underwriting",
+    "provisioningState": "Succeeded",
+    "resourceGroup": "rg-uw",
+    "sku": {"name": "Basic", "tier": "Basic"},
+    "tags": {"owner": "uw-ml@acme.com", "department": "Underwriting", "env": "dev"},
+    "type": "Microsoft.MachineLearningServices/workspaces"
+  }
+]

@@ -1,0 +1,19 @@
+[
+  {
+    "containerSpec": {"imageUri": "us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.2-1:latest"},
+    "createTime": "2025-05-01T10:00:00.000000Z",
+    "displayName": "fraud-xgb-v2",
+    "etag": "AMEw9yQ1w2e3r4t5y6u",
+    "labels": {"owner": "risk-team", "department": "risk"},
+    "name": "projects/123456789012/locations/us-central1/models/3330001112223334445",
+    "versionId": "2"
+  },
+  {
+    "createTime": "2025-02-18T16:20:00.000000Z",
+    "displayName": "support-router",
+    "etag": "AMEw9yR1a2s3d4f5g6h",
+    "labels": {},
+    "name": "projects/123456789012/locations/us-central1/models/4440001112223334445",
+    "versionId": "5"
+  }
+]

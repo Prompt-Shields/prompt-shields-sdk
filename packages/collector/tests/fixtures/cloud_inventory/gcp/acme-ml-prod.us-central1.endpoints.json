@@ -1,0 +1,21 @@
+[
+  {
+    "createTime": "2025-02-18T16:30:00.000000Z",
+    "deployedModels": [
+      {
+        "automaticResources": {"maxReplicaCount": 3, "minReplicaCount": 1},
+        "createTime": "2025-02-18T16:45:00.000000Z",
+        "displayName": "support-router",
+        "id": "7001234567890123456",
+        "model": "projects/123456789012/locations/us-central1/models/4440001112223334445",
+        "modelVersionId": "5"
+      }
+    ],
+    "displayName": "support-endpoint",
+    "etag": "AMEw9yM9n8b7v6c5x4z",
+    "labels": {"owner": "support-team", "department": "support", "environment": "staging"},
+    "name": "projects/123456789012/locations/us-central1/endpoints/9501112223334445556",
+    "trafficSplit": {"7001234567890123456": 100},
+    "updateTime": "2025-02-18T16:46:00.000000Z"
+  }
+]
