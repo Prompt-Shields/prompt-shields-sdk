@@ -23,6 +23,7 @@ import {
   normalizeUsage,
   plainReasoningText,
   toResponsesUsage,
+  toolCallKey,
 } from '../shared';
 import {
   echoRequestFields,
@@ -105,8 +106,12 @@ interface StreamState {
   items: OutputItem[];
   /** The message or reasoning item text is currently appended to */
   openItem: OutputItem | null;
-  /** Chat tool_call index → function call item */
-  toolCallByIndex: Record<number, OutputItem>;
+  /**
+   * Chat tool_call index → function call item. PS fork (#73): a Map, since
+   * the index comes from the provider (a `__proto__` index must not reach
+   * Object.prototype).
+   */
+  toolCallByIndex: Map<string, OutputItem>;
   /** PS fork (#73): a mid-stream provider error */
   error: { code: string; message: string } | null;
   /** PS fork (#73): model named in the request, for chunks without one */
@@ -193,6 +198,11 @@ function itemJson(item: OutputItem, status: 'in_progress' | 'completed') {
   }
 }
 
+/** PS fork (#73): a plain (non-null, non-array) object. */
+function isRecord(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function event(state: StreamState, type: string, data: object): string {
   return `event: ${type}\ndata: ${JSON.stringify({
     type,
@@ -255,11 +265,15 @@ function openItem(
 
 function closeItem(state: StreamState, events: string[], item: OutputItem) {
   if (item.done) return;
+  // PS fork (#73): citations of the message's last text block, while the
+  // item is still open (flushCitations skips a done item)
+  if (item.kind === 'message' && state.citedBlock?.item === item) {
+    flushCitations(state, events);
+  }
   item.done = true;
   if (state.openItem === item) state.openItem = null;
   const base = { item_id: item.id, output_index: item.outputIndex };
   if (item.kind === 'message') {
-    if (state.citedBlock?.item === item) flushCitations(state, events);
     events.push(
       event(state, 'response.output_text.done', {
         ...base,
@@ -462,7 +476,7 @@ function anthropicWebSearchBlock(
   block: any
 ) {
   const index = block?.index;
-  const d = block?.delta || {};
+  const d = isRecord(block?.delta) ? block.delta : {};
   if (index !== undefined && state.citedBlock?.index !== index) {
     flushCitations(state, events);
     state.citedBlock = { index, item: null, start: 0, citations: [] };
@@ -642,7 +656,8 @@ export function transformStreamChunk(
   } catch {
     return undefined;
   }
-  if (state.completed) return undefined;
+  // PS fork (#73): a chunk that is not an object carries nothing
+  if (state.completed || !isRecord(parsed)) return undefined;
 
   const events: string[] = [];
 
@@ -653,7 +668,9 @@ export function transformStreamChunk(
     state.contentPartIndex = 0;
     // PS fork (#73): chunks without a model (e.g. Gemini) fall back to the
     // requested one, as the JSON response does
-    state.model = parsed.model || state.requestedModel;
+    state.model =
+      (typeof parsed.model === 'string' && parsed.model) ||
+      state.requestedModel;
     state.createdAt = Math.floor(Date.now() / 1000);
 
     events.push(
@@ -677,7 +694,11 @@ export function transformStreamChunk(
     return events.join('') + finish(state);
   }
 
-  const delta = parsed.choices?.[0]?.delta;
+  // PS fork (#73): null or badly typed entries in the provider's arrays are
+  // skipped, never dereferenced
+  const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : undefined;
+  const delta: Record<string, any> | undefined =
+    isRecord(choice) && isRecord(choice.delta) ? choice.delta : undefined;
 
   // PS fork (#73): reasoning, from content_blocks (Anthropic, Gemini,
   // OpenRouter transforms) or reasoning_content / reasoning strings
@@ -685,9 +706,13 @@ export function transformStreamChunk(
   // thinking to carry to the next turn (thinkingCarry.ts)
   let sawBlockThinking = false;
   const carry = carriesThinking(state.provider);
-  for (const block of delta?.content_blocks || []) {
+  const blocks: unknown[] = Array.isArray(delta?.content_blocks)
+    ? delta.content_blocks
+    : [];
+  for (const block of blocks) {
+    if (!isRecord(block)) continue;
     anthropicWebSearchBlock(state, events, block);
-    const d = block?.delta || {};
+    const d = isRecord(block.delta) ? block.delta : {};
     if (typeof d.thinking === 'string' && d.thinking) {
       sawBlockThinking = true;
       appendText(state, events, 'reasoning', d.thinking);
@@ -721,25 +746,27 @@ export function transformStreamChunk(
   // a stable item id, and argument deltas reference that item.
   if (Array.isArray(delta?.tool_calls)) {
     for (const tc of delta.tool_calls) {
-      if (!tc) continue;
-      const toolIdx = tc.index ?? 0;
-      let fc: OutputItem | undefined = state.toolCallByIndex[toolIdx];
+      if (!isRecord(tc)) continue;
+      const fn = isRecord(tc.function) ? tc.function : {};
+      const id = typeof tc.id === 'string' ? tc.id : '';
+      const toolIdx = toolCallKey(tc.index);
+      let fc: OutputItem | undefined = state.toolCallByIndex.get(toolIdx);
       // A new id on a known index is a new call (Gemini restarts at 0)
-      if (!fc || (tc.id && tc.id !== fc.call_id)) {
+      if (!fc || (id && id !== fc.call_id)) {
         if (state.openItem) closeItem(state, events, state.openItem);
         fc = openItem(state, events, 'function_call', {
-          call_id: tc.id || `call_${randomUUID()}`,
-          name: tc.function?.name || '',
+          call_id: id || `call_${randomUUID()}`,
+          name: typeof fn.name === 'string' ? fn.name : '',
         });
-        state.toolCallByIndex[toolIdx] = fc;
+        state.toolCallByIndex.set(toolIdx, fc);
       }
-      if (tc.function?.arguments) {
-        fc.text += tc.function.arguments;
+      if (typeof fn.arguments === 'string' && fn.arguments) {
+        fc.text += fn.arguments;
         events.push(
           event(state, 'response.function_call_arguments.delta', {
             item_id: fc.id,
             output_index: fc.outputIndex,
-            delta: tc.function.arguments,
+            delta: fn.arguments,
           })
         );
       }
@@ -760,14 +787,18 @@ export function transformStreamChunk(
   }
 
   // PS fork (#73): Google Search grounding, applied at the end
-  const grounding = parsed.choices?.[0]?.groundingMetadata;
-  if (grounding && typeof grounding === 'object') {
+  const grounding = isRecord(choice) ? choice.groundingMetadata : undefined;
+  if (isRecord(grounding)) {
     state.grounding.push(grounding);
   }
 
   // Track finish reason
-  if (parsed.choices?.[0]?.finish_reason) {
-    state.finishReason = parsed.choices[0].finish_reason;
+  if (
+    isRecord(choice) &&
+    typeof choice.finish_reason === 'string' &&
+    choice.finish_reason
+  ) {
+    state.finishReason = choice.finish_reason;
   }
 
   return events.length > 0 ? events.join('') : undefined;
@@ -801,7 +832,7 @@ export function createStreamState(
     totalTokens: 0,
     items: [],
     openItem: null,
-    toolCallByIndex: {},
+    toolCallByIndex: new Map(),
     error: null,
     requestedModel: responseModel(originalRequest),
     requestEcho: echoRequestFields(originalRequest),

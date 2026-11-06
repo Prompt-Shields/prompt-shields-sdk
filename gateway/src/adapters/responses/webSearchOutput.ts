@@ -8,7 +8,8 @@
  * - Anthropic text block `citations` of type `web_search_result_location` →
  *   `url_citation` annotations covering that text block.
  * - Google `groundingMetadata` → one `web_search_call` per
- *   `webSearchQueries` entry (after the message) and `url_citation`
+ *   `webSearchQueries` entry (after the message and any function calls,
+ *   in JSON as in the stream) and `url_citation`
  *   annotations from `groundingSupports` / `groundingChunks[].web`.
  *
  * Only a result's URL (and a citation's URL and title) are copied. Anthropic's
@@ -336,7 +337,10 @@ export function mergeGroundingMetadata(list: any[]): any {
         groundingChunkIndices: (Array.isArray(s?.groundingChunkIndices)
           ? s.groundingChunkIndices
           : []
-        ).map((i: number) => remap[i]),
+        ).map((i: unknown) =>
+          // an index, not a key such as "length"
+          Number.isInteger(i) ? remap[i as number] : undefined
+        ),
       });
     }
   }

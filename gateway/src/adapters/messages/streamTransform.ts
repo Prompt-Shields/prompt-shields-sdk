@@ -11,7 +11,12 @@
  */
 
 import { randomUUID } from 'crypto';
-import { normalizeUsage, plainReasoningText, toMessagesUsage } from '../shared';
+import {
+  normalizeUsage,
+  plainReasoningText,
+  toMessagesUsage,
+  toolCallKey,
+} from '../shared';
 import { toAnthropicStopReason } from './responseTransform';
 
 type BlockType = 'thinking' | 'text' | 'tool_use';
@@ -40,8 +45,8 @@ interface StreamState {
   contentBlockIndex: number;
   /** Currently open content block, if any */
   openBlock: { index: number; type: BlockType } | null;
-  /** Chat tool_call index → its tool call */
-  toolBlocks: Record<number, ToolCall>;
+  /** Chat tool_call index → its tool call. PS fork (#73): a Map (toolCallKey) */
+  toolBlocks: Map<string, ToolCall>;
   /**
    * PS fork (#73): tool calls that started while another tool_use block was
    * open. Anthropic blocks never interleave, but OpenAI-compatible streams
@@ -280,9 +285,9 @@ export function transformStreamChunk(
   // Tool calls
   if (Array.isArray(delta?.tool_calls)) {
     for (const tc of delta.tool_calls) {
-      if (!tc) continue;
-      const toolIdx = tc.index ?? 0;
-      let call: ToolCall | undefined = state.toolBlocks[toolIdx];
+      if (!tc || typeof tc !== 'object') continue;
+      const toolIdx = toolCallKey(tc.index);
+      let call: ToolCall | undefined = state.toolBlocks.get(toolIdx);
       // A new id on a known index is a new call (Gemini restarts at 0)
       if (!call || (tc.id && tc.id !== call.id)) {
         call = {
@@ -290,7 +295,7 @@ export function transformStreamChunk(
           name: tc.function?.name || '',
           args: '',
         };
-        state.toolBlocks[toolIdx] = call;
+        state.toolBlocks.set(toolIdx, call);
         state.hasToolUse = true;
         // PS fork (#73): stream it live unless another tool_use block is
         // open (its arguments may still be coming); buffer it otherwise.
@@ -355,7 +360,7 @@ export function createStreamState(requestedModel?: unknown): StreamState {
     cacheCreationTokens: 0,
     contentBlockIndex: 0,
     openBlock: null,
-    toolBlocks: {},
+    toolBlocks: new Map(),
     bufferedTools: [],
     hasToolUse: false,
     finishReason: null,

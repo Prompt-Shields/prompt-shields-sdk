@@ -97,9 +97,11 @@ export function transformChatCompletionsToResponses(
   provider: string,
   originalRequest?: any
 ): OpenAIResponse | ErrorResponse {
+  // PS fork (#73): a body that is not an object is a failed request
+  const body = isRecord(response) ? response : null;
   // Pass through errors
-  if ('error' in response) return response;
-  if (responseStatus !== 200) {
+  if (body && 'error' in body) return response as ErrorResponse;
+  if (responseStatus !== 200 || !body) {
     return {
       error: {
         message: 'Request failed',
@@ -114,13 +116,24 @@ export function transformChatCompletionsToResponses(
   const reasoningItems: ResponseOutputItem[] = [];
   const messageItems: ResponseOutputItem[] = [];
   const functionCallItems: ResponseOutputItem[] = [];
+  // PS fork (#73): Google grounding searches go last, where the streamed
+  // response puts them (grounding arrives with the last chunk)
+  const groundingCallItems: ResponseOutputItem[] = [];
   let overallStatus: ResponseStatus = 'completed';
   let incompleteReason: string | null = null;
   const includeSources = wantsWebSearchSources(originalRequest);
 
-  // Process choices
-  for (const choice of response.choices || []) {
-    const msg = (choice.message as any) || {};
+  // Process choices. PS fork (#73): the provider's arrays may hold null or
+  // badly typed entries; those are skipped, never dereferenced.
+  const choices: unknown[] = Array.isArray(body.choices) ? body.choices : [];
+  for (const choice of choices) {
+    if (!isRecord(choice)) continue;
+    const msg: Record<string, any> = isRecord(choice.message)
+      ? choice.message
+      : {};
+    const blocks: Record<string, any>[] = Array.isArray(msg.content_blocks)
+      ? msg.content_blocks.filter(isRecord)
+      : [];
     const { status, reason } = toResponsesStatus(choice.finish_reason);
     if (status === 'incomplete') {
       overallStatus = 'incomplete';
@@ -130,33 +143,31 @@ export function transformChatCompletionsToResponses(
     // Handle reasoning/thinking from content_blocks
     // Providers like Anthropic, Google, OpenRouter expose thinking via content_blocks
     // The Responses API natively supports reasoning, so we always include it
-    if (msg.content_blocks?.length) {
-      for (const block of msg.content_blocks) {
-        // Handle thinking blocks (Anthropic, OpenRouter format)
-        // PS fork (#73): signed and redacted thinking travel in
-        // encrypted_content so the next turn can send them back
-        const encrypted = encodeThinkingCarry(provider, [block]);
-        if (block.thinking || block.type === 'thinking') {
-          const thinkingText = block.thinking || block.text || '';
-          reasoningItems.push({
-            id: `rs_${randomUUID()}`,
-            type: 'reasoning',
-            summary: [
-              {
-                type: 'summary_text',
-                text: thinkingText,
-              },
-            ],
-            ...(encrypted ? { encrypted_content: encrypted } : {}),
-          } as ResponseOutputItemReasoning);
-        } else if (block.type === 'redacted_thinking' && encrypted) {
-          reasoningItems.push({
-            id: `rs_${randomUUID()}`,
-            type: 'reasoning',
-            summary: [],
-            encrypted_content: encrypted,
-          } as ResponseOutputItemReasoning);
-        }
+    for (const block of blocks) {
+      // Handle thinking blocks (Anthropic, OpenRouter format)
+      // PS fork (#73): signed and redacted thinking travel in
+      // encrypted_content so the next turn can send them back
+      const encrypted = encodeThinkingCarry(provider, [block]);
+      if (stringOr(block.thinking) || block.type === 'thinking') {
+        const thinkingText = stringOr(block.thinking) || stringOr(block.text);
+        reasoningItems.push({
+          id: `rs_${randomUUID()}`,
+          type: 'reasoning',
+          summary: [
+            {
+              type: 'summary_text',
+              text: thinkingText,
+            },
+          ],
+          ...(encrypted ? { encrypted_content: encrypted } : {}),
+        } as ResponseOutputItemReasoning);
+      } else if (block.type === 'redacted_thinking' && encrypted) {
+        reasoningItems.push({
+          id: `rs_${randomUUID()}`,
+          type: 'reasoning',
+          summary: [],
+          encrypted_content: encrypted,
+        } as ResponseOutputItemReasoning);
       }
     }
 
@@ -173,15 +184,16 @@ export function transformChatCompletionsToResponses(
     }
 
     // Handle tool calls
-    if (msg.tool_calls?.length) {
+    if (Array.isArray(msg.tool_calls)) {
       for (const tc of msg.tool_calls) {
-        if (tc.type === 'function' || (!tc.type && tc.function)) {
+        if (!isRecord(tc) || !isRecord(tc.function)) continue;
+        if (tc.type === 'function' || !tc.type) {
           functionCallItems.push({
             id: `fc_${randomUUID()}`,
             type: 'function_call',
-            call_id: tc.id || `call_${randomUUID()}`,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
+            call_id: stringOr(tc.id) || `call_${randomUUID()}`,
+            name: stringOr(tc.function.name),
+            arguments: toolArguments(tc.function.arguments),
             status: 'completed',
           } as ResponseFunctionToolCall);
         }
@@ -191,19 +203,21 @@ export function transformChatCompletionsToResponses(
     // Handle text content
     const content = msg.content;
     const text =
-      content == null
-        ? ''
-        : typeof content === 'string'
+      typeof content === 'string'
+        ? content
+        : Array.isArray(content)
           ? content
-          : Array.isArray(content)
-            ? content.map((c: any) => c.text || '').join('')
-            : String(content);
+              .map((c: unknown) => (isRecord(c) ? stringOr(c.text) : ''))
+              .join('')
+          : typeof content === 'number' || typeof content === 'boolean'
+            ? String(content)
+            : '';
 
     // PS fork (#73): Anthropic web search blocks and citations become
     // web_search_call items and url_citation annotations, in block order
     // (webSearchOutput.ts). The text is the same, split at each search.
-    const segments = hasAnthropicWebSearch(msg.content_blocks)
-      ? anthropicWebSearchSegments(msg.content_blocks, includeSources)
+    const segments = hasAnthropicWebSearch(blocks)
+      ? anthropicWebSearchSegments(blocks, includeSources)
       : null;
     const segmentText = segments
       ?.map((s) => (s.kind === 'text' ? s.text : ''))
@@ -224,7 +238,7 @@ export function transformChatCompletionsToResponses(
     // PS fork (#73): Google Search grounding: annotations on the message,
     // then one web_search_call per search query
     const grounding = googleGroundingOutput(
-      (choice as any).groundingMetadata,
+      choice.groundingMetadata,
       text,
       includeSources
     );
@@ -240,23 +254,30 @@ export function transformChatCompletionsToResponses(
         )
       );
     }
-    messageItems.push(...(grounding.calls as any[]));
+    groundingCallItems.push(...(grounding.calls as any[]));
   }
 
-  // PS fork (#73): reasoning, then message, then function calls
+  // PS fork (#73): reasoning, then message, then function calls, then
+  // Google grounding searches (the streamed order)
   const output: ResponseOutputItem[] = [
     ...reasoningItems,
     ...messageItems,
     ...functionCallItems,
+    ...groundingCallItems,
   ];
 
   // PS fork (#73): cached tokens also read from Anthropic-style usage
-  const usage = toResponsesUsage(normalizeUsage(response.usage));
+  const usage = toResponsesUsage(normalizeUsage(body.usage));
 
-  const createdAt = response.created || Math.floor(Date.now() / 1000);
+  const createdAt =
+    typeof body.created === 'number' &&
+    Number.isFinite(body.created) &&
+    body.created > 0
+      ? body.created
+      : Math.floor(Date.now() / 1000);
 
   return {
-    id: response.id || `resp_${randomUUID()}`,
+    id: stringOr(body.id) || `resp_${randomUUID()}`,
     object: 'response',
     created_at: createdAt,
     completed_at:
@@ -265,13 +286,36 @@ export function transformChatCompletionsToResponses(
     incomplete_details:
       overallStatus === 'incomplete' ? { reason: incompleteReason } : null,
     // PS fork (#73): the requested model when the provider reports none
-    model: response.model || responseModel(originalRequest),
+    model: stringOr(body.model) || responseModel(originalRequest),
     output,
     error: null,
     usage,
     // PS fork (#73): shared with the streamed snapshots
     ...echoRequestFields(originalRequest),
   } as OpenAIResponse;
+}
+
+/** PS fork (#73): a plain (non-null, non-array) object. */
+function isRecord(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** PS fork (#73): `value` if it is a string, else ''. */
+function stringOr(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+/** PS fork (#73): function call arguments as JSON text. */
+function toolArguments(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value !== null && typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
+    }
+  }
+  return '';
 }
 
 /** PS fork (#73): an assistant message output item with one output_text. */
@@ -315,11 +359,12 @@ const TOOL_CREDENTIAL_KEYS = new Set(['headers', 'authorization']);
 
 function withoutToolCredentials(tool: any) {
   if (!tool || typeof tool !== 'object') return tool;
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(tool)) {
-    if (!TOOL_CREDENTIAL_KEYS.has(key.toLowerCase())) out[key] = value;
-  }
-  return out;
+  // fromEntries defines own properties: a `__proto__` key stays a key
+  return Object.fromEntries(
+    Object.entries(tool).filter(
+      ([key]) => !TOOL_CREDENTIAL_KEYS.has(key.toLowerCase())
+    )
+  );
 }
 
 export function echoRequestFields(originalRequest?: any) {
