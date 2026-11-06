@@ -448,7 +448,7 @@ class _StreamBase:
 
     def abandon(self) -> None:
         """Report the stream as abandoned now, as garbage collection would:
-        `on_abandon` (enqueue only, no I/O). A no-op once the stream ended or
+        `on_abandon` (which must only enqueue). A no-op once the stream ended or
         at interpreter shutdown; never raises. ShieldsRouter calls it when
         its own stream object is finalised, so the event is built before the
         router tells the routing learner about the call."""
@@ -467,7 +467,8 @@ class _StreamBase:
                 self._on_abandon(*args)
         except Exception as e:  # noqa: BLE001
             with contextlib.suppress(Exception):
-                logger.debug(f"Stream telemetry abandon error: {e}")
+                logger.debug("Stream telemetry abandon error: %s",
+                             type(e).__name__)
 
     def discard(self) -> None:
         """Drop this wrapper unused: it will emit nothing, not even when

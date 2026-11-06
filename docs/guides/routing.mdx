@@ -604,6 +604,13 @@ against the code.
   `budget_store` is written from the default executor, so the loop is not
   blocked; with no loop running (a stream collected after `asyncio.run`
   returned) the write happens in place.
+- **A blocking budget store may be written inside the garbage collector.**
+  A sync `RoutedStream` dropped unfinished with a blocking `budget_store`
+  (`RedisBudgetStore`) and no event loop running in the collecting thread
+  writes its spend in place, from the collector, as any instrumented
+  client's abandoned stream does: the collection waits for that write (up
+  to the store's socket timeout). End streams with `with` / `close()` to
+  keep the write at a known point.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
   OpenAI-only parameters (`tools`, `response_format`, `n`, ...) raise
   `RouterError` when the call is routed to Anthropic. They are not silently

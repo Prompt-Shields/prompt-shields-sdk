@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import weakref
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -737,7 +738,10 @@ def test_abandoned_stream_tells_the_learner_once(no_cyclic_gc):
     learner, choice = _with_learner(router)
     stream = router.chat.completions.create(messages=HI, stream=True, **CONFIDENTIAL)
     next(stream)
+    alive = weakref.ref(stream)
     del stream
+    # The finaliser holds no reference to the stream: it is collected.
+    assert alive() is None
     # Finalised by reference counting alone: event, spend, learner, close.
     (event,) = events
     assert event["stream_abandoned"] is True

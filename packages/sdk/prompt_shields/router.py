@@ -1888,8 +1888,12 @@ def _finalize_stream(upstream: Any, on_end: Any, is_async: bool) -> None:
     left mid-way without ``close()``). Runs from the garbage collector, at
     most once, never after the stream ended, never at interpreter shutdown.
 
-    In order: the telemetry event and spend are recorded (enqueued, no I/O),
-    the upstream is closed, then ``on_end`` tells the learner and drops the
+    In order: the telemetry event is built and enqueued (not sent) and the
+    spend recorded with ``commit_soon`` (an in-memory store in place; a
+    blocking store such as ``RedisBudgetStore`` from the default executor
+    when an event loop is running in this thread, else written in place,
+    inside the collector, as the instrumented clients' streams always
+    have), the upstream is closed, then ``on_end`` tells the learner and drops the
     pseudonymisation mapping. Each step is fail-open and never raises; only
     exception class names are logged, never content.
     """
