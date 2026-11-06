@@ -689,7 +689,7 @@
           "maxLength": 128
         },
         "ps.rate_limit.source": {
-          "enum": ["upstream", "gateway", "budget"]
+          "enum": ["upstream", "gateway"]
         },
         "http.response.status_code": {
           "const": 429

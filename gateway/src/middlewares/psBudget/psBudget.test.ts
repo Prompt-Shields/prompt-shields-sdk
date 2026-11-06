@@ -17,7 +17,11 @@ import { estimateCost } from '../psPricing';
 import { defaultRegistry } from '../psMetrics/registry';
 import { RoutePolicy } from '../router/types';
 import { estimateInputTokens } from '../router/policy';
-import { psSecurityEvents } from '../psSecurityEvents';
+import {
+  _resetSecurityEventsForTests,
+  flushSecurityEvents,
+  psSecurityEvents,
+} from '../psSecurityEvents';
 import { OIDC_IDENTITY_KEY } from '../psOidc/identity';
 
 const vectorFile = (name: string) =>
@@ -625,6 +629,37 @@ describe('downgrade', () => {
     expect(seen[0].route.reason).toBe('budget+budget-downgrade');
   });
 
+  test('a downgrade skips a tier at another provider (#20 binding)', async () => {
+    // eu-small is bound to berget: the request goes to openai and the
+    // gateway rewrites only the model, so the gate would refuse it there.
+    const bound: RoutePolicy = {
+      ...SOVEREIGN,
+      groups: {
+        ...SOVEREIGN.groups,
+        cheap: SOVEREIGN.groups.cheap.map((t) =>
+          t.model === 'eu-small' ? { ...t, provider: 'berget' } : t
+        ),
+      },
+    };
+    const store = install([team]);
+    await spend(store, key('use_case', 'rag'), 1);
+    const { app, seen } = makeApp({ policy: bound });
+    const confidential = {
+      'x-ps-use-case': 'rag',
+      'x-ps-data-classification': 'confidential',
+    };
+    await post(app, confidential, body('eu-large'));
+    expect(seen[0].model).toBe('eu-medium');
+    expect(seen[0].budget.action).toBe('downgraded');
+    // Sent to berget itself, the bound tier is the pick again.
+    await post(
+      app,
+      { ...confidential, 'x-portkey-provider': 'berget' },
+      body('eu-large')
+    );
+    expect(seen[1].model).toBe('eu-small');
+  });
+
   test('a ceiling below the estimate clamps before the budget is spent', async () => {
     const store = install([team]);
     await spend(store, key('use_case', 'rag'), 1 - 0.007);
@@ -709,8 +744,17 @@ describe('trust, leaks and interactions', () => {
     expect((await post(app, { 'x-ps-owner': 'bob' })).status).toBe(200);
   });
 
-  test('a budget 429 is a rate_limit.hit with source budget', async () => {
+  test('a budget 429 counts as source budget and writes no security event', async () => {
     process.env.PS_METRICS_ENABLED = 'true';
+    process.env.PS_SECURITY_EVENTS_LOG = 'true';
+    _resetSecurityEventsForTests();
+    const written: string[] = [];
+    const write = jest
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk: any) => {
+        written.push(String(chunk));
+        return true;
+      });
     try {
       const store = install([
         { ...perOwner, scope: 'global', subject: undefined },
@@ -731,8 +775,13 @@ describe('trust, leaks and interactions', () => {
       const before = count();
       expect((await post(app)).status).toBe(429);
       expect(count()).toBe(before + 1);
+      flushSecurityEvents(true);
+      expect(written.join('')).not.toContain('rate_limit.hit');
     } finally {
+      write.mockRestore();
+      _resetSecurityEventsForTests();
       delete process.env.PS_METRICS_ENABLED;
+      delete process.env.PS_SECURITY_EVENTS_LOG;
     }
   });
 

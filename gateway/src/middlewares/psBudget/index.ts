@@ -38,7 +38,8 @@ import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
 import { isMcpProxyPath } from '../../mcp/paths';
 import { oidcIdentityOf } from '../psOidc/identity';
-import { RESPONSE_HEADER_KEYS } from '../../globals';
+import { HEADER_KEYS, RESPONSE_HEADER_KEYS } from '../../globals';
+import { ServedTarget, tierServesTarget } from '../psServedTarget';
 import { observeStream, StreamSummary } from '../psStreamObserver';
 import {
   detectVendor,
@@ -344,6 +345,30 @@ function ruleFor(
   return dataPolicyRule(policy, level);
 }
 
+/**
+ * The provider and custom host the call goes to, from its headers (as the
+ * data policy gate in tryPost sees them): the downgrade rewrites only the
+ * model, so it must pick a tier that applies to this target.
+ */
+function requestTarget(
+  headers: Record<string, string | undefined>
+): ServedTarget {
+  let customHost = headers[HEADER_KEYS.CUSTOM_HOST];
+  if (!customHost && headers['x-portkey-config']) {
+    try {
+      const config = JSON.parse(headers['x-portkey-config']);
+      const host = config?.custom_host ?? config?.targets?.[0]?.custom_host;
+      if (typeof host === 'string') customHost = host;
+    } catch {
+      /* the handler rejects it */
+    }
+  }
+  return {
+    provider: providerFromHeaders(headers),
+    ...(customHost ? { customHost } : {}),
+  };
+}
+
 /** Estimated cost of the call as it stands (the router's estimate if it routed). */
 function estimateOf(
   policy: RoutePolicy,
@@ -564,7 +589,8 @@ export function psBudget(options: PsBudgetOptions = {}) {
         },
         ruleFor(c, policy, headers, body),
         estimate,
-        decision.ceilingUsd
+        decision.ceilingUsd,
+        (tier) => tierServesTarget(tier, requestTarget(headers))
       );
       if (pick) {
         const requestedModel = route?.requestedModel ?? body.model ?? 'auto';

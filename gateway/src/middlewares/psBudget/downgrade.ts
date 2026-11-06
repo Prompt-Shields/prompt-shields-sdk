@@ -5,7 +5,10 @@
  * allows: tiers that meet the data policy rule for the call's sensitivity
  * level and, when the use case has an `evalSet`, its `eligibleModels`. It
  * never falls back to a non-compliant model: with no compliant cheaper
- * candidate it returns null and the call keeps its model.
+ * candidate it returns null and the call keeps its model. Only the model is
+ * rewritten, so `serves` (tierServesTarget for the request's provider and
+ * custom host, #20) skips a tier at another provider, as router failover
+ * does: the data policy gate would refuse it there.
  */
 import { tierComplies, useCaseBar } from '../router/constraints';
 import { DEFAULT_OUTPUT_TOKENS, estimateTierCost } from '../router/policy';
@@ -31,7 +34,8 @@ export function pickDowngrade(
   req: DowngradeRequest,
   rule: DataPolicyRule | undefined,
   currentEst: number,
-  ceiling: number
+  ceiling: number,
+  serves: (tier: ModelTier) => boolean = () => true
 ): DowngradePick | null {
   const bar = useCaseBar(policy, req.useCase);
   const eligible = bar?.evalSet ? new Set(bar.eligibleModels || []) : null;
@@ -42,6 +46,7 @@ export function pickDowngrade(
   for (const group of Object.keys(policy.groups)) {
     for (const tier of policy.groups[group]) {
       if (!tierComplies(tier, rule)) continue;
+      if (!serves(tier)) continue;
       if (eligible && !eligible.has(tier.model)) continue;
       const estCost = estimateTierCost(tier, req.approxInputTokens, out);
       if (!(estCost < currentEst)) continue;
