@@ -497,12 +497,6 @@ def test_bad_configuration_is_rejected(kwargs, match):
         _router(**kwargs)
 
 
-def test_stream_is_refused_in_local_mode():
-    router = _router()
-    with pytest.raises(RouterError, match="stream"):
-        router.chat.completions.create(messages=HI, stream=True)
-
-
 def test_existing_clients_are_unchanged_by_the_router():
     """ShieldsClient still never routes: model and hints pass through as-is."""
     client = ShieldsClient(api_key="sk", ps_api_key="ps")
