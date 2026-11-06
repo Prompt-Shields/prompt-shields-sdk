@@ -232,6 +232,47 @@ describe('local estimate', () => {
     expect((res as Response).headers.get('x-ps-token-count')).toBe('estimated');
   });
 
+  test('a target with hooks is estimated on the Gemini and OpenAI routes', () => {
+    for (const [provider, model] of [
+      ['google', 'gemini-2.5-flash'],
+      ['vertex-ai', 'gemini-2.5-pro'],
+      ['openai', 'gpt-5'],
+    ]) {
+      const res = messagesCountTokensRoute(
+        provider,
+        body(model) as any,
+        undefined,
+        true
+      );
+      expect(res).toBeInstanceOf(Response);
+      expect((res as Response).headers.get('x-ps-token-count')).toBe(
+        'estimated'
+      );
+    }
+    // Native Anthropic count configs are unchanged.
+    expect(
+      messagesCountTokensRoute('anthropic', body('c') as any, undefined, true)
+    ).toBeNull();
+  });
+
+  test('guardrails keep content off Gemini countTokens', async () => {
+    const res = await count(body('gemini-2.5-flash'), {
+      'x-portkey-config': JSON.stringify({
+        provider: 'google',
+        api_key: 'gemini-key',
+        input_guardrails: [
+          {
+            'default.contains': { operator: 'none', words: ['x'] },
+            deny: true,
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-ps-token-count')).toBe('estimated');
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
   test('native count configs are used as is', () => {
     expect(messagesCountTokensRoute('anthropic', body('c') as any)).toBeNull();
     expect(

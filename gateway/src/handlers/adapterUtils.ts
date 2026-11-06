@@ -37,7 +37,8 @@ import {
 } from '../adapters/messagesViaResponses';
 import { estimateMessagesInputTokens } from '../adapters/messages/estimateTokens';
 import { toMessagesError } from '../adapters/shared';
-import { OPEN_AI } from '../globals';
+import { GOOGLE, GOOGLE_VERTEX_AI, OPEN_AI } from '../globals';
+import { getModelAndProvider } from '../providers/google-vertex-ai/utils';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -286,12 +287,24 @@ export function estimatedCountTokensResponse(params: Params): Response {
  *    chatComplete or messages config): a local estimate, marked with
  *    `x-ps-token-count: estimated`; nothing is sent upstream.
  * 4. Anything else: a 400 in Anthropic's error shape.
+ *
+ * Guardrails and mutators do not run on count requests, so a target with
+ * hooks is never sent its content on the routes added here (Gemini, OpenAI):
+ * it gets the local estimate, as /v1/messages would redact or deny first.
  */
 export function messagesCountTokensRoute(
   provider: string,
   params: Params,
-  customHost?: string
+  customHost?: string,
+  targetHasHooks = false
 ): AdapterRequestResult | Response | null {
+  const gemini =
+    provider === GOOGLE ||
+    (provider === GOOGLE_VERTEX_AI &&
+      getModelAndProvider(String(params.model ?? '')).provider === 'google');
+  if (targetHasHooks && (gemini || provider === OPEN_AI)) {
+    return estimatedCountTokensResponse(params);
+  }
   if (providerFnConfig(provider, 'messagesCountTokens', params)) return null;
   if (provider === OPEN_AI && !customHost) {
     let responsesParams: Params;

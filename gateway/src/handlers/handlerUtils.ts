@@ -426,7 +426,8 @@ export async function tryPost(
         messagesCountTokensRoute(
           providerOption.provider ?? '',
           routingParams,
-          requestHeaders[HEADER_KEYS.CUSTOM_HOST] || providerOption.customHost
+          requestHeaders[HEADER_KEYS.CUSTOM_HOST] || providerOption.customHost,
+          targetHasHooks
         )
       : applyAdapterRequestTransform(
           fn,
