@@ -27,8 +27,9 @@ CALL = "0b1e6a58-3f43-4c43-9d1e-2f0f6d3b9c11"
 
 @pytest.fixture
 async def client(seeded_db):
-    # A fresh limiter per test, so counts never leak between tests.
-    limiter = FixedWindowRateLimiter()
+    # A fresh limiter per test, so counts never leak between tests, on a
+    # clock pinned 30 s into a minute so a test never straddles a boundary.
+    limiter = FixedWindowRateLimiter(clock=lambda: 1_800_000_030.0)
     app.dependency_overrides[get_feedback_rate_limiter] = lambda: limiter
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         yield c
@@ -208,7 +209,7 @@ async def test_rate_limited_per_user_and_per_tenant(client, seeded_db, monkeypat
     assert (await fb(2, alice)).status_code == 200
     limited = await fb(3, alice)
     assert limited.status_code == 429
-    assert int(limited.headers["Retry-After"]) >= 1
+    assert limited.headers["Retry-After"] == "30"
     # Another user has their own budget, until the tenant's is used up.
     assert (await fb(4, bob)).status_code == 200
     assert (await fb(5, None)).status_code == 200

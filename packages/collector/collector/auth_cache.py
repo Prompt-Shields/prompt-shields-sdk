@@ -173,7 +173,11 @@ def client_key(host: str | None) -> str:
 
 
 class FailedAuthLimiter:
-    """Failed authentications per client per fixed window, LRU-bounded."""
+    """Failed authentications per client per fixed window, LRU-bounded.
+
+    ``clock`` is public so tests can pin the process-wide limiter: with the
+    real clock a test that crosses a window boundary sees its count reset.
+    """
 
     def __init__(
         self,
@@ -185,7 +189,7 @@ class FailedAuthLimiter:
         self._limit = limit
         self.max_clients = max_clients
         self.window = window
-        self._clock = clock
+        self.clock = clock
         # client → (window start, failures in that window)
         self._counts: OrderedDict[str, tuple[int, int]] = OrderedDict()
         self._lock = Lock()
@@ -201,7 +205,7 @@ class FailedAuthLimiter:
         limit = self.limit()
         if limit <= 0:
             return 0
-        now = self._clock()
+        now = self.clock()
         start = int(now) // self.window * self.window
         with self._lock:
             entry = self._counts.get(client)
@@ -212,7 +216,7 @@ class FailedAuthLimiter:
     def record_failure(self, client: str) -> None:
         if self.limit() <= 0 or self.max_clients <= 0:
             return
-        start = int(self._clock()) // self.window * self.window
+        start = int(self.clock()) // self.window * self.window
         with self._lock:
             entry = self._counts.get(client)
             count = entry[1] + 1 if entry is not None and entry[0] == start else 1

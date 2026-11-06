@@ -37,7 +37,7 @@ import hashlib
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic
@@ -94,9 +94,13 @@ class FixedWindowRateLimiter:
 
     ``check`` never awaits, so it is also atomic with respect to concurrent
     async requests on the same event loop.
+
+    ``clock`` (epoch seconds) defaults to ``time.time``, looked up per call;
+    tests pass a fixed one so a run never straddles a minute boundary.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self._clock = clock
         self._counts: dict[tuple[Hashable, int], int] = defaultdict(int)
         self._lock = Lock()
         self._last_gc_minute: int | None = None
@@ -112,7 +116,7 @@ class FixedWindowRateLimiter:
         )
 
     def check(self, partner_id: Hashable, limit: int) -> RateLimitResult:
-        now = int(time.time())
+        now = int(self._clock() if self._clock is not None else time.time())
         now_minute = now // 60
         key = (partner_id, now_minute)
 
