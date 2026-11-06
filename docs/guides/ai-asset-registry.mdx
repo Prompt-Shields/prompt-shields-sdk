@@ -174,7 +174,10 @@ changes `confidence`.
 - The CycloneDX AI-BOM (`/partner/v1/export?format=cyclonedx`) carries
   `promptshields:attestation:<field>` and, for attested fields,
   `…:attested_by`, `…:attested_at` and `…:value_changed`. Comments are not
-  exported.
+  exported. `attested_by` is usually an email: like `promptshields:owner`,
+  it is in the BOM because the export needs `export:read`, the same scope as
+  the JSON export, which already carries both. Treat a BOM you pass on as
+  containing personal data. `asset.attested` webhooks leave `attested_by` out.
 
 Rule-based risk suggestions have their own human review (confirm or reject,
 with a comment and history): see `POST /api/v1/admin/risk-mappings/{risk_id}/review`
