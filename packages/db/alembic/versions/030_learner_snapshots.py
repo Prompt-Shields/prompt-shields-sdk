@@ -9,11 +9,11 @@ projection and the human accept/reject decision). Fed by
 Both tables get the tenant_isolation policy (same SQL as 015) and, if RLS
 is already enforced on ai_assets, enforcement too (same as 020/027).
 
-Numbering: revision 029 is assigned to this change and 028 to the spend
-anomaly alerts (#30). Until 028 is on main this chains from 027; re-point
-``down_revision`` to "028" at merge.
+Numbering: revision 030 is assigned to this change (028 = outcome signals,
+#262; 029 = spend alerts, #265). Until 029 is on main this chains from
+main's head 027; re-point ``down_revision`` to "029" at merge.
 
-Revision ID: 029
+Revision ID: 030
 Revises: 027
 Create Date: 2026-11-06
 """
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "029"
+revision: str = "030"
 down_revision: str | None = "027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
