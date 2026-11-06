@@ -53,6 +53,7 @@ import {
   semanticBytes,
   semanticEntries,
 } from '../psMetrics/cache';
+import { upstreamFetch } from '../../utils/fetch';
 import { canonicalJSON, sha256Hex } from './hash';
 import { normalize, SemanticStore } from './semanticStore';
 
@@ -112,6 +113,8 @@ export interface Embedder {
   /** Runs inside the gateway process: no prompt text leaves it. */
   local: boolean;
   model: string;
+  /** The endpoint a remote embedder posts the prompt text to. */
+  url?: string;
   /** Sovereignty facts checked against the data policy rule. */
   facts?: ModelTier;
   embed(text: string): Promise<ArrayLike<number>>;
@@ -187,12 +190,15 @@ export function httpEmbedder(env: Env): Embedder | undefined {
     id: `http:${url}#${model}`,
     local: false,
     model,
+    url,
     facts,
     async embed(text: string) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const res = await fetch(url, {
+        // Never follows a redirect: a 3xx would re-send the prompt and the
+        // key to a host the egress and data policy checks never saw.
+        const res = await upstreamFetch(url, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -355,10 +361,18 @@ export function embedderAllowed(
   gate: DataPolicyGate | undefined
 ): boolean {
   if (!gate?.rule || embedder.local) return true;
-  return (
-    (!!embedder.facts && tierComplies(embedder.facts, gate.rule)) ||
-    modelComplies(gate.policy, embedder.model, gate.rule)
-  );
+  // Facts the operator declared for the embedding endpoint decide alone: a
+  // policy tier that happens to list the same model name describes another
+  // endpoint. Only without declared facts does such a tier count.
+  const f = embedder.facts;
+  const declared =
+    !!f &&
+    (f.provider !== undefined ||
+      f.jurisdiction !== undefined ||
+      f.zdr !== undefined ||
+      f.usCloudActExposure !== undefined);
+  if (declared) return tierComplies(f!, gate.rule);
+  return modelComplies(gate.policy, embedder.model, gate.rule);
 }
 
 /** `policy_version`, else a digest of the policy, else `none`. */
@@ -446,6 +460,16 @@ export async function semanticLookup(
   if (!sens.ok) return bypass(sens.reason);
   if (!embedderAllowed(embedder, sens.gate))
     return bypass('embedder_not_allowed');
+  // The same egress check as other operator-configured endpoints (OTel,
+  // telemetry): no metadata, private or loopback hosts unless listed in
+  // TRUSTED_CUSTOM_HOSTS. Checked per call, before any text is sent.
+  // Loaded lazily: requestValidator pulls in utils/env, which cache/index
+  // (and its importers) should not load at module init.
+  if (!embedder.local) {
+    const { isSafeUpstreamURL } = await import('../requestValidator');
+    if (!embedder.url || !isSafeUpstreamURL(embedder.url, c))
+      return bypass('embedder_unsafe_url');
+  }
 
   let vector: Float32Array | null;
   try {

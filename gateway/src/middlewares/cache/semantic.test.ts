@@ -152,6 +152,27 @@ describe('embedderAllowed', () => {
     );
   });
 
+  it('declared facts decide alone, even when a policy tier lists the model', () => {
+    const policy: any = {
+      groups: {
+        g: [
+          {
+            model: 'e',
+            group: 'g',
+            inputCostPer1k: 0,
+            outputCostPer1k: 0,
+            jurisdiction: 'DE',
+            zdr: true,
+          },
+        ],
+      },
+    };
+    const g: any = { ...gate, policy };
+    expect(embedderAllowed(http({ jurisdiction: 'US' }), g)).toBe(false);
+    // Without declared facts the listed tier counts.
+    expect(embedderAllowed(http({}), g)).toBe(true);
+  });
+
   it('always allows the local embedder and calls without a rule', () => {
     expect(embedderAllowed(localHashEmbedder(), gate)).toBe(true);
     expect(embedderAllowed(http({}), undefined)).toBe(true);

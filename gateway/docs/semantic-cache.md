@@ -66,7 +66,7 @@ applies to the exact-match cache.
 | `PS_SEMANTIC_CACHE_EMBEDDER` | What it is | Data policy |
 |---|---|---|
 | `local` | Built in. Feature-hashed words and character trigrams (`PS_SEMANTIC_CACHE_LOCAL_DIMS`, default 512). **Lexical, not semantic**: it matches the same question with different case, punctuation, spacing or a word or two changed, not real paraphrases. Use a threshold of 0.9 or higher. | Always allowed: no text leaves the gateway process |
-| `http` | An OpenAI-compatible `/v1/embeddings` endpoint: `PS_SEMANTIC_CACHE_EMBEDDING_URL`, `PS_SEMANTIC_CACHE_EMBEDDING_MODEL`, optional `PS_SEMANTIC_CACHE_EMBEDDING_API_KEY` (sent as a bearer token; keep it in a Secret) and `PS_SEMANTIC_CACHE_EMBEDDING_TIMEOUT_MS` (default 2000). Point it at a self-hosted model (e.g. text-embeddings-inference, Ollama, vLLM) to keep text in your network. | Checked per call, see below |
+| `http` | An OpenAI-compatible `/v1/embeddings` endpoint: `PS_SEMANTIC_CACHE_EMBEDDING_URL`, `PS_SEMANTIC_CACHE_EMBEDDING_MODEL`, optional `PS_SEMANTIC_CACHE_EMBEDDING_API_KEY` (sent as a bearer token; keep it in a Secret) and `PS_SEMANTIC_CACHE_EMBEDDING_TIMEOUT_MS` (default 2000). Point it at a self-hosted model (e.g. text-embeddings-inference, Ollama, vLLM) to keep text in your network. Like other operator-configured egress (OTel, telemetry), the URL must pass the gateway's upstream check: metadata, private and loopback hosts are refused unless listed in `TRUSTED_CUSTOM_HOSTS` (bypass reason `embedder_unsafe_url`), and redirects are never followed. | Checked per call, see below |
 
 Under a route policy with a `data_policy` section, the prompt text is sent to
 an `http` embedder only when the embedder meets the rule for the call's
@@ -80,7 +80,8 @@ PS_SEMANTIC_CACHE_EMBEDDING_ZDR=true
 PS_SEMANTIC_CACHE_EMBEDDING_US_CLOUD_ACT_EXPOSURE=false
 ```
 
-A policy tier that lists the embedding model by name also counts. Without a
+Declared facts decide alone. Only when none of them is set does a policy
+tier that lists the embedding model by name count. Without a
 data policy, any configured embedder is used for calls the sensitivity rule
 allows. The embedding call is not metered in telemetry.
 
@@ -116,4 +117,5 @@ Prometheus (`PS_METRICS_ENABLED=true`):
 
 - Per-instance memory only; there is no Redis-backed semantic store yet.
 - A semantic hit returns a response written for a different (similar) prompt. Tune the threshold per embedder and keep the mode off for use cases where small wording changes matter.
+- Callers in one partition share entries. Without OIDC, everyone using the same credential (a shared team key or virtual key) is one partition, so one of them can seed an answer another gets for a similar prompt; with a remote semantic embedder a long prompt with a small appended instruction can still score above the threshold. Enable OIDC (principals are isolated by default) or give callers separate keys where that matters.
 - Only the final user turn is compared; multi-turn conversations hit only when their whole history is identical.

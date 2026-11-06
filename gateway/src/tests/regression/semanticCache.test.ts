@@ -326,6 +326,32 @@ describe('embeddings', () => {
     expect(chatCalls()).toHaveLength(1);
   });
 
+  test('an embedder on a metadata or private address is never called', async () => {
+    process.env.PS_SEMANTIC_CACHE_EMBEDDING_URL =
+      'http://169.254.169.254/v1/embeddings';
+    upstream(/169\.254\.169\.254/, embedOk);
+    const r = await ask('What is the capital of France?');
+    expect(r).toMatchObject({ status: 'SEMANTIC BYPASS', code: 200 });
+    expect(upstreamCalls.filter((c) => /169\.254/.test(c.url))).toHaveLength(0);
+  });
+
+  test('a redirect from the embedder is not followed', async () => {
+    upstream(
+      /^http:\/\/embed\.test\//,
+      () =>
+        new Response(null, {
+          status: 307,
+          headers: { location: 'http://elsewhere.test/v1/embeddings' },
+        })
+    );
+    upstream(/elsewhere\.test/, embedOk);
+    const r = await ask('What is the capital of France?');
+    expect(r).toMatchObject({ status: 'SEMANTIC BYPASS', code: 200 });
+    expect(
+      upstreamCalls.filter((c) => /elsewhere\.test/.test(c.url))
+    ).toHaveLength(0);
+  });
+
   describe('under a data policy', () => {
     const headers = {
       ...OPENAI_A,
