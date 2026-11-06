@@ -356,6 +356,7 @@ def _source():
         (lambda s: s["models"]["openai/gpt-4o"].update(currency="GBP"), "currency"),
         (lambda s: s["models"]["openai/gpt-4o"].update(input_cost_per_token=-1), ">= 0"),
         (lambda s: s["models"]["openai/gpt-4o"].update(price=1), "unknown fields"),
+        (lambda s: s["models"]["openai/gpt-4o"].update(aliases="gpt-4o-x"), "aliases must be"),
         (lambda s: s["models"].update({"nobody/x": {"mode": "chat", "source": "x"}}), "unknown provider"),
         (lambda s: s["router"]["groups"]["cheap"].append("openai/nope"), "unknown model"),
         (
@@ -369,3 +370,12 @@ def test_validation_rejects_bad_source(mutate, message):
     mutate(source)
     with pytest.raises(build_catalog.CatalogError, match=message):
         build_catalog.validate(source)
+
+
+def test_aliases_are_carried_into_the_sdk_catalog():
+    """ps-teardown reconcile reads an entry's optional ``aliases`` (#24)."""
+    source = _source()
+    source["models"]["openai/gpt-4o"]["aliases"] = ["gpt-4o-alias"]
+    build_catalog.validate(source)
+    built = build_catalog.build_sdk_catalog(source)
+    assert built["models"]["openai/gpt-4o"]["aliases"] == ["gpt-4o-alias"]
