@@ -10,7 +10,10 @@ jest.mock('jose', () => ({}));
 
 import { json, post, resetHarness, upstream, upstreamCalls } from './harness';
 import app from '../../index';
-import { estimateMessagesInputTokens } from '../../adapters/messages/estimateTokens';
+import {
+  estimateMessagesInputTokens,
+  estimateResponsesInputTokens,
+} from '../../adapters/messages/estimateTokens';
 import { messagesCountTokensRoute } from '../../handlers/adapterUtils';
 
 beforeEach(() => resetHarness());
@@ -232,11 +235,16 @@ describe('local estimate', () => {
     expect((res as Response).headers.get('x-ps-token-count')).toBe('estimated');
   });
 
-  test('a target with hooks is estimated on the Gemini and OpenAI routes', () => {
+  test('a target with hooks is estimated on every count route', () => {
     for (const [provider, model] of [
       ['google', 'gemini-2.5-flash'],
       ['vertex-ai', 'gemini-2.5-pro'],
       ['openai', 'gpt-5'],
+      ['anthropic', 'claude-sonnet-5-5'],
+      ['bedrock', 'anthropic.claude-sonnet-5-5-v1:0'],
+      ['vertex-ai', 'claude-sonnet-5-5'],
+      ['claude-platform-aws', 'claude-sonnet-5-5'],
+      ['groq', 'llama-3.3-70b-versatile'],
     ]) {
       const res = messagesCountTokensRoute(
         provider,
@@ -249,10 +257,15 @@ describe('local estimate', () => {
         'estimated'
       );
     }
-    // Native Anthropic count configs are unchanged.
-    expect(
-      messagesCountTokensRoute('anthropic', body('c') as any, undefined, true)
-    ).toBeNull();
+    // A provider the Messages endpoint cannot reach still gets the 400.
+    const jina = messagesCountTokensRoute(
+      'jina',
+      body('jina-embeddings-v3') as any,
+      undefined,
+      true
+    ) as Response;
+    expect(jina.status).toBe(400);
+    expect(jina.headers.get('x-ps-token-count')).toBeNull();
   });
 
   test('guardrails keep content off Gemini countTokens', async () => {
@@ -284,6 +297,241 @@ describe('local estimate', () => {
     expect(
       messagesCountTokensRoute('vertex-ai', body('gemini-2.5-pro') as any)
     ).toBeNull();
+  });
+});
+
+describe('hooks keep the prompt off native count APIs', () => {
+  // Hooks do not run on count requests, so a target with any hooks must
+  // never send the prompt upstream to be counted: /v1/messages would have
+  // redacted or denied it first. Every native count API is stubbed to answer,
+  // so a leak would show up as an upstream call.
+  const SECRET = 'call me at 555-1234';
+  const secretBody = () => ({
+    model: 'claude-sonnet-5-5',
+    system: 'You are terse.',
+    messages: [{ role: 'user', content: SECRET }],
+  });
+
+  const REDACT = {
+    input_mutators: [
+      {
+        'default.regexReplace': {
+          rule: '\\d{3}-\\d{4}',
+          redactText: '[N]',
+        },
+      },
+    ],
+  };
+  const DENY = {
+    input_guardrails: [
+      { 'default.contains': { operator: 'none', words: ['555'] }, deny: true },
+    ],
+  };
+
+  const natives: [string, object][] = [
+    ['anthropic', { provider: 'anthropic', api_key: 'sk-ant-test' }],
+    [
+      'bedrock',
+      {
+        provider: 'bedrock',
+        aws_access_key_id: 'AKIAREGRESSIONTEST',
+        aws_secret_access_key: 'regression-secret',
+        aws_region: 'us-east-1',
+        override_params: { model: 'anthropic.claude-sonnet-5-5-v1:0' },
+      },
+    ],
+    [
+      'vertex-ai (Claude)',
+      {
+        provider: 'vertex-ai',
+        api_key: 'ya29.regression-token',
+        vertex_project_id: 'ps-regression',
+        vertex_region: 'us-east5',
+        override_params: { model: 'anthropic.claude-sonnet-5-5' },
+      },
+    ],
+    [
+      'claude-platform-aws',
+      {
+        provider: 'claude-platform-aws',
+        api_key: 'aws-claude-key',
+        aws_region: 'us-west-2',
+        anthropic_aws_workspace_id: 'wrkspc_regression',
+      },
+    ],
+  ];
+
+  // Bedrock's CountTokens answers `inputTokens`; the others `input_tokens`.
+  const stubEveryUpstream = () =>
+    upstream(/.*/, (call) =>
+      json(
+        /bedrock-runtime/.test(call.url)
+          ? { inputTokens: 99 }
+          : { input_tokens: 99 }
+      )
+    );
+
+  test.each(natives)(
+    '%s without hooks still uses its own count API',
+    async (_name, target) => {
+      stubEveryUpstream();
+      const res = await count(secretBody(), {
+        'x-portkey-config': JSON.stringify(target),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-ps-token-count')).toBeNull();
+      expect(await res.json()).toEqual({ input_tokens: 99 });
+      expect(upstreamCalls).toHaveLength(1);
+    }
+  );
+
+  for (const [hookName, hooks] of [
+    ['a redaction mutator', REDACT],
+    ['a deny guardrail', DENY],
+  ] as const) {
+    test.each(natives)(
+      `%s with ${hookName} is estimated and sends nothing upstream`,
+      async (_name, target) => {
+        stubEveryUpstream();
+        const b = secretBody();
+        const res = await count(b, {
+          'x-portkey-config': JSON.stringify({ ...target, ...hooks }),
+        });
+        expect(res.status).toBe(200);
+        expect(res.headers.get('x-ps-token-count')).toBe('estimated');
+        expect(await res.json()).toEqual({
+          input_tokens: estimateMessagesInputTokens(b),
+        });
+        expect(upstreamCalls).toHaveLength(0);
+        expect(JSON.stringify(upstreamCalls)).not.toContain('555-1234');
+      }
+    );
+  }
+
+  test('hooks inherited from a strategy config apply to its targets', async () => {
+    stubEveryUpstream();
+    const res = await count(secretBody(), {
+      'x-portkey-config': JSON.stringify({
+        strategy: { mode: 'fallback' },
+        ...REDACT,
+        targets: [natives[0][1], natives[1][1]],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-ps-token-count')).toBe('estimated');
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('/v1/messages on the same target does redact (the contrast)', async () => {
+    upstream(/api\.anthropic\.com\/v1\/messages$/, () =>
+      json({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-sonnet-5-5',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 8, output_tokens: 1 },
+      })
+    );
+    const res = await post(
+      app,
+      '/v1/messages',
+      { ...secretBody(), max_tokens: 16 },
+      {
+        'anthropic-version': '2023-06-01',
+        'x-portkey-config': JSON.stringify({ ...natives[0][1], ...REDACT }),
+      }
+    );
+    expect(res.status).toBe(200);
+    expect(upstreamCalls).toHaveLength(1);
+    expect(JSON.stringify(upstreamCalls[0].body)).not.toContain('555-1234');
+  });
+
+  describe('POST /v1/responses/input_tokens', () => {
+    const responsesBody = {
+      model: 'gpt-5.1',
+      instructions: 'You are terse.',
+      input: [{ role: 'user', content: SECRET }],
+    };
+    const openai = (extra: object = {}) =>
+      JSON.stringify({ provider: 'openai', api_key: 'sk-test', ...extra });
+
+    test('without hooks the OpenAI count API is called', async () => {
+      upstream(/api\.openai\.com\/v1\/responses\/input_tokens$/, () =>
+        json({ object: 'response.input_tokens', input_tokens: 12 })
+      );
+      const res = await post(app, '/v1/responses/input_tokens', responsesBody, {
+        'x-portkey-config': openai(),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-ps-token-count')).toBeNull();
+      expect(upstreamCalls).toHaveLength(1);
+    });
+
+    test.each([
+      ['a redaction mutator', REDACT],
+      ['a deny guardrail', DENY],
+    ])('with %s it is estimated locally', async (_n, hooks) => {
+      upstream(/.*/, () =>
+        json({ object: 'response.input_tokens', input_tokens: 12 })
+      );
+      const res = await post(app, '/v1/responses/input_tokens', responsesBody, {
+        'x-portkey-config': openai(hooks),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-ps-token-count')).toBe('estimated');
+      expect(await res.json()).toEqual({
+        object: 'response.input_tokens',
+        input_tokens: estimateResponsesInputTokens(responsesBody),
+      });
+      expect(upstreamCalls).toHaveLength(0);
+    });
+
+    test('an unsupported provider with hooks still gets the 400', async () => {
+      const res = await post(app, '/v1/responses/input_tokens', responsesBody, {
+        'x-portkey-config': JSON.stringify({
+          provider: 'groq',
+          api_key: 'gsk',
+          ...REDACT,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(upstreamCalls).toHaveLength(0);
+    });
+  });
+});
+
+describe('estimateResponsesInputTokens', () => {
+  test('counts instructions, items, tool calls and tools', () => {
+    const tokens = estimateResponsesInputTokens({
+      instructions: 'x'.repeat(40),
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'y'.repeat(40) },
+            { type: 'input_image', image_url: 'data:image/png;base64,AAAA' },
+          ],
+        },
+        { type: 'function_call', name: 'calc', arguments: '{"a":1}' },
+        { type: 'function_call_output', output: 'w'.repeat(40) },
+      ],
+      tools: [
+        { type: 'function', name: 'calc', description: 'adds', parameters: {} },
+      ],
+    });
+    // chars: 40*3 + 'calc' + '{"a":1}' + 'calc' + 'adds' + '{}' = 141
+    expect(tokens).toBe(1600 + 3 * 3 + 3 + Math.ceil(141 / 4));
+  });
+
+  test('a string input is one item', () => {
+    expect(estimateResponsesInputTokens({ input: 'abcdefgh' })).toBe(3 + 2);
+  });
+
+  test('is zero for an empty or invalid body', () => {
+    expect(estimateResponsesInputTokens({})).toBe(0);
+    expect(estimateResponsesInputTokens(null)).toBe(0);
   });
 });
 
