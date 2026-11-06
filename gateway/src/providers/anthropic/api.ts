@@ -1,13 +1,30 @@
 import { ProviderAPIConfig } from '../types';
+import {
+  assertWorkloadUpstreamIsVendor,
+  getWorkloadIdentityToken,
+  isWorkloadAuth,
+  withAnthropicOAuthBeta,
+} from '../../utils/vendorWorkloadIdentity';
 
 const AnthropicAPIConfig: ProviderAPIConfig = {
   getBaseURL: () => 'https://api.anthropic.com/v1',
-  headers: ({ providerOptions, gatewayRequestBody }) => {
-    const apiKey =
-      providerOptions.apiKey || providerOptions.anthropicApiKey || '';
-    const headers: Record<string, string | string[]> = {
-      'X-API-Key': apiKey,
-    };
+  headers: async ({ providerOptions, gatewayRequestBody, c }) => {
+    // PS fork (#76): the operator's workload identity federation sends a
+    // minted bearer token instead of X-API-Key.
+    const workload = isWorkloadAuth(
+      'anthropic',
+      providerOptions.anthropicAuthType,
+      c
+    );
+    const headers: Record<string, string | string[]> = {};
+    if (workload) {
+      assertWorkloadUpstreamIsVendor('anthropic', providerOptions, c);
+      const token = await getWorkloadIdentityToken('anthropic', c);
+      headers['Authorization'] = `Bearer ${token}`;
+    } else {
+      headers['X-API-Key'] =
+        providerOptions.apiKey || providerOptions.anthropicApiKey || '';
+    }
 
     // Accept anthropic_beta and anthropic_version in body to support enviroments which cannot send it in headers.
     const betaHeader =
@@ -19,7 +36,9 @@ const AnthropicAPIConfig: ProviderAPIConfig = {
       (gatewayRequestBody as Params)?.['anthropic_version'] ??
       '2023-06-01';
 
-    headers['anthropic-beta'] = betaHeader;
+    headers['anthropic-beta'] = workload
+      ? withAnthropicOAuthBeta(betaHeader)
+      : betaHeader;
     headers['anthropic-version'] = version;
     return headers;
   },

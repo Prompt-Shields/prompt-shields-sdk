@@ -383,7 +383,10 @@ def attach_outcome_signals(
             session_id = event.get("session_id")
         again = (tracker or _default_tracker).observe(
             request_key(model, messages, session_id), failed=failed)
-        if again is not None:
+        # A failover (non-empty fallback_chain) already re-sent the request
+        # after its own failed attempts; that is the router retrying, not
+        # the caller, so it is not a ``retry`` signal.
+        if again is not None and not (again == RETRY and FALLBACK in signals):
             signals.add(again)
         event["outcome_signals"] = sorted(signals & SIGNAL_CLASSES)[:MAX_SIGNALS]
         event["outcome_signals_version"] = OUTCOME_SIGNALS_VERSION

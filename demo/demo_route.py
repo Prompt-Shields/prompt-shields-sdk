@@ -24,7 +24,6 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-import openai
 from prompt_shields import PolicyViolation, RouteHint, ShieldsRouter
 from prompt_shields.route_policy import estimate_tier_cost
 
@@ -214,23 +213,47 @@ def main() -> int:
         print(f"     requests sent to any provider: {sent}")
 
     print("\n== 2. Failover ==\n")
+    print("Confidential call while scaleway (the cheapest compliant model) is down:")
     outage.add("scaleway")
+    before = dict(calls)
+    try:
+        resp = router.chat.completions.create(
+            messages=[{"role": "user", "content": "Summarise the Q3 incident log."}],
+            data_classification="confidential",
+        )
+    finally:
+        outage.clear()
+    tried = {p: calls.get(p, 0) - before.get(p, 0) for p in calls}
+    tried = {p: n for p, n in tried.items() if n}
+    r = resp.ps.route
+    for a in resp.ps.attempts:
+        outcome = "ok" if a.ok else f"{a.status} {a.error_class}"
+        print(f"  attempt {a.provider}/{a.model}: {outcome}")
+    print(f"  -> served by {r.model} via {r.provider} ({r.jurisdiction})")
+    print(f"     fallback_chain {list(resp.ps.fallback_chain)}")
+    print(f"     requests per provider: {tried}")
+    print("  Only models allowed for confidential data were candidates: the")
+    print("  US-hosted gpt-4o-mini in the same group was never tried.")
+    rows.append(("Confidential, after failover", r.model, resp.ps.cost.usd,
+                 resp.ps.cost.source,
+                 estimate_tier_cost(baseline, resp.usage.prompt_tokens,
+                                    resp.usage.completion_tokens)))
+
+    print("\nThe same call when every compliant provider is down:")
+    outage.update({"scaleway", "mistral-eu"})
     before = dict(calls)
     try:
         router.chat.completions.create(
             messages=[{"role": "user", "content": "Summarise the Q3 incident log."}],
             data_classification="confidential",
         )
-        print("  !! succeeded (unexpected: scaleway is down)")
+        print("  !! succeeded (unexpected: every compliant provider is down)")
         return 1
-    except openai.APIStatusError as exc:  # the provider's error, passed through
+    except PolicyViolation as exc:  # NoCompliantCandidate: fail closed
         tried = {p: calls.get(p, 0) - before.get(p, 0) for p in calls}
         tried = {p: n for p, n in tried.items() if n}
-        print(f"  scaleway answered 503 -> {type(exc).__name__}")
-        print(f"  requests per provider: {tried}")
-        print("  Not wired in yet (#21): prompt_shields.failover has the engine and")
-        print("  circuit breaker, but ShieldsRouter makes one attempt per call. It")
-        print("  does not move on to mistral-small-eu, the next compliant model.")
+        print(f"  -> {type(exc).__name__}, fallback_chain {exc.fallback_chain}")
+        print(f"     requests per provider: {tried}")
     finally:
         outage.clear()
 
@@ -253,7 +276,9 @@ def main() -> int:
     for e in events:
         print(f"  requested {e.get('requested_model')!s:<5} served "
               f"{e.get('served_model')!s:<25} {e.get('served_provider')!s:<11} "
-              f"{e.get('sensitivity_level')!s:<13} {e.get('route_reason')}")
+              f"{e.get('sensitivity_level')!s:<13} {e.get('route_reason')}"
+              + (f" fallback_chain {e['fallback_chain']}"
+                 if e.get("fallback_chain") else ""))
     server.shutdown()
     return 0
 

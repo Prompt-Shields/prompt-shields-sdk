@@ -1,8 +1,7 @@
 import { RouterError } from '../errors/RouterError';
-import {
-  constructConfigFromRequestHeaders,
-  tryTargetsRecursively,
-} from './handlerUtils';
+import { constructConfigFromRequestHeaders } from './handlerUtils';
+// PS fork (#21): failover across the router's compliant candidates.
+import { tryTargetsWithRouteFailover } from '../middlewares/router/failover';
 import { Context } from 'hono';
 
 /**
@@ -18,7 +17,7 @@ export async function chatCompletionsHandler(c: Context): Promise<Response> {
     let request = await c.req.json();
     let requestHeaders = Object.fromEntries(c.req.raw.headers);
     const camelCaseConfig = constructConfigFromRequestHeaders(requestHeaders);
-    const tryTargetsResponse = await tryTargetsRecursively(
+    const tryTargetsResponse = await tryTargetsWithRouteFailover(
       c,
       camelCaseConfig ?? {},
       request,

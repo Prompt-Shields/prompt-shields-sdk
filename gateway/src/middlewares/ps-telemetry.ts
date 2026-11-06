@@ -26,6 +26,21 @@ import { callIdOf, FEEDBACK_PATH, setCallIdHeader } from './psFeedback';
 import { applyBaseline, getBaseline } from './router/baseline';
 import { RESPONSE_HEADER_KEYS } from '../globals';
 import {
+  OUTCOME_SIGNALS_VERSION,
+  OutcomeInputs,
+  hasRefusal,
+  outcomeSignals,
+  stopReasonsOf,
+} from './psOutcomeSignals';
+import {
+  ROUTE_POLICY_KEY,
+  ServedTarget,
+  servedJurisdiction,
+  servedTargetOf,
+} from './psServedTarget';
+import { RoutePolicy } from './router/types';
+import {
+  COST_SOURCE_CACHE,
   COST_SOURCE_PROVIDER_REPORTED,
   costFields,
   PricingUsage,
@@ -76,6 +91,10 @@ interface TelemetryEvent {
   // it was declared, the policy default, or raised by detected PII.
   route_sensitivity_level?: string;
   route_sensitivity_source?: string;
+  // The provider that served the call (#20) and the jurisdiction the active
+  // route policy states for the served model there (psServedTarget.ts).
+  served_provider?: string;
+  served_jurisdiction?: string;
   // Verified savings (#24): the frozen baseline (PS_BASELINE_FILE) and what
   // the call's tokens would have cost on its baseline model, in USD.
   baseline_id?: string;
@@ -83,6 +102,8 @@ interface TelemetryEvent {
   // Exact-match cache (populated by emitCacheTelemetry)
   cache_status?: string;
   est_tokens_saved?: number;
+  // On a cache hit (#33): the upstream cost the hit avoided, in USD.
+  cache_saved_cost?: number;
   // Which API the caller spoke (chat, messages, responses, ...). With the
   // Messages/Responses adapters (#59) this can differ from what the provider
   // served, so it is recorded separately from vendor.
@@ -120,6 +141,44 @@ interface TelemetryEvent {
   // The error class of each failed attempt, in order (PRD 0001 §7.12):
   // empty when the first attempt succeeded. Classes only, never messages.
   fallback_chain?: string[];
+  // Implicit outcome signals (#44): the classes the gateway can see
+  // (fallback, max_tokens, refusal, stream_error, abandoned), with the
+  // SDK's version number. Class names only; see psOutcomeSignals.ts.
+  outcome_signals?: string[];
+  outcome_signals_version?: number;
+}
+
+/**
+ * `served_provider` and `served_jurisdiction` (#20): the target tryPost
+ * recorded as serving the call, else the request's provider; the
+ * jurisdiction only when the active route policy states one for the served
+ * model at that target.
+ */
+export function servedFields(
+  c: any,
+  vendor: string,
+  fallbackModel?: string
+): Pick<TelemetryEvent, 'served_provider' | 'served_jurisdiction'> {
+  const target: ServedTarget = { ...(servedTargetOf(c) || {}) };
+  if (!target.provider && vendor && vendor !== 'unknown')
+    target.provider = vendor;
+  if (!target.provider) return {};
+  const out: Pick<TelemetryEvent, 'served_provider' | 'served_jurisdiction'> = {
+    served_provider: target.provider.toLowerCase(),
+  };
+  let policy: RoutePolicy | undefined;
+  try {
+    policy = c.get(ROUTE_POLICY_KEY);
+  } catch {
+    policy = undefined;
+  }
+  const jurisdiction = servedJurisdiction(
+    policy,
+    target.model || fallbackModel,
+    target
+  );
+  if (jurisdiction) out.served_jurisdiction = jurisdiction;
+  return out;
 }
 
 /** The error classes of the failed attempts, in order. */
@@ -320,6 +379,27 @@ export function withCost(
     ...event,
     ...costFields(event.vendor, model, servedModel, usage),
   };
+}
+
+/**
+ * A response served from the gateway cache (#33): `cost` 0 with
+ * `cost_source: cache`, the cache status, and `cache_saved_cost`, the price
+ * of the cached response's usage (what the hit avoided), when it has one.
+ */
+export function withCacheHit(
+  event: TelemetryEvent,
+  cacheStatus: string,
+  servedModel?: string
+): TelemetryEvent {
+  const saved = withCost(event, servedModel).cost;
+  const out: TelemetryEvent = {
+    ...event,
+    cache_status: cacheStatus,
+    cost: 0,
+    cost_source: COST_SOURCE_CACHE,
+  };
+  if (saved !== undefined) out.cache_saved_cost = saved;
+  return out;
 }
 
 /**
@@ -526,6 +606,42 @@ export function withStreamSummary(
   return out;
 }
 
+// API surfaces that generate text, where outcome signals mean something.
+const GENERATION_SURFACES = new Set([
+  'chat',
+  'completions',
+  'messages',
+  'responses',
+]);
+
+/** A streamed call's event with its outcome signals, on generation surfaces. */
+export function streamOutcome(
+  event: TelemetryEvent,
+  summary: StreamSummary,
+  generation: boolean
+): TelemetryEvent {
+  if (!generation) return event;
+  return withOutcomeSignals(event, {
+    stopReasons: summary.stopReasons,
+    refusal: summary.refusal,
+    fallbackChain: event.fallback_chain,
+    streamTruncated: summary.truncated,
+    streamCancelled: summary.cancelled,
+  });
+}
+
+/** Sets `outcome_signals` (and its version) on an LLM call's event. */
+export function withOutcomeSignals(
+  event: TelemetryEvent,
+  inputs: OutcomeInputs
+): TelemetryEvent {
+  return {
+    ...event,
+    outcome_signals: outcomeSignals(inputs),
+    outcome_signals_version: OUTCOME_SIGNALS_VERSION,
+  };
+}
+
 /**
  * Hono adapter — emits one telemetry event per request after the response is
  * produced. Reads token usage + served model from a JSON body or, for a
@@ -627,6 +743,15 @@ export function psTelemetry() {
           event.route_sensitivity_source = route.sensitivitySource;
       }
 
+      Object.assign(
+        event,
+        servedFields(
+          c,
+          vendor,
+          route?.servedModel || requestBody?.model || responseBody?.model
+        )
+      );
+
       const attempts = attemptsOf(c);
       if (attempts.length) {
         // The caller's trace id links the event to the gateway logs.
@@ -648,15 +773,29 @@ export function psTelemetry() {
         /* no execution context */
       }
       // The model that ran prices the call (SDK: served, then requested).
-      // A response served from the gateway cache cost nothing upstream.
+      // A response served from the gateway cache cost nothing upstream: it
+      // is recorded at cost 0 with `cost_source: cache` and what it saved.
       const served = responseBody?.model || route?.servedModel;
       const cacheStatus =
         c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
+      const cacheHit = cacheStatus.endsWith('HIT');
       const priced = (e: TelemetryEvent, m?: string) =>
-        cacheStatus.endsWith('HIT') ? e : withCost(e, m);
+        cacheHit ? withCacheHit(e, cacheStatus, m) : withCost(e, m);
       const stream = observeStream(c);
+      // A cache hit is not a model call: its stop reasons and refusals
+      // belong to the call that filled the cache (which reported them), so
+      // it carries no outcome signals rather than counting them twice.
+      const generation =
+        !!surface && GENERATION_SURFACES.has(surface) && !cacheHit;
       if (!stream) {
-        waitUntil(sendTelemetry(priced(event, served)).catch(() => {}));
+        const outcome = generation
+          ? withOutcomeSignals(event, {
+              stopReasons: stopReasonsOf(responseBody),
+              refusal: hasRefusal(responseBody),
+              fallbackChain: event.fallback_chain,
+            })
+          : event;
+        waitUntil(sendTelemetry(priced(outcome, served)).catch(() => {}));
         return;
       }
       waitUntil(
@@ -664,12 +803,16 @@ export function psTelemetry() {
           .then((summary) =>
             sendTelemetry(
               priced(
-                withStreamSummary(
-                  event,
+                streamOutcome(
+                  withStreamSummary(
+                    event,
+                    summary,
+                    !!route,
+                    !adapted,
+                    zeroFilled
+                  ),
                   summary,
-                  !!route,
-                  !adapted,
-                  zeroFilled
+                  generation
                 ),
                 summary.model || served
               )
