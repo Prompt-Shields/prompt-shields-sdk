@@ -3321,6 +3321,13 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/RiskMapping'
+                  meta:
+                    type: object
+                    properties:
+                      tenant_id:
+                        type: string
+                        format: uuid
+                        description: Tenant of the credential that made the request
               example:
                 data:
                   - id: "019e1a2b-0000-7000-8000-000000000020"
