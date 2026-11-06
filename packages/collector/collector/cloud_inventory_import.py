@@ -8,7 +8,9 @@ cloud's own CLI (see ``docs/guides/discovery-sources.mdx``), and the JSON it
 prints is imported here. The collector never sees, stores or logs a cloud
 credential, and makes no cloud call.
 
-Supported so far: AWS (Amazon Bedrock). The export is::
+Supported: AWS (Amazon Bedrock), Azure (Azure OpenAI / AI Foundry
+accounts and Azure Machine Learning endpoints) and Google Cloud (Vertex AI).
+The AWS export is::
 
     {
       "cloud": "aws",
@@ -25,10 +27,48 @@ Supported so far: AWS (Amazon Bedrock). The export is::
       }
     }
 
-Each listing is the CLI's JSON output unchanged (or just its list of items);
-any listing may be left out. The same rules as the live pull turn it into
-assets (``cloud_inventory.bedrock_resources``), with the same asset ids, so
-an import and a later pull update the same rows.
+The Azure export (``scripts/cloud-inventory-export-azure.sh``)::
+
+    {
+      "cloud": "azure",
+      "subscriptions": {
+        "<subscription id>": {
+          "accounts":      <az cognitiveservices account list>,
+          "deployments":   {"<account id>":
+                            <az cognitiveservices account deployment list>},
+          "ml_workspaces": <az resource list --resource-type
+                            Microsoft.MachineLearningServices/workspaces>,
+          "ml_endpoints":  {"<workspace id>": {
+            "serverless_endpoints": <az ml serverless-endpoint list>,
+            "online_endpoints":     <az ml online-endpoint list>,
+            "online_deployments":   {"<endpoint name>":
+                                     <az ml online-deployment list>}}}
+        }
+      }
+    }
+
+The Google Cloud export (``scripts/cloud-inventory-export-gcp.sh``)::
+
+    {
+      "cloud": "gcp",
+      "owner_label_emails": {"claims-team": "claims@example.com"},  # optional
+      "projects": {
+        "<project id>": {
+          "<region>": {
+            "endpoints":   <gcloud ai endpoints list>,
+            "models":      <gcloud ai models list>,
+            "tuning_jobs": <tuningJobs.list>          # optional
+          }
+        }
+      }
+    }
+
+Each listing is the CLI's JSON output (or just its list of items; the
+scripts keep only the fields read here); any listing may be left out. The
+same rules as the live pull turn it into assets (``bedrock_resources``,
+``azure_account_deployments``, ``azure_ml_*``, ``vertex_*`` in
+``cloud_inventory``), with the same asset ids, so an import and a later
+pull update the same rows.
 
 An export holding anything that looks like a credential (for example
 ``aws sts assume-role`` output pasted by mistake) is refused before it is
@@ -48,6 +88,7 @@ import json
 import logging
 import re
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -64,8 +105,11 @@ from collector.sanitize import BoundedJsonRoute, loads_bounded
 
 logger = logging.getLogger("prompt_shields.cloud_inventory")
 
-IMPORT_CLOUDS = ("aws",)
+IMPORT_CLOUDS = ("aws", "azure", "gcp")
 MAX_REGIONS = 40
+MAX_SUBSCRIPTIONS = 200
+MAX_GCP_PROJECTS = 50
+MAX_LISTINGS = 20000
 MAX_ITEMS_PER_LISTING = 5000
 MAX_TAGGED_RESOURCES = 20000
 _AWS_ACCOUNT = re.compile(r"^\d{12}$")
@@ -88,6 +132,13 @@ CREDENTIAL_FIELDS = frozenset(
         "idtoken",
         "apikey",
         "authorization",
+        # az cognitiveservices account keys list, az ml *-endpoint
+        # get-credentials, connection strings.
+        "key1",
+        "key2",
+        "primarykey",
+        "secondarykey",
+        "connectionstring",
     }
 )
 
@@ -226,6 +277,252 @@ def parse_aws_export(export: dict) -> tuple[dict, list[ci.CloudDeployment]]:
     return summary, deployments
 
 
+class AzureMlWorkspaceExport(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    serverless_endpoints: Any = None
+    online_endpoints: Any = None
+    online_deployments: dict[str, Any] = {}
+
+
+class AzureSubscriptionExport(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    accounts: Any = None
+    deployments: dict[str, Any] = {}
+    ml_workspaces: Any = None
+    ml_endpoints: dict[str, AzureMlWorkspaceExport] = {}
+
+
+class AzureInventoryExport(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    cloud: Literal["azure"]
+    subscriptions: dict[str, AzureSubscriptionExport]
+
+    @field_validator("subscriptions")
+    @classmethod
+    def _subscriptions(cls, v: dict[str, AzureSubscriptionExport]) -> dict:
+        if not v:
+            raise ValueError("at least one subscription is required")
+        if len(v) > MAX_SUBSCRIPTIONS:
+            raise ValueError(f"at most {MAX_SUBSCRIPTIONS} subscriptions")
+        if not all(ci._GUID.match(s) for s in v):
+            raise ValueError("subscription ids must be GUIDs")
+        listings = sum(
+            len(s.deployments)
+            + sum(len(w.online_deployments) + 2 for w in s.ml_endpoints.values())
+            for s in v.values()
+        )
+        if listings > MAX_LISTINGS:
+            raise ValueError(f"more than {MAX_LISTINGS} listings")
+        return v
+
+
+# `az ml` prints its own flattened, snake_case objects; the rules read the
+# ARM shape (``properties.provisioningState``, ...) that the live pull gets.
+_AZ_ML_FIELDS = {
+    "provisioning_state": "provisioningState",
+    "endpoint_state": "endpointState",
+    "model": "model",
+}
+
+
+def _ml_arm(item: dict) -> dict:
+    props = dict(ci._dict(item.get("properties")))
+    for snake, camel in _AZ_ML_FIELDS.items():
+        if snake in item:
+            props.setdefault(camel, item[snake])
+    if "model_id" in item:
+        props.setdefault("modelSettings", {"modelId": item["model_id"]})
+    return {**item, "properties": props}
+
+
+def _arm_name(resource_id: str) -> str:
+    return resource_id.rsplit("/", 1)[-1]
+
+
+def parse_azure_export(export: dict) -> tuple[dict, list[ci.CloudDeployment]]:
+    """(summary, deployments) from an Azure export. Raises ``ExportError``."""
+    try:
+        doc = AzureInventoryExport.model_validate(export)
+    except ValidationError as exc:
+        raise ExportError(_validation_message(exc)) from None
+    deployments: list[ci.CloudDeployment] = []
+    counts = dict.fromkeys(
+        (
+            "accounts",
+            "ml_workspaces",
+            "accounts_without_deployment_listing",
+            "ml_workspaces_without_endpoint_listing",
+            "online_endpoints_without_deployment_listing",
+            "skipped_other_subscription",
+        ),
+        0,
+    )
+    for sid, sub in doc.subscriptions.items():
+        # ARM ids are case-insensitive.
+        prefix = f"/subscriptions/{sid}/".lower()
+        listings = {k.lower(): v for k, v in sub.deployments.items()}
+        for account in _items(sub.accounts, "value", f"{sid}.accounts"):
+            found = ci.azure_ai_account(account)
+            if found is None:
+                continue
+            if not found[0].lower().startswith(prefix):
+                counts["skipped_other_subscription"] += 1
+                continue
+            counts["accounts"] += 1
+            listing = listings.get(found[0].lower())
+            if listing is None:
+                counts["accounts_without_deployment_listing"] += 1
+                continue
+            what = f"{sid}.deployments.{_arm_name(found[0])}"
+            deployments += ci.azure_account_deployments(
+                *found, _items(listing, "value", what)
+            )
+
+        ml = {k.lower(): v for k, v in sub.ml_endpoints.items()}
+        for ws in _items(sub.ml_workspaces, "value", f"{sid}.ml_workspaces"):
+            found = ci.azure_ml_workspace(ws)
+            if found is None:
+                continue
+            if not found[0].lower().startswith(prefix):
+                counts["skipped_other_subscription"] += 1
+                continue
+            counts["ml_workspaces"] += 1
+            w = ml.get(found[0].lower())
+            if w is None:
+                counts["ml_workspaces_without_endpoint_listing"] += 1
+                continue
+            deployments += _azure_ml_workspace(sid, *found, w, counts)
+    summary: dict = {"subscriptions": len(doc.subscriptions)}
+    summary.update(
+        (k, v) for k, v in counts.items() if v or k in ("accounts", "ml_workspaces")
+    )
+    return summary, deployments
+
+
+def _azure_ml_workspace(
+    sid: str,
+    ws_id: str,
+    region: str | None,
+    ws_tags: dict[str, str],
+    w: AzureMlWorkspaceExport,
+    counts: dict[str, int],
+) -> list[ci.CloudDeployment]:
+    what = f"{sid}.ml_endpoints.{_arm_name(ws_id)}"
+    serverless = _items(w.serverless_endpoints, "value", f"{what}.serverless_endpoints")
+    out = ci.azure_ml_serverless_endpoints(
+        ws_id, region, ws_tags, [_ml_arm(ep) for ep in serverless]
+    )
+    by_endpoint = {k.lower(): v for k, v in w.online_deployments.items()}
+    for ep in _items(w.online_endpoints, "value", f"{what}.online_endpoints"):
+        endpoint = ci.azure_ml_online_endpoint(region, ws_tags, _ml_arm(ep))
+        if endpoint is None:
+            continue
+        listing = by_endpoint.get(endpoint[0].lower())
+        if listing is None:
+            counts["online_endpoints_without_deployment_listing"] += 1
+            continue
+        items = _items(listing, "value", f"{what}.online_deployments.{endpoint[0]}")
+        out += ci.azure_ml_online_deployments(
+            ws_id, *endpoint, [_ml_arm(dep) for dep in items]
+        )
+    return out
+
+
+class VertexRegionExport(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    endpoints: Any = None
+    models: Any = None
+    tuning_jobs: Any = None
+
+
+class GcpInventoryExport(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    cloud: Literal["gcp"]
+    projects: dict[str, dict[str, VertexRegionExport]]
+    # GCP label values cannot hold an email address: maps an ``owner`` label
+    # value to the owner's email, like the live pull's setting of that name.
+    owner_label_emails: dict[str, str] = {}
+
+    @field_validator("owner_label_emails")
+    @classmethod
+    def _owner_emails(cls, v: dict[str, str]) -> dict[str, str]:
+        return ci.GcpInventoryCredentials._owner_emails(v)
+
+    @field_validator("projects")
+    @classmethod
+    def _projects(cls, v: dict[str, dict[str, VertexRegionExport]]) -> dict:
+        if not v:
+            raise ValueError("at least one project is required")
+        if len(v) > MAX_GCP_PROJECTS:
+            raise ValueError(f"at most {MAX_GCP_PROJECTS} projects")
+        if not all(ci._GCP_PROJECT_ID.match(p) for p in v):
+            raise ValueError("invalid GCP project id")
+        if not all(v.values()):
+            raise ValueError("each project needs at least one region")
+        regions = {r for p in v.values() for r in p}
+        if len(regions) > MAX_REGIONS:
+            raise ValueError(f"at most {MAX_REGIONS} regions")
+        if not all(ci._GCP_REGION.match(r) for r in regions):
+            raise ValueError("invalid Vertex AI region name")
+        return v
+
+
+def parse_gcp_export(export: dict) -> tuple[dict, list[ci.CloudDeployment]]:
+    """(summary, deployments) from a Google Cloud export. Raises
+    ``ExportError``."""
+    try:
+        doc = GcpInventoryExport.model_validate(export)
+    except ValidationError as exc:
+        raise ExportError(_validation_message(exc)) from None
+    pairs = [
+        (f"{project}.{region}", region, r)
+        for project, regions in doc.projects.items()
+        for region, r in regions.items()
+    ]
+    # Every region's registry first, so an endpoint can name a model that
+    # lives in another exported region, as in the live pull.
+    catalog = ci._VertexCatalog()
+    for what, region, r in pairs:
+        ci.vertex_catalog_add(
+            catalog,
+            region,
+            _items(r.tuning_jobs, "tuningJobs", f"{what}.tuning_jobs"),
+            _items(r.models, "models", f"{what}.models"),
+        )
+    deployments = ci.vertex_tuned_deployments(catalog)
+    elsewhere: set[tuple[str, str]] = set()
+    for what, region, r in pairs:
+        endpoints = _items(r.endpoints, "endpoints", f"{what}.endpoints")
+        # The live pull reads these models one by one; an import cannot, so
+        # they keep the deployed model's display name until a pull.
+        elsewhere.update(ci.vertex_models_elsewhere(region, endpoints, catalog))
+        deployments += ci.vertex_endpoint_deployments(region, endpoints, catalog)
+    if doc.owner_label_emails:
+        deployments = [
+            replace(d, tags=ci.map_owner_label(d.tags, doc.owner_label_emails))
+            for d in deployments
+        ]
+    summary: dict = {
+        "projects": len(doc.projects),
+        "regions": len({region for _, region, _ in pairs}),
+    }
+    if elsewhere:
+        summary["models_in_unexported_regions"] = len(elsewhere)
+    return summary, deployments
+
+
+PARSERS = {
+    "aws": parse_aws_export,
+    "azure": parse_azure_export,
+    "gcp": parse_gcp_export,
+}
+
+
 def check_export(export: Any) -> str:
     """The export's cloud, after refusing credentials and unknown clouds."""
     if not isinstance(export, dict):
@@ -252,7 +549,7 @@ async def import_cloud_inventory(
     """Store the assets in one export for one tenant and commit. Raises
     ``ExportError`` (nothing stored) for a malformed export."""
     cloud = check_export(export)
-    summary, deployments = parse_aws_export(export)
+    summary, deployments = PARSERS[cloud](export)
     now = now or datetime.now(UTC)
     counts = await ci.store_inventory(db, tenant_id, deployments, now)
     await db.commit()

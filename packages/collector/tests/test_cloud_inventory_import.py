@@ -189,7 +189,7 @@ def test_resources_of_another_account_are_skipped():
 @pytest.mark.parametrize(
     "mutate, needle",
     [
-        (lambda e: e.update(cloud="azure"), "export.cloud"),
+        (lambda e: e.update(cloud="oracle"), "export.cloud"),
         (lambda e: e.pop("cloud"), "export.cloud"),
         (lambda e: e.update(account_id="12345"), "account_id"),
         (lambda e: e["regions"].update({"mars-north-1": {}}), "region"),

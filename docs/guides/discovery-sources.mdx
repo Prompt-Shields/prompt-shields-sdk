@@ -164,6 +164,39 @@ Hubs (whose deployments live in their projects) and feature stores are skipped, 
 
 Leave `subscription_ids` empty to inventory every subscription the principal can read. Run the inventory with `python -m collector.cloud_inventory --tenant <uuid>`, or `POST /api/v1/admin/cloud-inventory/pull` with `Authorization: Bearer $PS_ADMIN_TOKEN` and `{"tenant_id": "<uuid>"}`. Re-runs update the same assets. Deployments that disappear are not deleted; they go `stale` through the normal lifecycle sweep. The ARM access token is renewed five minutes before it expires, and also when ARM rejects it with 401 before that time (for example after the token is revoked, or after the host was suspended). In that case the collector gets a new token and retries the rejected page once, so a long run does not fail part-way.
 
+#### Azure offline import (no credentials in the collector)
+
+As for [AWS](#offline-import-no-credentials-in-the-collector), someone already signed in with `az login` (Reader, or the custom role above, is enough) can export the inventory and import the file; the collector then makes no Azure call and holds no secret:
+
+```bash
+# Read-only: runs only `az ... list` commands with your az login.
+# No subscription ids: every enabled subscription your login can see.
+scripts/cloud-inventory-export-azure.sh <subscription id> [...] > azure-export.json
+python -m collector.cloud_inventory_import --tenant <tenant uuid> --file azure-export.json
+```
+
+The script calls `az cognitiveservices account list`, `az cognitiveservices account deployment list` for each `OpenAI`/`AIServices` account, `az resource list --resource-type Microsoft.MachineLearningServices/workspaces`, and `az ml serverless-endpoint list`, `az ml online-endpoint list` and `az ml online-deployment list` for each workspace (with the Azure CLI `ml` extension; `PS_EXPORT_SKIP_ML=1` leaves Machine Learning out). It never lists keys or endpoint credentials, and keeps only the fields the import reads (ids, names, kind, location, tags, provisioning state, model), so endpoint URLs, environment variables and identities stay in your shell. The export, which the import route and command take like the AWS one:
+
+```json
+{
+  "cloud": "azure",
+  "subscriptions": {
+    "<subscription id>": {
+      "accounts":      [...],
+      "deployments":   {"<account resource id>": [...]},
+      "ml_workspaces": [...],
+      "ml_endpoints":  {"<workspace resource id>": {
+        "serverless_endpoints": [...],
+        "online_endpoints":     [...],
+        "online_deployments":   {"<endpoint name>": [...]}
+      }}
+    }
+  }
+}
+```
+
+Each listing may also be the raw CLI output or ARM's `{"value": [...]}`; both the `az ml` shape (`provisioning_state`, `model_id`) and the ARM shape (`properties.provisioningState`, …) are read. The pull's rules and asset ids apply, so an import and a later pull update the same assets. Resources whose id names another subscription are skipped (`skipped_other_subscription`); accounts, workspaces and online endpoints without their listing in the export are counted (`accounts_without_deployment_listing`, …) rather than guessed. Credential-named fields (`accessToken`, `key1`/`key2` from `az cognitiveservices account keys list`, `primaryKey` from `get-credentials`, `clientSecret`, `connectionString`, …) make the import refuse the whole export with a 400 that names the field, never its value.
+
 ### AWS: Amazon Bedrock
 
 Bedrock is regional, so list every region to inventory. In each region the collector records the resources that show AI in use, each as its own asset with vendor `amazon` (Azure deployments use `microsoft`):
@@ -309,6 +342,32 @@ PS_CLOUD_INVENTORY='{"<tenant uuid>": {"gcp": {
 ```
 
 `service_account` may also be the key file as a JSON string. Leave `project_ids` empty to inventory the service account's own project. The collector signs a JWT with the key and exchanges it at the fixed `oauth2.googleapis.com` (the key file's `token_uri` is ignored), then calls only `<region>-aiplatform.googleapis.com`. Region names are validated strictly (`us-central1`, `europe-west4`, …; not `global`). A project/region that fails, for example because the Vertex AI API is not enabled there, is reported under `region_errors` and does not stop the others.
+
+#### Vertex AI offline import (no credentials in the collector)
+
+With no service account key in the collector, someone signed in with `gcloud auth login` (Vertex AI Viewer is enough) can export the inventory and import the file; the collector makes no Google Cloud call:
+
+```bash
+# Read-only: runs only `gcloud ai endpoints list` and `gcloud ai models list`.
+scripts/cloud-inventory-export-gcp.sh <project id>[,<project id>...] europe-west4 us-central1 > vertex-export.json
+python -m collector.cloud_inventory_import --tenant <tenant uuid> --file vertex-export.json
+```
+
+The script keeps only the fields the import reads (names, display names, labels, deployed model ids and models, the Model Garden source). The export:
+
+```json
+{
+  "cloud": "gcp",
+  "owner_label_emails": {"claims-team": "claims-ai@acme.com"},
+  "projects": {
+    "<project id>": {
+      "europe-west4": {"endpoints": [...], "models": [...], "tuning_jobs": [...]}
+    }
+  }
+}
+```
+
+Add `owner_label_emails` by hand if you use owner labels; it works as in the pull configuration. Each listing may also be the REST output (`{"endpoints": [...]}`). The pull's rules and asset ids apply, so an import and a later pull update the same assets. Two differences, because gcloud has no list command for them: tuning jobs are not exported, so tuned models that are not deployed are missing and a deployed tuned model is named by its registry display name (an optional `tuning_jobs` listing from the REST API `tuningJobs.list` fills this in); and a deployed model registered in a region that is not in the export keeps its deployment's display name, counted under `models_in_unexported_regions`. The next pull, if one ever runs, corrects both on the same assets. Credential-named fields (`private_key`, `access_token`, `refresh_token`, …) are refused as for the other clouds.
 
 ## Provider Org Usage (Platform Signal)
 

@@ -1,0 +1,45 @@
+[
+  {
+    "etag": "\"5e6f7a80-0000-0d00-0000-66f0a2c30000\"",
+    "id": "/subscriptions/3f2a8c1e-5b7d-4e2a-9c61-0d4e8f1a2b3c/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acme-openai-weu/deployments/claims-chat",
+    "name": "claims-chat",
+    "properties": {
+      "callRateLimit": {"count": 300.0, "renewalPeriod": 10.0, "rules": []},
+      "capabilities": {"chatCompletion": "true"},
+      "model": {"format": "OpenAI", "name": "gpt-4o", "version": "2024-08-06"},
+      "provisioningState": "Succeeded",
+      "raiPolicyName": "Microsoft.DefaultV2",
+      "rateLimits": [{"count": 300.0, "key": "request", "renewalPeriod": 10.0}],
+      "versionUpgradeOption": "OnceNewDefaultVersionAvailable"
+    },
+    "resourceGroup": "rg-ai",
+    "sku": {"capacity": 50, "name": "GlobalStandard"},
+    "systemData": {"createdAt": "2025-03-04T09:30:00Z", "createdBy": "platform@acme.com", "createdByType": "User"},
+    "tags": {"cost-center": "cc-4410"},
+    "type": "Microsoft.CognitiveServices/accounts/deployments"
+  },
+  {
+    "etag": "\"5e6f7a80-0000-0d00-0000-66f0a2c30001\"",
+    "id": "/subscriptions/3f2a8c1e-5b7d-4e2a-9c61-0d4e8f1a2b3c/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acme-openai-weu/deployments/claims-embeddings",
+    "name": "claims-embeddings",
+    "properties": {
+      "model": {"format": "OpenAI", "name": "text-embedding-3-large", "version": "1"},
+      "provisioningState": "Succeeded"
+    },
+    "resourceGroup": "rg-ai",
+    "sku": {"capacity": 120, "name": "Standard"},
+    "type": "Microsoft.CognitiveServices/accounts/deployments"
+  },
+  {
+    "etag": "\"5e6f7a80-0000-0d00-0000-66f0a2c30002\"",
+    "id": "/subscriptions/3f2a8c1e-5b7d-4e2a-9c61-0d4e8f1a2b3c/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acme-openai-weu/deployments/claims-old",
+    "name": "claims-old",
+    "properties": {
+      "model": {"format": "OpenAI", "name": "gpt-35-turbo", "version": "0613"},
+      "provisioningState": "Failed"
+    },
+    "resourceGroup": "rg-ai",
+    "sku": {"capacity": 10, "name": "Standard"},
+    "type": "Microsoft.CognitiveServices/accounts/deployments"
+  }
+]
