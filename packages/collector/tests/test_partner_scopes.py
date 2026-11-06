@@ -43,10 +43,12 @@ ROUTES = [
     ("/partner/v1/changes?since=2026-01-01T00:00:00", "changes:read"),
     ("/partner/v1/export", "export:read"),
     ("/partner/v1/usage/focus-export", "usage:export"),
+    ("/partner/v1/mcp/tools", "mcp:read"),
+    ("/partner/v1/mcp/usage", "mcp:read"),
 ]
 
 # Read routes added after Phase 1 whose scope `registry:read` does not grant.
-NOT_IN_LEGACY = {"usage:export"}
+NOT_IN_LEGACY = {"usage:export", "mcp:read"}
 
 
 class TestExpandScopes:
