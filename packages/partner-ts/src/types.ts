@@ -68,9 +68,9 @@ export interface AIAsset {
   discoverySource: DiscoverySource[];
   confidence: Confidence;
   /** ISO 8601 timestamp. */
-  firstSeen: string | null;
+  firstSeen: string;
   /** ISO 8601 timestamp. */
-  lastSeen: string | null;
+  lastSeen: string;
   /** Telemetry-driven lifecycle, independent of the governance `status`. */
   lifecycleState?: LifecycleState;
   /** ISO 8601 timestamp of the last `lifecycleState` change. */
@@ -398,7 +398,7 @@ export interface ChangeEvent {
   /** Fields whose attestation changed since `since`. */
   attestationChanges?: string[];
   /** ISO 8601 timestamp. */
-  changedAt: string | null;
+  changedAt: string;
   /** Fields that changed. `null` for created assets and until field-level audit ships. */
   changedFields: string[] | null;
 }
