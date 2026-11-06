@@ -30,7 +30,7 @@ rely on routing for compliance.
 | Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
 | Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Yes, to the next compliant model in the routed group on a 5xx, 429 or timeout, with the request's own provider credentials. A gateway config with its own fallback or retry settings takes over instead |
 | Streaming | Refused (`RouterError`) | Yes |
-| Circuit breakers | Per process, shared by the routers in it unless you pass `breakers=` | Per gateway replica |
+| Circuit breakers | Per process, shared by the routers in it unless you pass `breakers=` or `breaker_config=` | Per gateway replica |
 | [Spend budgets](#spend-budgets) | `budgets=` (`budget.v1`). Counters are in-process unless you pass `budget_store=` | `PS_BUDGETS` or `PS_BUDGETS_FILE`. Counters are per replica unless Redis is configured |
 | [Savings baseline](#savings) | `baseline=` (`baseline.v1`) | `PS_BASELINE_FILE` |
 | [Pseudonymisation](/guides/pseudonymisation) | `pseudonymise=True`, off by default | No |
@@ -364,7 +364,8 @@ def budgeted(mode, limit_usd):
 try:
     budgeted("block", 0).route(minutes)
 except BudgetExceeded as exc:
-    str(exc)  # => "budget 'support-daily' is exhausted; the call was not sent"
+    blocked = str(exc)
+blocked  # => "budget 'support-daily' is exhausted; the call was not sent"
 
 hint = RouteHint(quality="critical")
 budgeted("warn", 0).route(minutes, route=hint).model  # => "mistral-large-eu"
@@ -535,7 +536,8 @@ against the code.
   `PS_ROUTER_ENABLED=true`), budgets, the savings baseline,
   pseudonymisation, learner auto mode and the gateway's response caches all
   need to be turned on. Failover is the exception: `ShieldsRouter` fails
-  over unless you pass `failover=False`.
+  over unless you pass `failover=False`, and the gateway router fails over
+  whenever it routes a call and no `x-portkey-config` owns retries.
 - **Local mode refuses streaming.** `stream=True` raises `RouterError` in
   local mode. Gateway mode streams.
 - **Local mode does not translate tools for Anthropic.** Tool messages and
