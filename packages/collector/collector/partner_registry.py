@@ -34,8 +34,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, func, select
 
-from collector import aibom, focus_export
-from collector.attestation import add_attestation_summaries, attestation_changes_since
+from collector import aibom, attestation, focus_export
+from collector.attestation import (
+    AttestationState,
+    add_attestation_summaries,
+    attestation_changes_since,
+)
 from collector.audit import record_read
 from collector.ingest import CACHE_HIT_STATUSES, COST_SOURCE_CACHE
 from collector.lifecycle import LifecycleState, lifecycle_change_for
@@ -211,12 +215,38 @@ async def list_assets(
     vendor: str | None = None,
     confidence: str | None = None,
     data_classification: str | None = None,
+    attestation_field: str | None = Query(
+        default=None,
+        description="With attestation_state: only assets whose current attestation "
+        "of this field (asset, owner, data_classification) is in that state",
+    ),
+    attestation_state: AttestationState | None = Query(  # noqa: B008 - FastAPI marker
+        default=None,
+        description="With attestation_field. `unreviewed` includes never-attested fields",
+    ),
     limit: int = Query(default=50, le=200, ge=1),
 ):
     await _enforce_rate_limit(request, response, principal)
     db = request.state.db
 
     conditions = [AIAsset.tenant_id == principal.tenant_id]
+    try:
+        review = attestation.list_filter(
+            principal.tenant_id, attestation_field, attestation_state
+        )
+    except ValueError as exc:
+        await _audit(request, principal, "/partner/v1/assets", "GET", 400)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "about:blank",
+                "title": "Bad Request",
+                "status": 400,
+                "detail": str(exc),
+            },
+        ) from exc
+    if review is not None:
+        conditions.append(review)
     if business_unit:
         conditions.append(AIAsset.business_unit == business_unit)
     if status:
@@ -957,7 +987,12 @@ async def export_registry(
 
     if format == "cyclonedx":
         assets, flows, risks = await aibom.load_registry(db, principal.tenant_id)
-        bom = aibom.build_bom(principal.tenant_id, assets, flows, risks)
+        latest = await attestation.latest_attestations(
+            db, principal.tenant_id, [a.id for a in assets]
+        )
+        bom = aibom.build_bom(
+            principal.tenant_id, assets, flows, risks, attestations=latest
+        )
         await _audit(
             request,
             principal,

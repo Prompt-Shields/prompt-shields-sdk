@@ -22,6 +22,8 @@ describe('assets', () => {
       since: new Date('2026-03-01T00:00:00Z'),
       limit: 200,
       vendor: undefined,
+      attestationField: 'owner',
+      attestationState: 'unreviewed',
     });
     const url = new URL(m.calls[0].url);
     expect(url.pathname).toBe('/partner/v1/assets');
@@ -32,6 +34,8 @@ describe('assets', () => {
       discovery_source: 'sdk',
       since: '2026-03-01T00:00:00.000Z',
       limit: '200',
+      attestation_field: 'owner',
+      attestation_state: 'unreviewed',
     });
   });
 
