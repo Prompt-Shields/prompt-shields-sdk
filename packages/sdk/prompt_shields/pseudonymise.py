@@ -228,8 +228,9 @@ class Pseudonymisation:
                 for name in ("content", "refusal"):
                     if isinstance(_get(message, name), str):
                         _set(message, name, self.restore(_get(message, name)))
-                for tc in _get(message, "tool_calls") or ():
-                    fn = _get(tc, "function")
+                fns = [_get(tc, "function") for tc in _get(message, "tool_calls") or ()]
+                fns.append(_get(message, "function_call"))
+                for fn in fns:
                     if fn is not None and isinstance(_get(fn, "arguments"), str):
                         _set(fn, "arguments",
                              self.restore(_get(fn, "arguments"), json_escape=True))
@@ -315,6 +316,8 @@ def _walk_content(content: Any, text: Callable[[str], str]) -> Any:
         if isinstance(part, Mapping):
             if isinstance(part.get("text"), str):
                 part = {**part, "text": text(part["text"])}
+            if part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
+                part = {**part, "refusal": text(part["refusal"])}
             if part.get("type") == "tool_result" and "content" in part:
                 part = {**part, "content": _walk_content(part["content"], text)}
             if part.get("type") == "tool_use" and isinstance(part.get("input"), Mapping):
@@ -335,6 +338,13 @@ def _walk_message(message: Any, text: Callable[[str], str]) -> Any:
     out = dict(message)
     if "content" in out:
         out["content"] = _walk_content(out["content"], text)
+    # An earlier answer sent back as history: its restored refusal and its
+    # legacy function_call carry the original values.
+    if isinstance(out.get("refusal"), str):
+        out["refusal"] = text(out["refusal"])
+    fc = out.get("function_call")
+    if isinstance(fc, Mapping) and isinstance(fc.get("arguments"), str):
+        out["function_call"] = {**fc, "arguments": _arguments(fc["arguments"], text)}
     if isinstance(out.get("tool_calls"), list):
         calls = []
         for tc in out["tool_calls"]:

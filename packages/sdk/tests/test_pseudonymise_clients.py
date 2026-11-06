@@ -427,3 +427,23 @@ def test_restore_response_on_dicts():
     p.restore_response(msg)
     assert msg["content"][0]["text"] == IBAN
     assert msg["content"][1]["thinking"] == _ph("IBAN")  # signed: left as is
+
+
+def test_earlier_answer_sent_back_as_history_is_pseudonymised():
+    # A restored answer appended to the history carries the original values
+    # in its refusal and legacy function_call, not only its content.
+    args = json.dumps({"to": EMAIL})
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None, "refusal": f"I won't mail {EMAIL}",
+         "function_call": {"name": "send", "arguments": args}},
+        {"role": "assistant", "content": [{"type": "refusal", "refusal": f"no, {EMAIL}"}]},
+    ]
+    p = pseudonymise(history)
+    assert EMAIL not in json.dumps(p.messages, ensure_ascii=False)
+    assert EMAIL in json.dumps(history)  # the input is not changed
+    resp = {"choices": [{"message": {
+        "content": None, "function_call": p.messages[1]["function_call"]}}]}
+    p.restore_response(resp)
+    fc = resp["choices"][0]["message"]["function_call"]
+    assert json.loads(fc["arguments"]) == {"to": EMAIL}
