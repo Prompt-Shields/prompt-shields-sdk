@@ -29,7 +29,7 @@ rely on routing for compliance.
 | Policy | Any `route-policy.v1` document you pass | The built-in default policy. A custom policy needs code (see [Limits](#limits)) |
 | Sensitivity, data policy, quality bar | Yes | Yes, when the policy has those sections. The default policy has none of them |
 | Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Yes, to the next compliant model in the routed group on a 5xx, 429 or timeout, with the request's own provider credentials. A gateway config with its own fallback or retry settings takes over instead |
-| Streaming | Refused (`RouterError`) | Yes |
+| Streaming | Yes. Failover only before the first chunk; chunks keep the serving provider's shape (see [Streaming](#streaming)) | Yes. Failover only before the stream starts |
 | Circuit breakers | Per process, shared by the routers in it unless you pass `breakers=` or `breaker_config=` | Per gateway replica |
 | [Spend budgets](#spend-budgets) | `budgets=` (`budget.v1`). Counters are in-process unless you pass `budget_store=` | `PS_BUDGETS` or `PS_BUDGETS_FILE`. Counters are per replica unless Redis is configured |
 | [Savings baseline](#savings) | `baseline=` (`baseline.v1`) | `PS_BASELINE_FILE` |
@@ -252,6 +252,45 @@ The telemetry event carries `requested_model` (`auto`), `served_model`,
 `route_est_cost`, `served_provider`, `served_jurisdiction`, `policy_version`,
 `sensitivity_level`, `sensitivity_source` and `fallback_chain`. The collector
 stores these fields on `ai_usage_events`.
+
+### Streaming
+
+With `stream=True` in local mode the call is routed exactly as above (route,
+data-policy gate, budget check, learner choice) before anything is sent, and
+`create()` returns a `RoutedStream` (`AsyncRoutedStream` for
+`AsyncShieldsRouter`). Iterate it, or use it as a context manager:
+
+```python
+with client.chat.completions.create(
+    model="auto", messages=minutes, stream=True,
+    data_classification="confidential",
+) as stream:
+    stream.ps.route.provider   # known before the first chunk is read
+    for chunk in stream:
+        ...
+stream.ps.cost.usd             # filled in once the stream has ended
+```
+
+- **Chunk shape:** the serving provider's own. Chat-completion chunks from
+  OpenAI and OpenAI-compatible providers, Messages stream events from
+  Anthropic. `stream.ps.route.provider` says which.
+- **Failover only before the first chunk.** An attempt counts as served once
+  its first chunk is in. The request raising, or the stream failing before
+  any chunk (connection error, 5xx, 429), moves to the next candidate as for
+  a non-streamed call. Once a chunk has been read, an error is raised to the
+  caller and never retried, as on the gateway.
+- **One event, one spend record.** The telemetry event is built when the
+  stream ends, fails, is closed early, or is dropped unfinished, with
+  `stream_completed` and `stream_error`. Tokens come from the provider's
+  final usage (OpenAI's `stream_options.include_usage`, which the SDK asks
+  api.openai.com for; Anthropic's `message_start` and `message_delta`), else
+  they are estimated and the event has `tokens_estimated: true`. The spend is
+  recorded against the budgets once, from that event. Failed attempts before
+  the first chunk send no event and record nothing.
+- **Pseudonymisation:** with `pseudonymise=True` the chunks are restored on
+  the way through (`restore_stream`), including placeholders split across
+  chunks, and the mapping is dropped when the stream ends, fails or is
+  closed. `stream.ps.pseudonymisation` is filled in at the end.
 
 ## Failover
 
@@ -538,8 +577,13 @@ against the code.
   need to be turned on. Failover is the exception: `ShieldsRouter` fails
   over unless you pass `failover=False`, and the gateway router fails over
   whenever it routes a call and no `x-portkey-config` owns retries.
-- **Local mode refuses streaming.** `stream=True` raises `RouterError` in
-  local mode. Gateway mode streams.
+- **Local-mode streams keep the provider's chunk shape.** A local-mode
+  stream yields chat-completion chunks from OpenAI and OpenAI-compatible
+  providers and Messages stream events from Anthropic; they are not
+  translated into one shape. Failover only happens before the first chunk.
+  The learner hears about a stream when it ends or is closed, not when it
+  is dropped unfinished without `close()` (its event and spend are still
+  recorded).
 - **Local mode does not translate tools for Anthropic.** Tool messages and
   OpenAI-only parameters (`tools`, `response_format`, `n`, ...) raise
   `RouterError` when the call is routed to Anthropic. They are not silently

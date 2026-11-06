@@ -87,8 +87,10 @@ from prompt_shields.pricing import estimate_cost, estimate_unit_cost
 from prompt_shields.pseudonymise import Pseudonymisation, pseudonymise
 from prompt_shields.route_policy import PolicyViolation
 from prompt_shields.router import (
+    AsyncRoutedStream,
     AsyncShieldsRouter,
     RoutedChatCompletion,
+    RoutedStream,
     RouterError,
     ShieldsRouter,
 )
@@ -106,6 +108,7 @@ __version__ = "0.4.0"
 
 __all__ = [
     "FEEDBACK_REASONS",
+    "AsyncRoutedStream",
     "AsyncShieldsAnthropic",
     "AsyncShieldsClient",
     "AsyncShieldsOpenAI",
@@ -128,6 +131,7 @@ __all__ = [
     "RedisBudgetStore",
     "RouteHint",
     "RoutedChatCompletion",
+    "RoutedStream",
     "RouterError",
     "ShieldsAnthropic",
     "ShieldsClient",

@@ -290,14 +290,6 @@ def test_client_error_is_raised_not_retried():
     assert _called(upstreams) == {"scaleway": 1}
 
 
-def test_stream_still_refused_in_local_mode():
-    router = _router()
-    _, upstreams = _wire(router)
-    with pytest.raises(RouterError, match="stream"):
-        router.chat.completions.create(messages=HI, stream=True)
-    assert not _called(upstreams)
-
-
 def test_failover_false_makes_one_attempt():
     router = _router(failover=False)
     _, upstreams = _wire(router, {"scaleway": [ProviderError(503)]})
