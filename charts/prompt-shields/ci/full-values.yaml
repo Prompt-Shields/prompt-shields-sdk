@@ -43,6 +43,13 @@ gateway:
           match: [Chat.Use]
           providers: [azure-openai]
           rate_limit: {requests_per_minute: 60}
+  budgets:
+    enabled: true
+    redis:
+      existingSecret: {name: gateway-redis, key: url}
+    budgets:
+      - {id: support-daily, scope: use_case, subject: support-bot, window: day, limit_usd: 50, mode: downgrade}
+      - {id: per-owner-monthly, scope: owner, subject: "*", window: month, limit_usd: 20, mode: block}
   config:
     AWS_AMBIENT_CREDENTIALS_ENABLED: "true"
     HTTPS_PROXY: http://egress-proxy.example.com:3128

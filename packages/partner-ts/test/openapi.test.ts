@@ -211,6 +211,15 @@ const UNMAPPED_SCHEMAS = new Set([
   'McpPageMeta',
   'McpToolPage',
   'McpUsagePage',
+  // Routing learner snapshots and recommendation review (#47, #48): not
+  // wrapped yet; call them with client.send().
+  'LearnerSnapshotSummary',
+  'LearnerSnapshot',
+  'LearnerArmProjection',
+  'LearnerRealised',
+  'LearnerRecommendation',
+  'LearnerReviewRequest',
+  'LearnerSnapshotUploadResult',
   // Spend anomaly alerts (#30): not wrapped yet; call them with
   // client.send(). The thresholds are operator tenant settings.
   'SpendAlert',
@@ -348,6 +357,14 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/mcp/tools': NOT_WRAPPED,
   'GET /partner/v1/mcp/usage': NOT_WRAPPED,
   'GET /api/v1/registry/mcp-tools': NOT_WRAPPED,
+  // Learner snapshots are uploaded by the Python SDK's ps-learn with the
+  // tenant ingest key; the learner routes are not wrapped yet (#47, #48).
+  'POST /ingest/learner-snapshots': NOT_WRAPPED,
+  'GET /partner/v1/learner/snapshots': NOT_WRAPPED,
+  'GET /partner/v1/learner/snapshots/{learner_version}': NOT_WRAPPED,
+  'GET /partner/v1/learner/recommendations': NOT_WRAPPED,
+  'GET /partner/v1/learner/recommendations/{rec_id}': NOT_WRAPPED,
+  'POST /partner/v1/learner/recommendations/{rec_id}/review': NOT_WRAPPED,
 };
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

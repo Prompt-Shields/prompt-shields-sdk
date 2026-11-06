@@ -606,7 +606,10 @@ export function reportPayloadRejected(
 
 /**
  * Middleware: records responses with status 429 (metric and rate_limit.hit
- * event). `upstream` when a provider attempt was made, else `gateway`.
+ * event). `upstream` when a provider attempt was made, else `gateway`. A
+ * spend budget refusal (psBudget, #28) only counts in the metric, as
+ * `budget`: it is a cost decision, not a security signal, so it writes no
+ * security event.
  */
 export function psSecurityEvents() {
   return async (c: Context, next: Next) => {
@@ -616,9 +619,13 @@ export function psSecurityEvents() {
       const target = sinksOf(c);
       const metrics = isMetricsEnabled(c);
       if (!target && !metrics) return;
-      const source = attemptsOf(c).length ? 'upstream' : 'gateway';
+      const source = c.get('psBudgetRefused' as any)
+        ? 'budget'
+        : attemptsOf(c).length
+          ? 'upstream'
+          : 'gateway';
       if (metrics) rateLimitedTotal.inc({ source });
-      if (!target) return;
+      if (!target || source === 'budget') return;
       const provider = providerFromHeaders(headersOf(c));
       enqueue(target, {
         ...base(c, 'rate_limit.hit', {

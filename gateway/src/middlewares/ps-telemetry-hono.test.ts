@@ -137,6 +137,27 @@ describe('psTelemetry (Hono adapter)', () => {
     expect(sent.events[0]).toMatchObject({ model: 'm', source: 'gateway' });
   });
 
+  test('carries the budget decision (psBudget) into the event', async () => {
+    const app = new Hono();
+    app.use('/v1/chat/completions', psTelemetry());
+    app.use('/v1/chat/completions', async (c, next) => {
+      c.set('psBudget', {
+        state: 'exceeded',
+        action: 'downgraded',
+        budgetId: 'mkt-monthly',
+      });
+      await next();
+    });
+    app.post('/v1/chat/completions', (c) => c.json({ model: 'gpt-4o-mini' }));
+    await post(app, { model: 'gpt-4o-mini', messages: [] });
+    await flush();
+    expect(sent.events[0]).toMatchObject({
+      budget_state: 'exceeded',
+      budget_action: 'downgraded',
+      budget_id: 'mkt-monthly',
+    });
+  });
+
   test('never includes provider credentials in the event', async () => {
     const app = makeApp((c) => c.json({ model: 'gpt-4o' }));
     await post(
