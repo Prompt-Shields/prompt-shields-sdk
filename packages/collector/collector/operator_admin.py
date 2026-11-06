@@ -28,7 +28,11 @@ Tenants:
   POST   /retention/purge             usage-event purge             operator:retention
   GET    /audit/verify                check the hash chains         operator:audit
 
-Operator tokens (operator:tokens; a caller grants only scopes it holds):
+Operator tokens (operator:tokens). A named token can only grant, rotate or
+revoke a token whose scopes it holds (403 otherwise), and a token it issues
+or rotates expires no later than itself: an omitted or later expiry is
+capped to the caller's, as for tenant admin tokens (#364). PS_ADMIN_TOKEN
+is not bounded.
 
   GET    /token-scopes                the operator scopes
   POST   /tokens                      issue (token returned once); 409 on a
@@ -48,7 +52,8 @@ names the caller: ``operator_token`` with the token's name, or
 ``operator`` for PS_ADMIN_TOKEN (whose every use is also an
 ``operator.break_glass`` row on the system chain). Operator token issue,
 rotate and revoke are ``operator_token.issue|rotate|revoke`` on the system
-chain.
+chain; a refused (403) attempt is the same action with outcome ``failure``,
+and a capped expiry sets ``details.expiry_capped``.
 ``GET /audit/verify`` checks the hash chains.
 """
 
@@ -606,6 +611,34 @@ async def _audit_token(
     )
 
 
+async def _refuse_token(
+    request: Request,
+    action: str,
+    detail: str,
+    *,
+    target: OperatorToken | None = None,
+    **details,
+) -> HTTPException:
+    """Record a refused ``operator_token.*`` attempt (outcome ``failure``,
+    status 403) on the system chain and return the 403 to raise. Nothing has changed
+    in the request's session yet, so the row commits on its own."""
+    if target is not None:
+        details = {"name": target.name, **details}
+    await audit_trail.record_committed(
+        request.state.db,
+        tenant_id=audit_trail.SYSTEM_TENANT_ID,
+        export=False,
+        action=action,
+        outcome=audit_trail.FAILURE,
+        actor=current_actor(request),
+        target_type="operator_token",
+        target_id=str(target.id) if target is not None else None,
+        status_code=403,
+        details=details,
+    )
+    return _problem(403, "Forbidden", detail)
+
+
 async def _get_operator_token(db, token_id: UUID) -> OperatorToken:
     row = (
         await db.execute(select(OperatorToken).where(OperatorToken.id == token_id))
@@ -615,8 +648,8 @@ async def _get_operator_token(db, token_id: UUID) -> OperatorToken:
     return row
 
 
-def _caller_scopes(request: Request) -> frozenset[str]:
-    return request.state.operator.scopes
+def _caller(request: Request) -> OperatorPrincipal:
+    return request.state.operator
 
 
 @router.get("/token-scopes", summary="List the operator token scopes")
@@ -637,18 +670,28 @@ async def create_operator_token(
             "Bad Request",
             f"Unknown scopes: {bad}. Allowed: {list(OPERATOR_SCOPES)}",
         )
-    beyond = sorted(set(body.scopes) - _caller_scopes(request))
+    caller = _caller(request)
+    beyond = caller.lacks(body.scopes)
     if beyond:
-        raise _problem(
-            403, "Forbidden", f"Cannot grant scopes the caller does not hold: {beyond}"
+        raise await _refuse_token(
+            request,
+            "operator_token.issue",
+            f"Cannot grant scopes the caller does not hold: {beyond}",
+            name=body.name,
+            reason="scope_not_held",
+            scopes=beyond,
         )
+    requested = _future(body.expires_at)
+    # No later than the caller's own expiry (#364): capped, as for tenant
+    # admin tokens; the audit row says when.
+    expires_at = caller.cap_expiry(requested)
     db = request.state.db
     try:
         row, token = await issue_operator_token(
             db,
             name=body.name,
             scopes=body.scopes,
-            expires_at=_future(body.expires_at),
+            expires_at=expires_at,
             created_by=_created_by(request),
         )
     except NameTaken:
@@ -658,8 +701,9 @@ async def create_operator_token(
             "An operator token with this name exists or existed; names are not reused",
         ) from None
     out = serialize_operator_token(row)
+    capped = {"expiry_capped": True} if expires_at != requested else {}
     await _audit_token(
-        request, "operator_token.issue", row, 201, scopes=out["scopes"]
+        request, "operator_token.issue", row, 201, scopes=out["scopes"], **capped
     )
     await db.commit()
     return {**out, "token": token, "warning": OPERATOR_TOKEN_WARNING}
@@ -704,19 +748,30 @@ async def rotate_operator_token(
 ) -> dict:
     db = request.state.db
     row = await _get_operator_token(db, token_id)
+    caller = _caller(request)
     # Rotating hands out the token's scopes, so the caller must hold them.
-    beyond = sorted(set(row.scopes or ()) - _caller_scopes(request))
+    beyond = caller.lacks(row.scopes)
     if beyond:
-        raise _problem(
-            403,
-            "Forbidden",
+        raise await _refuse_token(
+            request,
+            "operator_token.rotate",
             f"Cannot rotate a token with scopes the caller does not hold: {beyond}",
+            target=row,
+            reason="scope_not_held",
+            scopes=beyond,
         )
     try:
         token = rotate_token(row)
     except ValueError as exc:
         raise _problem(409, "Conflict", f"Cannot rotate a {exc} token") from None
-    await _audit_token(request, "operator_token.rotate", row, 200)
+    # The new secret expires no later than the caller (#364): a later or
+    # missing expiry is capped to the caller's own.
+    expires_at = caller.cap_expiry(row.expires_at)
+    capped = {}
+    if expires_at != row.expires_at:
+        row.expires_at = expires_at
+        capped = {"expiry_capped": True}
+    await _audit_token(request, "operator_token.rotate", row, 200, **capped)
     out = serialize_operator_token(row)
     await db.commit()
     return {**out, "token": token, "warning": OPERATOR_TOKEN_WARNING}
@@ -730,6 +785,17 @@ async def revoke_operator_token(
 ) -> None:
     db = request.state.db
     row = await _get_operator_token(db, token_id)
+    # A narrower token cannot disrupt a broader one (#364).
+    beyond = _caller(request).lacks(row.scopes)
+    if beyond:
+        raise await _refuse_token(
+            request,
+            "operator_token.revoke",
+            f"Cannot revoke a token with scopes the caller does not hold: {beyond}",
+            target=row,
+            reason="scope_not_held",
+            scopes=beyond,
+        )
     if row.revoked_at is None:
         row.revoked_at = datetime.now(UTC)
         await _audit_token(request, "operator_token.revoke", row, 204)

@@ -96,6 +96,9 @@ class OperatorPrincipal:
     scopes: frozenset[str]
     token_id: object | None = None
     name: str | None = None
+    # A named token's own expiry (None: it does not expire). Tokens it
+    # issues or rotates expire no later than this (``cap_expiry``).
+    expires_at: datetime | None = None
 
     @property
     def break_glass(self) -> bool:
@@ -115,6 +118,23 @@ class OperatorPrincipal:
         if self.break_glass:
             return audit_trail.OPERATOR.id
         return f"{ACTOR_TYPE}:{self.name}"
+
+    def cap_expiry(self, expires_at: datetime | None) -> datetime | None:
+        """``expires_at`` for a token this caller issues or rotates: no later
+        than the caller's own expiry, so a short-lived token cannot mint or
+        renew a longer-lived (or never-expiring) one. An omitted or later
+        expiry is capped to the caller's, as for tenant admin tokens
+        (``admin_auth.cap_child_expiry``). Break-glass and named tokens
+        without an expiry are not capped."""
+        if self.break_glass or self.expires_at is None:
+            return expires_at
+        if expires_at is None or expires_at > self.expires_at:
+            return self.expires_at
+        return expires_at
+
+    def lacks(self, scopes) -> list[str]:
+        """The scopes in ``scopes`` this caller does not hold, sorted."""
+        return sorted(set(scopes or ()) - self.scopes)
 
     def allows(self, scope: str, method: str) -> bool:
         if scope in self.scopes:
@@ -179,6 +199,7 @@ async def _resolve_named(request: Request, token: str) -> OperatorPrincipal:
         scopes=frozenset(row.scopes or ()),
         token_id=row.id,
         name=row.name,
+        expires_at=row.expires_at,
     )
 
 

@@ -30,7 +30,7 @@ This is separate from the **registry read log** (`partner_audit_log`), which rec
 | `auth.failure` | A refused operator token or tenant key on an admin route, or a partner without a write scope (`webhooks:manage`, `attestations:write`, `risks:review`, `learner:review`, `provider-credentials:manage`). Rate-limited (below). |
 | `operator.access` | A named operator token's call to an operator route (route and method) |
 | `operator.break_glass` | Any call made with `PS_ADMIN_TOKEN` (route and method): every use of the break-glass token |
-| `operator_token.issue` / `operator_token.rotate` / `operator_token.revoke` | Named operator tokens issued, rotated or revoked (`/api/v1/operator/tokens`) |
+| `operator_token.issue` / `operator_token.rotate` / `operator_token.revoke` | Named operator tokens issued, rotated or revoked (`/api/v1/operator/tokens`). A refused attempt (the caller lacks one of the token's scopes, 403) has outcome `failure` and `details.reason` `scope_not_held`; an expiry capped to the caller's own sets `details.expiry_capped` |
 | `audit_log.purge` | `python -m collector.audit purge` deleted read-log rows |
 | `audit.purge` | A checkpoint left by the audit trail's own purge (below) |
 
