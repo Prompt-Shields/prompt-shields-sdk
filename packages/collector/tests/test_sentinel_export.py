@@ -20,6 +20,7 @@ from collector.connectors import ConnectorError
 from collector.partner_scopes import LEGACY_REGISTRY_READ, SCOPES, expand_scopes
 from db import audit_chain
 from db.models import AIAsset, AIUsageEvent, AuditEvent
+from pydantic import ValidationError
 
 DOCS = Path(__file__).resolve().parents[3] / "docs" / "integrations" / "sentinel"
 SECRET = "entra-CLIENT-SECRET-value"
@@ -340,3 +341,31 @@ async def test_client_refuses_private_addresses():
         with pytest.raises(ConnectorError, match="non-public"):
             await c.upload([{"EventUid": "1"}])
     assert calls == []
+
+
+def test_audit_record_lets_the_siem_recompute_row_hash():
+    for over in ({}, {"details": None}, {"created_at": datetime(2026, 11, 1, 9, 5, 0, 120, tzinfo=UTC)}):
+        row = _audit_row(**over)
+        rec = se.audit_record(row)
+        fields = {
+            "id": rec["EventUid"],
+            "tenant_id": rec["PsTenantId"],
+            "seq": rec["PsAuditSeq"],
+            "created_at": rec["TimeGenerated"],
+            "action": rec["Operation"],
+            "outcome": rec["EventResult"].lower(),
+            "actor_type": rec.get("ActorUserType"),
+            "actor_id": rec.get("ActorUserId"),
+            "target_type": rec.get("ObjectType"),
+            "target_id": rec.get("Object"),
+            "request_id": rec.get("PsRequestId"),
+            "status_code": rec.get("HttpStatusCode"),
+            "details": rec.get("PsAuditDetails"),
+        }
+        assert audit_chain.compute_row_hash(rec["PsAuditPrevHash"], fields) == rec["PsAuditRowHash"]
+
+
+def test_ingestion_endpoint_refuses_ip_literals_cleanly():
+    for ep in ("https://[::1]", "https://10.0.0.1", "https://[2001:db8::1]"):
+        with pytest.raises(ValidationError):
+            se.SentinelConnection(**_conn(ingestion_endpoint=ep))

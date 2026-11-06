@@ -87,6 +87,7 @@ from typing import Any, Literal, Self
 from uuid import UUID
 
 import httpx
+from db import audit_chain
 from db.models import AIAsset, AIUsageEvent, AuditEvent, Tenant
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
@@ -347,6 +348,9 @@ def audit_record(row: AuditEvent) -> dict:
     return _compact(
         {
             **_common("Audit", row.id, row.created_at, row.tenant_id),
+            # The chain's own timestamp form (microseconds, "Z"), so row_hash
+            # can be recomputed from the exported fields.
+            "TimeGenerated": audit_chain.format_ts(row.created_at),
             "EventResult": "Success" if row.outcome == audit_trail.SUCCESS else "Failure",
             "EventSeverity": _audit_severity(row),
             "Operation": row.action,
@@ -360,7 +364,8 @@ def audit_record(row: AuditEvent) -> dict:
             "PsAuditPrevHash": row.prev_hash,
             "PsAuditRowHash": row.row_hash,
             "PsAuditHashVersion": payload["hash_version"],
-            "PsAuditDetails": payload["details"],
+            # As stored (null stays null): it is a chained field.
+            "PsAuditDetails": row.details,
         }
     )
 
@@ -527,10 +532,15 @@ class SentinelConnection(BaseModel):
     @field_validator("ingestion_endpoint")
     @classmethod
     def _endpoint(cls, v: str) -> str:
-        url = httpx.URL(v.strip())
+        try:
+            url = httpx.URL(v.strip())
+            host = validate_hostname(url.host)  # no IP literal
+        except (httpx.InvalidURL, ValueError):
+            url, host = None, ""
         if (
-            url.scheme != "https"
-            or not url.host
+            url is None
+            or url.scheme != "https"
+            or not host
             or url.userinfo
             or url.query
             or url.port not in (None, 443)
@@ -540,7 +550,7 @@ class SentinelConnection(BaseModel):
                 "ingestion_endpoint must be https://<host> (the DCR's or DCE's "
                 "logs ingestion endpoint), without a path"
             )
-        return f"https://{url.host}"
+        return f"https://{host}"
 
     @property
     def token_host(self) -> str:

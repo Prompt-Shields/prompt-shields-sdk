@@ -104,6 +104,13 @@ Each run sends calls and then audit rows, oldest first. Cursors are kept in the 
 
 Calls have no insertion time, only the time of the call. A run sends only calls older than `settle_seconds`, so events that the SDK or gateway batch and deliver a little late are still sent. A call that arrives later than that, with an older timestamp, is not pushed. Fetch that window again with the pull endpoint, using `since`.
 
+This affects:
+
+- SDK or gateway events delivered more than `settle_seconds` after the call, for example after an outage or from an offline buffer. Raise `settle_seconds` if your senders can lag longer.
+- Usage rows from the provider usage pull. They are stamped with the start of their usage bucket and stored hours later, so the push never sends them. They are org-level totals, not routed calls, and carry no routing evidence.
+
+To fill such gaps, page through `/partner/v1/siem/calls` with `since` set to the start of the window. `EventUid` is stable, so rows that were already sent can be deduplicated.
+
 ## Pull as NDJSON (fallback)
 
 If the collector cannot reach Azure, or you forward with your own pipeline (Azure Monitor Agent, Logstash, Cribl or a script that calls the Logs Ingestion API), a partner credential can pull the same records:
