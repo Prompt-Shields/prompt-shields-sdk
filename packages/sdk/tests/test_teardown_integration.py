@@ -516,6 +516,24 @@ def test_learning_tuples_carry_eval_quality_and_the_replayed_route():
     assert SECRET_TEXT not in json.dumps(tuples)
 
 
+def test_learner_reads_the_replay_as_a_counterfactual_arm():
+    from prompt_shields.learner import LearnerConfig, train
+
+    tuples = _tuples()
+    snap = train(tuples, POLICY, LearnerConfig(min_arm_samples=1))
+    bot = next(g for g in snap["groups"]
+               if (g["use_case"], g["sensitivity"]) == ("support-bot", "internal"))
+    calls = sum(1 for t in tuples if t["use_case"] == "support-bot"
+                and t["sensitivity_level"] == "internal")
+    # The replayed mini arm trains from eval parity, but adds no traffic.
+    assert bot["calls"] == calls and bot["current_model"] == "openai:gpt-4o"
+    assert bot["arms"]["openai:gpt-4o-mini"]["n"] == 0
+    assert bot["arms"]["openai:gpt-4o-mini"]["replay_n"] == 4
+    assert snap["data"]["rows"] == len(tuples)
+    assert snap["inputs"]["replay"]["rows"] == 4
+    assert all(r["recommended_model"] in r["candidates"] for r in snap["recommendations"])
+
+
 def test_learning_tuples_without_eval_or_policy_stay_unscored():
     for t in _tuples(eval_results=None):
         assert t["quality_score"] is None and t["replay"]["quality_score"] is None
