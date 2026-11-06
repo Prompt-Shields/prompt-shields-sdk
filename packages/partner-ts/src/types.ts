@@ -732,6 +732,75 @@ export interface SpendAnomalySettings {
   minSigmaFraction?: number;
 }
 
+// Provider admin credentials (/partner/v1/provider-credentials and
+// /partner/v1/provider-key-fingerprints). Scope `provider-credentials:manage`.
+
+/** A provider whose usage API the collector can pull with a stored admin key. */
+export type CredentialProvider = OpenString<'openai' | 'anthropic'>;
+
+/** A stored provider admin key, masked. The key itself is never returned. */
+export interface ProviderCredential {
+  provider: CredentialProvider;
+  /** `****` plus the key's last four characters. */
+  keyHint: string;
+  /** Id of the collector keyring key the admin key is encrypted under. */
+  keyId: string | null;
+  /** ISO 8601 timestamp. */
+  createdAt: string | null;
+  /** ISO 8601 timestamp. */
+  rotatedAt: string | null;
+}
+
+/** Body of `providerCredentials.create` and `rotate`. */
+export interface AdminKeyRequest {
+  /**
+   * The provider's organization admin key (20 to 512 printable ASCII
+   * characters, no whitespace). Write-only: never returned, logged or
+   * audited.
+   */
+  adminKey: string;
+}
+
+export interface ProviderCredentialListMeta {
+  /** Providers a key can be stored for. */
+  providers: string[];
+  /** Providers with no stored key that the usage pull takes from `PS_PROVIDER_ADMIN_KEYS`. */
+  envFallback: string[];
+}
+
+export interface ProviderCredentialList {
+  data: ProviderCredential[];
+  meta: ProviderCredentialListMeta;
+}
+
+/** Links a provider's opaque API key id to the SDK's `api_key_fingerprint`. */
+export interface ProviderKeyFingerprintLink {
+  provider: CredentialProvider;
+  /** The key id the provider's usage API reports. */
+  apiKeyId: string;
+  /** First 16 hex characters of sha256(api key), computed where the key lives. */
+  apiKeyFingerprint: string;
+  /** ISO 8601 timestamp. */
+  createdAt: string | null;
+}
+
+/** Body of `providerKeyFingerprints.put`. */
+export interface FingerprintRequest {
+  /** First 16 lowercase hex characters of sha256(api key). Anything else is refused with a 400. */
+  apiKeyFingerprint: string;
+}
+
+export interface FingerprintLinkMeta {
+  /** Platform_signal assets that gained a corroborating source. */
+  corroboratedAssets: number;
+}
+
+/** The link, and how many assets it corroborated. */
+export interface FingerprintLinkResult {
+  data: ProviderKeyFingerprintLink;
+  meta: FingerprintLinkMeta;
+}
+
 // FinOps FOCUS cost export (/partner/v1/usage/focus-export).
 
 export type FocusExportFormat = OpenString<'csv' | 'jsonl'>;

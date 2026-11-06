@@ -417,6 +417,50 @@ describe('docs/sdks/typescript.mdx', () => {
     expect(siemQueries).toEqual(['?cursor=saved', '?cursor=c2']);
   });
 
+  it('Provider Credentials', async () => {
+    const cred = { provider: 'openai', key_hint: '****WXYZ', key_id: 'k1', created_at: null, rotated_at: null };
+    const calls: string[] = [];
+    routeFetch((url) => {
+      calls.push(url.pathname);
+      if (url.pathname === '/partner/v1/provider-credentials') {
+        return json({ data: [cred], meta: { providers: ['openai', 'anthropic'], env_fallback: ['anthropic'] } });
+      }
+      if (url.pathname.startsWith('/partner/v1/provider-key-fingerprints/')) {
+        return json({ data: { provider: 'openai', api_key_id: 'key_abc123', api_key_fingerprint: '3f9a1c0b7d2e4f60', created_at: null }, meta: { corroborated_assets: 3 } });
+      }
+      return json(cred);
+    });
+    const saved = process.env.OPENAI_ADMIN_KEY;
+    process.env.OPENAI_ADMIN_KEY = 'sk-admin-0123456789abcdefWXYZ';
+    const client = new PartnerClient({ clientId: 'ps-partner-ardoq-abc123', clientSecret: 'sk-partner-secret-xyz789' });
+    try {
+      // ---- begin docs ----
+      // Store a provider admin key; a 409 means one is stored already, so rotate it
+      const stored = await client.providerCredentials.create('openai', { adminKey: process.env.OPENAI_ADMIN_KEY! });
+      console.log(`Stored ${stored.provider} key ${stored.keyHint}`);
+      await client.providerCredentials.rotate('openai', { adminKey: process.env.OPENAI_ADMIN_KEY! });
+
+      const { data: keys, meta } = await client.providerCredentials.list();
+      console.log(`${keys.length} stored, env fallback for: ${meta.envFallback.join(', ') || 'none'}`);
+
+      // Link the provider's key id to the SDK's api_key_fingerprint (sha256 of the key, first 16 hex characters)
+      const link = await client.providerKeyFingerprints.put('openai', 'key_abc123', { apiKeyFingerprint: '3f9a1c0b7d2e4f60' });
+      console.log(`Corroborated ${link.meta.corroboratedAssets} assets`);
+      // ---- end docs ----
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_ADMIN_KEY;
+      else process.env.OPENAI_ADMIN_KEY = saved;
+    }
+
+    expect(logs).toEqual(['Stored openai key ****WXYZ', '1 stored, env fallback for: anthropic', 'Corroborated 3 assets']);
+    expect(calls).toEqual([
+      '/partner/v1/provider-credentials/openai',
+      '/partner/v1/provider-credentials/openai/rotate',
+      '/partner/v1/provider-credentials',
+      '/partner/v1/provider-key-fingerprints/openai/key_abc123',
+    ]);
+  });
+
   it('Webhook Subscriptions', async () => {
     const sub = { id: 's1', partner_id: 'p1', url: 'https://ea-tool.example.com/hooks/prompt-shields', event_types: [], description: null, is_active: true, rotation_grace_ends_at: null, created_at: null, updated_at: null };
     const calls: string[] = [];
