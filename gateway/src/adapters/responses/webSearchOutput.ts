@@ -199,7 +199,9 @@ export function anthropicWebSearchSegments(
   includeSources: boolean
 ): AnthropicSegment[] {
   const segments: AnthropicSegment[] = [];
-  const calls: Record<string, WebSearchCallItem> = {};
+  // a Map: tool ids come from the provider (a `__proto__` key must not
+  // reach Object.prototype)
+  const calls = new Map<unknown, WebSearchCallItem>();
   let text: Extract<AnthropicSegment, { kind: 'text' }> | null = null;
   let textLength = 0;
   for (const block of blocks) {
@@ -226,11 +228,11 @@ export function anthropicWebSearchSegments(
         anthropicSearchQuery(block.input),
         includeSources ? [] : undefined
       );
-      if (typeof block.id === 'string') calls[block.id] = item;
+      if (typeof block.id === 'string') calls.set(block.id, item);
       segments.push({ kind: 'web_search_call', item });
       text = null;
     } else if (block?.type === 'web_search_tool_result') {
-      const item = calls[block.tool_use_id];
+      const item = calls.get(block.tool_use_id);
       if (!item) continue;
       const { status, urls } = anthropicSearchResult(block.content);
       item.status = status;

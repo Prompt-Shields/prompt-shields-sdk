@@ -308,6 +308,40 @@ describe('Anthropic web search, JSON', () => {
     expect(res.output[0].action.sources).toEqual([]);
   });
 
+  test('a provider tool id of __proto__ does not touch Object.prototype', () => {
+    const blocks = [
+      {
+        type: 'server_tool_use',
+        id: '__proto__',
+        name: 'web_search',
+        input: {},
+      },
+      { type: 'web_search_tool_result', tool_use_id: '__proto__', content: [] },
+      {
+        type: 'web_search_tool_result',
+        tool_use_id: 'constructor',
+        content: [],
+      },
+    ];
+    anthropicJson({ ...anthropicMessage, content: blocks }, request(SOURCES));
+    const state = createStreamState(request(SOURCES), 'anthropic');
+    for (const delta of [
+      { id: '__proto__', name: 'web_search', input: {} },
+      { tool_use_id: '__proto__', content: [] },
+      { tool_use_id: 'toString', content: [] },
+    ]) {
+      transformStreamChunk(
+        `data: ${JSON.stringify({ choices: [{ delta: { content_blocks: [{ index: 0, delta }] } }] })}`,
+        state
+      );
+    }
+    const probe: any = {};
+    expect(probe.status).toBeUndefined();
+    expect(probe.done).toBeUndefined();
+    expect(probe.searchStatus).toBeUndefined();
+    expect(probe.sources).toBeUndefined();
+  });
+
   test('a response without web search is unchanged', () => {
     const res = anthropicJson(
       { ...anthropicMessage, content: [{ type: 'text', text: 'Hello' }] },

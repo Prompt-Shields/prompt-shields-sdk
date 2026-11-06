@@ -119,8 +119,12 @@ interface StreamState {
   includeSources: boolean;
   /** PS fork (#73): the current Anthropic content block and its citations */
   citedBlock: CitedBlock | null;
-  /** PS fork (#73): web search items by server_tool_use id / block index */
-  searchByToolId: Record<string, OutputItem>;
+  /**
+   * PS fork (#73): web search items by server_tool_use id / block index.
+   * Maps: the ids come from the provider (a `__proto__` id must not reach
+   * Object.prototype).
+   */
+  searchByToolId: Map<string, OutputItem>;
   searchByBlockIndex: Map<unknown, OutputItem>;
   /** PS fork (#73): Google grounding metadata seen in the stream */
   grounding: any[];
@@ -477,7 +481,7 @@ function anthropicWebSearchBlock(
         ? { query: anthropicSearchQuery(d.input) }
         : {}),
     });
-    state.searchByToolId[d.id] = item;
+    state.searchByToolId.set(d.id, item);
     state.searchByBlockIndex.set(index, item);
     return;
   }
@@ -488,7 +492,7 @@ function anthropicWebSearchBlock(
     return;
   }
   if (typeof d.tool_use_id === 'string' && 'content' in d) {
-    const item = state.searchByToolId[d.tool_use_id];
+    const item = state.searchByToolId.get(d.tool_use_id);
     if (!item) return;
     const { status, urls } = anthropicSearchResult(d.content);
     searchResult(state, events, item, status, urls);
@@ -804,7 +808,7 @@ export function createStreamState(
     provider: provider || '',
     includeSources: wantsWebSearchSources(originalRequest),
     citedBlock: null,
-    searchByToolId: {},
+    searchByToolId: new Map(),
     searchByBlockIndex: new Map(),
     grounding: [],
   };
