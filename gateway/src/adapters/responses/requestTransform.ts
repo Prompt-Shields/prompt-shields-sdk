@@ -7,7 +7,11 @@
 
 import { Params, Message, ContentType } from '../../types/requestBody';
 import { CarriedThinkingBlock, decodeThinkingCarry } from './thinkingCarry';
-import { transformResponsesTools } from './requestFields';
+import {
+  applyMaxToolCalls,
+  transformResponsesInclude,
+  transformResponsesTools,
+} from './requestFields';
 
 // Role mapping (inline for performance)
 const ROLE_MAP: Record<string, 'system' | 'user' | 'assistant' | 'tool'> = {
@@ -112,6 +116,11 @@ export function transformResponsesToChatCompletions(
   // PS fork (#73): tools and tool_choice, mapped for the target provider
   // or refused (requestFields.ts)
   const { tools, tool_choice } = transformResponsesTools(req, provider);
+  // PS fork (#73): max_tool_calls and include (requestFields.ts)
+  applyMaxToolCalls(req, tools, provider);
+  const { logprobs } = transformResponsesInclude(req, provider);
+  // (Params types logprobs as a number; Chat Completions takes a boolean)
+  if (logprobs) (result as any).logprobs = logprobs;
   if (tools) result.tools = tools;
   if (tool_choice !== undefined) result.tool_choice = tool_choice;
 
