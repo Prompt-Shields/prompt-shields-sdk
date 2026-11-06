@@ -279,3 +279,65 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "gateway.oidc.issuer"
+
+  - it: renders no budget settings by default
+    template: templates/configmap.yaml
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: data.PS_BUDGETS
+
+  - it: renders spend budgets as a budget.v1 document
+    template: templates/configmap.yaml
+    documentIndex: 0
+    set:
+      gateway.budgets.enabled: true
+      gateway.budgets.namespace: acme
+      gateway.budgets.redis.url: redis://redis:6379/0
+      gateway.budgets.budgets:
+        - id: mkt
+          scope: business_unit
+          subject: marketing
+          window: month
+          limit_usd: 500
+          mode: block
+    asserts:
+      - equal:
+          path: data.PS_BUDGETS
+          value: '{"budgets":[{"id":"mkt","limit_usd":500,"mode":"block","scope":"business_unit","subject":"marketing","window":"month"}],"namespace":"acme","on_store_error":"open","schema_version":"budget.v1"}'
+      - equal:
+          path: data.PS_BUDGET_RESERVATION_TTL_MS
+          value: "900000"
+      - equal:
+          path: data.PS_BUDGET_REDIS_URL
+          value: redis://redis:6379/0
+
+  - it: refuses budgets without entries
+    template: templates/configmap.yaml
+    set:
+      gateway.budgets.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "gateway.budgets.budgets"
+
+  - it: refuses a budget Redis URL with credentials in plain values
+    template: templates/configmap.yaml
+    set:
+      gateway.budgets.enabled: true
+      gateway.budgets.redis.url: redis://:hunter2@redis:6379/0
+      gateway.budgets.budgets:
+        - {id: g, scope: global, window: day, limit_usd: 1, mode: warn}
+    asserts:
+      - failedTemplate:
+          errorPattern: "must not hold credentials"
+
+  - it: refuses an unknown onStoreError
+    template: templates/configmap.yaml
+    set:
+      gateway.budgets.enabled: true
+      gateway.budgets.onStoreError: maybe
+      gateway.budgets.budgets:
+        - {id: g, scope: global, window: day, limit_usd: 1, mode: warn}
+    asserts:
+      - failedTemplate:
+          errorPattern: "gateway.budgets.onStoreError"

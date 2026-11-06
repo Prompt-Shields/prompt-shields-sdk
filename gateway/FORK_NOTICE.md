@@ -335,6 +335,7 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
    - (2.31) The Messages adapter's `message_start.model` falls back to the requested model when the provider's chunks carry none.
    - (related to 2.30) `cache.max_age` is seconds. The fork base added it to `Date.now()` as milliseconds, so entries expired almost at once (`cacheExpiresAt` in `src/middlewares/cache/index.ts`).
    - (2.32, 2.33) OpenAI chat completions forward `moderation`, and `/v1/responses` forwards `prompt_cache_options`.
+41. **Added** (PS spend budgets, #28; fork behaviour): `src/index.ts` mounts `psBudget` (`src/middlewares/psBudget/`) between the router and telemetry when `PS_BUDGETS` or `PS_BUDGETS_FILE` is set, and `src/start-server.ts` loads the budgets and the shared Redis store at startup (an invalid config stops the gateway). Refused calls get HTTP 429 `budget_exceeded`.
 
 ## Original License
 
