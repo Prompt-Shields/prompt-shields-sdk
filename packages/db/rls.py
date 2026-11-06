@@ -54,6 +54,7 @@ TENANT_TABLES: dict[str, str] = {
     "admin_tokens": "tenant_id",
     "audit_events": "tenant_id",
     "call_feedback": "tenant_id",
+    "spend_alerts": "tenant_id",
 }
 
 

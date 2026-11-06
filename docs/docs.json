@@ -75,7 +75,8 @@
         "guides/gateway-oidc",
         "guides/audit-trail",
         "guides/model-catalog",
-        "guides/routing"
+        "guides/routing",
+        "guides/spend-anomaly-alerts"
       ]
     },
     {

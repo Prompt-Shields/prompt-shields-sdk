@@ -52,6 +52,11 @@ SCOPES: dict[str, str] = {
         "Store, rotate and delete provider admin keys (write-only) and "
         "key fingerprint links for the org usage pull"
     ),
+    "spend-alerts:read": (
+        "List spend anomaly alerts and receive them as `spend.anomaly` "
+        "webhook events"
+    ),
+    "spend-alerts:acknowledge": "Acknowledge spend anomaly alerts",
     "usage:export": (
         "Bulk export AI usage cost in the FinOps FOCUS format "
         "(CSV or JSON Lines, per asset, model and provider)"
