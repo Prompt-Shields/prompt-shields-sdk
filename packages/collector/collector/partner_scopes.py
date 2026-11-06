@@ -52,6 +52,10 @@ SCOPES: dict[str, str] = {
         "Store, rotate and delete provider admin keys (write-only) and "
         "key fingerprint links for the org usage pull"
     ),
+    "usage:export": (
+        "Bulk export AI usage cost in the FinOps FOCUS format "
+        "(CSV or JSON Lines, per asset, model and provider)"
+    ),
     "audit:read": (
         "Receive the tenant's admin audit trail as `audit.*` webhook events "
         "(credential, scope, webhook, retention and registry changes)"
