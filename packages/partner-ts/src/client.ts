@@ -10,17 +10,21 @@ import {
 import { FocusExport, SiemBatch, SiemFeed } from './download';
 import { PageIterator } from './pagination';
 import type {
+  AdminKeyRequest,
   AIAsset,
   AttestationList,
   AttestationRequest,
   AttestationResult,
   ChangeEvent,
   CreateWebhookSubscriptionParams,
+  CredentialProvider,
   DataFlow,
   CycloneDxBom,
   DownloadOptions,
   ExportParams,
   ExportResult,
+  FingerprintLinkResult,
+  FingerprintRequest,
   FocusExportParams,
   HealthStatus,
   LearnerRecommendation,
@@ -44,6 +48,9 @@ import type {
   McpUsageDay,
   McpUsagePage,
   Page,
+  ProviderCredential,
+  ProviderCredentialList,
+  ProviderKeyFingerprintLink,
   RiskMapping,
   RiskReviewHistory,
   RiskReviewRequest,
@@ -219,6 +226,10 @@ export class PartnerClient {
   readonly mcp: McpResource;
   readonly learner: LearnerResource;
   readonly siem: SiemResource;
+  /** Stored provider admin keys (write-only, masked). Needs `provider-credentials:manage`. */
+  readonly providerCredentials: ProviderCredentialsResource;
+  /** Provider key id to SDK `api_key_fingerprint` links. Needs `provider-credentials:manage`. */
+  readonly providerKeyFingerprints: ProviderKeyFingerprintsResource;
   /**
    * Webhook subscriptions: the tenant admin API (`/api/v1/admin/webhooks`).
    * Needs a client built with the tenant's own API key (`apiKey`), not
@@ -276,6 +287,8 @@ export class PartnerClient {
     this.mcp = new McpResource(this);
     this.learner = new LearnerResource(this);
     this.siem = new SiemResource(this);
+    this.providerCredentials = new ProviderCredentialsResource(this);
+    this.providerKeyFingerprints = new ProviderKeyFingerprintsResource(this);
     this.webhooks = new WebhooksResource(this);
   }
 
@@ -866,6 +879,107 @@ export class SiemResource {
     return new SiemFeed(
       (next) => this.audit(next === null ? { ...rest, since } : { ...rest, cursor: next }, options),
       cursor === undefined || cursor === null ? null : String(cursor),
+    );
+  }
+}
+
+const FINGERPRINT_RE = /^[0-9a-f]{16}$/;
+
+/**
+ * `/partner/v1/provider-credentials`: the tenant's provider admin keys,
+ * which the collector uses to pull provider usage. Needs the
+ * `provider-credentials:manage` scope (never granted by default). Keys are
+ * write-only: every response is masked (`keyHint`), and the SDK never puts
+ * the key in an error message.
+ */
+export class ProviderCredentialsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** Stored keys, masked. `meta.envFallback` lists providers the pull takes from the collector's environment. */
+  list(): Promise<ProviderCredentialList> {
+    return this.client.get<ProviderCredentialList>('/partner/v1/provider-credentials');
+  }
+
+  /** One stored key, masked. Throws `NotFoundError` if none is stored. */
+  get(provider: CredentialProvider): Promise<ProviderCredential> {
+    return this.client.get<ProviderCredential>(`/partner/v1/provider-credentials/${requireId(provider, 'provider')}`);
+  }
+
+  /**
+   * Store a provider admin key. A 409 `APIError` means one is already
+   * stored: `rotate` it instead. A 503 means the collector has no keyring.
+   * Not retried on network errors or 5xx, since a retry would then be a 409.
+   */
+  create(provider: CredentialProvider, request: AdminKeyRequest): Promise<ProviderCredential> {
+    return this.client.send<ProviderCredential>(
+      'POST',
+      `/partner/v1/provider-credentials/${requireId(provider, 'provider')}`,
+      { body: adminKeyBody(request) },
+    );
+  }
+
+  /** Replace a stored key. Throws `NotFoundError` if none is stored. Not retried on network errors or 5xx. */
+  rotate(provider: CredentialProvider, request: AdminKeyRequest): Promise<ProviderCredential> {
+    return this.client.send<ProviderCredential>(
+      'POST',
+      `/partner/v1/provider-credentials/${requireId(provider, 'provider')}/rotate`,
+      { body: adminKeyBody(request) },
+    );
+  }
+
+  /** Delete a stored key. Throws `NotFoundError` if none is stored. */
+  async delete(provider: CredentialProvider): Promise<void> {
+    await this.client.send<void>('DELETE', `/partner/v1/provider-credentials/${requireId(provider, 'provider')}`);
+  }
+}
+
+function adminKeyBody(request: AdminKeyRequest): AdminKeyRequest {
+  const adminKey = request?.adminKey;
+  if (typeof adminKey !== 'string' || adminKey === '') {
+    throw new PartnerError('adminKey must be a non-empty string');
+  }
+  return { adminKey };
+}
+
+/**
+ * `/partner/v1/provider-key-fingerprints`: which SDK `api_key_fingerprint`
+ * belongs to which provider key id, so provider usage corroborates SDK
+ * telemetry. Needs `provider-credentials:manage`.
+ */
+export class ProviderKeyFingerprintsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** Every link of the tenant. */
+  async list(): Promise<ProviderKeyFingerprintLink[]> {
+    const res = await this.client.get<{ data: ProviderKeyFingerprintLink[] }>('/partner/v1/provider-key-fingerprints');
+    return res.data;
+  }
+
+  /**
+   * Link a provider key id to a fingerprint (first 16 hex characters of
+   * sha256 of the key, computed where the key lives), creating or
+   * replacing the link. Anything that is not 16 lowercase hex characters
+   * (a raw key, for example) is refused before it is sent. Idempotent, so
+   * it is retried like a GET. `meta.corroboratedAssets` counts the assets
+   * the link verified.
+   */
+  put(provider: CredentialProvider, apiKeyId: string, request: FingerprintRequest): Promise<FingerprintLinkResult> {
+    const apiKeyFingerprint = request?.apiKeyFingerprint;
+    if (typeof apiKeyFingerprint !== 'string' || !FINGERPRINT_RE.test(apiKeyFingerprint)) {
+      throw new PartnerError('apiKeyFingerprint must be 16 lowercase hex characters (never the key itself)');
+    }
+    return this.client.send<FingerprintLinkResult>(
+      'PUT',
+      `/partner/v1/provider-key-fingerprints/${requireId(provider, 'provider')}/${requireId(apiKeyId, 'apiKeyId')}`,
+      { body: { apiKeyFingerprint } },
+    );
+  }
+
+  /** Delete a link. Throws `NotFoundError` if absent. */
+  async delete(provider: CredentialProvider, apiKeyId: string): Promise<void> {
+    await this.client.send<void>(
+      'DELETE',
+      `/partner/v1/provider-key-fingerprints/${requireId(provider, 'provider')}/${requireId(apiKeyId, 'apiKeyId')}`,
     );
   }
 }
