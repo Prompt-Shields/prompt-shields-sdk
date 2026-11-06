@@ -651,6 +651,22 @@ export class OtlpJsonExporter {
   }
 }
 
+let shared: { config: OtelConfig; exporter: OtlpJsonExporter } | undefined;
+
+/**
+ * One exporter per process for a given config, so the LLM spans and the MCP
+ * proxy spans (`../mcp/otel.ts`) share a queue and batches.
+ */
+export function sharedOtlpExporter(config: OtelConfig): OtlpJsonExporter {
+  if (
+    !shared ||
+    shared.config.endpoint !== config.endpoint ||
+    shared.config.serviceName !== config.serviceName
+  )
+    shared = { config, exporter: new OtlpJsonExporter(config) };
+  return shared.exporter;
+}
+
 // ---------------------------------------------------------------------------
 // Hono middleware
 // ---------------------------------------------------------------------------
@@ -661,7 +677,7 @@ export class OtlpJsonExporter {
  */
 export function psOtel(
   config: OtelConfig,
-  exporter = new OtlpJsonExporter(config)
+  exporter = sharedOtlpExporter(config)
 ) {
   return async (c: any, next: any) => {
     const startMs = Date.now();
