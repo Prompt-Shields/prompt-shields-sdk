@@ -112,10 +112,12 @@ Every file that exists at the fork base `28ed85e` and differs here (regenerate w
 - `plugins/utils.ts`
 - `plugins/walledai/walledprotect.ts`
 - `src/globals.ts`
+- `src/handlers/chatCompletionsHandler.ts`
 - `src/handlers/createTranscriptionHandler.ts`
 - `src/handlers/createTranslationHandler.ts`
 - `src/handlers/handlerUtils.ts`
 - `src/handlers/imageEditsHandler.ts`
+- `src/handlers/messagesHandler.ts`
 - `src/handlers/modelResponsesHandler.ts`
 - `src/handlers/modelsHandler.ts`
 - `src/handlers/proxyHandler.ts`
@@ -317,8 +319,11 @@ We track upstream Portkey at a known commit. New upstream changes are evaluated 
 34. **Added** (PS call feedback, #43; fork behaviour): `src/index.ts` mounts `POST /v1/feedback` (`src/middlewares/psFeedback.ts`) after `/v1/models`, before the router, telemetry, hooks and cache. It checks the feedback (call id, score, reason label; no free text), rate-limits it per user (`PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`) and forwards it to the collector's `/ingest/feedback`. `ps-telemetry` puts a `call_id` (the caller's `X-PS-Call-Id`, else a new UUID) on each event and returns it as the `X-PS-Call-Id` response header.
 35. **Added** keyless upstream auth, third slice (#76): workload identity federation for `openai` and `anthropic` (`src/utils/vendorWorkloadIdentity.ts`), re-implemented from the vendors' published protocols (OpenAI RFC 8693 token exchange at `auth.openai.com/oauth/token`; Anthropic RFC 7523 jwt-bearer at `api.anthropic.com/v1/oauth/token`). Callers opt in with `openaiAuthType` / `anthropicAuthType: workload` (`x-portkey-*-auth-type` headers read in `src/handlers/handlerUtils.ts`, `openai_auth_type` / `anthropic_auth_type` in `src/middlewares/requestValidator/schema/config.ts`, `src/types/requestBody.ts`). It uses the gateway host's identity token file and operator-only federation settings (`src/utils/env.ts`), behind `OPENAI_AMBIENT_CREDENTIALS_ENABLED` / `ANTHROPIC_AMBIENT_CREDENTIALS_ENABLED`, default off. `src/providers/openai/api.ts` sends the minted bearer. `src/providers/anthropic/api.ts` sends `Authorization: Bearer` with the `oauth-2025-04-20` beta instead of `X-API-Key`. Custom hosts are refused before the exchange. The token URL goes through `assertSafeTokenUrl` (its new `alsoAllowedHosts` argument lets the fixed vendor host pass `OAUTH_TOKEN_URL_ALLOWED_HOSTS`). Redirects are not followed, error bodies are dropped, and tokens are cached until shortly before they expire. `src/utils/credentialFingerprint.ts` fingerprints the vendor service account, and the SDK's `prompt_shields.credentials` computes the same values.
 
+35. **Added** (PS semantic cache mode, #33; fork behaviour): upstream's `cache.mode: "semantic"` needs Portkey's hosted service; in this fork it read like the exact cache and never wrote. `src/handlers/services/cacheService.ts` now sends semantic-mode lookups to `src/middlewares/cache/semantic.ts` (embedding of the final user message, compared only within a partition keyed by caller scope, tenant, OIDC principal, use case, model, route policy version, sensitivity level, endpoint, embedder, request params and history; bounded in-memory store in `semanticStore.ts`), and the `memoryCache` write-back in `src/middlewares/cache/index.ts` stores semantic entries from the vector the read recorded per target. Both modes now skip refusals (`isRefusalResponse`) and count write outcomes. See [`docs/semantic-cache.md`](docs/semantic-cache.md).
+
 ## Original License
 
 The original Portkey AI Gateway is licensed under the MIT License. See [`LICENSE`](./LICENSE).
 
 The `ps-telemetry.ts` middleware and the PS-specific configuration glue are wholly original code by Prompt Shields, also released under MIT.
+35. **Added** (PS failover between routed models, #21; fork behaviour): `src/handlers/chatCompletionsHandler.ts` and `src/handlers/messagesHandler.ts` call `tryTargetsWithRouteFailover` (`src/middlewares/router/failover.ts`) instead of `tryTargetsRecursively`. Without a router decision listing more than one candidate it is `tryTargetsRecursively` unchanged; with one, it calls `tryTargetsRecursively` once per compliant candidate through the `psFailover` engine (5xx, 429, timeout move on; any other answer is returned as is). A request whose `x-portkey-config` sets a `strategy` / `targets`, `retry` attempts or `override_params.model` is never failed over by the router.
