@@ -19,9 +19,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "029"
-# Chains from 027 until #262 (028, outcome signals) merges; re-chain to
-# "028" then.
-down_revision: str | None = "027"
+down_revision: str | None = "028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
