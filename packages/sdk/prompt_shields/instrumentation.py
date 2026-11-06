@@ -447,8 +447,11 @@ def suppress_instrumentation():
 class _State:
     def __init__(self, telemetry, atlas, metadata, scan_pii, send_prompt_text,
                  pricing_table, vendors=None, azure_deployments=None,
-                 collector_url=None, api_key=None, mcp_mode="batch"):
+                 collector_url=None, api_key=None, mcp_mode="batch",
+                 credential_fingerprint=None):
         self.telemetry = telemetry
+        # Replaces the per-call key hash when set (#76, keyless auth).
+        self.credential_fingerprint = credential_fingerprint
         self.collector_url = collector_url
         self.api_key = api_key
         self.mcp_mode = mcp_mode
@@ -507,6 +510,7 @@ def instrument(
     azure_deployments: dict[str, str] | None = None,
     exit_flush_timeout: float | None = None,
     mcp_telemetry_mode: str | None = None,
+    credential_fingerprint: str | None = None,
 ) -> bool:
     """Patch installed provider SDKs so every call emits a telemetry event.
 
@@ -529,6 +533,9 @@ def instrument(
     "batch" only buffers MCP tool call events on the call path and sends
     them from a background thread (every 2 s or 100 events, one request per
     batch); "sync" sends each before `call_tool` returns.
+    `credential_fingerprint` (default `PS_CREDENTIAL_FINGERPRINT`) replaces
+    the per-call `sha256(api_key)[:16]` with a stable identity fingerprint
+    for keyless auth; see `prompt_shields.credentials`.
     Returns True if this call instrumented, False if already instrumented.
     Raises ValueError when no Prompt Shields API key is available, or for
     an unknown `mcp_telemetry_mode`.
@@ -583,6 +590,11 @@ def instrument(
             collector_url=ps_collector_url,
             api_key=ps_api_key,
             mcp_mode=mcp_mode,
+            credential_fingerprint=(
+                credential_fingerprint
+                or os.environ.get("PS_CREDENTIAL_FINGERPRINT")
+                or None
+            ),
         )
 
         lazy: dict[str, list[tuple]] = {}
@@ -1474,6 +1486,12 @@ def build_event(state: _State, *, vendor: str, model: Any, messages: list,
     # Imported here: client.py imports this module for suppress_instrumentation.
     from prompt_shields.client import ShieldsClient, _fingerprint
 
+    fingerprint = getattr(state, "credential_fingerprint", None)
+    if fingerprint:
+        fingerprint = fingerprint.strip()
+    elif api_key:
+        fingerprint = _fingerprint(api_key)
+
     # Duck-typed stand-in for a ShieldsClient: the attributes _build_event reads.
     shim = SimpleNamespace(
         _vendor=vendor,
@@ -1484,7 +1502,7 @@ def build_event(state: _State, *, vendor: str, model: Any, messages: list,
         _scan_pii=state.scan_pii,
         _send_prompt_text=state.send_prompt_text,
         _pricing_table=state.pricing_table,
-        _api_key_fingerprint=_fingerprint(api_key) if api_key else None,
+        _api_key_fingerprint=fingerprint or None,
     )
     return ShieldsClient._build_event(
         shim,

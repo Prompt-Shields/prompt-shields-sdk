@@ -1,23 +1,8 @@
-import { ProviderAPIConfig } from '../types';
+import { openAICompatibleAPIConfig } from '../openAICompatible';
 
 // Scaleway Generative APIs, fr-par (OpenAI-compatible). The base URL is a fixed vendor host.
 export const SCALEWAY_BASE_URL = 'https://api.scaleway.ai/v1';
 
-const ScalewayAPIConfig: ProviderAPIConfig = {
-  getBaseURL: () => SCALEWAY_BASE_URL,
-  headers: ({ providerOptions }) => {
-    return { Authorization: `Bearer ${providerOptions.apiKey}` };
-  },
-  getEndpoint: ({ fn }) => {
-    switch (fn) {
-      case 'chatComplete':
-        return '/chat/completions';
-      case 'embed':
-        return '/embeddings';
-      default:
-        return '';
-    }
-  },
-};
+const ScalewayAPIConfig = openAICompatibleAPIConfig(SCALEWAY_BASE_URL, true);
 
 export default ScalewayAPIConfig;

@@ -11,8 +11,14 @@
  * - Azure Entra client secret: tenant + client id; Azure managed/workload
  *   identity: the client id, when one was given
  * - Vertex service account JSON: the account's `client_email`
+ * - OpenAI workload identity federation: the vendor service account id;
+ *   Anthropic: organization id + service account id (operator settings,
+ *   ./vendorWorkloadIdentity.ts)
  * - a static API key: sha256(key)[:16], exactly as the SDK computes it, so
  *   gateway events corroborate with registered key links (#93)
+ *
+ * The Python SDK computes the same values (`prompt_shields.credentials`), so
+ * SDK and gateway events for one identity carry one fingerprint.
  *
  * Nothing is reported for short-lived bearers (Azure AD tokens, an API key
  * that is a JWT) or for the gateway host's own identity (AWS serviceRole,
@@ -52,8 +58,23 @@ export function credentialFingerprintEnabled(
 
 /** The fingerprint of the credential identity behind providerOptions. */
 export async function credentialFingerprint(
-  o: Partial<Options>
+  o: Partial<Options>,
+  env?: Record<string, any>
 ): Promise<string | undefined> {
+  // Same precedence as the providers: workload auth wins when selected.
+  if (o.openaiAuthType === 'workload' || o.anthropicAuthType === 'workload') {
+    // The runtime env record (`env(c)`: process.env on Node).
+    const e: Record<string, any> = env ?? {};
+    const value = (k: string) =>
+      typeof e[k] === 'string' && e[k].trim() ? String(e[k]).trim() : '';
+    if (o.openaiAuthType === 'workload') {
+      const sa = value('OPENAI_SERVICE_ACCOUNT_ID');
+      return sa ? identity('openai-workload', sa) : undefined;
+    }
+    const org = value('ANTHROPIC_ORGANIZATION_ID');
+    const sa = value('ANTHROPIC_SERVICE_ACCOUNT_ID');
+    return org && sa ? identity('anthropic-workload', org, sa) : undefined;
+  }
   // Same precedence as the providers (hasOAuthClientCredentials): any OAuth
   // field means OAuth is used and the static key is ignored.
   if (o.oauthTokenUrl || o.oauthClientId || o.oauthClientSecret) {
@@ -103,7 +124,7 @@ export async function recordCredentialFingerprint(
 ): Promise<void> {
   try {
     if (!c || !credentialFingerprintEnabled(env)) return;
-    const fp = await credentialFingerprint(providerOptions);
+    const fp = await credentialFingerprint(providerOptions, env);
     c.set(CREDENTIAL_FINGERPRINT_KEY, fp);
   } catch {
     /* fail-open */
