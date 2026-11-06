@@ -56,6 +56,11 @@ SCOPES: dict[str, str] = {
         "Read observed MCP servers and tools (with each server's registry "
         "asset and owner) and their daily tool-call metering"
     ),
+    "spend-alerts:read": (
+        "List spend anomaly alerts and receive them as `spend.anomaly` "
+        "webhook events"
+    ),
+    "spend-alerts:acknowledge": "Acknowledge spend anomaly alerts",
     "usage:export": (
         "Bulk export AI usage cost in the FinOps FOCUS format "
         "(CSV or JSON Lines, per asset, model and provider)"

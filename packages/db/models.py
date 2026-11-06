@@ -467,6 +467,49 @@ class CallFeedback(Base):
     )
 
 
+class SpendAlert(Base):
+    """A spend anomaly (#30): one day's spend for a use case (or asset) far
+    above its EWMA baseline. Written by ``python -m collector.spend_anomalies``.
+
+    One row per (tenant, group_by, group_key, day), so re-running the job
+    for a day changes nothing. ``group_key`` is the asset's use case name
+    (``(none)`` when it has none) or the asset id, per ``group_by``.
+    Numbers only: no prompt content, no personal data. ``acknowledged_by``
+    names the credential that acknowledged it (``partner:<id>``), never a
+    person. Rows for days before the tenant's retention cutoff are purged
+    with the events.
+    """
+
+    __tablename__ = "spend_alerts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    group_by = Column(Text, nullable=False)
+    group_key = Column(Text, nullable=False)
+    day = Column(Date, nullable=False)
+    observed_cost = Column(Numeric(14, 6), nullable=False)
+    baseline_cost = Column(Float, nullable=False)
+    baseline_sigma = Column(Float, nullable=False)
+    z_score = Column(Float, nullable=False)
+    threshold_sigma = Column(Float, nullable=False)
+    history_days = Column(Integer, nullable=False)
+    severity = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="open", server_default="open")
+    acknowledged_at = Column(TIMESTAMP(timezone=True))
+    acknowledged_by = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "group_by", "group_key", "day", name="ux_spend_alerts_group_day"
+        ),
+        CheckConstraint("status IN ('open', 'acknowledged')", name="ck_spend_alerts_status"),
+        Index("ix_spend_alerts_tenant_created", "tenant_id", "created_at"),
+        Index("ix_spend_alerts_tenant_day", "tenant_id", "day"),
+    )
+
+
 class DataFlow(Base):
     __tablename__ = "data_flows"
 

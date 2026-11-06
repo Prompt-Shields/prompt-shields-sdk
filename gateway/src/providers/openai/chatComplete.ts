@@ -133,6 +133,10 @@ export const OpenAIChatCompleteConfig: ProviderConfig = {
   verbosity: {
     param: 'verbosity',
   },
+  // PS fork (#208, Portkey enterprise changelog 2.32): passed through.
+  moderation: {
+    param: 'moderation',
+  },
 };
 
 export interface OpenAIChatCompleteResponse extends ChatCompletionResponse {
