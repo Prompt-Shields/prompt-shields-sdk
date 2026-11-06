@@ -38,7 +38,7 @@ test('is registered, native for Responses and for Messages on every model', () =
   expect(supportsMessagesApiNatively('meta', 'any-model')).toBe(false);
 });
 
-test('uses the fixed vendor base URL, ignoring caller-supplied hosts', async () => {
+test('uses the fixed vendor base URL; no request field reaches it', async () => {
   const url = await config.api.getBaseURL({
     providerOptions: {
       apiKey: 'k',
@@ -87,6 +87,8 @@ describe('endpoints', () => {
       '',
     ]) {
       expect(filePath(bad)).toBe('');
+      expect(() => endpoint('retrieveFile', bad)).toThrow('Invalid file id');
+      expect(() => endpoint('deleteFile', bad)).toThrow('Invalid file id');
     }
   });
 
@@ -98,7 +100,7 @@ describe('endpoints', () => {
       'getModelResponse',
       'imageGenerate',
     ]) {
-      expect(endpoint(fn)).toBe('');
+      expect(() => endpoint(fn)).toThrow('is not supported by meta-model-api');
     }
   });
 });

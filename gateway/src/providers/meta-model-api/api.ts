@@ -1,3 +1,4 @@
+import { GatewayError } from '../../errors/GatewayError';
 import { ProviderAPIConfig } from '../types';
 
 /**
@@ -9,7 +10,9 @@ import { ProviderAPIConfig } from '../types';
  *   (`/v1/responses`), Anthropic Messages (`/v1/messages`,
  *   `/v1/messages/count_tokens`), and a Files API (`POST`/`GET /v1/files`,
  *   `GET`/`DELETE /v1/files/{file_id}`, multipart upload).
- * The base URL is a fixed vendor host; caller-supplied hosts are not used.
+ * The base URL is a fixed vendor host: no request field reaches it. As for
+ * every provider, a custom host (validated by requestValidator) replaces it.
+ * Anything else gets a 400 here instead of a request to the bare base URL.
  */
 export const META_MODEL_API_BASE_URL = 'https://api.meta.ai/v1';
 const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
@@ -60,10 +63,13 @@ const MetaModelAPIConfig: ProviderAPIConfig = {
       case 'listFiles':
         return `/files${gatewayURL(gatewayRequestURL).search}`;
       case 'retrieveFile':
-      case 'deleteFile':
-        return filePath(gatewayRequestURL);
+      case 'deleteFile': {
+        const path = filePath(gatewayRequestURL);
+        if (!path) throw new GatewayError('Invalid file id', 400);
+        return path;
+      }
       default:
-        return '';
+        throw new GatewayError(`${fn} is not supported by meta-model-api`, 400);
     }
   },
 };

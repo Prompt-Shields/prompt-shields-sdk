@@ -331,6 +331,23 @@ describe('Meta Model API: files', () => {
     }
   });
 
+  test('a bad file id or an unmapped API is a 400, never sent upstream', async () => {
+    upstream(/api\.meta\.ai/, () => json({ ok: true }));
+    for (const [method, path] of [
+      ['GET', '/v1/files/a%2F..%2Fmodels'],
+      ['DELETE', '/v1/files/..%2Fx'],
+      ['GET', '/v1/files/a%5Cb'],
+      ['GET', '/v1/files/file_1/content'],
+      ['GET', '/v1/responses/resp_1'],
+      ['DELETE', '/v1/responses/resp_1'],
+      ['GET', '/v1/batches'],
+    ]) {
+      const res = await app.request(path, { method, headers });
+      expect([method, path, res.status]).toEqual([method, path, 400]);
+    }
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
   test('a file error is returned in the gateway error shape', async () => {
     upstream(/api\.meta\.ai\/v1\/files\/file_missing$/, () =>
       json({ error: { message: 'No such file', type: 'not_found' } }, 404)
