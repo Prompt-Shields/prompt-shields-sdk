@@ -140,6 +140,100 @@ describe('Stream Transform', () => {
     });
   });
 
+  // PS fork (#73): snapshots echo the request, as the JSON response does
+  describe('request echo in snapshots', () => {
+    const snapshots = (out: string) =>
+      out
+        .split('\n\n')
+        .filter((b) => b.includes('"response":'))
+        .map((b) => JSON.parse(b.slice(b.indexOf('data: ') + 6)).response);
+
+    test('created, in_progress and completed echo the request fields', () => {
+      const request = {
+        model: 'claude-sonnet-4-5',
+        input: 'hi',
+        stream: true,
+        instructions: 'Be brief.',
+        tools: [
+          {
+            type: 'function',
+            name: 'get_weather',
+            parameters: { type: 'object' },
+          },
+          { type: 'web_search' },
+        ],
+        tool_choice: 'required',
+        temperature: 0.2,
+        top_p: 0.9,
+        max_output_tokens: 256,
+        metadata: { run: 'r1' },
+        parallel_tool_calls: false,
+        text: { format: { type: 'json_object' }, verbosity: 'low' },
+        reasoning: { effort: 'low', summary: 'auto' },
+      };
+      const state = createStreamState(request);
+      // No model on the chunk (e.g. Gemini): the requested one is used.
+      let out = transformStreamChunk(
+        'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+        state
+      )!;
+      out += transformStreamChunk('data: [DONE]', state)!;
+      const snaps = snapshots(out);
+      expect(snaps.map((s) => s.status)).toEqual([
+        'in_progress',
+        'in_progress',
+        'completed',
+      ]);
+      for (const s of snaps) {
+        expect(s).toMatchObject({
+          model: 'claude-sonnet-4-5',
+          instructions: 'Be brief.',
+          tool_choice: 'required',
+          temperature: 0.2,
+          top_p: 0.9,
+          max_output_tokens: 256,
+          metadata: { run: 'r1' },
+          parallel_tool_calls: false,
+          text: { format: { type: 'json_object' }, verbosity: 'low' },
+          reasoning: { effort: 'low', summary: 'auto' },
+        });
+        expect(s.tools).toEqual([
+          {
+            type: 'function',
+            name: 'get_weather',
+            description: null,
+            parameters: { type: 'object' },
+            strict: null,
+          },
+          { type: 'web_search' },
+        ]);
+        expect(s).not.toHaveProperty('input');
+        expect(s).not.toHaveProperty('stream');
+      }
+    });
+
+    test('without a request, snapshots carry the API defaults', () => {
+      const state = createStreamState();
+      const out = transformStreamChunk(
+        'data: {"model":"gpt-4","choices":[{"delta":{"content":"Hi"}}]}',
+        state
+      )!;
+      expect(snapshots(out)[0]).toMatchObject({
+        model: 'gpt-4',
+        instructions: null,
+        tools: [],
+        tool_choice: 'auto',
+        temperature: 1,
+        top_p: 1,
+        max_output_tokens: null,
+        metadata: {},
+        parallel_tool_calls: true,
+        text: { format: { type: 'text' } },
+        reasoning: null,
+      });
+    });
+  });
+
   describe('sequence_number', () => {
     test('should include sequence_number in all events starting from 0', () => {
       const state = createStreamState();
