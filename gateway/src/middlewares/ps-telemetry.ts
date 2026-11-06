@@ -33,6 +33,7 @@ import {
 } from './psServedTarget';
 import { RoutePolicy } from './router/types';
 import {
+  COST_SOURCE_CACHE,
   COST_SOURCE_PROVIDER_REPORTED,
   costFields,
   PricingUsage,
@@ -94,6 +95,8 @@ interface TelemetryEvent {
   // Exact-match cache (populated by emitCacheTelemetry)
   cache_status?: string;
   est_tokens_saved?: number;
+  // On a cache hit (#33): the upstream cost the hit avoided, in USD.
+  cache_saved_cost?: number;
   // Which API the caller spoke (chat, messages, responses, ...). With the
   // Messages/Responses adapters (#59) this can differ from what the provider
   // served, so it is recorded separately from vendor.
@@ -364,6 +367,27 @@ export function withCost(
     ...event,
     ...costFields(event.vendor, model, servedModel, usage),
   };
+}
+
+/**
+ * A response served from the gateway cache (#33): `cost` 0 with
+ * `cost_source: cache`, the cache status, and `cache_saved_cost`, the price
+ * of the cached response's usage (what the hit avoided), when it has one.
+ */
+export function withCacheHit(
+  event: TelemetryEvent,
+  cacheStatus: string,
+  servedModel?: string
+): TelemetryEvent {
+  const saved = withCost(event, servedModel).cost;
+  const out: TelemetryEvent = {
+    ...event,
+    cache_status: cacheStatus,
+    cost: 0,
+    cost_source: COST_SOURCE_CACHE,
+  };
+  if (saved !== undefined) out.cache_saved_cost = saved;
+  return out;
 }
 
 /**
@@ -701,12 +725,15 @@ export function psTelemetry() {
         /* no execution context */
       }
       // The model that ran prices the call (SDK: served, then requested).
-      // A response served from the gateway cache cost nothing upstream.
+      // A response served from the gateway cache cost nothing upstream: it
+      // is recorded at cost 0 with `cost_source: cache` and what it saved.
       const served = responseBody?.model || route?.servedModel;
       const cacheStatus =
         c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || '';
       const priced = (e: TelemetryEvent, m?: string) =>
-        cacheStatus.endsWith('HIT') ? e : withCost(e, m);
+        cacheStatus.endsWith('HIT')
+          ? withCacheHit(e, cacheStatus, m)
+          : withCost(e, m);
       const stream = observeStream(c);
       if (!stream) {
         waitUntil(sendTelemetry(priced(event, served)).catch(() => {}));

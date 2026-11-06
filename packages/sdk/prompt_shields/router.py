@@ -26,8 +26,18 @@ same as a tier the data policy does not allow.
 Every response comes back in the OpenAI chat-completions shape
 (``RoutedChatCompletion``), whichever provider served it. The provider's own
 response object is kept as ``resp.raw``, and ``resp.ps`` carries the route,
-the cost and the attempts. Failover between providers is not done here yet
-(#21): each call makes one attempt, recorded in ``resp.ps.attempts``.
+the cost, the attempts and the ``fallback_chain``.
+
+Failover (local mode, #21): the router builds an ordered list of candidates
+that all passed the same data-policy check as the chosen one (and the use
+case's eligible models and the budget; for a pinned model, only the same
+model on another provider), and hands it to
+``prompt_shields.failover.FailoverEngine`` (PRD §7.5). A candidate that does
+not comply is never added, so a fallback never leaves the constraint set.
+When every candidate failed or was skipped, ``NoCompliantCandidate`` (a
+``PolicyViolation``) is raised. Per-provider circuit breakers are shared by
+every router in the process unless ``breakers=`` / ``breaker_config=`` say
+otherwise.
 """
 
 from __future__ import annotations
@@ -36,11 +46,22 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from prompt_shields.baseline import Baseline, BaselineError, load_baseline
+from prompt_shields.failover import (
+    BreakerConfig,
+    BreakerRegistry,
+    Candidate,
+    FailoverAttempt,
+    FailoverEngine,
+    NoCompliantCandidate,
+    chain_of,
+    classify_failure,
+    default_registry,
+)
 from prompt_shields.pii import detect_pii_categories
 from prompt_shields.pricing import (
     COST_SOURCE_PRICING_TABLE,
@@ -139,20 +160,28 @@ class CostInfo:
 
 @dataclass(frozen=True)
 class Attempt:
-    """One upstream attempt. ``error`` is the exception class name only."""
+    """One upstream attempt. ``error`` is the exception class name and
+    ``error_class`` the failover class (``server_error``, ``rate_limited``,
+    ...); never an error message or content."""
 
     provider: str | None
     model: str | None
     ok: bool
     latency_ms: int
     error: str | None = None
+    error_class: str | None = None
+    status: int | None = None
 
 
 @dataclass(frozen=True)
 class PSResult:
+    """``fallback_chain`` is the error class of each failed attempt, in
+    order: empty when the first attempt succeeded."""
+
     route: RouteInfo
     cost: CostInfo
     attempts: tuple[Attempt, ...]
+    fallback_chain: tuple[str, ...] = ()
 
 
 @dataclass
@@ -548,6 +577,28 @@ class _Plan:
     requested_model: str
     data_classification: str | None
     use_case: str | None
+    request: RouteRequest | None = None
+
+
+class _AttemptLimit(Exception):
+    """Internal: the call's ``max_attempts`` is used up."""
+
+
+@dataclass
+class _AttemptTracker:
+    """The failed attempts of one routed call, as they happen."""
+
+    failures: list[FailoverAttempt] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)  # exception class names
+    last: BaseException | None = None
+
+
+#: ``fallback.max_attempts`` when the policy does not set it (schema default).
+DEFAULT_MAX_ATTEMPTS = 3
+
+#: Longest 429 ``Retry-After`` honoured (seconds) when the policy sets no
+#: ``fallback.retry_after_max_wait_ms``.
+DEFAULT_RETRY_AFTER_MAX_WAIT = 10.0
 
 
 class _RouterCore:
@@ -580,6 +631,12 @@ class _RouterCore:
         atlas_url: str | None = None,
         atlas_api_key: str | None = None,
         baseline: Baseline | Mapping[str, Any] | str | os.PathLike | None = None,
+        failover: bool = True,
+        breakers: BreakerRegistry | None = None,
+        breaker_config: BreakerConfig | None = None,
+        max_attempts: int | None = None,
+        retry_after_max_wait: float | None = None,
+        rate_limit_retries: int = 1,
     ):
         if mode not in ("local", "gateway"):
             raise RouterError(f"mode must be 'local' or 'gateway', got {mode!r}")
@@ -662,6 +719,53 @@ class _RouterCore:
             )
         # Each provider's instrumented client is built on first use.
         self._client_kwargs = client_kwargs
+        self._init_failover(
+            failover, breakers, breaker_config, max_attempts,
+            retry_after_max_wait, rate_limit_retries,
+        )
+
+    def _init_failover(
+        self,
+        enabled: bool,
+        breakers: BreakerRegistry | None,
+        breaker_config: BreakerConfig | None,
+        max_attempts: int | None,
+        retry_after_max_wait: float | None,
+        rate_limit_retries: int,
+    ) -> None:
+        """Failover settings: a kwarg wins over the policy's ``fallback``
+        section, which wins over the defaults."""
+        if breakers is not None and breaker_config is not None:
+            raise RouterError("pass breakers or breaker_config, not both")
+        fallback = (self.policy or {}).get("fallback") or {}
+        if max_attempts is None:
+            max_attempts = fallback.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+        if (
+            not isinstance(max_attempts, int)
+            or isinstance(max_attempts, bool)
+            or max_attempts < 1
+        ):
+            raise RouterError("max_attempts must be an integer of at least 1")
+        if retry_after_max_wait is None:
+            wait_ms = fallback.get("retry_after_max_wait_ms")
+            retry_after_max_wait = (
+                DEFAULT_RETRY_AFTER_MAX_WAIT if wait_ms is None else wait_ms / 1000
+            )
+        if retry_after_max_wait < 0:
+            raise RouterError("retry_after_max_wait must not be negative")
+        if rate_limit_retries < 0:
+            raise RouterError("rate_limit_retries must not be negative")
+        self.failover = enabled
+        self.max_attempts = max_attempts
+        if breaker_config is not None:
+            breakers = BreakerRegistry(breaker_config)
+        #: Per-provider circuit breakers (``.snapshot()``, ``.metrics()``).
+        self.breakers = breakers if breakers is not None else default_registry()
+        self._engine = FailoverEngine(
+            breakers=self.breakers,
+            max_wait=retry_after_max_wait,
+            rate_limit_retries=rate_limit_retries,
+        )
 
     def _client(self, name: str) -> Any:
         """The instrumented client for provider ``name`` (built on first use)."""
@@ -831,16 +935,166 @@ class _RouterCore:
         decision = self._decide(req)
         tier = self._find_tier(decision, req)
         provider = self._providers[self._tier_provider(tier)]  # type: ignore[index]
-        return _Plan(decision, tier, provider, model, declared, use_case)
+        return _Plan(decision, tier, provider, model, declared, use_case, req)
+
+    # --- failover -------------------------------------------------------------
+
+    def _fallback_plans(self, plan: _Plan) -> list[_Plan]:
+        """``plan`` first, then the other candidates failover may use,
+        cheapest first (ties in policy order).
+
+        Every candidate passes the same data-policy rule as ``plan`` (the
+        rule for the call's effective sensitivity) and is served by a
+        configured provider. The pool is ``plan``'s group; for a pinned
+        model it is the same model on any other provider. A use case's
+        ``eligible_models`` and the ``max_cost`` budget (or ``plan``'s own
+        cost, when that is above the budget) narrow it further. A candidate
+        that does not comply is never added.
+        """
+        d, req = plan.decision, plan.request
+        if req is None:
+            return [plan]
+        rule = data_policy_rule(self._reachable, d.sensitivity_level)
+        out = (
+            DEFAULT_OUTPUT_TOKENS
+            if req.max_output_tokens is None
+            else req.max_output_tokens
+        )
+        eligible: set[str] | None = None
+        if req.explicit_group is None and req.use_case is not None:
+            bar = (self._reachable.get("use_cases") or {}).get(req.use_case) or {}
+            if bar.get("eval_set"):
+                eligible = set(bar.get("eligible_models") or ())
+        budget = None if req.max_cost is None else max(req.max_cost, d.est_cost)
+        if d.reason == "pinned":
+            pool = [
+                (group, tier)
+                for group, tiers in self._reachable["groups"].items()
+                for tier in tiers
+                if tier["model"] == d.model
+            ]
+        else:
+            pool = [(d.group, t) for t in self._reachable["groups"].get(d.group) or ()]
+        seen = {(plan.provider.name, plan.tier["model"])}
+        scored = []
+        for index, (group, tier) in enumerate(pool):
+            name = self._tier_provider(tier)
+            if name is None or (name, tier["model"]) in seen:
+                continue
+            if not tier_complies(tier, rule):
+                continue
+            if eligible is not None and tier["model"] not in eligible:
+                continue
+            cost = estimate_tier_cost(tier, req.approx_input_tokens, out)
+            if budget is not None and cost > budget:
+                continue
+            seen.add((name, tier["model"]))
+            scored.append((cost, index, group, tier, name))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        plans = [plan]
+        for cost, _, group, tier, name in scored:
+            plans.append(replace(
+                plan,
+                decision=replace(d, model=tier["model"], group=group, est_cost=cost),
+                tier=tier,
+                provider=self._providers[name],
+            ))
+        return plans
+
+    def _complies(self, plan: _Plan) -> bool:
+        """Defence in depth: the engine re-checks each candidate before it
+        calls it (``allow=``)."""
+        rule = data_policy_rule(self._reachable, plan.decision.sensitivity_level)
+        return plan.provider.name in self._providers and tier_complies(
+            plan.tier, rule
+        )
+
+    def _candidates(
+        self, plan: _Plan, messages: list, max_tokens: int | None, kwargs: dict
+    ) -> list[Candidate]:
+        """The candidates to try, in order. Each carries ``(plan, call args)``
+        as its ``data``.
+
+        A fallback whose provider cannot take this request (OpenAI-only
+        parameters on an Anthropic model) is left out; the chosen candidate
+        raises ``RouterError`` as before.
+        """
+        plans = [(plan, self._call_args(plan, messages, max_tokens, kwargs))]
+        if self.failover:
+            for fallback in self._fallback_plans(plan)[1:]:
+                try:
+                    args = self._call_args(fallback, messages, max_tokens, kwargs)
+                except RouterError:
+                    continue
+                plans.append((fallback, args))
+        return [
+            Candidate(p.provider.name, p.decision.model, None, (p, args))
+            for p, args in plans
+        ]
+
+    def _failed(self, c: Candidate, exc: BaseException, start: float,
+                tracker: _AttemptTracker) -> None:
+        """Notes a failed attempt for the next attempt's telemetry event,
+        classified as the engine classifies it."""
+        info = self._engine.failure_of(exc)
+        tracker.failures.append(FailoverAttempt(
+            c.provider, c.model, False, int((time.monotonic() - start) * 1000),
+            classify_failure(info).error_class, info.status,
+        ))
+        tracker.errors.append(type(exc).__name__)
+        tracker.last = exc
+
+    def _attempt_limit(self, tracker: _AttemptTracker) -> NoCompliantCandidate:
+        """``max_attempts`` used up: fail closed like an exhausted list."""
+        attempts = tracker.failures
+        err = NoCompliantCandidate(
+            f"no compliant candidate served the call within max_attempts="
+            f"{self.max_attempts}; failing closed ("
+            + "; ".join(f"{a.provider}/{a.model}: {a.error_class}" for a in attempts)
+            + ")",
+            attempts=attempts,
+        )
+        err.__cause__ = tracker.last
+        return err
+
+    @staticmethod
+    def _attempts(
+        engine_attempts: tuple[FailoverAttempt, ...], tracker: _AttemptTracker
+    ) -> tuple[Attempt, ...]:
+        errors = iter(tracker.errors)
+        return tuple(
+            Attempt(
+                a.provider, a.model, a.ok, a.latency_ms,
+                None if a.ok else next(errors, None), a.error_class, a.status,
+            )
+            for a in engine_attempts
+        )
 
     # --- telemetry and response ----------------------------------------------
 
-    def _event_hook(self, plan: _Plan, captured: dict):
+    def _event_hook(self, plan: _Plan, captured: dict,
+                    tracker: _AttemptTracker | None = None):
         decision, tier = plan.decision, plan.tier
         policy_version = (self.policy or {}).get("policy_version")
         baseline = self.baseline
 
         def hook(event: dict) -> None:
+            # Failover (#21): the error class of each failed attempt before
+            # this one, never a message (PRD §7.12). The collector stores
+            # fallback_chain; retry_count and attempts match the gateway's
+            # event and are only sent after a failed attempt.
+            prior = list(tracker.failures) if tracker is not None else []
+            event["fallback_chain"] = chain_of(prior)
+            if prior:
+                event["retry_count"] = len(prior)
+                event["attempts"] = [
+                    {"attempt": i + 1, "provider": a.provider, "model": a.model,
+                     "status": a.status, "latency_ms": a.latency_ms,
+                     "error_class": a.error_class}
+                    for i, a in enumerate(prior)
+                ] + [{"attempt": len(prior) + 1, "provider": plan.provider.name,
+                      "model": decision.model,
+                      "latency_ms": event.get("latency_ms")}]
             event["requested_model"] = plan.requested_model
             event["route_mode"] = "local"
             event["route_group"] = decision.group
@@ -944,7 +1198,8 @@ class _RouterCore:
 
     @staticmethod
     def _local_result(plan: _Plan, response: Any, event: dict,
-                      attempt: Attempt, policy_version: str | None) -> RoutedChatCompletion:
+                      attempts: tuple[Attempt, ...],
+                      policy_version: str | None) -> RoutedChatCompletion:
         out = (
             from_anthropic(response) if plan.provider.vendor == "anthropic"
             else from_openai(response)
@@ -971,9 +1226,19 @@ class _RouterCore:
                 counterfactual_usd=event.get("counterfactual_cost"),
                 baseline_id=event.get("baseline_id"),
             ),
-            attempts=(attempt,),
+            attempts=attempts,
+            fallback_chain=tuple(
+                a.error_class for a in attempts if not a.ok and a.error_class
+            ),
         )
         return out
+
+    def _routed(self, candidate: Candidate, response: Any, captured: dict,
+                attempts: tuple[Attempt, ...]) -> RoutedChatCompletion:
+        return self._local_result(
+            candidate.data[0], response, captured, attempts,
+            (self.policy or {}).get("policy_version"),
+        )
 
     @staticmethod
     def _gateway_result(model: str, response: Any, event: dict,
@@ -1020,6 +1285,22 @@ class ShieldsRouter(_RouterCore):
 
     ``client.chat.completions.create(model="auto", messages=[...],
     route=RouteHint(...))`` returns a ``RoutedChatCompletion``.
+
+    Failover (local mode; see ``prompt_shields.failover``):
+
+    * ``failover`` (default ``True``): ``False`` makes one attempt per call
+      and raises the provider's error, as before #21.
+    * ``breakers``: a ``BreakerRegistry`` to use, e.g. one shared by several
+      routers. Default: the process-wide ``default_registry()``.
+    * ``breaker_config``: a ``BreakerConfig`` (``failure_threshold``,
+      ``open_seconds``, ``half_open_max_probes``) for a registry of this
+      router's own. Not together with ``breakers``.
+    * ``max_attempts``: provider attempts per call, retries included.
+      Default: the policy's ``fallback.max_attempts``, else 3.
+    * ``retry_after_max_wait``: longest 429 ``Retry-After`` honoured, in
+      seconds. Default: the policy's ``fallback.retry_after_max_wait_ms``,
+      else 10.
+    * ``rate_limit_retries``: retries of one candidate after a 429 (1).
     """
 
     def __init__(self, **kwargs: Any):
@@ -1100,21 +1381,40 @@ class _RouterCompletions:
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
         )
-        call_messages, call_max, call_kwargs = r._call_args(
-            plan, messages, max_tokens, kwargs
-        )
-        client = r._client(plan.provider.name)
-        start = time.monotonic()
-        # The seam for failover (#21): one attempt for now.
-        response = client.chat.completions._create(
-            model=plan.decision.model, messages=call_messages,
-            ps_metadata=ps_metadata, max_tokens=call_max,
-            _event_hook=r._event_hook(plan, captured), **call_kwargs,
-        )
-        attempt = Attempt(plan.provider.name, plan.decision.model, True,
-                          int((time.monotonic() - start) * 1000))
-        return r._local_result(plan, response, captured, attempt,
-                               (r.policy or {}).get("policy_version"))
+        candidates = r._candidates(plan, messages, max_tokens, kwargs)
+        tracker = _AttemptTracker()
+
+        def call(c: Candidate) -> Any:
+            cplan, (call_messages, call_max, call_kwargs) = c.data
+            if len(tracker.failures) >= r.max_attempts:
+                raise _AttemptLimit()
+            captured.clear()
+            start = time.monotonic()
+            try:
+                return r._client(cplan.provider.name).chat.completions._create(
+                    model=cplan.decision.model, messages=call_messages,
+                    ps_metadata=ps_metadata, max_tokens=call_max,
+                    _event_hook=r._event_hook(cplan, captured, tracker),
+                    **call_kwargs,
+                )
+            except Exception as exc:
+                r._failed(c, exc, start, tracker)
+                raise
+
+        if not r.failover:
+            start = time.monotonic()
+            response = call(candidates[0])
+            attempt = Attempt(candidates[0].provider, candidates[0].model, True,
+                              int((time.monotonic() - start) * 1000))
+            return r._routed(candidates[0], response, captured, (attempt,))
+        try:
+            result = r._engine.run(
+                candidates, call, allow=lambda c: r._complies(c.data[0])
+            )
+        except _AttemptLimit:
+            raise r._attempt_limit(tracker) from tracker.last
+        return r._routed(result.candidate, result.response, captured,
+                         r._attempts(result.attempts, tracker))
 
 
 class _AsyncRouterCompletions:
@@ -1157,18 +1457,37 @@ class _AsyncRouterCompletions:
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
         )
-        call_messages, call_max, call_kwargs = r._call_args(
-            plan, messages, max_tokens, kwargs
-        )
-        client = r._client(plan.provider.name)
-        start = time.monotonic()
-        # The seam for failover (#21): one attempt for now.
-        response = await client.chat.completions._create(
-            model=plan.decision.model, messages=call_messages,
-            ps_metadata=ps_metadata, max_tokens=call_max,
-            _event_hook=r._event_hook(plan, captured), **call_kwargs,
-        )
-        attempt = Attempt(plan.provider.name, plan.decision.model, True,
-                          int((time.monotonic() - start) * 1000))
-        return r._local_result(plan, response, captured, attempt,
-                               (r.policy or {}).get("policy_version"))
+        candidates = r._candidates(plan, messages, max_tokens, kwargs)
+        tracker = _AttemptTracker()
+
+        async def call(c: Candidate) -> Any:
+            cplan, (call_messages, call_max, call_kwargs) = c.data
+            if len(tracker.failures) >= r.max_attempts:
+                raise _AttemptLimit()
+            captured.clear()
+            start = time.monotonic()
+            try:
+                return await r._client(cplan.provider.name).chat.completions._create(
+                    model=cplan.decision.model, messages=call_messages,
+                    ps_metadata=ps_metadata, max_tokens=call_max,
+                    _event_hook=r._event_hook(cplan, captured, tracker),
+                    **call_kwargs,
+                )
+            except Exception as exc:
+                r._failed(c, exc, start, tracker)
+                raise
+
+        if not r.failover:
+            start = time.monotonic()
+            response = await call(candidates[0])
+            attempt = Attempt(candidates[0].provider, candidates[0].model, True,
+                              int((time.monotonic() - start) * 1000))
+            return r._routed(candidates[0], response, captured, (attempt,))
+        try:
+            result = await r._engine.arun(
+                candidates, call, allow=lambda c: r._complies(c.data[0])
+            )
+        except _AttemptLimit:
+            raise r._attempt_limit(tracker) from tracker.last
+        return r._routed(result.candidate, result.response, captured,
+                         r._attempts(result.attempts, tracker))

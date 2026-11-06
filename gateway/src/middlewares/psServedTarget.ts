@@ -23,6 +23,8 @@ import { STACKIT_BASE_URL } from '../providers/stackit/api';
 import { ModelTier, RoutePolicy } from './router/types';
 
 export const SERVED_TARGET_KEY = 'psServedTarget';
+// Same key as cache/semantic.ts PS_ROUTE_POLICY_KEY (set by router/hono.ts);
+// not imported, to keep the cache module out of the gate's import graph.
 export const ROUTE_POLICY_KEY = 'psRoutePolicy';
 
 export interface ServedTarget {
