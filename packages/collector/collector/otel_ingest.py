@@ -12,6 +12,7 @@ The response uses the request's encoding. Compressed bodies
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import NoReturn
 from uuid import UUID
 
@@ -25,7 +26,7 @@ from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
 from collector.loss_accounting import OtelCounts, otel_client_id, record_otel
-from collector.mcp_usage import McpCall, record_calls
+from collector.mcp_usage import McpCall, record_calls, register_assets
 from collector.otel_mapping import (
     GenAISpan,
     count_spans,
@@ -47,6 +48,7 @@ from collector.otlp_protobuf import (
 from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
 from collector.webhooks import AssetChanges
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 OTEL_SOURCE = "otel"
@@ -227,7 +229,8 @@ async def ingest_otel_traces(request: Request):
     if mapped or mcp_calls:
         try:
             if mcp_calls:
-                await record_calls(db, tenant_id, mcp_calls)
+                # Assets are registered after the commit, below.
+                await record_calls(db, tenant_id, mcp_calls, register=False)
             if mapped:
                 assets_created = await write_spans(db, tenant_id, mapped)  # commits
             else:
@@ -241,6 +244,8 @@ async def ingest_otel_traces(request: Request):
                 c.received = 0
             await record_otel(db, tenant_id, counts)
             raise
+    if mcp_calls:
+        await _register_mcp_assets(db, tenant_id, mcp_calls)
     await record_otel(db, tenant_id, counts)
 
     # ExportTraceServiceResponse: an empty object means full success. Non-GenAI
@@ -269,6 +274,21 @@ async def ingest_otel_traces(request: Request):
             }
         }
     return {}
+
+
+async def _register_mcp_assets(db, tenant_id, calls: list[McpCall]) -> None:
+    """MCP servers as assets (#77), in their own transaction after the spans
+    are stored: the span write locks LLM asset keys, and taking MCP asset
+    locks in the same transaction could deadlock with another ingest. The
+    calls are already counted, so a failure here is logged, not raised; the
+    next batch from the same server registers it."""
+    try:
+        await register_assets(db, tenant_id, calls)
+        await db.commit()
+    except Exception:
+        logger.warning("MCP asset registration failed", exc_info=True)
+        with contextlib.suppress(Exception):
+            await db.rollback()
 
 
 NO_VENDOR = "no_vendor"

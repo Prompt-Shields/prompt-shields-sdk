@@ -36,6 +36,7 @@ from db.models import (
     LearnerRecommendation,
     LearnerSnapshot,
     McpToolUsage,
+    McpToolUsageDaily,
     PartnerAuditLog,
     PartnerCredential,
     ProviderCredential,
@@ -160,6 +161,14 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 ),
                 McpToolUsage(
                     tenant_id=tenant_id,
+                    source="sdk",
+                    server_name=f"server-{name}",
+                    tool_name="search",
+                    call_count=1,
+                ),
+                McpToolUsageDaily(
+                    tenant_id=tenant_id,
+                    day=date(2026, 11, 1),
                     source="sdk",
                     server_name=f"server-{name}",
                     tool_name="search",
