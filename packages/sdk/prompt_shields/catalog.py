@@ -8,7 +8,7 @@ Each model entry is keyed ``"<provider>/<model id>"`` and uses LiteLLM
 (``input_cost_per_token``, ``cache_read_input_token_cost``,
 ``cache_creation_input_token_cost[_above_1hr]``,
 ``output_cost_per_reasoning_token``, ``*_above_200k_tokens``,
-``*_batches``, ``*_flex``, audio), limits (``max_input_tokens``,
+``*_batches``, ``*_flex``, ``*_priority``, audio), limits (``max_input_tokens``,
 ``max_output_tokens``) and capabilities (``supports_function_calling``,
 ``supports_response_schema``, ``supports_vision``, ``supports_reasoning``,
 ``supports_prompt_caching``). Prices are in the entry's ``currency``: USD,
@@ -69,6 +69,16 @@ _ABOVE_200K_RATES = (
     "cache_creation_input_token_cost_above_200k_tokens",
     "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
 )
+# Per-model service-tier rates: the `service_tier` a provider reports, and the
+# LiteLLM fields of its (input, output[, cache_read]) prices.
+SERVICE_TIER_RATES = {
+    tier: (
+        f"input_cost_per_token_{suffix}",
+        f"output_cost_per_token_{suffix}",
+        f"cache_read_input_token_cost_{suffix}",
+    )
+    for tier, suffix in (("batch", "batches"), ("flex", "flex"), ("priority", "priority"))
+}
 
 
 def load_catalog(path: str | Path | None = None) -> dict[str, Any]:
@@ -166,6 +176,25 @@ def long_context_pricing(
         if rates is not None:
             bands[(entry["provider"], entry["model"])] = (LONG_CONTEXT_THRESHOLD, rates)
     return bands
+
+
+def service_tier_pricing(
+    catalog: dict | None = None,
+) -> dict[tuple[str, str], dict[str, tuple[float, ...]]]:
+    """Per-model service-tier rates for USD models, per 1k tokens:
+    ``{tier: (input, output[, cache_read])}`` for the tiers in
+    ``SERVICE_TIER_RATES`` the catalog prices (``*_batches``, ``*_flex``,
+    ``*_priority``)."""
+    tiers = {}
+    for entry in _usd_entries(catalog):
+        by_tier = {}
+        for tier, fields in SERVICE_TIER_RATES.items():
+            rates = _rate_tuple(entry, fields)
+            if rates is not None:
+                by_tier[tier] = rates
+        if by_tier:
+            tiers[(entry["provider"], entry["model"])] = by_tier
+    return tiers
 
 
 def audio_pricing(catalog: dict | None = None) -> dict[tuple[str, str], tuple[float, float]]:

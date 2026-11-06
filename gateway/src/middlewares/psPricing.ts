@@ -5,9 +5,10 @@
  * gateway and the SDK report the same `cost` for the same usage. Both run
  * the shared golden vectors in `schemas/pricing/cost-vectors.v1.json`
  * (gateway: psPricing.test.ts). A change to one side's prices must be made
- * on the other. Token, long-context and audio rates are generated from the
- * model catalog (schemas/catalog/source.v1.json -> scripts/build_catalog.py
- * -> psPricingTables.json), as the SDK's are; the per-unit and image prices,
+ * on the other. Token, long-context, audio and service-tier rates are
+ * generated from the model catalog (schemas/catalog/source.v1.json ->
+ * scripts/build_catalog.py -> psPricingTables.json), as the SDK's are; the
+ * per-unit and image prices,
  * multipliers and fallbacks are hand-copied from pricing.py and checked by
  * psPricing.drift.test.ts.
  *
@@ -26,6 +27,7 @@ const generatedTables = generatedJson as unknown as {
   tokenPricing: Record<string, Rates>;
   longContextPricing: Record<string, { threshold: number; rates: Rates }>;
   audioPricing: Record<string, [number, number]>;
+  serviceTierPricing: Record<string, Record<string, Rates>>;
 };
 
 const key = (...parts: string[]) => parts.join('\u0000');
@@ -70,6 +72,12 @@ const LONG_CONTEXT_PRICING = new Map<string, [number, Rates]>(
 
 // Audio token rates (input_per_1k, output_per_1k) in USD.
 const AUDIO_PRICING = catalogMap(generatedTables.audioPricing);
+
+// Per-model service-tier rates, {tier: (input, output[, cached])} per 1k,
+// as pricing.py SERVICE_TIER_PRICING: they replace the standard rates, and
+// what a tier does not price is the standard rate scaled by tier input /
+// standard input. Standard context and the vendor's own models only.
+const SERVICE_TIER_PRICING = catalogMap(generatedTables.serviceTierPricing);
 
 // Vendors priced at another vendor's list prices when they have no entry.
 const PRICING_VENDOR_FALLBACK: Record<string, string> = {
@@ -194,46 +202,14 @@ export function resolvePricingModel(
   return candidates[candidates.length - 1];
 }
 
-function tierMultiplier(
+/**
+ * `[input, output, cacheRead, cacheWrite, cacheWrite1h]` per 1k, filling the
+ * rates an entry leaves out from the vendor multipliers (SDK `_full_rates`).
+ */
+function fullRates(
   vendor: string,
-  serviceTier: string | undefined
-): number | null {
-  if (serviceTier == null || STANDARD_SERVICE_TIERS.has(serviceTier))
-    return 1.0;
-  return SERVICE_TIER_MULTIPLIER[vendor]?.[serviceTier] ?? null;
-}
-
-/** USD cost of a token-billed call, or null when it cannot be priced. */
-export function estimateCost(
-  vendor: string,
-  model: string | undefined,
-  u: PricingUsage
-): number | null {
-  const tokensIn = u.tokens_in;
-  const tokensOut = u.tokens_out;
-  if (model == null || tokensIn == null || tokensOut == null) return null;
-
-  const found = lookupRates(vendor, model);
-  if (!found) return null;
-  let rates: Rates;
-  [vendor, rates] = found;
-
-  const tier = tierMultiplier(vendor, u.service_tier);
-  if (tier === null) return null;
-
-  const band = LONG_CONTEXT_PRICING.get(key(vendor, model));
-  if (band && tokensIn > band[0]) rates = band[1];
-
-  const audioIn = u.tokens_audio_in || 0;
-  const audioOut = u.tokens_audio_out || 0;
-  let audioInRate = 0.0;
-  let audioOutRate = 0.0;
-  if (audioIn || audioOut) {
-    const audioRates = AUDIO_PRICING.get(key(vendor, model));
-    if (!audioRates) return null;
-    [audioInRate, audioOutRate] = audioRates;
-  }
-
+  rates: Rates
+): [number, number, number, number, number] {
   const [inRate, outRate] = rates;
   const cachedRate =
     rates.length > 2
@@ -248,6 +224,82 @@ export function estimateCost(
   else if (vendor in CACHE_WRITE_1H_MULTIPLIER)
     write1hRate = inRate * CACHE_WRITE_1H_MULTIPLIER[vendor];
   else write1hRate = writeRate;
+  return [inRate, outRate, cachedRate, writeRate, write1hRate];
+}
+
+function tierMultiplier(
+  vendor: string,
+  serviceTier: string | undefined
+): number | null {
+  if (serviceTier == null || STANDARD_SERVICE_TIERS.has(serviceTier))
+    return 1.0;
+  const byTier = SERVICE_TIER_MULTIPLIER[vendor];
+  return byTier && Object.prototype.hasOwnProperty.call(byTier, serviceTier)
+    ? byTier[serviceTier]
+    : null;
+}
+
+/** USD cost of a token-billed call, or null when it cannot be priced. */
+export function estimateCost(
+  vendor: string,
+  model: string | undefined,
+  u: PricingUsage
+): number | null {
+  const tokensIn = u.tokens_in;
+  const tokensOut = u.tokens_out;
+  if (model == null || tokensIn == null || tokensOut == null) return null;
+
+  const found = lookupRates(vendor, model);
+  if (!found) return null;
+  const [pricingVendor, baseRates] = found;
+  let rates = baseRates;
+
+  let longContext = false;
+  const band = LONG_CONTEXT_PRICING.get(key(pricingVendor, model));
+  if (band && tokensIn > band[0]) {
+    rates = band[1];
+    longContext = true;
+  }
+  let [inRate, outRate, cachedRate, writeRate, write1hRate] = fullRates(
+    pricingVendor,
+    rates
+  );
+
+  // A model's own tier rates replace the standard ones; what the tier does
+  // not price is scaled by tier input / standard input. Else a multiplier.
+  const byTier = SERVICE_TIER_PRICING.get(key(vendor, model));
+  const tierRates =
+    !longContext &&
+    pricingVendor === vendor &&
+    byTier !== undefined &&
+    typeof u.service_tier === 'string' &&
+    Object.prototype.hasOwnProperty.call(byTier, u.service_tier)
+      ? byTier[u.service_tier]
+      : undefined;
+  let scale = 1.0;
+  let tier: number | null;
+  if (tierRates !== undefined) {
+    tier = 1.0;
+    scale = inRate ? tierRates[0] / inRate : 1.0;
+    [inRate, outRate] = tierRates;
+    cachedRate = tierRates.length > 2 ? tierRates[2] : cachedRate * scale;
+    writeRate *= scale;
+    write1hRate *= scale;
+  } else {
+    tier = tierMultiplier(pricingVendor, u.service_tier);
+    if (tier === null) return null;
+  }
+
+  const audioIn = u.tokens_audio_in || 0;
+  const audioOut = u.tokens_audio_out || 0;
+  let audioInRate = 0.0;
+  let audioOutRate = 0.0;
+  if (audioIn || audioOut) {
+    const audioRates = AUDIO_PRICING.get(key(pricingVendor, model));
+    if (!audioRates) return null;
+    audioInRate = audioRates[0] * scale;
+    audioOutRate = audioRates[1] * scale;
+  }
 
   const cached = u.tokens_cached || 0;
   const cacheWrite = u.tokens_cache_write || 0;
@@ -265,7 +317,8 @@ export function estimateCost(
       textOut * outRate +
       audioOut * audioOutRate) /
     1000.0;
-  const fees = (u.web_search_requests || 0) * (WEB_SEARCH_FEE[vendor] ?? 0.0);
+  const fees =
+    (u.web_search_requests || 0) * (WEB_SEARCH_FEE[pricingVendor] ?? 0.0);
   return round6(tokenCost * tier + fees);
 }
 
@@ -380,6 +433,7 @@ export const PRICE_TABLES = {
   WEB_SEARCH_FEE,
   LONG_CONTEXT_PRICING,
   AUDIO_PRICING,
+  SERVICE_TIER_PRICING,
   PRICING_VENDOR_FALLBACK,
   UNIT_PRICING,
   IMAGE_PRICING,
