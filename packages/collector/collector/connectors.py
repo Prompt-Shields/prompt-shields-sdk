@@ -386,7 +386,7 @@ class PartnerApiConnection(BaseModel):
     base_url: str
     api_key: SecretStr
     # For a collector reached over an internal network (same cluster).
-    # Still https only.
+    # Still https only, and never loopback, link-local or cloud metadata.
     allow_private_network: bool = False
 
     @field_validator("base_url")
@@ -426,6 +426,7 @@ class PartnerApiClient:
             resolver=resolver,
             sleep=sleep,
             allow_private_network=conn.allow_private_network,
+            allow_local_network=False,
         )
         self._headers = {
             "Authorization": f"Bearer {conn.api_key.get_secret_value()}",
