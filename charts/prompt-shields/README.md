@@ -162,7 +162,7 @@ variable names**. For each component the chart uses the first of:
 
 | Component | Keys |
 |---|---|
-| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_SENTINEL_EXPORT`, `PS_SIEM_EXPORT`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
+| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_CREDENTIAL_KEK_KEYS`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_SENTINEL_EXPORT`, `PS_SIEM_EXPORT`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
 | `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `PS_BUDGET_REDIS_URL`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
 
@@ -606,6 +606,9 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_EMBEDDINGS_BACKEND`, `PS_EMBEDDINGS_MODEL`, `PS_EMBEDDINGS_OPENAI_BASE_URL`, `PS_EMBEDDINGS_CACHE_DIR` | `auto`, —, `https://api.openai.com/v1`, — | Semantic search embeddings |
 | `OPENAI_API_KEY` (secret) | — | Embeddings with the `openai` / `auto` backend |
 | `PS_WEBHOOK_SECRET_KEYS`, `PS_WEBHOOK_SECRET_KEY` (secret) | — | Keyring for webhook and provider credential secrets |
+| `PS_CREDENTIAL_KEK_PROVIDER` | `local` | Inference credential vault key-encryption key: `azure-keyvault` (production) or `local` (development only) |
+| `PS_CREDENTIAL_KEK_KEYS` (secret) | — | `local` provider keyring (`kid:key,...`, separate from the webhook keyring); not for production |
+| `PS_AZURE_KEYVAULT_KEY_ID`, `PS_AZURE_KEYVAULT_WRAP_ALGORITHM`, `PS_AZURE_KEYVAULT_TIMEOUT_SECONDS` | —, `RSA-OAEP-256`, `5` | Azure Key Vault / Managed HSM key that wraps credential data keys (`https://<vault>.vault.azure.net/keys/<name>[/<version>]` or a sovereign-cloud host). Needs the image built with `COLLECTOR_EXTRAS=azure-keyvault` and workload identity (pod label `azure.workload.identity/use: "true"`, service account annotation) or a managed identity with the "Key Vault Crypto User" role on the key |
 | `PS_WEBHOOK_TIMEOUT_SECONDS`, `PS_WEBHOOK_MAX_ATTEMPTS`, `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `10`, `8`, `30` | Webhook delivery |
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` (*chart* on the worker) | `0` | Webhook delivery loop (set by `worker.webhookIntervalSeconds`) |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | Development only |

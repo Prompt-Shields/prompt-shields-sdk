@@ -602,6 +602,47 @@ class ProviderKeyFingerprint(Base):
     )
 
 
+class InferenceCredential(Base):
+    """A tenant's stored inference API key (#342), for virtual keys (#343).
+
+    Envelope encryption (collector/credential_vault.py, collector/kms.py):
+    ``sealed_key`` is the key encrypted with AES-256-GCM under a random data
+    key of its own, authenticated with the tenant, row id and provider;
+    ``wrapped_dek`` is that data key wrapped by the key-encryption key named
+    in ``kek_ref`` (``local:<kid>`` or ``azure-keyvault:<alg>:<key id>``).
+    Rotating the KEK rewraps ``wrapped_dek`` only. The key is write-only:
+    the API returns ``key_hint`` (last four characters) and
+    ``key_fingerprint`` (sha256(key)[:16], the SDK's api_key_fingerprint),
+    never the key, its ciphertext or the wrapped data key.
+    """
+
+    __tablename__ = "inference_credentials"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    provider = Column(Text, nullable=False)
+    label = Column(Text, nullable=False)
+    sealed_key = Column(Text, nullable=False)
+    wrapped_dek = Column(Text, nullable=False)
+    kek_ref = Column(Text, nullable=False)
+    key_hint = Column(Text, nullable=False)
+    key_fingerprint = Column(Text, nullable=False)
+    expires_at = Column(TIMESTAMP(timezone=True))
+    disabled_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+    rotated_at = Column(TIMESTAMP(timezone=True))
+    rewrapped_at = Column(TIMESTAMP(timezone=True))
+    last_used_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "provider", "label", name="uq_inference_credentials_label"
+        ),
+        Index("ix_inference_credentials_kek_ref", "kek_ref"),
+    )
+
+
 class McpToolUsage(Base):
     """Observed MCP tool calls, aggregated (#63, Phase 0: observe only).
 

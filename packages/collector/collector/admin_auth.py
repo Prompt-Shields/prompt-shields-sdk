@@ -12,8 +12,8 @@ Every tenant admin route declares one scope from `ADMIN_SCOPES` with
   - a tenant ingest key (the key the SDK sends), only while
     ``PS_ADMIN_REQUIRE_SCOPED_TOKENS=false``: the scopes in
     ``TENANT_KEY_SCOPES``, i.e. every admin scope but member management
-    (#338): ``admin:members`` is never reachable with
-    an ingest key. Only a key holding every ingest key scope (tenant_keys
+    (#338) and the inference credential vault (#342): ``admin:members`` and
+    ``admin:inference-credentials`` are never reachable with an ingest key. Only a key holding every ingest key scope (tenant_keys
     ALL_KEY_SCOPES: every key from before scopes existed, #341) gets in; a
     narrowed key, such as a new ``ingest:write``-only key, is refused (403).
 
@@ -98,12 +98,20 @@ ADMIN_SCOPES: dict[str, str] = {
         "Manage principals, teams, projects and role memberships (granting a "
         "role needs every admin scope it carries; the owner role needs an owner)"
     ),
+    "admin:inference-credentials": (
+        "Store, rotate, disable and delete inference API keys in the credential "
+        "vault (write-only: no route returns a key)"
+    ),
 }
 
 # What a full-scope tenant ingest key reaches while
 # PS_ADMIN_REQUIRE_SCOPED_TOKENS is off: every admin scope but member
 # management (#338), which only admin tokens get.
-TENANT_KEY_SCOPES: frozenset[str] = frozenset(ADMIN_SCOPES) - {"admin:members"}
+TENANT_KEY_SCOPES: frozenset[str] = frozenset(ADMIN_SCOPES) - {
+    "admin:members",
+    # Inference keys (#342) are new and only for admin tokens, too.
+    "admin:inference-credentials",
+}
 
 READ_SCOPE = "admin:read"
 _READ_METHODS = frozenset({"GET", "HEAD"})

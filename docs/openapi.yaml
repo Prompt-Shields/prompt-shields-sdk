@@ -55,6 +55,15 @@ tags:
       under `/partner/v1` (scope `provider-credentials:manage`) and under
       `/api/v1/admin` (tenant API key). Every call is audited (path and
       status, never the body).
+  - name: Inference Credentials
+    description: |
+      Write-only inference API keys in the credential vault (#342), for
+      virtual keys. Envelope encryption: each key is encrypted under its own
+      data key, wrapped by a key-encryption key in Azure Key Vault
+      (`PS_CREDENTIAL_KEK_PROVIDER=azure-keyvault`) or, for development only,
+      a local keyring (`PS_CREDENTIAL_KEK_KEYS`). Tenant admin only
+      (`admin:inference-credentials`; GET also `admin:read`). Keys are never
+      returned, logged or audited; 400 and 422 bodies never echo them.
   - name: Webhooks
     description: |
       Tenant admin API (`/api/v1/admin/webhooks`, tenant API key) for
@@ -2315,6 +2324,148 @@ components:
             characters, no whitespace). Write-only: never returned, logged or
             audited, and a 400 or 422 about it never echoes the value.
 
+    InferenceCredential:
+      type: object
+      description: >-
+        A stored inference API key, masked. The key, its ciphertext and its
+        wrapped data key are never returned.
+      properties:
+        id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'
+          example: openai
+        label:
+          type: string
+          example: prod
+        status:
+          type: string
+          enum: [active, disabled, expired]
+        key_hint:
+          type: string
+          description: "`****` plus the key's last four characters"
+          example: "****a1b2"
+        key_fingerprint:
+          type: string
+          description: First 16 hex characters of sha256(key), the SDK's `api_key_fingerprint`
+          example: 0123456789abcdef
+        kek_provider:
+          type: string
+          enum: [local, azure-keyvault]
+          description: Key provider whose key-encryption key wraps this credential's data key
+        kek_ref:
+          type: string
+          description: >-
+            The key-encryption key: `local:<kid>` or
+            `azure-keyvault:<algorithm>:<versioned Key Vault key id>`. Changes
+            when the data key is rewrapped (KEK rotation).
+          example: azure-keyvault:RSA-OAEP-256:https://contoso-kek.vault.azure.net/keys/ps-credentials/0123456789abcdef0123456789abcdef
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        disabled_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        rotated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the key itself was last replaced
+        rewrapped_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the data key was last rewrapped under a new key-encryption key
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - provider
+        - label
+        - status
+        - key_hint
+        - key_fingerprint
+        - kek_provider
+        - kek_ref
+        - expires_at
+        - disabled_at
+        - created_at
+        - updated_at
+        - rotated_at
+        - rewrapped_at
+        - last_used_at
+
+    CreateInferenceCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, label, api_key]
+      properties:
+        provider:
+          type: string
+          description: Provider name, 1-64 characters from a-z 0-9 _ . - (lower-cased)
+          example: openai
+        label:
+          type: string
+          description: 1-128 printable characters, unique per tenant and provider
+          example: prod
+        api_key:
+          type: string
+          writeOnly: true
+          description: >-
+            The inference API key (8 to 4096 printable ASCII characters, no
+            whitespace). Write-only: never returned, logged or audited, and a
+            400 or 422 about it never echoes the value.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Optional expiry (with a time zone, in the future); an expired key is not served
+
+    RotateInferenceCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [api_key]
+      properties:
+        api_key:
+          type: string
+          writeOnly: true
+          description: The new key, as in `CreateInferenceCredentialRequest`. Never echoed.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: New expiry; omitted keeps the current one
+
+    UpdateInferenceCredentialRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        label:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: New expiry; `null` clears it
+        disabled:
+          type: boolean
+          nullable: true
+          description: "`true` disables (never served), `false` enables"
+
     ProviderKeyFingerprintLink:
       type: object
       description: Links a provider's opaque API key id to the SDK's `api_key_fingerprint`.
@@ -2448,8 +2599,9 @@ components:
         Admin token scope. `admin:read` grants every GET under
         `/api/v1/admin`; the others grant one resource family. While
         `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off an ingest key reaches every
-        admin route but member management, so issuing or rotating one needs
-        every admin scope but `admin:members`.
+        admin route but member management and the inference credential
+        vault, so issuing or rotating one needs every admin scope but
+        `admin:members` and `admin:inference-credentials`.
       enum:
         - admin:read
         - admin:keys
@@ -2460,6 +2612,7 @@ components:
         - admin:registry
         - admin:privacy
         - admin:members
+        - admin:inference-credentials
 
     EraseUserRequest:
       type: object
@@ -3536,6 +3689,34 @@ components:
             $ref: '#/components/schemas/Error'
     KeyringNotConfigured:
       description: Credential storage needs `PS_WEBHOOK_SECRET_KEYS` on this collector
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InferenceCredential:
+      description: The stored inference credential, masked
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InferenceCredential'
+    InferenceCredentialList:
+      description: Stored inference credentials, masked
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InferenceCredential'
+    KeyProviderUnavailable:
+      description: >-
+        The credential vault's key provider is not configured
+        (`PS_CREDENTIAL_KEK_PROVIDER`, `PS_CREDENTIAL_KEK_KEYS`,
+        `PS_AZURE_KEYVAULT_KEY_ID`) or failed (Key Vault unreachable or
+        refused). The message names settings and status codes, never keys.
       content:
         application/json:
           schema:
@@ -9002,3 +9183,177 @@ paths:
           $ref: '#/components/responses/OperatorForbidden'
         '404':
           $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/inference-credentials:
+    get:
+      operationId: listInferenceCredentials
+      tags: [Inference Credentials]
+      summary: List stored inference credentials (masked)
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:inference-credentials
+      parameters:
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        '200':
+          $ref: '#/components/responses/InferenceCredentialList'
+        '400':
+          description: Invalid provider, label, key or expiry (the message never echoes a key)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    post:
+      operationId: createInferenceCredential
+      tags: [Inference Credentials]
+      summary: Store an inference API key (write-only)
+      description: |
+        Encrypts the key under a new data key and wraps the data key with the
+        current key-encryption key. Only the 32-byte data key is sent to Azure
+        Key Vault. Audited as `inference_credential.create` (never the key).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:inference-credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInferenceCredentialRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/InferenceCredential'
+        '400':
+          description: Invalid provider, label, key or expiry (the message never echoes a key)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '409':
+          description: The provider and label are taken, or the tenant holds the maximum (500)
+        '422':
+          description: Malformed body; the error lists type, location and message without the submitted values
+        '503':
+          $ref: '#/components/responses/KeyProviderUnavailable'
+
+  /api/v1/admin/inference-credentials/{credential_id}:
+    parameters:
+      - name: credential_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getInferenceCredential
+      tags: [Inference Credentials]
+      summary: Get a stored inference credential (masked)
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:inference-credentials
+      responses:
+        '200':
+          $ref: '#/components/responses/InferenceCredential'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: updateInferenceCredential
+      tags: [Inference Credentials]
+      summary: Relabel, set the expiry of, disable or enable a credential
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:inference-credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateInferenceCredentialRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/InferenceCredential'
+        '400':
+          description: Invalid provider, label, key or expiry (the message never echoes a key)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The provider and label are taken
+        '422':
+          description: Malformed body; the error lists type, location and message without the submitted values
+    delete:
+      operationId: deleteInferenceCredential
+      tags: [Inference Credentials]
+      summary: Delete a stored inference credential
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:inference-credentials
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/inference-credentials/{credential_id}/rotate:
+    parameters:
+      - name: credential_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: rotateInferenceCredential
+      tags: [Inference Credentials]
+      summary: Replace a stored inference API key
+      description: |
+        New key, new data key, wrapped with the current key-encryption key.
+        (Rotating the key-encryption key itself is an operator job:
+        `python -m collector.credential_vault rewrap`, which rewraps data keys
+        without re-encrypting the keys.)
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:inference-credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateInferenceCredentialRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/InferenceCredential'
+        '400':
+          description: Invalid provider, label, key or expiry (the message never echoes a key)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Malformed body; the error lists type, location and message without the submitted values
+        '503':
+          $ref: '#/components/responses/KeyProviderUnavailable'
