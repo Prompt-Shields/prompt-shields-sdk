@@ -5,7 +5,12 @@ Backends (``PS_EMBEDDINGS_BACKEND``):
 - ``auto`` (default): ``openai`` when ``OPENAI_API_KEY`` is set, otherwise ``none``.
 - ``openai``: POSTs asset metadata to an OpenAI-compatible ``/embeddings`` API.
   ``PS_EMBEDDINGS_OPENAI_BASE_URL`` points it at another provider (e.g. an EU
-  endpoint). Data leaves the box.
+  endpoint). Data leaves the box. The base URL's host is resolved and every
+  address checked before each request (`collector.egress`, private networks
+  allowed for internal providers, but never loopback, link-local or a cloud
+  metadata address), and the connection is pinned to the checked address so
+  DNS rebinding cannot redirect it. Redirects are not followed and proxy
+  settings from the environment are ignored.
 - ``local``: computes embeddings in-process with fastembed (ONNX, no torch).
   Install with ``pip install 'prompt-shields-collector[local-embeddings]'``.
   Asset metadata never leaves the box; only the model weights are downloaded,
@@ -30,6 +35,7 @@ from typing import Protocol
 
 import httpx
 
+from collector import egress
 from collector.config import settings
 
 logger = logging.getLogger("prompt_shields.embeddings")
@@ -62,29 +68,69 @@ def fit_to_column(vector: list[float]) -> list[float]:
 
 
 class OpenAIEmbedder:
-    """OpenAI or any OpenAI-compatible ``/embeddings`` endpoint. Sends data off-box."""
+    """OpenAI or any OpenAI-compatible ``/embeddings`` endpoint. Sends data off-box.
 
-    def __init__(self, api_key: str, model: str, base_url: str):
+    The base URL comes from operator config, so it may name an internal
+    provider (private addresses are admitted), but it must never reach this
+    host or its cloud metadata service: loopback, link-local and metadata
+    addresses (and IPv6 forms embedding them) are refused after resolving
+    the host, and the request is sent to the checked address."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str,
+        *,
+        resolver=None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.api_key = api_key
         self.model = model
         self.url = base_url.rstrip("/") + "/embeddings"
         self.name = f"openai:{model}"
+        self._resolver = resolver
+        self._transport = transport
+
+    async def _pinned(self) -> tuple[httpx.URL, dict, dict]:
+        url = httpx.URL(self.url)
+        if url.scheme not in ("http", "https") or not url.host or url.userinfo:
+            raise egress.AddressNotAllowed("base URL must be http(s)://<host>")
+        port = url.port or (443 if url.scheme == "https" else 80)
+        resolve = self._resolver or egress.resolve_host
+        addresses = await resolve(url.host, port)
+        address = egress.check_addresses(
+            addresses, allow_private=True, allow_local=False
+        )
+        return egress.pin_request(url, address)
 
     async def embed(self, text: str) -> list[float] | None:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            target, pin_headers, extensions = await self._pinned()
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                transport=self._transport,
+                follow_redirects=False,
+                # The connection must go to the checked address.
+                trust_env=False,
+            ) as client:
                 resp = await client.post(
-                    self.url,
+                    target,
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
+                        **pin_headers,
                     },
+                    extensions=extensions,
                     json={"model": self.model, "input": text},
                 )
             if resp.status_code != 200:
                 logger.warning(f"Embedding API returned {resp.status_code}")
                 return None
             return resp.json()["data"][0]["embedding"]
+        except egress.AddressNotAllowed as e:
+            logger.warning(f"Embedding API host refused: {e}")
+            return None
         except Exception as e:  # noqa: BLE001 - fail-open by design
             logger.warning(f"Embedding generation failed: {e}")
             return None

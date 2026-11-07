@@ -8,15 +8,17 @@ import {
   JWTPayload,
 } from 'jose';
 import { isSafeUpstreamURL } from '../requestValidator';
-import { upstreamFetch } from '../../utils/fetch';
+import { guardedUpstreamFetch } from '../../utils/egressFetch';
 import { OidcConfig } from './config';
 
 /**
  * JWT verification against the issuer's JWKS, with jose (WebCrypto, so the
  * same code runs on Node and Workers).
  *
- * JWKS and discovery documents are fetched with `upstreamFetch` (redirects
- * are never followed) after `isSafeUpstreamURL`, over https only, with a
+ * JWKS and discovery documents are fetched with `guardedUpstreamFetch`
+ * (redirects are never followed; on Node the host is resolved, refused when
+ * it resolves to a link-local or metadata address, and the connection pinned
+ * to the checked address, #377) after `isSafeUpstreamURL`, over https only, with a
  * timeout and a size cap. Keys are cached for the response's
  * `Cache-Control: max-age` (clamped to MIN_TTL_MS..MAX_TTL_MS). A token
  * whose `kid` is not in the cache triggers a refresh, but refreshes for any
@@ -79,11 +81,18 @@ async function fetchDocument(
   c?: Context
 ): Promise<{ json: any; ttlMs: number }> {
   if (!isAllowedIdpUrl(url, c)) throw new Error(`refused IdP URL ${url}`);
-  const res = await upstreamFetch(url, {
-    method: 'GET',
-    headers: { accept: 'application/json' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
+  // #377: the host is resolved and checked (no link-local / metadata
+  // address) and the connection pinned to the checked address.
+  const res = await guardedUpstreamFetch(
+    url,
+    {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    },
+    'metadata',
+    c
+  );
   if (!res.ok) {
     res.body?.cancel().catch(() => {});
     throw new Error(`IdP answered ${res.status} for ${url}`);

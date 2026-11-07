@@ -20,8 +20,10 @@
  *
  * Egress (as the OTLP logs exporter): the endpoint must pass
  * `isSafeUpstreamURL` (no metadata, private or loopback addresses unless
- * listed in `TRUSTED_CUSTOM_HOSTS`), and sends go through `upstreamFetch`,
- * which never follows a redirect. Spans for a refused endpoint are dropped
+ * listed in `TRUSTED_CUSTOM_HOSTS`), and sends go through
+ * `guardedUpstreamFetch`, which never follows a redirect and (on Node)
+ * refuses a name resolving to a link-local or metadata address, pinning the
+ * connection to the checked address (#377). Spans for a refused endpoint are dropped
  * and counted (`reason="unsafe_endpoint"`); nothing is sent.
  */
 
@@ -39,7 +41,7 @@ import {
 } from './psStreamObserver';
 import { telemetryDroppedTotal } from './psMetrics/security';
 import { isSafeUpstreamURL } from './requestValidator';
-import { upstreamFetch } from '../utils/fetch';
+import { guardedUpstreamFetch } from '../utils/egressFetch';
 
 export interface OtelConfig {
   endpoint: string;
@@ -544,7 +546,8 @@ export class OtlpJsonExporter {
 
   constructor(
     private config: OtelConfig,
-    private fetchFn: FetchFn = upstreamFetch
+    // #377: resolve-and-check (no link-local / metadata address), pinned.
+    private fetchFn: FetchFn = guardedUpstreamFetch
   ) {}
 
   get pending() {

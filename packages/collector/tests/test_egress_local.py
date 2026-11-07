@@ -38,7 +38,17 @@ LOCAL = [
 # What the private opt-ins are for: internal networks.
 PRIVATE = ["10.0.0.7", "172.16.0.1", "192.168.1.10", "fd12:3456::1", "100.64.0.1"]
 # Never allowed, opt-in or not.
-NEVER = ["0.0.0.0", "::", "224.0.0.1", "ff02::1"]
+NEVER = [
+    "0.0.0.0",
+    "0.1.2.3",  # "this network" 0.0.0.0/8 (#377)
+    "0.255.255.255",
+    "255.255.255.255",  # limited broadcast (#377)
+    "::ffff:0.1.2.3",
+    "::ffff:255.255.255.255",
+    "::",
+    "224.0.0.1",
+    "ff02::1",
+]
 LOOPBACK = ["127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1"]
 
 
@@ -219,3 +229,89 @@ def test_egress_default_refuses_ipv4_translated_non_public(addr):
 
 def test_egress_default_admits_ipv4_translated_public():
     assert egress.ip_is_public(_ip("::ffff:0:808:808"))
+
+
+# ── collector embeddings client (OpenAI-compatible base URL, #377) ────
+
+
+def _embedder(resolver, seen, base_url="https://embed.example.com/v1"):
+    from collector.embeddings import OpenAIEmbedder
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"data": [{"embedding": [0.5, 0.25]}]})
+
+    return OpenAIEmbedder(
+        api_key="sk-test",
+        model="m",
+        base_url=base_url,
+        resolver=resolver,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+@pytest.mark.parametrize("addr", LOCAL + NEVER)
+async def test_embeddings_refuses_local_and_metadata(addr):
+    seen = []
+    assert await _embedder(_resolver(addr), seen).embed("x") is None
+    assert seen == []
+
+
+async def test_embeddings_refuses_when_any_address_is_local():
+    seen = []
+    embedder = _embedder(_resolver("10.0.0.7", "169.254.169.254"), seen)
+    assert await embedder.embed("x") is None
+    assert seen == []
+
+
+@pytest.mark.parametrize("addr", PRIVATE + ["8.8.8.8"])
+async def test_embeddings_admits_public_and_internal_and_pins(addr):
+    seen = []
+    assert await _embedder(_resolver(addr), seen).embed("x") == [0.5, 0.25]
+    (req,) = seen
+    assert req.url.host == addr
+    assert req.url.path == "/v1/embeddings"
+    assert req.headers["host"] == "embed.example.com"
+    assert req.extensions["sni_hostname"] == "embed.example.com"
+    assert req.headers["authorization"] == "Bearer sk-test"
+
+
+async def test_embeddings_http_base_url_pins_port():
+    seen = []
+    embedder = _embedder(
+        _resolver("10.0.0.7"), seen, base_url="http://embed.internal:8080/v1/"
+    )
+    assert await embedder.embed("x") == [0.5, 0.25]
+    assert seen[0].url.host == "10.0.0.7" and seen[0].url.port == 8080
+    assert seen[0].headers["host"] == "embed.internal:8080"
+
+
+async def test_embeddings_refuses_ip_literal_metadata_base_url():
+    seen = []
+    embedder = _embedder(
+        egress.resolve_host, seen, base_url="http://169.254.169.254/latest"
+    )
+    assert await embedder.embed("x") is None
+    assert seen == []
+
+
+async def test_embeddings_does_not_follow_redirect_to_metadata():
+    from collector.embeddings import OpenAIEmbedder
+
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(
+            307, headers={"location": "http://169.254.169.254/latest/meta-data"}
+        )
+
+    embedder = OpenAIEmbedder(
+        api_key="k",
+        model="m",
+        base_url="https://embed.example.com/v1",
+        resolver=_resolver("8.8.8.8"),
+        transport=httpx.MockTransport(handler),
+    )
+    assert await embedder.embed("x") is None
+    assert len(seen) == 1
