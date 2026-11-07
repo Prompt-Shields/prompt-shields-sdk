@@ -3443,6 +3443,11 @@ components:
           minimum: 0
           maximum: 10000000
           description: /ingest/security-events and /ingest/otel/v1/logs (default `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`)
+        otel_traces:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+          description: /ingest/otel/v1/traces (default `PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE`)
 
     SpendAnomalySettings:
       type: object
@@ -4044,6 +4049,83 @@ paths:
                 $ref: '#/components/schemas/Error'
         '429':
           description: The tenant's security-event ingest rate limit (`PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`) is exhausted
+          headers:
+            Retry-After:
+              description: Seconds until the limit resets
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /ingest/otel/v1/traces:
+    post:
+      operationId: ingestOtelTraces
+      tags: [Ingest]
+      summary: Store GenAI spans sent as OTLP/HTTP traces
+      description: |
+        OTLP/HTTP traces, JSON (`application/json`) or protobuf
+        (`application/x-protobuf`), at most 2000 spans and 4 MiB. GenAI
+        spans (`gen_ai.*` attributes) become usage events and assets; MCP
+        `tools/call` spans become MCP tool usage; other spans are ignored.
+        GenAI spans without a provider are rejected and counted in
+        `partialSuccess`. The tenant is the ingest key's. Limited per tenant
+        (`PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE`, default 600 requests/minute,
+        or the tenant's `ingest_rate_limits.otel_traces`), counted apart from
+        `/ingest/events`.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: OTLP ExportTraceServiceRequest
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: ExportTraceServiceResponse (empty on full success)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  partialSuccess:
+                    type: object
+                    properties:
+                      rejectedSpans: {type: integer}
+                      errorMessage: {type: string}
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: The body is not valid JSON or protobuf, or nests too deep
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: More than 2000 spans, or the body exceeds 4 MiB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Not OTLP/HTTP JSON or protobuf
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: The tenant's OTLP trace ingest rate limit (`PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE`) is exhausted
           headers:
             Retry-After:
               description: Seconds until the limit resets
