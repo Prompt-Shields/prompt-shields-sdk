@@ -47,12 +47,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from collector import auth_cache, tenant_keys
+from collector import auth_cache, rbac, tenant_keys
 from collector.admin_auth import (
     ADMIN_SCOPES,
     TOKEN_WARNING,
     AdminPrincipal,
     add_audit,
+    can_manage_owner,
     cap_child_expiry,
     created_by,
     issue_token,
@@ -113,6 +114,10 @@ class CreateAdminTokenBody(BaseModel):
     name: str = NAME
     scopes: list[str] = Field(..., min_length=1)
     expires_at: datetime | None = None
+    # Issue it for a principal (#338): it gets the requested scopes its
+    # tenant-wide roles grant, and on every request no more than they grant
+    # then. Omitted: an automation token that belongs to no one.
+    principal_id: UUID | None = None
 
 
 @router.get("/token-scopes", summary="List the admin token scopes")
@@ -137,14 +142,45 @@ async def create_token(
             403, "Forbidden", f"Cannot grant scopes the caller does not hold: {beyond}"
         )
     db = request.state.db
+    scopes = body.scopes
+    roles: frozenset[str] = frozenset()
+    if body.principal_id is not None:
+        try:
+            roles = await rbac.tenant_roles(db, principal.tenant_id, body.principal_id)
+            granted = rbac.role_scopes(roles)
+        except rbac.PrincipalDisabled:
+            raise _problem(
+                400, "Bad Request", "principal_id: no such principal, or it is disabled"
+            ) from None
+        scopes = rbac.ordered(set(body.scopes) & granted, body.scopes)
+        if not scopes:
+            raise _problem(
+                400,
+                "Bad Request",
+                "None of the requested scopes is granted by the principal's "
+                "tenant-wide roles",
+            )
+    # A token that could manage owners (every admin scope, and unbound or
+    # issued for an owner; admin_auth.can_manage_owner) only from a caller
+    # that can: otherwise an admin could mint one and make itself owner.
+    if set(ADMIN_SCOPES) <= set(scopes) and (
+        body.principal_id is None or rbac.OWNER in roles
+    ) and not can_manage_owner(principal):
+        raise _problem(
+            403,
+            "Forbidden",
+            "Only an owner can issue a token holding every admin scope that "
+            "is unbound or issued for an owner",
+        )
     try:
         row, token = await issue_token(
             db,
             principal.tenant_id,
             name=body.name,
-            scopes=body.scopes,
+            scopes=scopes,
             expires_at=await cap_child_expiry(db, principal, _future(body.expires_at)),
             created_by=created_by(request, principal),
+            principal_id=body.principal_id,
         )
     except DuplicateName:
         raise _problem(
@@ -162,6 +198,7 @@ async def create_token(
         target_id=out["id"],
         name=row.name,
         scopes=out["scopes"],
+        principal_id=out["principal_id"],
     )
     await db.commit()
     return {**out, "token": token, "warning": TOKEN_WARNING}

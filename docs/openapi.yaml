@@ -63,12 +63,18 @@ tags:
   - name: Admin
     description: |
       Tenant admin API (`/api/v1/admin`): scoped admin tokens, tenant ingest
-      keys, Partner API credentials and registry jobs. Each operation names
+      keys, Partner API credentials, registry jobs, and principals, teams,
+      projects and role memberships (RBAC). Each operation names
       its scope in `x-admin-scope`; GET operations also accept `admin:read`.
       Changes are audited. Conventions for keys, tokens and credentials:
       stable UUID ids, secrets returned once, POST with a name an unrevoked
       row already has is 409, and DELETE revokes (204, the row stays
       readable by id with `status: revoked`, a repeated DELETE is 204).
+  - name: Members
+    description: |
+      The tenant's teams and projects (scope `members:read`). Principals and
+      role memberships are managed through the tenant admin API
+      (`/api/v1/admin`, scope `admin:members`).
   - name: Learner
     description: |
       Routing learner (`recommend` mode, PRD 0001 §7.13): versioned
@@ -114,6 +120,7 @@ components:
             learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
             learner:review: Accept or reject routing learner recommendations, with reviewer and comment (never granted by default)
             spend-alerts:read: List spend anomaly alerts and receive them as `spend.anomaly` webhook events (never granted by default)
+            members:read: List the tenant's teams and projects (never granted by default)
             spend-alerts:acknowledge: Acknowledge spend anomaly alerts (never granted by default)
             usage:export: Bulk export AI usage cost in the FinOps FOCUS format and the usage time series (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
@@ -159,10 +166,15 @@ components:
         with `POST /api/v1/admin/tokens` or, for a tenant's first token,
         `POST /api/v1/operator/tenants/{tenant_id}/admin-tokens`.
 
-        Every operation that takes an admin token also takes the tenant API
-        key (`TenantApiKey`), which has every admin scope. A collector
-        started with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` refuses tenant
-        API keys on `/api/v1/admin` (403), so only admin tokens get in.
+        A token issued for a principal (`principal_id`) reaches at most
+        what the principal's tenant-wide roles grant at request time; a
+        disabled or deleted principal's tokens get 401.
+
+        `PS_ADMIN_REQUIRE_SCOPED_TOKENS` defaults to `true`: tenant API keys
+        are refused on `/api/v1/admin` (403), so only admin tokens get in.
+        With it set to `false`, every operation that takes an admin token
+        also takes the tenant API key (`TenantApiKey`), which then holds
+        every admin scope except `admin:members`.
 
     OperatorToken:
       type: http
@@ -2436,7 +2448,8 @@ components:
         Admin token scope. `admin:read` grants every GET under
         `/api/v1/admin`; the others grant one resource family. While
         `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off an ingest key reaches every
-        admin route, so issuing or rotating one needs every admin scope.
+        admin route but member management, so issuing or rotating one needs
+        every admin scope but `admin:members`.
       enum:
         - admin:read
         - admin:keys
@@ -2446,6 +2459,7 @@ components:
         - admin:partners
         - admin:registry
         - admin:privacy
+        - admin:members
 
     EraseUserRequest:
       type: object
@@ -2509,6 +2523,12 @@ components:
         token_hint:
           type: string
           description: Last four characters of the token
+        principal_id:
+          type: [string, 'null']
+          format: uuid
+          description: >-
+            The principal it was issued for (it then reaches at most what the
+            principal's tenant-wide roles grant), or null
         status:
           $ref: '#/components/schemas/CredentialStatus'
         created_by:
@@ -2525,7 +2545,7 @@ components:
         revoked_at:
           type: [string, 'null']
           format: date-time
-      required: [id, name, scopes, token_hint, status, created_by, created_at, expires_at, revoked_at]
+      required: [id, name, scopes, token_hint, principal_id, status, created_by, created_at, expires_at, revoked_at]
 
     AdminTokenWithSecret:
       description: Returned once, on creation. Store the token now.
@@ -2564,6 +2584,18 @@ components:
             Must be in the future. Omit for a token that does not expire.
             With an admin token that expires, the new token expires no later
             than the caller's (an omitted or later expiry is capped to it).
+        principal_id:
+          type: [string, 'null']
+          format: uuid
+          description: >-
+            Issue it for this principal: it keeps the requested scopes the
+            principal's tenant-wide roles grant (400 when none is, or the
+            principal is unknown or disabled), and on every request reaches
+            no more than those roles grant then. Omit for an automation
+            token that belongs to no one. A token holding every admin scope
+            that is unbound or issued for an owner can manage owners, so
+            only an owner (or an unbound token holding every admin scope)
+            may issue one (403).
       required: [name, scopes]
 
     BootstrapAdminTokenRequest:
@@ -2742,6 +2774,12 @@ components:
         created_at:
           type: [string, 'null']
           format: date-time
+        principal_id:
+          type: [string, 'null']
+          format: uuid
+          description: >-
+            The principal it was issued for (it then reaches at most what the
+            principal's tenant-wide roles grant), or null
       required:
         - id
         - partner_name
@@ -2754,6 +2792,7 @@ components:
         - has_api_key
         - expires_at
         - created_at
+        - principal_id
 
     PartnerCredentialWithSecrets:
       type: object
@@ -2784,6 +2823,12 @@ components:
         expires_at:
           type: [string, 'null']
           format: date-time
+        principal_id:
+          type: [string, 'null']
+          format: uuid
+          description: >-
+            The principal it was issued for (it then reaches at most what the
+            principal's tenant-wide roles grant), or null
         warning:
           type: string
       required:
@@ -2797,6 +2842,7 @@ components:
         - rate_limit_tier
         - created_at
         - expires_at
+        - principal_id
         - warning
 
     IssuePartnerCredentialRequest:
@@ -2808,7 +2854,10 @@ components:
           maxLength: 80
         scopes:
           type: array
-          description: Defaults to the read scopes. See `GET /api/v1/admin/partner-scopes`.
+          description: >-
+            Defaults to the read scopes (with `principal_id`: every partner
+            scope the principal's roles grant). See
+            `GET /api/v1/admin/partner-scopes`.
           items:
             type: string
         issue_api_key:
@@ -2824,6 +2873,14 @@ components:
           format: date-time
         metadata:
           type: [object, 'null']
+        principal_id:
+          type: [string, 'null']
+          format: uuid
+          description: >-
+            Issue it for this principal: it keeps the requested scopes the
+            principal's tenant-wide roles grant (400 when none is, or the
+            principal is unknown or disabled), and on every request (and in
+            every access token) reaches no more than those roles grant then.
       required: [partner_name]
 
     UpdatePartnerCredentialRequest:
@@ -2839,6 +2896,264 @@ components:
         rate_limit:
           type: [integer, 'null']
           minimum: 1
+
+    # ── RBAC: principals, teams, projects, memberships (tenant admin) ──
+
+    Role:
+      type: string
+      description: |
+        Built-in role: a named set of admin and partner scopes (see
+        `GET /api/v1/admin/roles`). Only tenant-wide memberships grant
+        scopes on the tenant-wide APIs. `owner` and `admin` hold the same
+        scopes; only an owner may grant, change or remove the owner role.
+      enum: [owner, admin, developer, viewer, auditor, billing]
+
+    Principal:
+      type: object
+      description: A user or service account in the tenant.
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [user, service_account]
+        external_id:
+          type: [string, 'null']
+          description: The identity provider's subject; unique in the tenant
+        email:
+          type: [string, 'null']
+        display_name:
+          type: [string, 'null']
+        status:
+          type: string
+          enum: [active, disabled]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+        disabled_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, kind, external_id, email, display_name, status, created_at, updated_at, disabled_at]
+
+    PrincipalWithMemberships:
+      allOf:
+        - $ref: '#/components/schemas/Principal'
+        - type: object
+          properties:
+            memberships:
+              type: array
+              items:
+                $ref: '#/components/schemas/Membership'
+          required: [memberships]
+
+    Team:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Unique in the tenant
+        description:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, name, description, created_at, updated_at]
+
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        team_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Unique in the tenant
+        description:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, team_id, name, description, created_at, updated_at]
+
+    Membership:
+      type: object
+      description: |
+        A principal's role tenant-wide (`team_id` null), in a team, or in a
+        project of that team. One role per principal per place.
+      properties:
+        id:
+          type: string
+          format: uuid
+        principal_id:
+          type: string
+          format: uuid
+        team_id:
+          type: [string, 'null']
+          format: uuid
+        project_id:
+          type: [string, 'null']
+          format: uuid
+        role:
+          $ref: '#/components/schemas/Role'
+        created_by:
+          type: string
+          description: '`token:<prefix>` of the admin token that granted it'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, principal_id, team_id, project_id, role, created_by, created_at, updated_at]
+
+    CreatePrincipalRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [user, service_account]
+        external_id:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+        email:
+          type: [string, 'null']
+          minLength: 3
+          maxLength: 320
+        display_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 200
+      required: [kind]
+
+    UpdatePrincipalRequest:
+      type: object
+      additionalProperties: false
+      description: Fields left out are unchanged; null clears an optional field.
+      properties:
+        external_id:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+        email:
+          type: [string, 'null']
+          minLength: 3
+          maxLength: 320
+        display_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 200
+        disabled:
+          type: [boolean, 'null']
+          description: >-
+            true suspends every admin token and partner credential issued for
+            the principal (401) without revoking them; false restores them.
+
+    CreateTeamRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+      required: [name]
+
+    UpdateTeamRequest:
+      type: object
+      additionalProperties: false
+      description: Fields left out are unchanged.
+      properties:
+        name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+
+    CreateProjectRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        team_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+      required: [team_id, name]
+
+    UpdateProjectRequest:
+      type: object
+      additionalProperties: false
+      description: Fields left out are unchanged. A project stays in its team.
+      properties:
+        name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+
+    CreateMembershipRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Leave out `team_id` and `project_id` for a tenant-wide role; give a
+        `project_id` for a project role (`team_id` is taken from it).
+        Granting a role needs every admin scope it carries; granting
+        `owner` needs an owner.
+      properties:
+        principal_id:
+          type: string
+          format: uuid
+        role:
+          $ref: '#/components/schemas/Role'
+        team_id:
+          type: [string, 'null']
+          format: uuid
+        project_id:
+          type: [string, 'null']
+          format: uuid
+      required: [principal_id, role]
+
+    UpdateMembershipRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+      required: [role]
 
     # ── Operator: tenants ───────────────────────────────────────────────
 
@@ -5106,6 +5421,62 @@ paths:
               schema:
                 $ref: '#/components/schemas/McpToolPage'
 
+  /partner/v1/teams:
+    get:
+      operationId: listTeams
+      tags: [Members]
+      summary: List the tenant's teams
+      security:
+        - OAuth2: [members:read]
+        - PartnerApiKey: []
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Teams, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Team'
+                required: [data]
+
+  /partner/v1/projects:
+    get:
+      operationId: listProjects
+      tags: [Members]
+      summary: List the tenant's projects
+      security:
+        - OAuth2: [members:read]
+        - PartnerApiKey: []
+      parameters:
+        - name: team_id
+          in: query
+          required: false
+          description: Only this team's projects
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Projects, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+                required: [data]
+
   /partner/v1/vendors:
     get:
       operationId: listVendors
@@ -6194,6 +6565,655 @@ paths:
         '409':
           description: The delivery is already queued
 
+  # ── RBAC: principals, teams, projects, memberships (tenant admin) ────
+
+  /api/v1/admin/roles:
+    get:
+      operationId: listRoles
+      tags: [Admin]
+      summary: List the built-in roles and their scopes
+      description: |
+        A role is a named set of existing scopes. Admin tokens and partner
+        credentials issued for a principal reach at most what its tenant-wide
+        roles grant.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: Every built-in role
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          $ref: '#/components/schemas/Role'
+                        description:
+                          type: string
+                        admin_scopes:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/AdminScope'
+                        partner_scopes:
+                          type: array
+                          items:
+                            type: string
+                      required: [name, description, admin_scopes, partner_scopes]
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/principals:
+    post:
+      operationId: createPrincipal
+      tags: [Admin]
+      summary: Create a principal (user or service account)
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePrincipalRequest'
+      responses:
+        '201':
+          description: The principal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Principal'
+        '409':
+          description: A principal with this `external_id` exists
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listPrincipals
+      tags: [Admin]
+      summary: List principals
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          description: Only this kind
+          schema:
+            type: string
+            enum: [user, service_account]
+        - name: status
+          in: query
+          required: false
+          description: Only active or only disabled principals
+          schema:
+            type: string
+            enum: [active, disabled]
+      responses:
+        '200':
+          description: Principals, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Principal'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/principals/{principal_id}:
+    parameters:
+      - name: principal_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getPrincipal
+      tags: [Admin]
+      summary: Get a principal and its memberships
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: The principal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrincipalWithMemberships'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    patch:
+      operationId: updatePrincipal
+      tags: [Admin]
+      summary: Change, disable or enable a principal
+      description: |
+        Disabling suspends every admin token and partner credential issued for
+        the principal (401). Disabling, enabling or changing the `external_id`
+        of a principal needs what granting each of its roles would (403):
+        every admin scope the role carries, and an owner for an owner. The
+        tenant's last enabled owner cannot be disabled (409).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePrincipalRequest'
+      responses:
+        '200':
+          description: The principal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Principal'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The `external_id` is taken, or this is the last enabled owner
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    delete:
+      operationId: deletePrincipal
+      tags: [Admin]
+      summary: Delete a principal
+      description: |
+        Removes its memberships and revokes the admin tokens and partner
+        credentials issued for it (their rows are kept, unlinked). Deleting an
+        owner needs an owner; the last enabled owner cannot be deleted (409).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The tenant's last enabled owner
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/teams:
+    post:
+      operationId: createTeam
+      tags: [Admin]
+      summary: Create a team
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTeamRequest'
+      responses:
+        '201':
+          description: The team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+        '409':
+          description: A team with this name exists
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listAdminTeams
+      tags: [Admin]
+      summary: List teams
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: Teams, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Team'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/teams/{team_id}:
+    parameters:
+      - name: team_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getTeam
+      tags: [Admin]
+      summary: Get a team
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: The team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    patch:
+      operationId: updateTeam
+      tags: [Admin]
+      summary: Rename or describe a team
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTeamRequest'
+      responses:
+        '200':
+          description: The team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A team with this name exists
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    delete:
+      operationId: deleteTeam
+      tags: [Admin]
+      summary: Delete a team
+      description: |
+        Its memberships go with it. 409 while the team has projects.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The team has projects
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/projects:
+    post:
+      operationId: createProject
+      tags: [Admin]
+      summary: Create a project in a team
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProjectRequest'
+      responses:
+        '201':
+          description: The project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A project with this name exists
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listAdminProjects
+      tags: [Admin]
+      summary: List projects
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      parameters:
+        - name: team_id
+          in: query
+          required: false
+          description: Only this team's projects
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Projects, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/projects/{project_id}:
+    parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getProject
+      tags: [Admin]
+      summary: Get a project
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: The project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    patch:
+      operationId: updateProject
+      tags: [Admin]
+      summary: Rename or describe a project
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectRequest'
+      responses:
+        '200':
+          description: The project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A project with this name exists
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    delete:
+      operationId: deleteProject
+      tags: [Admin]
+      summary: Delete a project
+      description: |
+        Its memberships go with it.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/memberships:
+    post:
+      operationId: createMembership
+      tags: [Admin]
+      summary: Grant a principal a role
+      description: |
+        Tenant-wide (no `team_id` or `project_id`), in a team, or in a project.
+        Only tenant-wide roles grant scopes on the tenant-wide APIs. Granting a
+        role needs every admin scope it carries (403); granting `owner` needs an
+        owner. Audited as `membership.add`.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMembershipRequest'
+      responses:
+        '201':
+          description: The membership
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '400':
+          description: '`project_id` is not in `team_id`'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The principal already has a role there
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listMemberships
+      tags: [Admin]
+      summary: List memberships
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      parameters:
+        - name: principal_id
+          in: query
+          required: false
+          description: Only this principal's memberships
+          schema:
+            type: string
+            format: uuid
+        - name: team_id
+          in: query
+          required: false
+          description: Only this team's (and its projects') memberships
+          schema:
+            type: string
+            format: uuid
+        - name: project_id
+          in: query
+          required: false
+          description: Only this project's memberships
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Memberships, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Membership'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/memberships/{membership_id}:
+    parameters:
+      - name: membership_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getMembership
+      tags: [Admin]
+      summary: Get a membership
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: The membership
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    patch:
+      operationId: updateMembership
+      tags: [Admin]
+      summary: Change a membership's role
+      description: |
+        Needs what granting both the old and the new role would. The tenant's
+        last enabled owner cannot be demoted (409). Audited as `role.change`.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMembershipRequest'
+      responses:
+        '200':
+          description: The membership
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The tenant's last enabled owner
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    delete:
+      operationId: deleteMembership
+      tags: [Admin]
+      summary: Remove a membership
+      description: |
+        Needs what granting the role would. The tenant's last enabled owner
+        cannot be removed (409). Audited as `membership.remove`.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '204':
+          description: Removed
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The tenant's last enabled owner
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
   # ── Admin tokens and tenant ingest keys (tenant admin) ────────────────
 
   /api/v1/admin/token-scopes:
@@ -6350,8 +7370,9 @@ paths:
       summary: Issue a tenant ingest key
       description: |
         The key is returned once, in this response; only its hash is
-        stored. While `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off the new key
-        also has full access to `/api/v1/admin`, like every ingest key.
+        stored. While `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off (it defaults
+        to on) the new key also reaches every `/api/v1/admin` route but
+        member management, like every ingest key.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7576,14 +8597,15 @@ paths:
       tags: [Operator]
       summary: Issue a scoped admin token for a tenant
       description: |
-        How a tenant's first admin token is made, for example when
-        `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is on and no tenant key may call
-        `/api/v1/admin/tokens`. Any scope may be granted. The token is
-        returned once. With a named operator token that expires, the admin
-        token expires no later than the caller: an omitted or later
-        `expires_at` is capped to the caller's own (`PS_ADMIN_TOKEN` is not
-        bounded), and the `admin_token.create` audit row sets
-        `details.expiry_capped`.
+        How a tenant's first admin token is made: with
+        `PS_ADMIN_REQUIRE_SCOPED_TOKENS` on (the default) no tenant key may
+        call `/api/v1/admin/tokens`. Any scope may be granted; a token with
+        every scope can create the tenant's first principal and make it
+        `owner`, then issue tokens for it. The token is returned once. With
+        a named operator token that expires, the admin token expires no
+        later than the caller: an omitted or later `expires_at` is capped to
+        the caller's own (`PS_ADMIN_TOKEN` is not bounded), and the
+        `admin_token.create` audit row sets `details.expiry_capped`.
       security:
         - OperatorToken: []
       x-operator-scope: operator:tenants

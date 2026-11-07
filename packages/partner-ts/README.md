@@ -47,6 +47,7 @@ for await (const asset of client.assets.list({ limit: 200 })) {
 | `client.providerKeyFingerprints.list()` / `put(provider, apiKeyId, { apiKeyFingerprint })` / `delete(provider, apiKeyId)` | `GET /partner/v1/provider-key-fingerprints`, `PUT` / `DELETE .../{provider}/{api_key_id}` (`provider-credentials:manage`) |
 | `client.telemetry.coverage()` | `GET /partner/v1/telemetry/coverage` (coverage per source: sdk, gateway, otel, kong) |
 | `client.vendors.list()` / `models.list()` / `businessUnits.list()` | `GET /partner/v1/vendors`, `/models`, `/business-units` |
+| `client.teams.list()` / `projects.list({ teamId })` | `GET /partner/v1/teams`, `/projects` (`members:read`) |
 | `client.changes.list({ since })` / `listPage(...)` | `GET /partner/v1/changes` |
 | `client.export.get()` | `GET /partner/v1/export` |
 | `client.health()` | `GET /partner/v1/health` |

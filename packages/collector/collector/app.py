@@ -255,6 +255,13 @@ from collector.user_erasure import router as user_erasure_router
 app.include_router(user_erasure_router)
 app.include_router(audit_partner_router)
 
+# RBAC: principals, teams, projects and role memberships (collector/rbac.py)
+from collector.rbac_admin import partner_router as rbac_partner_router
+from collector.rbac_admin import router as rbac_admin_router
+
+app.include_router(rbac_admin_router)
+app.include_router(rbac_partner_router)
+
 # Operator surface: tenants, retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router
 

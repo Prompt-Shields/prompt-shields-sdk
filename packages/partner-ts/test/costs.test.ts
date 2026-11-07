@@ -626,3 +626,37 @@ describe('risk mapping reviews', () => {
     await expect(c.assets.reviewRisk('', 'r1', { status: 'confirmed', reviewedBy: 'x' })).rejects.toThrow(PartnerError);
   });
 });
+
+describe('client.teams and client.projects', () => {
+  const TEAM_WIRE = {
+    id: '019e1a2b-0000-7000-8000-0000000000t1',
+    name: 'Payments',
+    description: null,
+    created_at: '2026-11-06T10:00:00Z',
+    updated_at: null,
+  };
+
+  it('lists teams, unwrapping `data`', async () => {
+    const m = mockFetch(json({ data: [TEAM_WIRE] }));
+    expect(await client(m.fetch).teams.list()).toEqual([
+      {
+        id: TEAM_WIRE.id,
+        name: 'Payments',
+        description: null,
+        createdAt: '2026-11-06T10:00:00Z',
+        updatedAt: null,
+      },
+    ]);
+    expect(new URL(m.calls[0].url).pathname).toBe('/partner/v1/teams');
+  });
+
+  it('lists projects filtered by team as a snake_case query parameter', async () => {
+    const wire = { ...TEAM_WIRE, id: 'p1', name: 'checkout', team_id: TEAM_WIRE.id };
+    const m = mockFetch(json({ data: [wire] }));
+    const res = await client(m.fetch).projects.list({ teamId: TEAM_WIRE.id });
+    expect(res[0].teamId).toBe(TEAM_WIRE.id);
+    const url = new URL(m.calls[0].url);
+    expect(url.pathname).toBe('/partner/v1/projects');
+    expect(Object.fromEntries(url.searchParams)).toEqual({ team_id: TEAM_WIRE.id });
+  });
+});

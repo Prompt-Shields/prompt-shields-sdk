@@ -63,6 +63,10 @@ TENANT_TABLES: dict[str, str] = {
     "usage_rollup_hourly": "tenant_id",
     "usage_rollup_daily": "tenant_id",
     "usage_rollup_state": "tenant_id",
+    "principals": "tenant_id",
+    "teams": "tenant_id",
+    "projects": "tenant_id",
+    "memberships": "tenant_id",
 }
 
 

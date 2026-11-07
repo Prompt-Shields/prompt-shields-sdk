@@ -405,6 +405,12 @@ class AdminToken(Base):
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     expires_at = Column(TIMESTAMP(timezone=True))
     revoked_at = Column(TIMESTAMP(timezone=True))
+    # Issued for a principal (#338): the token then reaches at most what the
+    # principal's tenant-wide roles grant now (collector/rbac.py). NULL for
+    # automation tokens that belong to no one (every token before 039).
+    principal_id = Column(
+        UUID(as_uuid=True), ForeignKey("principals.id", ondelete="SET NULL")
+    )
 
     __table_args__ = (
         Index("ux_admin_tokens_prefix", "token_prefix", unique=True),
@@ -416,6 +422,133 @@ class AdminToken(Base):
             postgresql_where=text("revoked_at IS NULL"),
         ),
         Index("ix_admin_tokens_tenant", "tenant_id", "created_at"),
+    )
+
+
+class Principal(Base):
+    """A person or service account in a tenant (#338, RBAC).
+
+    Roles come from ``memberships``; admin tokens and partner credentials
+    issued for a principal inherit them (collector/rbac.py). ``disabled_at``
+    suspends every credential issued for it without revoking them.
+    """
+
+    __tablename__ = "principals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    kind = Column(Text, nullable=False)  # user | service_account
+    # The identity provider's subject (OIDC sub, SCIM id); unique per tenant.
+    external_id = Column(Text)
+    email = Column(Text)
+    display_name = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+    disabled_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('user', 'service_account')", name="ck_principals_kind"
+        ),
+        Index(
+            "ux_principals_tenant_external_id",
+            "tenant_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
+        ),
+        Index("ix_principals_tenant", "tenant_id", "created_at"),
+    )
+
+
+class Team(Base):
+    """A group of principals in a tenant (#338)."""
+
+    __tablename__ = "teams"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    description = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_teams_tenant_name"),
+    )
+
+
+class Project(Base):
+    """A project owned by a team (#338)."""
+
+    __tablename__ = "projects"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    description = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_projects_tenant_name"),
+        Index("ix_projects_team", "team_id"),
+    )
+
+
+class Membership(Base):
+    """A principal's built-in role (collector/rbac.py ROLES) in the tenant
+    (``team_id`` NULL), a team, or a project of that team (#338).
+
+    One role per principal per place. Only tenant-wide memberships grant
+    scopes on the tenant-wide APIs today; team and project memberships are
+    recorded for team-scoped resources.
+    """
+
+    __tablename__ = "memberships"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    principal_id = Column(
+        UUID(as_uuid=True), ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"))
+    project_id = Column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    role = Column(Text, nullable=False)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "project_id IS NULL OR team_id IS NOT NULL",
+            name="ck_memberships_project_needs_team",
+        ),
+        Index(
+            "ux_memberships_tenant_wide",
+            "principal_id",
+            unique=True,
+            postgresql_where=text("team_id IS NULL"),
+        ),
+        Index(
+            "ux_memberships_team",
+            "principal_id",
+            "team_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL AND project_id IS NULL"),
+        ),
+        Index(
+            "ux_memberships_project",
+            "principal_id",
+            "project_id",
+            unique=True,
+            postgresql_where=text("project_id IS NOT NULL"),
+        ),
+        Index("ix_memberships_tenant", "tenant_id"),
+        Index("ix_memberships_team", "team_id"),
     )
 
 
@@ -943,6 +1076,10 @@ class PartnerCredential(Base):
     partner_metadata = Column(JSONB, default=dict)
     expires_at = Column(TIMESTAMP(timezone=True))
     created_at = Column(TIMESTAMP(timezone=True), default=utcnow)
+    # Issued for a principal (#338): like AdminToken.principal_id.
+    principal_id = Column(
+        UUID(as_uuid=True), ForeignKey("principals.id", ondelete="SET NULL")
+    )
 
     __table_args__ = (
         Index("ix_partner_credentials_tenant", "tenant_id"),

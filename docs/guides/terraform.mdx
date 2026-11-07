@@ -45,7 +45,8 @@ resource "helm_release" "prompt_shields" {
   values = [yamlencode({
     collector = {
       config = {
-        # Admin routes take scoped admin tokens only (see "Auth" below).
+        # Admin routes take scoped admin tokens only (the default since
+        # roles shipped; see "Auth" below). Kept explicit here.
         PS_ADMIN_REQUIRE_SCOPED_TOKENS = "true"
       }
     }
@@ -63,7 +64,7 @@ The collector has four kinds of credential. Tenant Terraform should only ever ho
 |------------|---------|------------------|
 | `PS_ADMIN_TOKEN` (operator, break-glass) | `/api/v1/operator/*` and operator pulls, across every tenant, bypassing row-level security. Every use is audited as `operator.break_glass` | No: use it to issue named operator tokens, then keep it for emergencies (or unset it) |
 | Named operator token (`ps-ot-...`) | The operator routes its scopes allow, across every tenant; every action is attributed to the token's name in the audit trail | Only in a separate platform workspace that creates tenants |
-| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | What its scopes allow: `ingest:write`, `registry:read`, `registry:attest`. A key holding all three (every key from before scopes existed) also reaches every `/api/v1/admin` route unless `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` | No: it is what SDKs and gateways send |
+| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | What its scopes allow: `ingest:write`, `registry:read`, `registry:attest`. A key holding all three (every key from before scopes existed) also reaches every `/api/v1/admin` route but member management, but only with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` (default `true`) | No: it is what SDKs and gateways send |
 | Admin token (`ps-at-...`) | `/api/v1/admin` routes allowed by its scopes, for one tenant | Yes |
 
 ### Ingest key scopes
@@ -88,14 +89,19 @@ Admin token scopes:
 | `admin:partners` | Partner API credentials |
 | `admin:registry` | Lifecycle sweep, risk suggestions, risk reviews |
 | `admin:privacy` | Erase an end user's identifiers (`/api/v1/admin/users/...`) |
+| `admin:members` | Principals, teams, projects and role memberships |
 
 Each operation in the OpenAPI spec names its scope in `x-admin-scope`.
 
 ### `PS_ADMIN_REQUIRE_SCOPED_TOKENS`
 
-By default (`false`) a tenant ingest key still has full access to `/api/v1/admin`, as it always had. That includes rotating provider admin keys, issuing partner credentials and issuing more ingest keys, so anyone holding a key deployed with an SDK or gateway can do those things. With `PS_ADMIN_REQUIRE_SCOPED_TOKENS=true` the collector refuses ingest keys on every `/api/v1/admin` route (403, audited), and only admin tokens with the right scope get in. Ingest and registry routes are unchanged. Turn it on once your automation uses admin tokens.
+By default (`true`, since roles shipped) the collector refuses ingest keys on every `/api/v1/admin` route (403, audited), and only admin tokens with the right scope get in. Ingest and registry routes are unchanged. Before, the default was `false`: any ingest key, including one deployed with an SDK or gateway, could rotate provider admin keys, issue partner credentials and mint more keys. **Upgrading:** move automation that calls `/api/v1/admin` with an ingest key to an admin token first, or set `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` to keep the old behaviour for now.
 
-While it is off, a full-scope ingest key reaches every admin route, so issuing or rotating one (`POST /api/v1/admin/api-keys` with all three scopes, `.../rotate` on such a key) needs a token with every admin scope. A narrower key (the default, `ingest:write`) cannot reach admin routes, so `admin:keys` is enough to issue or rotate it, and to list, read and revoke any key. With the setting on, `admin:keys` is enough for every key.
+With it set to `false`, a full-scope ingest key reaches every admin route except member management (`admin:members`), so issuing or rotating one (`POST /api/v1/admin/api-keys` with all three scopes, `.../rotate` on such a key) needs a token with all of those admin scopes. A narrower key (the default, `ingest:write`) cannot reach admin routes, so `admin:keys` is enough to issue or rotate it, and to list, read and revoke any key. With the setting on, `admin:keys` is enough for every key.
+
+### Roles
+
+Principals (users and service accounts), teams, projects and memberships are managed under `/api/v1/admin/principals`, `/teams`, `/projects` and `/memberships` (`admin:members`). A membership gives a principal one built-in role (`owner`, `admin`, `developer`, `viewer`, `auditor`, `billing`; `GET /api/v1/admin/roles` lists their scopes) tenant-wide, in a team, or in a project. Pass `principal_id` when issuing an admin token or partner credential to issue it for a principal: it keeps the requested scopes the principal's tenant-wide roles grant, and on every request reaches no more than those roles grant then, so demoting or disabling the principal takes effect at once. Tokens issued without `principal_id` (Terraform's own) work as before. Only an owner can grant, change or remove the owner role.
 
 ### Named operator tokens
 
