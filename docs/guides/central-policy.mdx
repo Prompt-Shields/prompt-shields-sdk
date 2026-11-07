@@ -1,0 +1,192 @@
+---
+title: Central Policy
+description: One versioned, audited governance policy per tenant, team and project in the collector, pulled by every gateway replica
+---
+
+# Central Policy
+
+The collector holds your governance policy: which models calls are routed to
+and under what data rules (`route`), and who may call which providers, models
+and MCP tools (`access`). Gateways pull it, so one change reaches every
+replica within a poll interval, with no redeploy. Each change is a new
+immutable version, and every create, version, activation and delete is on the
+tenant's audit trail.
+
+<Note>
+This is the first part of #340. The collector stores team and project
+policies and compiles them, and gateways validate them, but gateways apply
+only the tenant-wide policy today: they do not yet know which team a caller
+is in. Per-group rules work now through the `access` section's
+identity-provider groups.
+</Note>
+
+## The policy document
+
+A policy version is one `ps-policy.v1` document made of **sections**. Each
+section has its own format version:
+
+```json
+{
+  "schema": "ps-policy.v1",
+  "sections": {
+    "route": {
+      "version": 1,
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "balanced",
+        "quality_to_group": {"draft": "cheap", "balanced": "balanced", "critical": "balanced"},
+        "groups": {
+          "cheap": [{"model": "mistral-small", "provider": "mistral", "input_cost_per_1k": 0.0002, "output_cost_per_1k": 0.0006, "jurisdiction": "EEA", "zdr": true}],
+          "balanced": [{"model": "gpt-4o", "provider": "openai", "input_cost_per_1k": 0.0025, "output_cost_per_1k": 0.01, "jurisdiction": "US"}]
+        },
+        "data_policy": {"confidential": {"jurisdictions": ["EEA"], "require_zdr": true}}
+      }
+    },
+    "access": {
+      "version": 1,
+      "default": "deny",
+      "groups": [
+        {"name": "engineering", "match": ["eng"], "models": ["gpt-4o*", "mistral-*"], "rate_limit": {"requests_per_minute": 120}},
+        {"name": "everyone", "match": ["staff"], "models": ["mistral-small"]}
+      ]
+    }
+  }
+}
+```
+
+| Section | Version | Body | Enforced by |
+|---|---|---|---|
+| `route` | 1 | `policy`: a [`route-policy.v1`](/guides/routing) document, the same as `PS_ROUTE_POLICY_FILE` | The gateway router: model groups, sensitivity levels and the fail-closed data policy |
+| `access` | 1 | `default` and `groups`, the [`PS_OIDC_POLICY`](/guides/gateway-oidc) format: providers, models, MCP servers and tools, and rate limits per identity-provider group | Gateway OIDC authentication (needs `PS_OIDC_ENABLED=true`) |
+
+Sections planned by other work items are reserved and refused until they ship:
+`rate_limits`, `prices`, `guardrails`, `pseudonymisation`, `budgets`. Unknown
+sections are refused too, so nothing is stored that nothing enforces.
+
+**Extending it.** A section changes incompatibly only by adding a new version
+(`route` v2), never by changing what v1 means. A gateway that does not know
+a version of a section it enforces refuses the whole bundle and keeps its
+last good policy. Sections a gateway does not enforce are ignored by it, so
+adding a section for another component does not affect gateways. New
+sections and versions are registered in `collector/policy_doc.py`
+(`SECTIONS`) by the change that enforces them.
+
+The collector checks the document when you save it: the outline of each
+section, every reference it can check, and its size (256 KB at most). It
+answers 422 listing every problem. The gateway validates the `route` section
+in full against the schema before applying it.
+
+## Where a policy applies
+
+Each policy is bound to the **tenant**, a **team** or a **project**, one policy
+per binding. The effective policy of a project is built section by section:
+its own section if its policy has one, else its team's, else the tenant's. A
+section is always taken whole, never merged field by field, so a team's
+`access` section is exactly what the team gets.
+
+A team or project with a policy cannot be deleted (409); delete its policy
+first.
+
+## Managing policies
+
+Admin API under `/api/v1/admin`, admin token with `admin:policies` (GETs also
+take `admin:read`; tenant ingest keys never reach these routes, even with
+`PS_ADMIN_REQUIRE_SCOPED_TOKENS=false`). The `owner` and `admin` roles hold
+`admin:policies`.
+
+```bash
+# Create the tenant-wide policy with version 1, active at once
+curl -X POST $COLLECTOR/api/v1/admin/policies -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"name": "default", "scope": "tenant", "document": '"$(cat policy.json)"', "activate": true}'
+
+# A new version (not active until activated)
+curl -X POST $COLLECTOR/api/v1/admin/policies/$ID/versions -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"document": '"$(cat policy-v2.json)"', "comment": "EEA only for confidential"}'
+
+# Activate it; activating an older version rolls back; null deactivates
+curl -X POST $COLLECTOR/api/v1/admin/policies/$ID/activate -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"version": 2}'
+
+# What gateways will receive
+curl $COLLECTOR/api/v1/admin/policy/effective -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+| Route | What it does |
+|---|---|
+| `POST /policies` | Create (`scope`: `tenant`, `team` with `team_id`, or `project` with `project_id`), optionally with version 1 and `activate` |
+| `GET /policies`, `GET /policies/{id}` | List (`?scope=`), read with the active document |
+| `PATCH /policies/{id}` | Rename or describe |
+| `DELETE /policies/{id}` | Delete with every version |
+| `POST /policies/{id}/versions` | Add a version (`activate: true` to make it active) |
+| `GET /policies/{id}/versions[/{version}]` | List versions, read one with its document |
+| `POST /policies/{id}/activate` | Make a version active, or `null` for none |
+| `GET /policy/effective` | Preview the compiled bundle |
+
+Versions are immutable: no route changes one, and the database refuses an
+update.
+
+**Audit.** Every change is a row on the tenant's hash-chained audit trail
+(`GET /partner/v1/audit`, the SIEM connectors): `policy.create`,
+`policy.update`, `policy.delete`, `policy.version_create` and
+`policy.activate`. An activation records the version number and SHA-256 of the
+document before and after, and which sections changed; the documents
+themselves are the immutable versions the digests point to.
+
+## The gateway pull
+
+The collector compiles every effective policy of the tenant into one
+`ps-policy-bundle.v1` document at `GET /api/v1/policy/effective`, with an
+ETag. The tenant-wide policy is under `tenant`, and each team and project with
+a policy of its own (or, for a project, from its team) is under `teams` or
+`projects`. Each has a `version` naming the policy versions that contributed,
+for example `default@3+team-eu@2`.
+
+Turn the pull on in the gateway:
+
+| Variable | Default | |
+|---|---|---|
+| `PS_POLICY_PULL_ENABLED` | off | `true` polls `${PS_COLLECTOR_URL}/api/v1/policy/effective` |
+| `PS_POLICY_PULL_API_KEY` | `PS_API_KEY` | A tenant ingest key holding `policy:read` |
+| `PS_POLICY_PULL_INTERVAL_SECONDS` | `30` | 5 to 86400 |
+
+Issue the gateway's key with `POST /api/v1/admin/api-keys`
+`{"name": "gateway", "scopes": ["ingest:write", "policy:read"]}` (one key for
+telemetry and the pull). Keys that existed before this release and held every
+scope were given `policy:read` by migration `043`.
+
+What the gateway does with it:
+
+- The first pull runs before the gateway serves. Then it polls with
+  `If-None-Match`, so an unchanged policy costs a 304.
+- The tenant-wide `route` section replaces `PS_ROUTE_POLICY_FILE` and the
+  `access` section replaces `PS_OIDC_POLICY`. A section the central policy
+  does not have falls back to the local setting.
+- **Collector unreachable** (or an error status, or a timeout): the last good
+  central policy keeps applying. If the gateway has never had one, its local
+  settings apply, exactly as without the pull.
+- **Malformed policy**: a bundle that does not validate in full is never
+  applied, not even in part, and is logged once; the last good policy (or
+  the local settings) stays active. An invalid `route` section never turns
+  routing off.
+- **No policy at all** (nothing created, or nothing active): the bundle is
+  empty and the gateway behaves exactly as it does today.
+- Telemetry events carry `policy_version`: the central policy's version, else
+  the route policy file's `policy_version`. The semantic cache keys entries
+  by it too.
+
+With the default 30 s interval, an edit reaches every replica within about 30
+seconds.
+
+The collector URL goes through the gateway's egress check, like telemetry: a
+loopback or private address must be listed in `TRUSTED_CUSTOM_HOSTS`.
+
+## Not done yet
+
+- Gateways apply team and project policies: this needs the caller's team
+  (from SSO/SCIM group mapping or virtual keys).
+- Sections for rate-limit policies, prices, guardrails and pseudonymisation
+  (#344, #348, #349, #350).
+- A gateway that starts while the collector is down uses its local settings
+  until the first successful pull; the last good policy is not persisted
+  across restarts.

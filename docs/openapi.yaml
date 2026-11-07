@@ -63,8 +63,8 @@ tags:
   - name: Admin
     description: |
       Tenant admin API (`/api/v1/admin`): scoped admin tokens, tenant ingest
-      keys, Partner API credentials, registry jobs, and principals, teams,
-      projects and role memberships (RBAC). Each operation names
+      keys, Partner API credentials, registry jobs, principals, teams,
+      projects and role memberships (RBAC), and governance policies. Each operation names
       its scope in `x-admin-scope`; GET operations also accept `admin:read`.
       Changes are audited. Conventions for keys, tokens and credentials:
       stable UUID ids, secrets returned once, POST with a name an unrevoked
@@ -85,8 +85,8 @@ tags:
   - name: Ingest
     description: |
       Telemetry ingest routes the SDK and the gateway call with the tenant's
-      own API key. Only call feedback and learner snapshots are documented
-      here.
+      own API key. Only some are documented here, among them call
+      feedback, learner snapshots and the gateway's policy pull.
   - name: Operator
     description: |
       Cross-tenant operator routes (`PS_ADMIN_TOKEN`): tenants, retention,
@@ -2448,8 +2448,9 @@ components:
         Admin token scope. `admin:read` grants every GET under
         `/api/v1/admin`; the others grant one resource family. While
         `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off an ingest key reaches every
-        admin route but member management, so issuing or rotating one needs
-        every admin scope but `admin:members`.
+        admin route but member management and governance policies, so issuing
+        or rotating one needs every admin scope but `admin:members` and
+        `admin:policies`.
       enum:
         - admin:read
         - admin:keys
@@ -2460,6 +2461,7 @@ components:
         - admin:registry
         - admin:privacy
         - admin:members
+        - admin:policies
 
     EraseUserRequest:
       type: object
@@ -2622,13 +2624,16 @@ components:
         Ingest key scope. `ingest:write` sends events (`/ingest/*`, OTLP,
         Kong, MCP, learner snapshots, feedback); `registry:read` reads
         `/api/v1/registry` and `/telemetry/loss`; `registry:attest` records
-        attestations. Keys issued before scopes existed hold all three; a
-        new key holds `ingest:write` unless more are asked for. Only a key
-        holding all three can call `/api/v1/admin`.
+        attestations; `policy:read` reads the compiled governance policy
+        (`/api/v1/policy/effective`, the gateway's policy pull). Keys issued
+        before scopes existed hold all four; a new key holds `ingest:write`
+        unless more are asked for. Only a key holding the first three can
+        call `/api/v1/admin`.
       enum:
         - ingest:write
         - registry:read
         - registry:attest
+        - policy:read
 
     TenantApiKey:
       type: object
@@ -3021,6 +3026,238 @@ components:
           type: [string, 'null']
           format: date-time
       required: [id, principal_id, team_id, project_id, role, created_by, created_at, updated_at]
+
+    Policy:
+      type: object
+      description: |
+        A governance policy (#340), bound to the tenant, a team or a project.
+        Its content is in immutable versions; `active_version` is the one in
+        force (null: inactive).
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: [string, 'null']
+        scope:
+          type: string
+          enum: [tenant, team, project]
+        team_id:
+          type: [string, 'null']
+          format: uuid
+        project_id:
+          type: [string, 'null']
+          format: uuid
+        active_version:
+          type: [integer, 'null']
+        created_by:
+          type: string
+          description: '`token:<prefix>` or `key:<prefix>` of the credential that created it'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, name, description, scope, team_id, project_id, active_version, created_by, created_at, updated_at]
+
+    PolicyWithDocument:
+      allOf:
+        - $ref: '#/components/schemas/Policy'
+        - type: object
+          properties:
+            active_document:
+              description: The active version's document, or null
+              oneOf:
+                - $ref: '#/components/schemas/PolicyDocument'
+                - type: 'null'
+          required: [active_document]
+
+    PolicyDocument:
+      type: object
+      description: |
+        A `ps-policy.v1` document. Each section is `{"version": N, ...}`;
+        known sections: `route` v1 (`{"version": 1, "policy": <route-policy.v1>}`)
+        and `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
+        the gateway's PS_OIDC_POLICY format). Reserved for later:
+        `rate_limits`, `prices`, `guardrails`, `pseudonymisation`, `budgets`.
+        See docs/guides/central-policy.mdx.
+      properties:
+        schema:
+          type: string
+          const: ps-policy.v1
+        description:
+          type: string
+        sections:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              version:
+                type: integer
+            required: [version]
+      required: [schema, sections]
+
+    PolicyVersionSummary:
+      type: object
+      properties:
+        policy_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        sha256:
+          type: string
+          description: SHA-256 of the document's canonical JSON
+        sections:
+          type: object
+          description: Section name -> section version
+          additionalProperties:
+            type: integer
+        comment:
+          type: [string, 'null']
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required: [policy_id, version, sha256, sections, comment, created_by, created_at]
+
+    PolicyVersion:
+      allOf:
+        - $ref: '#/components/schemas/PolicyVersionSummary'
+        - type: object
+          properties:
+            document:
+              $ref: '#/components/schemas/PolicyDocument'
+          required: [document]
+
+    CreatePolicyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+        scope:
+          type: string
+          enum: [tenant, team, project]
+        team_id:
+          type: [string, 'null']
+          format: uuid
+          description: 'Required with `scope: team`, else omitted'
+        project_id:
+          type: [string, 'null']
+          format: uuid
+          description: 'Required with `scope: project`, else omitted'
+        document:
+          oneOf:
+            - $ref: '#/components/schemas/PolicyDocument'
+            - type: 'null'
+        comment:
+          type: [string, 'null']
+          maxLength: 1000
+        activate:
+          type: boolean
+          default: false
+          description: Make version 1 active at once (needs `document`)
+      required: [name, scope]
+
+    UpdatePolicyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 100
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+
+    CreatePolicyVersionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        document:
+          $ref: '#/components/schemas/PolicyDocument'
+        comment:
+          type: [string, 'null']
+          maxLength: 1000
+        activate:
+          type: boolean
+          default: false
+      required: [document]
+
+    ActivatePolicyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          type: [integer, 'null']
+          minimum: 1
+          description: The version to make active; null deactivates the policy
+      required: [version]
+
+    EffectivePolicy:
+      type: object
+      properties:
+        version:
+          type: [string, 'null']
+          description: |
+            The contributing policy versions, most general first
+            (`default@3+team-eu@2`); recorded as `policy_version` in gateway
+            telemetry. Null when no policy applies.
+        sections:
+          type: object
+          description: Section name -> section, each taken whole from the most specific active policy that has it
+          additionalProperties:
+            type: object
+      required: [version, sections]
+
+    PolicyBundle:
+      type: object
+      description: Every effective policy of the tenant (`ps-policy-bundle.v1`).
+      properties:
+        schema:
+          type: string
+          const: ps-policy-bundle.v1
+        tenant:
+          $ref: '#/components/schemas/EffectivePolicy'
+        teams:
+          type: object
+          description: Team id -> effective policy, for teams with an active policy
+          additionalProperties:
+            allOf:
+              - $ref: '#/components/schemas/EffectivePolicy'
+              - type: object
+                properties:
+                  name:
+                    type: string
+                required: [name]
+        projects:
+          type: object
+          description: Project id -> effective policy, for projects with an active policy of their own or from their team
+          additionalProperties:
+            allOf:
+              - $ref: '#/components/schemas/EffectivePolicy'
+              - type: object
+                properties:
+                  name:
+                    type: string
+                  team_id:
+                    type: string
+                    format: uuid
+                required: [name, team_id]
+      required: [schema, tenant, teams, projects]
 
     CreatePrincipalRequest:
       type: object
@@ -6886,7 +7123,8 @@ paths:
       tags: [Admin]
       summary: Delete a team
       description: |
-        Its memberships go with it. 409 while the team has projects.
+        Its memberships go with it. 409 while the team has projects or a
+        governance policy.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -6897,7 +7135,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: The team has projects
+          description: The team has projects or a governance policy
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -7030,7 +7268,8 @@ paths:
       tags: [Admin]
       summary: Delete a project
       description: |
-        Its memberships go with it.
+        Its memberships go with it. 409 while the project has a governance
+        policy.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7040,6 +7279,8 @@ paths:
           description: Deleted
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: The project has a governance policy
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -7215,6 +7456,375 @@ paths:
           $ref: '#/components/responses/AdminForbidden'
 
   # ── Admin tokens and tenant ingest keys (tenant admin) ────────────────
+
+  /api/v1/admin/policies:
+    post:
+      operationId: createPolicy
+      tags: [Admin]
+      summary: Create a policy
+      description: |
+        A governance policy bound to the tenant (`scope: tenant`), a team or a
+        project; one policy per binding. With `document`, version 1 is
+        created (and, with `activate: true`, made active). Audited
+        (`policy.create`, `policy.version_create`, `policy.activate`).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyRequest'
+      responses:
+        '201':
+          description: The policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A policy with this name, or for this binding, exists
+        '422':
+          description: Invalid field, binding or policy document (`detail` lists every problem)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listPolicies
+      tags: [Admin]
+      summary: List policies
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [tenant, team, project]
+      responses:
+        '200':
+          description: Policies, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Policy'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/policies/{policy_id}:
+    parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getPolicy
+      tags: [Admin]
+      summary: Get a policy
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      responses:
+        '200':
+          description: The policy, with its active document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyWithDocument'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    patch:
+      operationId: updatePolicy
+      tags: [Admin]
+      summary: Rename or describe a policy
+      description: The binding cannot change; create a new policy instead. Audited (`policy.update`).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePolicyRequest'
+      responses:
+        '200':
+          description: The policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A policy with this name exists
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    delete:
+      operationId: deletePolicy
+      tags: [Admin]
+      summary: Delete a policy
+      description: |
+        Deletes the policy and every version. Gateways stop applying it at
+        their next pull. Audited (`policy.delete`, with the active version's
+        number and SHA-256).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/policies/{policy_id}/versions:
+    parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: createPolicyVersion
+      tags: [Admin]
+      summary: Add a policy version
+      description: |
+        Versions are immutable and numbered 1, 2, ... per policy. With
+        `activate: true` the new version becomes active at once. Audited
+        (`policy.version_create`, `policy.activate`).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyVersionRequest'
+      responses:
+        '201':
+          description: The new version (without its document)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersionSummary'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Invalid policy document (`detail` lists every problem)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listPolicyVersions
+      tags: [Admin]
+      summary: List a policy's versions
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      responses:
+        '200':
+          description: Versions, newest first (without documents)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PolicyVersionSummary'
+                required: [data]
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/policies/{policy_id}/versions/{version}:
+    parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: version
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getPolicyVersion
+      tags: [Admin]
+      summary: Get a policy version
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      responses:
+        '200':
+          description: The version, with its document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/policies/{policy_id}/activate:
+    parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: activatePolicyVersion
+      tags: [Admin]
+      summary: Activate a policy version
+      description: |
+        Makes `version` the active one (an older version rolls back), or with
+        `null` deactivates the policy (its level then falls back to the one
+        above). Audited (`policy.activate`, with the version and SHA-256
+        before and after and the sections that changed).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivatePolicyRequest'
+      responses:
+        '200':
+          description: The policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/policy/effective:
+    get:
+      operationId: previewEffectivePolicy
+      tags: [Admin]
+      summary: Preview the compiled policy bundle
+      description: Exactly what `GET /api/v1/policy/effective` returns to a gateway, with the same ETag.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:policies
+      responses:
+        '200':
+          description: The bundle
+          headers:
+            ETag:
+              description: SHA-256 of the bundle's canonical JSON, quoted
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyBundle'
+        '304':
+          description: Not modified (If-None-Match matched)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/policy/effective:
+    get:
+      operationId: getEffectivePolicy
+      tags: [Ingest]
+      summary: Compiled policy bundle (gateway pull)
+      description: |
+        The tenant's governance policies compiled into one
+        `ps-policy-bundle.v1` document: the tenant-wide effective policy and
+        one per team and project with a policy of its own (project > team >
+        tenant, section by section). Gateways poll it
+        (`PS_POLICY_PULL_ENABLED`); send the last ETag as `If-None-Match` to
+        get 304 when nothing changed. Needs an ingest key holding
+        `policy:read`. See docs/guides/central-policy.mdx.
+      security:
+        - TenantApiKey: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The bundle
+          headers:
+            ETag:
+              description: SHA-256 of the bundle's canonical JSON, quoted
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyBundle'
+        '304':
+          description: Not modified (If-None-Match matched)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The key lacks `policy:read`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/v1/admin/token-scopes:
     get:

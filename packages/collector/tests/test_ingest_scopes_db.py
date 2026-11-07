@@ -127,7 +127,8 @@ async def test_new_key_is_ingest_only_and_old_key_keeps_every_scope(client, seed
         legacy = (
             await s.execute(select(TenantApiKey).where(TenantApiKey.origin == "legacy"))
         ).scalar_one()
-    assert sorted(legacy.scopes) == sorted(ALL_KEY_SCOPES)
+    # Every scope, including policy:read (#340).
+    assert sorted(legacy.scopes) == sorted([*ALL_KEY_SCOPES, "policy:read"])
     assert await _registry(client, TENANT_KEY) == 200
     assert await _ingest(client, TENANT_KEY) == 200
     assert await _attest(client, TENANT_KEY) == 404  # past the scope check

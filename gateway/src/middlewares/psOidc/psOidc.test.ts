@@ -23,6 +23,7 @@ import {
   modelAllowed,
 } from './policy';
 import { oidcIdentityOf, psOidc } from '.';
+import { setCentralPolicy } from '../policyPull/state';
 
 const ISSUER = 'https://login.example.com/tenant/v2.0';
 
@@ -300,5 +301,50 @@ describe('Workers path: settings from bindings, verification with WebCrypto', ()
     // Without the bindings (process.env is empty) OIDC is off.
     const off = await app.request('/v1/chat/completions', init());
     expect(off.status).toBe(200);
+
+    // PS fork (#340): a central access section replaces PS_OIDC_POLICY.
+    try {
+      setCentralPolicy({
+        ignored: [],
+        teams: 0,
+        projects: 0,
+        access: parsePolicy({
+          groups: [{ name: 'central-eng', match: ['Eng'] }],
+        }),
+      });
+      const refused = await app.request(
+        '/v1/chat/completions',
+        init(`Bearer ${jwt}`),
+        bindings
+      );
+      expect(refused.status).toBe(403);
+      setCentralPolicy({
+        ignored: [],
+        teams: 0,
+        projects: 0,
+        access: parsePolicy({
+          groups: [{ name: 'central-chat', match: ['Chat.Use'] }],
+        }),
+      });
+      seen.length = 0;
+      const allowed = await app.request(
+        '/v1/chat/completions',
+        init(`Bearer ${jwt}`),
+        bindings
+      );
+      expect(allowed.status).toBe(200);
+      expect(seen[0].group).toBe('central-chat');
+      // No access section: PS_OIDC_POLICY applies again.
+      setCentralPolicy({ ignored: [], teams: 0, projects: 0 });
+      seen.length = 0;
+      await app.request(
+        '/v1/chat/completions',
+        init(`Bearer ${jwt}`),
+        bindings
+      );
+      expect(seen[0].group).toBe('chat-users');
+    } finally {
+      setCentralPolicy(undefined);
+    }
   });
 });

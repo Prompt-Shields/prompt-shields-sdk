@@ -312,7 +312,7 @@ class TenantApiKey(Base):
     previous_expires_at = Column(TIMESTAMP(timezone=True))
     # 'api' (issued here) or 'legacy' (moved from tenants.api_key_*).
     origin = Column(Text, nullable=False, default="api", server_default="api")
-    # ingest:write | registry:read | registry:attest (collector/tenant_keys.py).
+    # ingest:write | registry:read | registry:attest | policy:read (collector/tenant_keys.py).
     # Keys from before migration 037 hold all three; a new row defaults to
     # ingest:write only.
     scopes = Column(
@@ -549,6 +549,87 @@ class Membership(Base):
         ),
         Index("ix_memberships_tenant", "tenant_id"),
         Index("ix_memberships_team", "team_id"),
+    )
+
+
+class Policy(Base):
+    """A governance policy bound to the tenant, a team or a project (#340).
+
+    Its content lives in immutable ``policy_versions`` rows; ``active_version``
+    names the one in force (NULL: none, the policy is inactive). At most one
+    policy per binding: one tenant-wide, one per team, one per project.
+    collector/policy_doc.py documents the ps-policy.v1 document and how the
+    effective policy is compiled (project > team > tenant, per section).
+    """
+
+    __tablename__ = "policies"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    description = Column(Text)
+    # 'tenant', 'team' or 'project'.
+    scope = Column(Text, nullable=False)
+    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id"))
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"))
+    active_version = Column(Integer)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_policies_tenant_name"),
+        CheckConstraint(
+            "(scope = 'tenant' AND team_id IS NULL AND project_id IS NULL) OR "
+            "(scope = 'team' AND team_id IS NOT NULL AND project_id IS NULL) OR "
+            "(scope = 'project' AND project_id IS NOT NULL AND team_id IS NULL)",
+            name="ck_policies_scope_binding",
+        ),
+        Index(
+            "ux_policies_tenant_wide",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("scope = 'tenant'"),
+        ),
+        Index(
+            "ux_policies_team",
+            "team_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_policies_project",
+            "project_id",
+            unique=True,
+            postgresql_where=text("project_id IS NOT NULL"),
+        ),
+    )
+
+
+class PolicyVersion(Base):
+    """One immutable version of a policy's ps-policy.v1 document (#340).
+
+    Rows are never updated (a trigger refuses UPDATE); a change is a new
+    version. ``sha256`` is the digest of the canonical JSON document.
+    """
+
+    __tablename__ = "policy_versions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    policy_id = Column(
+        UUID(as_uuid=True), ForeignKey("policies.id", ondelete="CASCADE"), nullable=False
+    )
+    version = Column(Integer, nullable=False)
+    document = Column(JSONB, nullable=False)
+    sha256 = Column(Text, nullable=False)
+    comment = Column(Text)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("policy_id", "version", name="uq_policy_versions_policy_version"),
+        Index("ix_policy_versions_tenant", "tenant_id"),
     )
 
 
@@ -1461,8 +1542,25 @@ BEFORE DELETE ON risk_mapping_reviews
 FOR EACH ROW EXECUTE FUNCTION risk_mapping_reviews_no_delete()
 """
 
+POLICY_VERSION_IMMUTABLE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION policy_versions_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'policy_versions rows are immutable; create a new version instead';
+END;
+$$ LANGUAGE plpgsql
+"""
+POLICY_VERSION_IMMUTABLE_TRIGGER_SQL = """
+CREATE TRIGGER policy_versions_no_update
+BEFORE UPDATE ON policy_versions
+FOR EACH ROW EXECUTE FUNCTION policy_versions_immutable()
+"""
+
 # Install the triggers when the schema is built with create_all too (tests).
 for _table, _ddls in (
+    (
+        PolicyVersion.__table__,
+        (POLICY_VERSION_IMMUTABLE_FUNCTION_SQL, POLICY_VERSION_IMMUTABLE_TRIGGER_SQL),
+    ),
     (
         RiskMappingReview.__table__,
         (

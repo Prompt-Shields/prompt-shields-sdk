@@ -36,6 +36,7 @@ _KEY_SCOPE_NAMES = {
     "INGEST_WRITE": tenant_keys.INGEST_WRITE,
     "REGISTRY_READ": tenant_keys.REGISTRY_READ,
     "REGISTRY_ATTEST": tenant_keys.REGISTRY_ATTEST,
+    "POLICY_READ": tenant_keys.POLICY_READ,
 }
 
 
