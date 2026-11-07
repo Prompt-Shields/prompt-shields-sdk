@@ -113,7 +113,7 @@ async def token_endpoint(
         # the token names only scopes its roles still grant (resolve_partner
         # checks again on every request).
         try:
-            granted = rbac.role_scopes(await rbac.tenant_roles(db, partner.principal_id))
+            granted = rbac.role_scopes(await rbac.tenant_roles(db, partner.tenant_id, partner.principal_id))
         except rbac.PrincipalDisabled:
             raise HTTPException(
                 status_code=401,

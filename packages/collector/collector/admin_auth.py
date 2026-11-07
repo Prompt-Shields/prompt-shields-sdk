@@ -189,7 +189,7 @@ async def _resolve_admin_token(request: Request, token: str) -> AdminPrincipal:
     roles: frozenset[str] = frozenset()
     if row.principal_id is not None:
         try:
-            roles = await rbac.tenant_roles(db, row.principal_id)
+            roles = await rbac.tenant_roles(db, row.tenant_id, row.principal_id)
         except rbac.PrincipalDisabled:
             record_failed_auth(client)
             await _audit_failure(request, "principal_disabled", 401, row.tenant_id)

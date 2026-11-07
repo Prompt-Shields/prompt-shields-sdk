@@ -546,6 +546,64 @@ async def test_owner_role_is_protected(env):
     assert resp.status_code == 403
 
 
+async def test_admin_cannot_mint_an_owner_capable_token(env):
+    """An admin holds every admin scope, but a token holding every admin
+    scope that is unbound, or issued for an owner, can manage owners; only
+    an owner may issue one, or an admin could make itself owner."""
+    c, boot = env["c"], env["boot"]
+    owner = await _member(c, boot, "owner")
+    admin = await _member(c, boot, "admin")
+    admin_raw = (await _token_for(c, boot, admin))["token"]
+    owner_raw = (await _token_for(c, boot, owner))["token"]
+    every = list(ADMIN_SCOPES)
+    await _post(c, admin_raw, "/tokens", {"name": "unbound", "scopes": every}, 403)
+    await _token_for(c, admin_raw, owner, status=403)
+    # Narrower tokens, or full tokens for a non-owner, are fine.
+    await _post(c, admin_raw, "/tokens", {"name": "ci", "scopes": every[:-1]})
+    await _token_for(c, admin_raw, admin)
+    await _token_for(c, admin_raw, owner, scopes=["admin:read"])
+    # An owner (or the operator's unbound bootstrap token) can.
+    await _post(c, owner_raw, "/tokens", {"name": "unbound2", "scopes": every})
+    await _token_for(c, owner_raw, owner)
+
+
+async def test_narrow_member_token_cannot_reenable_an_admin(env):
+    """Disabling, re-enabling (which revives its credentials) or changing
+    the external_id of a principal needs what granting its roles would."""
+    c, boot = env["c"], env["boot"]
+    admin = await _member(c, boot, "admin")
+    resp = await c.patch(f"{A}/principals/{admin}", headers=H(boot), json={"disabled": True})
+    assert resp.status_code == 200
+    lt = (await _post(c, boot, "/tokens", {"name": "hr", "scopes": ["admin:members"]}))["token"]
+    for body in ({"disabled": False}, {"external_id": "idp|attacker"}):
+        resp = await c.patch(f"{A}/principals/{admin}", headers=H(lt), json=body)
+        assert resp.status_code == 403, body
+    # Display fields stay editable.
+    resp = await c.patch(f"{A}/principals/{admin}", headers=H(lt), json={"display_name": "Al"})
+    assert resp.status_code == 200
+    auditor = (await _post(c, lt, "/principals", {"kind": "user"}))["id"]
+    await _post(c, lt, "/memberships", {"principal_id": auditor, "role": "auditor"})
+    resp = await c.patch(f"{A}/principals/{auditor}", headers=H(lt), json={"disabled": True})
+    assert resp.status_code == 200
+
+
+async def test_principal_of_another_tenant_cannot_be_bound_without_rls(env):
+    """The tenant check on principal_id is explicit, not only row-level
+    security (which is opt-in)."""
+    c, boot, engine = env["c"], env["boot"], env["engine"]
+    b = await _add_tenant_b(engine)
+    boot_b = await _bootstrap(c, b)
+    p_a = await _member(c, boot, "admin")
+    await _token_for(c, boot_b, p_a, scopes=["admin:read"], status=400)
+    await _post(
+        c,
+        boot_b,
+        "/partner-credentials",
+        {"partner_name": "x", "principal_id": p_a, "scopes": ["members:read"]},
+        400,
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Partner read routes and tenant isolation
 # ──────────────────────────────────────────────────────────────────────

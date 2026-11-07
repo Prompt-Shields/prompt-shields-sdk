@@ -29,7 +29,9 @@ No privilege escalation: granting a role (or changing a membership to it)
 needs every admin scope that role carries; granting, changing or removing an
 ``owner`` membership needs an owner (``admin_auth.can_manage_owner``), and
 the tenant's last enabled owner cannot be removed, demoted, disabled or
-deleted (409).
+deleted (409). Disabling, enabling, re-identifying (``external_id``) or
+deleting a principal needs what granting each of its roles would; issuing
+an owner-capable admin token needs an owner (collector/admin_api.py).
 
 Every change writes a hash-chained audit trail row in the same transaction
 (``principal.*``, ``team.*``, ``project.*``, ``membership.add``,
@@ -376,6 +378,22 @@ async def update_principal(
     row = await _get(db, Principal, principal.tenant_id, principal_id, "Principal")
     sent = body.model_fields_set
     changed: list[str] = []
+    toggles = body.disabled is not None and body.disabled != (row.disabled_at is not None)
+    if toggles or ("external_id" in sent and body.external_id != row.external_id):
+        # Disabling or re-enabling a principal (which re-activates its
+        # credentials) or changing its identity-provider subject needs what
+        # granting each of its roles would, like deleting it does.
+        memberships = (
+            (await db.execute(select(Membership).where(Membership.principal_id == row.id)))
+            .scalars()
+            .all()
+        )
+        for m in memberships:
+            if m.role == rbac.OWNER and not can_manage_owner(principal):
+                raise _problem(
+                    403, "Forbidden", "Only an owner can disable, enable or re-identify an owner"
+                )
+            _check_can_touch(principal, m)
     if "external_id" in sent and body.external_id != row.external_id:
         if await _external_id_taken(db, principal.tenant_id, body.external_id, row.id):
             raise _problem(409, "Conflict", "A principal with this external_id already exists")
@@ -386,14 +404,9 @@ async def update_principal(
             setattr(row, field, getattr(body, field))
             changed.append(field)
     action = "principal.update"
-    if body.disabled is not None and body.disabled != (row.disabled_at is not None):
-        if await _is_tenant_owner(db, row.id):
-            if not can_manage_owner(principal):
-                raise _problem(
-                    403, "Forbidden", "Only an owner can disable or enable an owner"
-                )
-            if body.disabled:
-                await _keep_an_owner(db, principal.tenant_id, row.id)
+    if toggles:
+        if body.disabled:
+            await _keep_an_owner(db, principal.tenant_id, row.id)
         row.disabled_at = _now() if body.disabled else None
         action = "principal.disable" if body.disabled else "principal.enable"
     elif not changed:

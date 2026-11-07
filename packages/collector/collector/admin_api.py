@@ -53,6 +53,7 @@ from collector.admin_auth import (
     TOKEN_WARNING,
     AdminPrincipal,
     add_audit,
+    can_manage_owner,
     cap_child_expiry,
     created_by,
     issue_token,
@@ -142,9 +143,11 @@ async def create_token(
         )
     db = request.state.db
     scopes = body.scopes
+    roles: frozenset[str] = frozenset()
     if body.principal_id is not None:
         try:
-            granted = await rbac.granted_scopes(db, body.principal_id)
+            roles = await rbac.tenant_roles(db, principal.tenant_id, body.principal_id)
+            granted = rbac.role_scopes(roles)
         except rbac.PrincipalDisabled:
             raise _problem(
                 400, "Bad Request", "principal_id: no such principal, or it is disabled"
@@ -157,6 +160,18 @@ async def create_token(
                 "None of the requested scopes is granted by the principal's "
                 "tenant-wide roles",
             )
+    # A token that could manage owners (every admin scope, and unbound or
+    # issued for an owner; admin_auth.can_manage_owner) only from a caller
+    # that can: otherwise an admin could mint one and make itself owner.
+    if set(ADMIN_SCOPES) <= set(scopes) and (
+        body.principal_id is None or rbac.OWNER in roles
+    ) and not can_manage_owner(principal):
+        raise _problem(
+            403,
+            "Forbidden",
+            "Only an owner can issue a token holding every admin scope that "
+            "is unbound or issued for an owner",
+        )
     try:
         row, token = await issue_token(
             db,

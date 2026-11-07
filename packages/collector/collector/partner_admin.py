@@ -169,14 +169,14 @@ def _credential_dict(r: PartnerCredential) -> dict:
 
 
 async def _principal_scopes(
-    request: Request, principal_id: UUID, requested: list[str] | None
+    request: Request, tenant_id: UUID, principal_id: UUID, requested: list[str] | None
 ) -> list[str]:
     """Scopes to store for a credential issued for ``principal_id``: the
     requested ones (aliases expanded; None means every partner scope the
     roles grant) intersected with the principal's tenant-wide roles. 400
     when the principal is unknown or disabled, or nothing is left."""
     try:
-        granted = await rbac.granted_scopes(request.state.db, principal_id)
+        granted = await rbac.granted_scopes(request.state.db, tenant_id, principal_id)
     except rbac.PrincipalDisabled:
         raise _bad_request("principal_id: no such principal, or it is disabled") from None
     wanted = expand_scopes(requested) if requested is not None else frozenset(SCOPES)
@@ -242,6 +242,7 @@ async def issue_partner_credential(
     if body.principal_id is not None:
         scopes = await _principal_scopes(
             request,
+            tenant_id,
             body.principal_id,
             scopes if "scopes" in body.model_fields_set else None,
         )
@@ -366,7 +367,7 @@ async def update_partner_credential(
             row.scopes = _validated_scopes(body.scopes)
             if row.principal_id is not None:
                 row.scopes = await _principal_scopes(
-                    request, row.principal_id, row.scopes
+                    request, tenant_id, row.principal_id, row.scopes
                 )
         if body.rate_limit_tier is not None or body.rate_limit is not None:
             row.rate_limit_tier, row.rate_limit = _resolve_rate_limit(

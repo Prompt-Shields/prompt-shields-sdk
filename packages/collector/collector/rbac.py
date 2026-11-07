@@ -138,12 +138,17 @@ class PrincipalDisabled(Exception):
     """The principal a credential was issued for is disabled or gone."""
 
 
-async def tenant_roles(db: AsyncSession, principal_id: UUID) -> frozenset[str]:
+async def tenant_roles(
+    db: AsyncSession, tenant_id: UUID, principal_id: UUID
+) -> frozenset[str]:
     """The principal's tenant-wide roles. Raises PrincipalDisabled when the
-    principal is disabled or no longer exists (in the current tenant)."""
+    principal is disabled or does not exist in ``tenant_id`` (checked
+    explicitly, not only by row-level security, which is opt-in)."""
     row = (
         await db.execute(
-            select(Principal.disabled_at).where(Principal.id == principal_id)
+            select(Principal.disabled_at).where(
+                Principal.id == principal_id, Principal.tenant_id == tenant_id
+            )
         )
     ).one_or_none()
     if row is None or row.disabled_at is not None:
@@ -151,6 +156,7 @@ async def tenant_roles(db: AsyncSession, principal_id: UUID) -> frozenset[str]:
     roles = (
         await db.execute(
             select(Membership.role).where(
+                Membership.tenant_id == tenant_id,
                 Membership.principal_id == principal_id,
                 Membership.team_id.is_(None),
             )
@@ -159,10 +165,12 @@ async def tenant_roles(db: AsyncSession, principal_id: UUID) -> frozenset[str]:
     return frozenset(roles)
 
 
-async def granted_scopes(db: AsyncSession, principal_id: UUID) -> frozenset[str]:
+async def granted_scopes(
+    db: AsyncSession, tenant_id: UUID, principal_id: UUID
+) -> frozenset[str]:
     """What the principal's tenant-wide roles grant now. Raises
     PrincipalDisabled like ``tenant_roles``."""
-    return role_scopes(await tenant_roles(db, principal_id))
+    return role_scopes(await tenant_roles(db, tenant_id, principal_id))
 
 
 def ordered(scopes: Iterable[str], order: Iterable[str]) -> list[str]:

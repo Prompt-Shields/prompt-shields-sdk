@@ -306,7 +306,7 @@ async def _credential_scopes(db: AsyncSession, partner: PartnerCredential) -> fr
     if partner.principal_id is None:
         return scopes
     try:
-        roles = await rbac.tenant_roles(db, partner.principal_id)
+        roles = await rbac.tenant_roles(db, partner.tenant_id, partner.principal_id)
     except rbac.PrincipalDisabled:
         raise HTTPException(
             status_code=401,

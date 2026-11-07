@@ -98,6 +98,8 @@ The response gives the user's salted hash (`user_id_hash`, null if the tenant ne
 
 Events that arrive after the erasure are stored as usual, so stop sending the id first. Copies already sent elsewhere (webhook receivers, Microsoft Sentinel or another SIEM) are outside the collector: erase them there.
 
+End-user erasure does not touch the tenant's own staff. A principal (`/api/v1/admin/principals`, #338) may hold an `email`, `display_name` and `external_id`: clear them with `PATCH /api/v1/admin/principals/{id}` (`null`), or delete the principal (`DELETE`, which also removes its memberships and revokes its credentials). Audit rows about principals hold ids and roles only. Tenant erasure deletes every principal, team, project and membership.
+
 ## Not yet covered
 
 - Retention for `partner_audit_log`, which is kept until the tenant is erased.

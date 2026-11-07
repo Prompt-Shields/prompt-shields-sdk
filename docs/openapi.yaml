@@ -2426,7 +2426,10 @@ components:
             principal's tenant-wide roles grant (400 when none is, or the
             principal is unknown or disabled), and on every request reaches
             no more than those roles grant then. Omit for an automation
-            token that belongs to no one.
+            token that belongs to no one. A token holding every admin scope
+            that is unbound or issued for an owner can manage owners, so
+            only an owner (or an unbound token holding every admin scope)
+            may issue one (403).
       required: [name, scopes]
 
     BootstrapAdminTokenRequest:
@@ -6177,8 +6180,10 @@ paths:
       summary: Change, disable or enable a principal
       description: |
         Disabling suspends every admin token and partner credential issued for
-        the principal (401). Disabling an owner needs an owner, and the tenant's
-        last enabled owner cannot be disabled (409).
+        the principal (401). Disabling, enabling or changing the `external_id`
+        of a principal needs what granting each of its roles would (403):
+        every admin scope the role carries, and an owner for an owner. The
+        tenant's last enabled owner cannot be disabled (409).
       security:
         - TenantApiKey: []
         - AdminToken: []
