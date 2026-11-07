@@ -112,10 +112,17 @@ default_resolver: Resolver = egress.resolve_host
 
 
 async def assert_public_host(
-    host: str, port: int, resolver: Resolver, *, allow_private: bool = False
+    host: str,
+    port: int,
+    resolver: Resolver,
+    *,
+    allow_private: bool = False,
+    allow_local: bool = True,
 ) -> str:
     """Resolve ``host`` and return the address to connect to; every
-    resolved address must pass the SSRF check."""
+    resolved address must pass the SSRF check (``allow_local=False``: no
+    loopback, link-local or cloud metadata address even with
+    ``allow_private``)."""
     try:
         addresses = await resolver(host, port)
     except OSError as exc:
@@ -123,7 +130,9 @@ async def assert_public_host(
     if not addresses:
         raise ConnectorError(f"{host}: DNS lookup returned no address")
     try:
-        return egress.check_addresses(addresses, allow_private=allow_private)
+        return egress.check_addresses(
+            addresses, allow_private=allow_private, allow_local=allow_local
+        )
     except egress.AddressNotAllowed:
         raise ConnectorError(f"{host}: resolves to a non-public address; refused")
 
@@ -152,6 +161,7 @@ class GuardedClient:
         timeout: float = DEFAULT_TIMEOUT_S,
         max_retries: int = DEFAULT_MAX_RETRIES,
         allow_private_network: bool = False,
+        allow_local_network: bool = True,
     ):
         url = httpx.URL(base_url)
         if url.scheme != "https" or not url.host or url.userinfo:
@@ -163,6 +173,7 @@ class GuardedClient:
         self._sleep = sleep
         self._max_retries = max_retries
         self._allow_private = allow_private_network
+        self._allow_local = allow_local_network
         self._client = httpx.AsyncClient(
             transport=transport,
             timeout=httpx.Timeout(timeout, connect=min(timeout, 10.0)),
@@ -204,6 +215,7 @@ class GuardedClient:
             url.port or 443,
             self._resolver,
             allow_private=self._allow_private,
+            allow_local=self._allow_local,
         )
         target, pin_headers, extensions = egress.pin_request(url, address)
         headers = {**(kwargs.pop("headers", None) or {}), **pin_headers}
@@ -374,7 +386,7 @@ class PartnerApiConnection(BaseModel):
     base_url: str
     api_key: SecretStr
     # For a collector reached over an internal network (same cluster).
-    # Still https only.
+    # Still https only, and never loopback, link-local or cloud metadata.
     allow_private_network: bool = False
 
     @field_validator("base_url")
@@ -414,6 +426,7 @@ class PartnerApiClient:
             resolver=resolver,
             sleep=sleep,
             allow_private_network=conn.allow_private_network,
+            allow_local_network=False,
         )
         self._headers = {
             "Authorization": f"Bearer {conn.api_key.get_secret_value()}",

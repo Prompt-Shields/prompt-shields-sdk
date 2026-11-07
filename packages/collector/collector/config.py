@@ -126,10 +126,12 @@ class Settings(BaseSettings):
     # Neither set disables creating subscriptions and delivering.
     webhook_secret_key: str = ""
     webhook_secret_keys: str = ""
-    # Dev/test only: allow http:// targets and private, loopback or
-    # link-local destinations.
+    # Dev/test only: allow http:// targets; private destinations (RFC 1918,
+    # ULA, CGNAT; never loopback, link-local or cloud metadata); loopback
+    # destinations (127.0.0.0/8, ::1) for a receiver on the same host.
     webhook_allow_http: bool = False
     webhook_allow_private_destinations: bool = False
+    webhook_allow_loopback_destinations: bool = False
     # Deadline for one whole delivery attempt, at most
     # WEBHOOK_MAX_TIMEOUT_SECONDS (well under the claim lease).
     webhook_timeout_seconds: float = 10.0

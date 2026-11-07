@@ -573,7 +573,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_WEBHOOK_SECRET_KEYS`, `PS_WEBHOOK_SECRET_KEY` (secret) | — | Keyring for webhook and provider credential secrets |
 | `PS_WEBHOOK_TIMEOUT_SECONDS`, `PS_WEBHOOK_MAX_ATTEMPTS`, `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `10`, `8`, `30` | Webhook delivery |
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` (*chart* on the worker) | `0` | Webhook delivery loop (set by `worker.webhookIntervalSeconds`) |
-| `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | Development only |
+| `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS`, `PS_WEBHOOK_ALLOW_LOOPBACK_DESTINATIONS` | `false` | Development only (private never admits loopback, link-local or cloud metadata; loopback has its own flag) |
 | `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS` (*chart* on the worker), `PS_PROVIDER_USAGE_PULL_DAYS` | `0`, `3` | Provider usage pull loop (set by `worker.providerUsagePullIntervalSeconds`) |
 | `PS_PROVIDER_ADMIN_KEYS` (secret) | — | Operator-held provider admin keys per tenant (JSON) |
 | `PS_LEANIX`, `PS_LEANIX_ALLOWED_HOST_SUFFIXES` | — | LeanIX connector (JSON config is secret) |
