@@ -82,6 +82,11 @@ SCOPES: dict[str, str] = {
         "Pull per-call routing evidence (served provider, model and "
         "jurisdiction, policy version, sensitivity) as NDJSON from /siem/calls"
     ),
+    "security-events:read": (
+        "List the gateway security events stored for the tenant (guardrail "
+        "verdicts, PII and injection detections, auth failures, policy "
+        "denials, rate limits, payload rejections) from /security-events"
+    ),
 }
 
 # What `registry:read` meant in Phase 1: every read route. Frozen on

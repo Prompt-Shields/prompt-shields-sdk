@@ -109,6 +109,7 @@ components:
             provider-credentials:manage: Store, rotate and delete provider admin keys and key fingerprint links (never granted by default)
             audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events, list it from `/audit`, or pull it from `/siem/audit` (never granted by default)
             evidence:read: Pull per-call routing evidence as NDJSON from `/siem/calls` (never granted by default)
+            security-events:read: List the gateway security events stored for the tenant from `/security-events` (never granted by default)
             mcp:read: Read observed MCP servers and tools, with each server's asset and owner, and their daily tool-call metering (never granted by default)
             learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
             learner:review: Accept or reject routing learner recommendations, with reviewer and comment (never granted by default)
@@ -1459,6 +1460,67 @@ components:
           description: Pass as `cursor` for the next page
       required: [has_more, next_cursor]
 
+    SecurityEventRow:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        received_at:
+          type: string
+          format: date-time
+          description: When the collector stored the event (page order)
+        event:
+          type: object
+          additionalProperties: true
+          description: |
+            The event in the gateway's security event schema v1 field names
+            (`@timestamp`, `event.id`, `event.name`, `event.kind`,
+            `event.outcome`, `event.category`, `severity`, `action`,
+            `signature`, `ps.request_id`, `http.route`,
+            `http.request.method`, `ps.business_unit`, `ps.environment`,
+            `gen_ai.provider.name`, `gen_ai.request.model`,
+            `http.response.status_code`, `user.hash` and the event's other
+            `ps.*` fields). Metadata only: never prompt or response content,
+            PII values, credentials or client IP addresses.
+      required: [id, received_at, event]
+
+    SecurityEventPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/SecurityEventRow'}
+        meta: {$ref: '#/components/schemas/SecurityEventPageMeta'}
+      required: [data, meta]
+
+    SecurityEventPageMeta:
+      type: object
+      properties:
+        has_more: {type: boolean}
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque; pass as `cursor` for the next page
+      required: [has_more, next_cursor]
+
+    SecurityEventIngestResult:
+      type: object
+      properties:
+        accepted: {type: integer, description: Events stored}
+        duplicates: {type: integer, description: Events already stored (same `event.id`)}
+        rejected: {type: integer, description: Events that are not valid security events}
+        errors:
+          type: array
+          description: The first 20 rejections, by position in the request
+          items:
+            type: object
+            properties:
+              index: {type: integer}
+              reason: {type: string}
+            required: [index, reason]
+      required: [accepted, duplicates, rejected, errors]
+
     AuditTrailPage:
       type: object
       properties:
@@ -2311,7 +2373,8 @@ components:
           additionalProperties: {type: integer}
           description: |
             Rows changed per table (`ai_usage_events`, and for a `user_id`
-            also `call_feedback` and `mcp_tool_usage`); zeros on a repeat
+            also `call_feedback`, `mcp_tool_usage` and
+            `gateway_security_events`); zeros on a repeat
         audit_event_id:
           type: string
           format: uuid
@@ -3361,6 +3424,122 @@ paths:
               description: Seconds until the limit resets
               schema:
                 type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /ingest/security-events:
+    post:
+      operationId: ingestSecurityEvents
+      tags: [Ingest]
+      summary: Store gateway security events (log forwarders)
+      description: |
+        The gateway's security event lines (`PS_SECURITY_EVENTS_LOG`, schema
+        v1) as `application/x-ndjson` (one event per line) or
+        `application/json` (an array, or `{"events": [...]}`), at most 5000
+        events and 4 MiB. Each event needs `event.id`, `event.name`,
+        `@timestamp` and `log.logger: ps.security`; others are rejected and
+        counted. An event already stored (same `event.id`) is a duplicate,
+        so a forwarder may resend. The tenant is the ingest key's.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  items: {type: object}
+                - type: object
+                  properties:
+                    events:
+                      type: array
+                      items: {type: object}
+                  required: [events]
+      responses:
+        '200':
+          description: Stored, with per-event rejections
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityEventIngestResult'
+        '400':
+          description: The body is not JSON, or nests too deep
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: More than 5000 events, or the body exceeds 4 MiB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Not NDJSON or JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /ingest/otel/v1/logs:
+    post:
+      operationId: ingestOtelLogs
+      tags: [Ingest]
+      summary: Store gateway security events sent as OTLP/HTTP JSON logs
+      description: |
+        Set the gateway's `PS_SECURITY_EVENTS_OTLP=true`,
+        `PS_SECURITY_EVENTS_OTLP_ENDPOINT=<collector>/ingest/otel/v1/logs`
+        and `PS_SECURITY_EVENTS_OTLP_HEADERS=Authorization=Bearer <ingest key>`.
+        Each log record's body (the event JSON) or attributes is one
+        security event; records that are not (`log.logger` other than
+        `ps.security`) are rejected and counted in `partialSuccess`. JSON
+        encoding only; at most 5000 records and 4 MiB.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: OTLP ExportLogsServiceRequest
+      responses:
+        '200':
+          description: ExportLogsServiceResponse (empty on full success)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  partialSuccess:
+                    type: object
+                    properties:
+                      rejectedLogRecords: {type: integer}
+                      errorMessage: {type: string}
+        '400':
+          description: The body is not JSON, or nests too deep
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: More than 5000 log records, or the body exceeds 4 MiB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Not OTLP/HTTP JSON
           content:
             application/json:
               schema:
@@ -4859,6 +5038,77 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuditTrailPage'
+        '400':
+          description: Invalid `cursor`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/security-events:
+    get:
+      operationId: listSecurityEvents
+      tags: [Sync]
+      summary: List the tenant's gateway security events
+      description: |
+        Gateway security events the collector stored for the tenant
+        (guardrail verdicts, PII and injection detections, auth failures,
+        policy denials, rate limits, payload rejections), in arrival order
+        (`received_at`, then id) so a reader can tail the feed with
+        `meta.next_cursor`. `since` / `until` filter on the event's own time
+        (`@timestamp`). Requires `security-events:read`.
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+          description: '`meta.next_cursor` of the previous page'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: First event time to include
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Event time before which to stop (exclusive)
+        - name: name
+          in: query
+          schema:
+            type: string
+            maxLength: 64
+          description: Only events with this `event.name`, e.g. `injection.detected`
+        - name: severity
+          in: query
+          schema:
+            type: string
+            maxLength: 32
+          description: Only events with this severity (`informational`, `low`, `medium`, `high`)
+        - name: action
+          in: query
+          schema:
+            type: string
+            maxLength: 32
+          description: Only events with this action (`allowed`, `blocked`, `failure`)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      security:
+        - OAuth2: [security-events:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: One page of security events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityEventPage'
         '400':
           description: Invalid `cursor`
         '403':
@@ -6664,6 +6914,192 @@ paths:
       responses:
         '200':
           description: Configuration (hosts and ids, no secrets), cursors and last run
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OperatorForbidden'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/splunk-hec/sync:
+    post:
+      operationId: syncSplunkHec
+      tags: [Operator]
+      summary: Push a tenant's AI call evidence, audit trail and security events to Splunk HTTP Event Collector (operator)
+      description: |
+        Sends new `calls`, `audit` and `security` records (the connector's
+        `include`) from the tenant's saved cursors: `POST <url>/services/collector/event`, one event per record with sourcetype `prompt_shields:call`, `prompt_shields:audit` or `prompt_shields:security`
+        (`PS_SIEM_EXPORT`). Returns `not_configured` when the tenant has no
+        configuration for this connector.
+      security:
+        - OperatorToken: []
+      x-operator-scope: operator:integrations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id]
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Export result (counts, status)
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OperatorForbidden'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/splunk-hec/status:
+    get:
+      operationId: splunkHecStatus
+      tags: [Operator]
+      summary: Export state for Splunk HTTP Event Collector for a tenant (operator)
+      security:
+        - OperatorToken: []
+      x-operator-scope: operator:integrations
+      parameters:
+        - $ref: '#/components/parameters/TenantIdQueryParam'
+      responses:
+        '200':
+          description: Configuration (hosts and options, never a credential or the webhook path), cursors and last run
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OperatorForbidden'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/syslog/sync:
+    post:
+      operationId: syncSyslog
+      tags: [Operator]
+      summary: Push a tenant's AI call evidence, audit trail and security events to syslog (CEF or JSON over TLS) (operator)
+      description: |
+        Sends new `calls`, `audit` and `security` records (the connector's
+        `include`) from the tenant's saved cursors: RFC 5424 over TLS (RFC 5425 framing), one CEF (default) or JSON message per record
+        (`PS_SIEM_EXPORT`). Returns `not_configured` when the tenant has no
+        configuration for this connector.
+      security:
+        - OperatorToken: []
+      x-operator-scope: operator:integrations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id]
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Export result (counts, status)
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OperatorForbidden'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/syslog/status:
+    get:
+      operationId: syslogStatus
+      tags: [Operator]
+      summary: Export state for syslog (CEF or JSON over TLS) for a tenant (operator)
+      security:
+        - OperatorToken: []
+      x-operator-scope: operator:integrations
+      parameters:
+        - $ref: '#/components/parameters/TenantIdQueryParam'
+      responses:
+        '200':
+          description: Configuration (hosts and options, never a credential or the webhook path), cursors and last run
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OperatorForbidden'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/webhook/sync:
+    post:
+      operationId: syncSiemWebhook
+      tags: [Operator]
+      summary: Push a tenant's AI call evidence, audit trail and security events to an HTTPS SIEM webhook (operator)
+      description: |
+        Sends new `calls`, `audit` and `security` records (the connector's
+        `include`) from the tenant's saved cursors: `POST <url>` with `{kind, schema_version, source, tenant_id, records}`, signed with `Prompt-Shields-Signature` when a `signing_secret` is set
+        (`PS_SIEM_EXPORT`). Returns `not_configured` when the tenant has no
+        configuration for this connector.
+      security:
+        - OperatorToken: []
+      x-operator-scope: operator:integrations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id]
+              properties:
+                tenant_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Export result (counts, status)
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OperatorForbidden'
+        '404':
+          $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/connectors/webhook/status:
+    get:
+      operationId: siemWebhookStatus
+      tags: [Operator]
+      summary: Export state for an HTTPS SIEM webhook for a tenant (operator)
+      security:
+        - OperatorToken: []
+      x-operator-scope: operator:integrations
+      parameters:
+        - $ref: '#/components/parameters/TenantIdQueryParam'
+      responses:
+        '200':
+          description: Configuration (hosts and options, never a credential or the webhook path), cursors and last run
           content:
             application/json:
               schema:

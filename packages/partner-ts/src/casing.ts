@@ -23,9 +23,9 @@ const MAP_KEYS = new Set(['attestation', 'current', 'outcome_signal_counts', 'ar
  * Response keys whose whole value is a document kept exactly as sent: a
  * learner snapshot's `snapshot` (the uploaded `ps-learner-snapshot.v1`) and
  * an audit trail row's `details` (chained as stored, so the row hash can be
- * recomputed).
+ * recomputed) and a gateway security event's `event` (schema v1 field names).
  */
-const RAW_KEYS = new Set(['snapshot', 'details']);
+const RAW_KEYS = new Set(['snapshot', 'details', 'event']);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);

@@ -8,7 +8,14 @@ from datetime import timedelta
 
 import pytest
 from collector import audit_trail, user_erasure, user_identity
-from db.models import AIUsageEvent, AuditEvent, CallFeedback, McpToolUsage, TenantSecret
+from db.models import (
+    AIUsageEvent,
+    AuditEvent,
+    CallFeedback,
+    GatewaySecurityEvent,
+    McpToolUsage,
+    TenantSecret,
+)
 from sqlalchemy import select
 
 from tests.test_retention import (  # noqa: F401 - fixture and helpers
@@ -43,6 +50,10 @@ async def test_erase_user_merges_mcp_rows_and_nulls_ids(session_factory):  # noq
             _mcp(b, "create", USER, 4),
             CallFeedback(tenant_id=a, call_id="c1", score=1, source="sdk", user_id=USER),
             CallFeedback(tenant_id=b, call_id="c1", score=1, source="sdk", user_id=USER),
+            GatewaySecurityEvent(tenant_id=a, event_id="e1", name="policy.denied",
+                                 occurred_at=NOW, user_hash=USER),
+            GatewaySecurityEvent(tenant_id=b, event_id="e1", name="policy.denied",
+                                 occurred_at=NOW, user_hash=USER),
         ])
         await db.commit()
         asset = await make_asset(db, a)
@@ -58,6 +69,7 @@ async def test_erase_user_merges_mcp_rows_and_nulls_ids(session_factory):  # noq
         assert result.user_id_hash == hashed
         assert result.rows_erased == {
             "ai_usage_events": 3, "call_feedback": 1, "mcp_tool_usage": 2,
+            "gateway_security_events": 1,
         }
         assert result.audit_event_id is not None
 

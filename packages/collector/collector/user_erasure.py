@@ -27,8 +27,11 @@ What is erased, in the caller's tenant only:
 * ``mcp_tool_usage`` rows with ``user_hash`` equal to the id as sent:
   merged into the row for the same tool with no user (``user_hash = ''``),
   so the counts stay and the user's key is gone.
+* ``gateway_security_events`` rows with ``user_hash`` equal to the id as
+  sent (the gateway's OIDC subject hash on policy denials): ``user_hash``
+  is set to NULL (the event is kept).
 
-The feedback and MCP tables store the id as the gateway sent it (a hex
+The feedback, MCP and security event tables store the id as the gateway sent it (a hex
 hash), not the collector's salted hash, so only the POST form, which
 carries that id, reaches them.
 
@@ -59,7 +62,13 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
-from db.models import AIUsageEvent, CallFeedback, McpToolUsage, RetentionAuditLog
+from db.models import (
+    AIUsageEvent,
+    CallFeedback,
+    GatewaySecurityEvent,
+    McpToolUsage,
+    RetentionAuditLog,
+)
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text, update
@@ -269,6 +278,16 @@ async def erase_user(
             size,
         )
         rows[McpToolUsage.__tablename__] = await _merge_mcp_rows(db, tenant_id, user_id)
+        rows[GatewaySecurityEvent.__tablename__] = await _null_in_batches(
+            db,
+            GatewaySecurityEvent,
+            [
+                GatewaySecurityEvent.tenant_id == tenant_id,
+                GatewaySecurityEvent.user_hash == user_id,
+            ],
+            {"user_hash": None},
+            size,
+        )
 
     result = UserEraseResult(user_id_hash=user_id_hash, input=input_, rows_erased=rows)
     # The data is committed. If the audit write fails now, report the

@@ -1252,6 +1252,48 @@ export interface ListAuditParams {
   limit?: number;
 }
 
+// ── Gateway security events (client.securityEvents) ────────────────────
+
+/** One stored gateway security event (`GET /partner/v1/security-events`). */
+export interface SecurityEventRow {
+  id: string;
+  /** When the collector stored it (page order). */
+  receivedAt: string;
+  /**
+   * The event in the gateway's schema v1 field names, kept exactly as sent
+   * (`@timestamp`, `event.name`, `severity`, `action`, `signature`, `ps.*`, ...).
+   */
+  event: Record<string, unknown>;
+}
+
+export interface SecurityEventPageMeta {
+  hasMore: boolean;
+  /** Opaque; pass as `cursor` for the next page. */
+  nextCursor: string | null;
+}
+
+export interface SecurityEventPage {
+  data: SecurityEventRow[];
+  meta: SecurityEventPageMeta;
+}
+
+export interface ListSecurityEventsParams {
+  /** `meta.nextCursor` of the previous page. */
+  cursor?: string | null;
+  /** First event time to include. */
+  since?: Timestamp;
+  /** Event time before which to stop (exclusive). */
+  until?: Timestamp;
+  /** Only this `event.name`, e.g. `injection.detected`. */
+  name?: string;
+  /** Only this severity: `informational`, `low`, `medium` or `high`. */
+  severity?: string;
+  /** Only this action: `allowed`, `blocked` or `failure`. */
+  action?: string;
+  /** Events per page, 1 to 1000. Server default is 200. */
+  limit?: number;
+}
+
 export interface SiemAuditParams {
   /** `cursor` of the previous batch (the `seq` of its last row). */
   cursor?: string | number | null;

@@ -9,6 +9,8 @@ Raw usage events (`ai_usage_events`) can include session ids and prompt hashes, 
 
 MCP tool usage (`mcp_tool_usage`: per server and tool call counts, first and last seen) follows the same retention period: the purge deletes rows not seen since the cutoff, since they only summarise calls older than it. The purge result reports them as `mcp_tool_usage_deleted`.
 
+Gateway security events stored by the collector (`gateway_security_events`, see [SIEM export](/integrations/siem#gateway-security-events-in-the-collector)) follow it too: events that happened before the cutoff are deleted and reported as `security_events_deleted`.
+
 ## Retention period
 
 Each tenant keeps usage events for `retention_days` days:
