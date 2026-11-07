@@ -1,7 +1,8 @@
 """docs/openapi.yaml against the collector's routes and serializers.
 
-Covers the Partner API, every tenant admin route (/api/v1/admin) and every
-operator route (/api/v1/operator): every documented operation exists in
+Covers the Partner API, every tenant admin route (/api/v1/admin), every
+operator route (/api/v1/operator), the SSO login routes (/api/v1/sso) and
+SCIM (/scim/v2): every documented operation exists in
 the app (and the reverse for those prefixes), each admin operation's
 security and ``x-admin-scope`` match the route's dependency, and the
 documented schemas have exactly the keys the serializers and request
@@ -21,10 +22,12 @@ from collector import (
     audit_trail,
     cloud_inventory,
     cloud_inventory_import,
+    idp_sync,
     leanix,
     learner,
     lifecycle,
     mcp_usage,
+    oidc,
     operator_admin,
     operator_auth,
     partner_admin,
@@ -34,10 +37,12 @@ from collector import (
     rbac_admin,
     risk_reviews,
     risk_suggestions,
+    scim,
     security_events,
     sentinel_export,
     servicenow,
     siem_export,
+    sso_admin,
     tenant_keys,
     user_erasure,
     webhook_admin,
@@ -61,6 +66,8 @@ DOCUMENTED_PREFIXES = (
     "/partner/v1/",
     "/api/v1/admin/",
     "/api/v1/operator/",
+    "/api/v1/sso/",
+    "/scim/v2/",
 )
 
 
@@ -165,6 +172,9 @@ def test_webhook_schemas_match_serializers():
         ("UpdateProjectRequest", rbac_admin.UpdateProjectBody),
         ("CreateMembershipRequest", rbac_admin.CreateMembershipBody),
         ("UpdateMembershipRequest", rbac_admin.UpdateMembershipBody),
+        ("PutOidcConfigRequest", sso_admin.OidcConfigBody),
+        ("CreateScimTokenRequest", sso_admin.CreateScimTokenBody),
+        ("PutIdpGroupRolesRequest", sso_admin.GroupRolesBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -343,6 +353,7 @@ ADMIN_ROUTERS = (
     siem_export.router,
     operator_admin.router,
     user_erasure.router,
+    sso_admin.router,
 )
 
 
@@ -674,3 +685,87 @@ def test_security_event_schemas_match_serializers():
     assert op["security"][0] == {"OAuth2": ["security-events:read"]}
     for path in ("/ingest/security-events", "/ingest/otel/v1/logs"):
         assert SPEC["paths"][path]["post"]["security"] == [{"TenantApiKey": []}]
+
+
+def test_sso_and_scim_schemas_match_serializers():
+    now = datetime.now(UTC)
+    cfg = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        issuer="https://idp.example.com",
+        client_id="c",
+        client_secret_ciphertext=None,
+        redirect_uri="https://c.example.com/api/v1/sso/callback",
+        audience=None,
+        algorithms=["RS256"],
+        subject_claim="sub",
+        session_ttl_seconds=3600,
+        enabled=True,
+        created_by="operator",
+        created_at=now,
+        updated_at=None,
+    )
+    keys = set(sso_admin.serialize_oidc_config(cfg))
+    assert _props("OidcConfig") == keys == set(SCHEMAS["OidcConfig"]["required"])
+    token = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="okta",
+        scopes=["scim:users"],
+        token_hint="abcd",
+        created_by="token:x",
+        created_at=now,
+        expires_at=None,
+        revoked_at=None,
+    )
+    keys = set(scim.serialize_token(token))
+    assert _props("ScimToken") == keys == set(SCHEMAS["ScimToken"]["required"])
+    assert _props("ScimTokenWithSecret") == keys | {"token", "warning"}
+    roles = SimpleNamespace(
+        team_id=uuid.uuid4(),
+        member_role="viewer",
+        tenant_role=None,
+        created_by="operator",
+        created_at=now,
+        updated_at=None,
+    )
+    keys = set(sso_admin.serialize_group_roles(roles))
+    assert _props("IdpGroupRoles") == keys == set(SCHEMAS["IdpGroupRoles"]["required"])
+    assert SCHEMAS["OidcAlgorithm"]["enum"] == list(oidc.ASYMMETRIC_ALGORITHMS)
+    assert SCHEMAS["ScimTokenScope"]["enum"] == list(scim.SCIM_SCOPES)
+    assert set(SCHEMAS["GroupRole"]["enum"]) == set(idp_sync.GROUP_ROLES)
+    assert "owner" not in SCHEMAS["GroupRole"]["enum"]
+    request = SimpleNamespace(base_url="https://c.example.com/")
+    principal = SimpleNamespace(
+        id=uuid.uuid4(),
+        user_name="u",
+        email="u@example.com",
+        external_id="e",
+        display_name="U",
+        disabled_at=None,
+        created_at=now,
+        updated_at=None,
+    )
+    user = scim.user_resource(request, principal, [])
+    assert set(user) <= _props("ScimUser")
+    assert set(SCHEMAS["ScimUser"]["required"]) <= set(user)
+    team = SimpleNamespace(id=uuid.uuid4(), name="t", external_id="g", created_at=now, updated_at=None)
+    group = scim.group_resource(request, team, [principal])
+    assert set(group) <= _props("ScimGroup")
+    assert set(SCHEMAS["ScimGroup"]["required"]) <= set(group)
+    assert set(user["meta"]) == _props("ScimMeta")
+
+
+def test_scim_operations_document_their_scope_and_security():
+    routes = {}
+    for route in scim.router.routes:
+        if isinstance(route, APIRoute):
+            scopes = {getattr(d.call, "scim_scope", None) for d in route.dependant.dependencies} - {None}
+            for method in route.methods:
+                routes[(method, route.path)] = next(iter(scopes))
+    assert routes
+    for (method, path), scope in routes.items():
+        op = SPEC["paths"][path][method.lower()]
+        assert op["security"] == [{"ScimToken": []}], (method, path)
+        assert op["x-scim-scope"] == scope, (method, path)
+    for path in ("/api/v1/sso/{tenant_id}/login", "/api/v1/sso/callback"):
+        assert SPEC["paths"][path]["get"]["security"] == []

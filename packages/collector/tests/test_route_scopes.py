@@ -9,7 +9,11 @@ Walks the mounted app, so a new route cannot ship without a scope:
     ``resolve_tenant(request, <scope>, ...)``, naming at least one
     ``tenant_keys.KEY_SCOPES`` scope;
   - partner routes (/partner/v1, /oauth/token) use partner credentials and
-    are covered by tests/test_partner_scopes.py.
+    are covered by tests/test_partner_scopes.py;
+  - SCIM routes (/scim/v2) declare a ``scim:*`` scope (collector.scim), or
+    take any SCIM token (ServiceProviderConfig);
+  - the SSO login and callback (/api/v1/sso) are public by design: the
+    identity provider authenticates the user (collector.sso).
 
 No database needed.
 """
@@ -25,10 +29,16 @@ from collector import tenant_keys
 from collector.admin_auth import ADMIN_SCOPES
 from collector.app import app
 from collector.operator_auth import OPERATOR_SCOPES
+from collector.scim import SCIM_SCOPES
 from fastapi.routing import APIRoute
 
 # Unauthenticated by design.
-PUBLIC = {("GET", "/metrics"), ("GET", "/readyz")}
+PUBLIC = {
+    ("GET", "/metrics"),
+    ("GET", "/readyz"),
+    ("GET", "/api/v1/sso/{tenant_id}/login"),
+    ("GET", "/api/v1/sso/callback"),
+}
 # Partner credentials (OAuth client credentials / partner API key).
 PARTNER_PREFIXES = ("/partner/v1/", "/oauth/")
 
@@ -90,7 +100,12 @@ def test_every_route_declares_a_scope():
                 continue
             operator = _declared(route, "operator_scope")
             admin = _declared(route, "admin_scope")
-            assert len(operator) + len(admin) <= 1, key
+            scim = _declared(route, "scim_scope")
+            assert len(operator) + len(admin) + len(scim) <= 1, key
+            if route.path.startswith("/scim/v2/"):
+                assert scim and scim <= set(SCIM_SCOPES) | {"any"}, key
+                continue
+            assert not scim, key
             if operator:
                 assert operator <= set(OPERATOR_SCOPES), key
                 continue

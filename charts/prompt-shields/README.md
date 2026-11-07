@@ -605,10 +605,11 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_ASSET_STALE_AFTER_DAYS`, `PS_ASSET_RETIRE_AFTER_DAYS`, `PS_ASSET_LIFECYCLE_SOURCE_THRESHOLDS` | `30`, `90`, `""` | Lifecycle sweep |
 | `PS_EMBEDDINGS_BACKEND`, `PS_EMBEDDINGS_MODEL`, `PS_EMBEDDINGS_OPENAI_BASE_URL`, `PS_EMBEDDINGS_CACHE_DIR` | `auto`, —, `https://api.openai.com/v1`, — | Semantic search embeddings |
 | `OPENAI_API_KEY` (secret) | — | Embeddings with the `openai` / `auto` backend |
-| `PS_WEBHOOK_SECRET_KEYS`, `PS_WEBHOOK_SECRET_KEY` (secret) | — | Keyring for webhook and provider credential secrets |
+| `PS_WEBHOOK_SECRET_KEYS`, `PS_WEBHOOK_SECRET_KEY` (secret) | — | Keyring for webhook, provider credential and SSO (OIDC) client secrets |
 | `PS_WEBHOOK_TIMEOUT_SECONDS`, `PS_WEBHOOK_MAX_ATTEMPTS`, `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `10`, `8`, `30` | Webhook delivery |
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` (*chart* on the worker) | `0` | Webhook delivery loop (set by `worker.webhookIntervalSeconds`) |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS`, `PS_WEBHOOK_ALLOW_LOOPBACK_DESTINATIONS` | `false` | Development only (private never admits loopback, link-local or cloud metadata; loopback has its own flag) |
+| `PS_SSO_IDP_ALLOW_PRIVATE_NETWORK` | `false` | Let the admin API SSO identity provider (OIDC discovery, JWKS, token endpoint) be on a private network, e.g. an on-premises Keycloak; loopback, link-local and cloud metadata addresses stay refused |
 | `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS` (*chart* on the worker), `PS_PROVIDER_USAGE_PULL_DAYS` | `0`, `3` | Provider usage pull loop (set by `worker.providerUsagePullIntervalSeconds`) |
 | `PS_USAGE_ROLLUP_INTERVAL_SECONDS`, `PS_USAGE_ROLLUP_RETENTION_DAYS` | `30`, `760` | Usage rollup loop (in the worker set: the worker Deployment, else every API replica; overlapping runs skip a tenant another run holds) and how long hourly/daily usage rollups are kept, never less than raw retention |
 | `PS_PROVIDER_ADMIN_KEYS` (secret) | — | Operator-held provider admin keys per tenant (JSON) |

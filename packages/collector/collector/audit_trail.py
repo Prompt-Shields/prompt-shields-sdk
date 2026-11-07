@@ -129,7 +129,7 @@ class Actor:
     """Who acted. ``id`` identifies a credential, never contains one."""
 
     # tenant_key | admin_token | partner | operator | operator_token | system
-    # | anonymous
+    # | anonymous | scim_token (collector.scim) | principal (sso.login)
     type: str
     id: str | None = None
 
