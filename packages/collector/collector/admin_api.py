@@ -19,9 +19,10 @@ ingest keys. Mounted at /api/v1/admin. Auth and scopes: collector/admin_auth.py.
 
   Issuing a token for a tenant-wide owner (``principal_id``), or an
   unbound one holding every admin scope, needs a caller that can manage
-  owners (admin_auth.can_manage_owner) or, for the former, a token issued
-  for that same owner; otherwise 403, audited as
-  ``admin_token.create`` with outcome ``failure`` and reason
+  owners (admin_auth.can_manage_owner), however narrow, also when the
+  caller's own token is issued for that owner (it may have been issued by
+  a non-owner, e.g. before its principal was promoted); otherwise 403,
+  audited as ``admin_token.create`` with outcome ``failure`` and reason
   ``owner_required`` (#379).
 
   A token may always revoke itself. When the caller cannot manage owners,
@@ -189,10 +190,12 @@ async def create_token(
     # that can manage owners: otherwise an admin could mint one and make
     # itself owner, or act (and be audited) as the owner and leave the
     # owner holding a token it cannot revoke without them (#379).
-    # An owner's own token may still issue (narrower) tokens for that owner.
+    # No exemption for a token issued for that same owner: it may be held
+    # by a non-owner (issued before its principal was promoted, or before
+    # #379) and would otherwise keep minting owner-bound tokens.
     refusal = None
     if not can_manage_owner(principal):
-        if rbac.OWNER in roles and principal.principal_id != body.principal_id:
+        if rbac.OWNER in roles:
             refusal = "Only an owner can issue a token for an owner"
         elif body.principal_id is None and set(ADMIN_SCOPES) <= set(scopes):
             refusal = (

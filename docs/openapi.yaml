@@ -7545,9 +7545,9 @@ paths:
         Issuing a token for a principal with the tenant-wide `owner` role
         (`principal_id`), however narrow, or an unbound token holding every
         admin scope, needs a caller that can manage owners (an owner's
-        token, or an unbound token holding every admin scope); a token
-        issued for an owner may also issue (narrower) tokens for that same
-        owner. Otherwise 403, audited as `admin_token.create` with outcome
+        token, or an unbound token holding every admin scope), also when
+        the caller's token is itself issued for that owner. Otherwise 403,
+        audited as `admin_token.create` with outcome
         `failure` and `details.reason` `owner_required`.
       security:
         - TenantApiKey: []
@@ -7892,8 +7892,9 @@ paths:
 
         Issuing a credential for a principal with the tenant-wide `owner`
         role (`principal_id`) needs a caller that can manage owners (an
-        owner's token, or an unbound token holding every admin scope), or a
-        token issued for that same owner: otherwise 403, audited as
+        owner's token, or an unbound token holding every admin scope), also
+        when the caller's token is itself issued for that owner: otherwise
+        403, audited as
         `partner_credential.create` with outcome `failure` and
         `details.reason` `owner_required`.
       security:

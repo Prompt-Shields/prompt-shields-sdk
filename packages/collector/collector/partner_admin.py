@@ -19,8 +19,8 @@ and a repeated DELETE is 204 too.
 Issuing (``principal_id``), changing or revoking a credential issued for a
 tenant-wide owner needs a caller that can manage owners
 (admin_auth.can_manage_owner); otherwise 403, audited with outcome
-``failure`` and reason ``owner_required`` (#372, #379). An owner's own
-admin token may still issue a credential for that owner.
+``failure`` and reason ``owner_required`` (#372, #379), also when the
+caller's token is itself issued for that owner.
 
 This is the dashboard's hook for the "Partners > Add Integration" UX.
 
@@ -286,22 +286,22 @@ async def issue_partner_credential(
 
     scopes = _validated_scopes(body.scopes)
     if body.principal_id is not None:
-        # For an owner only from a caller that can manage owners, or an
-        # owner's own token (#379): a credential acts, and is audited, as
-        # its principal, and only an owner can change or revoke it.
-        if principal.principal_id != body.principal_id:
-            await _require_owner_manager(
-                request,
-                principal,
-                body.principal_id,
-                action="partner_credential.create",
-                target_id=None,
-                detail="Only an owner can issue a partner credential for an owner",
-                details={
-                    "partner_name": body.partner_name,
-                    "principal_id": str(body.principal_id),
-                },
-            )
+        # For an owner only from a caller that can manage owners (#379),
+        # also when the caller's token is issued for that owner (it may be
+        # held by a non-owner): a credential acts, and is audited, as its
+        # principal, and only an owner can change or revoke it.
+        await _require_owner_manager(
+            request,
+            principal,
+            body.principal_id,
+            action="partner_credential.create",
+            target_id=None,
+            detail="Only an owner can issue a partner credential for an owner",
+            details={
+                "partner_name": body.partner_name,
+                "principal_id": str(body.principal_id),
+            },
+        )
         scopes = await _principal_scopes(
             request,
             tenant_id,

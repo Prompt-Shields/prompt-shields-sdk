@@ -862,8 +862,8 @@ async def test_self_revoke_by_an_owner_cascades_fully(env):
 async def test_issuing_credentials_for_an_owner_needs_an_owner(env):
     """A caller that cannot manage owners gets 403 (audited, reason
     ``owner_required``) issuing an admin token or a partner credential for
-    an owner, however narrow; an owner's own token may still issue them for
-    that owner, and an owner can for any owner (#379)."""
+    an owner, however narrow, also from a token issued for that owner; an
+    owner (a token that can manage owners) can for any owner (#379)."""
     c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
     owner = await _member(c, boot, "owner")
     other_owner = await _member(c, boot, "owner")
@@ -899,12 +899,30 @@ async def test_issuing_credentials_for_an_owner_needs_an_owner(env):
     await _token_for(c, admin_raw, admin, scopes=["admin:read"])
     await _partner_for(c, admin_raw, admin)
 
-    # An owner's narrow token for that same owner: fine; for another owner: no.
+    # A token issued for that same owner that cannot manage owners gets no
+    # exemption: it may be held by a non-owner (here an admin's token for a
+    # principal promoted to owner afterwards).
     narrow = await _token_for(
         c, boot, owner, scopes=["admin:tokens", "admin:partners", "admin:read"]
     )
-    await _token_for(c, narrow["token"], owner, scopes=["admin:read"])
-    await _partner_for(c, narrow["token"], owner)
+    promoted = await _member(c, boot, "admin")
+    held = await _token_for(
+        c, admin_raw, promoted, scopes=["admin:tokens", "admin:partners", "admin:read"]
+    )
+    resp = await c.patch(
+        f"{A}/memberships/{await _tenant_mid(c, boot, promoted)}",
+        headers=H(boot),
+        json={"role": "owner"},
+    )
+    assert resp.status_code == 200, resp.text
+    for tok, who in ((narrow, owner), (held, promoted)):
+        await _token_for(c, tok["token"], who, scopes=["admin:read"], status=403)
+        resp = await c.post(
+            f"{A}/partner-credentials",
+            headers=H(tok["token"]),
+            json={"partner_name": "bi", "principal_id": who, "scopes": ["assets:read"]},
+        )
+        assert resp.status_code == 403, resp.text
     await _token_for(c, narrow["token"], other_owner, scopes=["admin:read"], status=403)
 
     # An owner can manage owners: any owner.
