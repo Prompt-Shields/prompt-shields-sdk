@@ -303,6 +303,44 @@ async def test_a_concurrent_run_skips_the_tenant(env):
     assert not (await _refresh(env)).skipped
 
 
+async def test_a_catch_up_commits_in_steps_and_yields_the_lock(env, monkeypatch):
+    # One day per transaction: the two days of tenant A take two steps.
+    monkeypatch.setattr(usage_rollups, "BATCH_DAYS", 1)
+    result = await _refresh(env)
+    assert (result.hours, result.days, result.skipped) == (4, 2, False)
+    async with env["factory"]() as db:
+        assert await _rollup_daily(db, env["a"]) == await _raw_daily(db, env["a"])
+        await db.execute(delete(UsageRollupHourly))
+        await db.execute(delete(UsageRollupDaily))
+        await db.execute(text("DELETE FROM usage_rollup_state"))
+        await db.commit()
+
+    # Another run takes the lock between the steps: this one stops without
+    # moving the watermark, so the next run does the whole catch-up again.
+    real = usage_rollups._try_lock
+    calls = 0
+
+    async def lock_once(db, tenant_id):
+        nonlocal calls
+        calls += 1
+        return calls == 1 and await real(db, tenant_id)
+
+    monkeypatch.setattr(usage_rollups, "_try_lock", lock_once)
+    assert (await _refresh(env)).skipped
+    async with env["factory"]() as db:
+        assert await usage_rollups.watermark(db, env["a"]) is None
+    monkeypatch.setattr(usage_rollups, "_try_lock", real)
+    assert (await _refresh(env)).hours == 4
+    async with env["factory"]() as db:
+        assert await _rollup_daily(db, env["a"]) == await _raw_daily(db, env["a"])
+
+
+def test_day_batches_keep_whole_days():
+    hours = [YESTERDAY, YESTERDAY + timedelta(hours=1), TODAY, TODAY + timedelta(hours=3)]
+    assert usage_rollups._day_batches(hours) == [hours]
+    assert usage_rollups._day_batches([]) == []
+
+
 async def test_asset_merge_repoints_rollups(env):
     from collector import asset_merge
 

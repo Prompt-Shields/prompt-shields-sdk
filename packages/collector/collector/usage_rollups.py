@@ -19,14 +19,21 @@ hour, then does the same for the days those hours fall in from the hourly
 rows. Recomputing a bucket is idempotent, so the overlap (which covers
 ingest transactions still open at the last run) and overlapping runs cost
 work but never double counts; a per-tenant advisory lock makes a second
-concurrent run skip the tenant. A bucket is only recomputed while every
+concurrent run (another replica) skip the tenant. The work is committed
+BATCH_DAYS days of touched hours at a time, re-taking the lock for each
+step, so a large catch-up (the first run after the migration) holds no long
+transaction; the watermark only moves once every step is done. An ingest
+transaction open longer than the overlap (5 minutes) when a run lists the
+touched hours can be missed until a later event lands in the same hour or a
+``rebuild``. A bucket is only recomputed while every
 event of it is still in raw retention (it starts at or after the cutoff),
 so a purge never shrinks a rollup: rollups survive the raw purge. For days
 still in raw retention the daily rollup equals the raw events to the token.
 
 What the rollups do not follow on their own: deleting raw events other
 than by the retention purge (an asset merge repoints the rollups itself;
-erasing a tenant deletes them). ``python -m collector.usage_rollups
+erasing an end user nulls their ``user_id_hash`` here too; erasing a tenant
+deletes them). ``python -m collector.usage_rollups
 rebuild --tenant <id>`` recomputes every bucket still in raw retention.
 
 The loop runs in the collector's worker set every
@@ -79,6 +86,12 @@ OVERLAP = timedelta(minutes=5)
 CHUNK = 168
 LIST_BYPASS_REASON = "usage-rollup-job"
 LOCK_KEY = "ps_usage_rollup"
+# Days of touched hours recomputed per transaction. A large catch-up (the
+# first run after the migration backfills all raw events still kept) is
+# committed in these steps, so no transaction holds the lock for long.
+BATCH_DAYS = 7
+# Key of the rollup rows in a user erasure's rows_erased.
+ROWS_KEY = "usage_rollups"
 
 GroupBy = Literal["none", "user", "project", "model", "provider", "api_surface", "asset"]
 Granularity = Literal["hour", "day", "week"]
@@ -203,6 +216,43 @@ async def _try_lock(db: AsyncSession, tenant_id: UUID) -> bool:
     )
 
 
+async def lock_tenant(db: AsyncSession, tenant_id: UUID) -> None:
+    """Wait for the tenant's rollup lock, held to the end of the transaction.
+    A writer that changes rollup rows outside the job (user erasure) takes
+    it, so a job transaction that read raw events before that writer's
+    change cannot commit rows that undo it. No-op off PostgreSQL."""
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k), hashtext(:t))"),
+        {"k": LOCK_KEY, "t": str(tenant_id)},
+    )
+
+
+async def erase_user_hash(
+    db: AsyncSession, tenant_id: UUID, user_id_hash: str, batch_size: int
+) -> int:
+    """Set ``user_id_hash`` to NULL on the tenant's hourly and daily rollup
+    rows of one user (erasure by end user, #353), in batches, each under
+    the tenant's rollup lock; commits. The totals stay; the rows no longer
+    say whose they were. Call it after the user's raw events are erased."""
+    total = 0
+    for model in (UsageRollupHourly, UsageRollupDaily):
+        t = model.__table__
+        match = (t.c.tenant_id == tenant_id, t.c.user_id_hash == user_id_hash)
+        while True:
+            await lock_tenant(db, tenant_id)
+            ids = select(t.c.id).where(*match).limit(batch_size)
+            changed = (
+                await db.execute(t.update().where(t.c.id.in_(ids)).values(user_id_hash=None))
+            ).rowcount or 0
+            await db.commit()
+            total += changed
+            if changed < batch_size:
+                break
+    return total
+
+
 async def _touched_hours(
     db: AsyncSession, tenant_id: UUID, since: datetime | None, floor: datetime
 ) -> list[datetime]:
@@ -216,6 +266,18 @@ async def _touched_hours(
         params["since"] = since
     rows = (await db.execute(text(sql + " ORDER BY h"), params)).scalars().all()
     return list(rows)
+
+
+def _day_batches(hours: Sequence[datetime]) -> list[list[datetime]]:
+    """`hours` split into lists of whole UTC days, BATCH_DAYS days each."""
+    by_day: dict[datetime, list[datetime]] = {}
+    for h in sorted(set(hours)):
+        by_day.setdefault(_day_of(h), []).append(h)
+    days = list(by_day.values())
+    return [
+        [h for day in days[i : i + BATCH_DAYS] for h in day]
+        for i in range(0, len(days), BATCH_DAYS)
+    ]
 
 
 async def recompute(
@@ -255,7 +317,8 @@ async def _save_watermark(db: AsyncSession, tenant_id: UUID, watermark: datetime
         text(
             "INSERT INTO usage_rollup_state (tenant_id, watermark, updated_at) "
             "VALUES (:t, :w, now()) ON CONFLICT (tenant_id) "
-            "DO UPDATE SET watermark = excluded.watermark, updated_at = now()"
+            "DO UPDATE SET watermark = greatest(usage_rollup_state.watermark, "
+            "excluded.watermark), updated_at = now()"
         ),
         {"t": tenant_id, "w": watermark},
     )
@@ -289,7 +352,20 @@ async def refresh_tenant(db: AsyncSession, tenant_id: UUID) -> RefreshResult:
     ).scalar_one_or_none()
     since = previous - OVERLAP if previous is not None else None
     hours = await _touched_hours(db, tenant_id, since, _floor(tenant_settings, now))
-    result.hours, result.days = await recompute(db, tenant_id, hours)
+    batches = _day_batches(hours)
+    for i, batch in enumerate(batches):
+        if i:
+            # Commit each step; take the lock again for the next one. If
+            # another run holds it now, stop: that run starts from the
+            # saved watermark, which this one has not moved.
+            await db.commit()
+            if not await _try_lock(db, tenant_id):
+                await db.rollback()
+                result.skipped = True
+                return result
+        h, d = await recompute(db, tenant_id, batch)
+        result.hours += h
+        result.days += d
     await _save_watermark(db, tenant_id, now)
     await db.commit()
     result.watermark = now.isoformat()

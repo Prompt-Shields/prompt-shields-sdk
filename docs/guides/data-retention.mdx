@@ -85,14 +85,15 @@ A tenant erases what the collector holds about one of its end users with the ten
 
 | Method | Path | Body | Reaches |
 |--------|------|------|---------|
-| `POST` | `/api/v1/admin/users/erase` | `{"user_id": "<id as the gateway or SDK sent it>"}` | usage events, call feedback, MCP tool usage |
-| `DELETE` | `/api/v1/admin/users/{user_id_hash}/data` | none | usage events |
+| `POST` | `/api/v1/admin/users/erase` | `{"user_id": "<id as the gateway or SDK sent it>"}` | usage events, usage rollups, call feedback, MCP tool usage |
+| `DELETE` | `/api/v1/admin/users/{user_id_hash}/data` | none | usage events, usage rollups |
 
 Send the raw id in the POST body, not in a URL, so it never lands in an access log. The collector hashes it with the tenant's salt; it never creates or rotates the salt for an erasure. Admin tokens that held every admin scope before `admin:privacy` existed are given it by migration `038`.
 
 What changes, in the caller's tenant only:
 
 - **Usage events** of the user (matched by `user_id_hash`; an event with `user_id_raw` always has the hash too): `user_id_hash`, `user_id_raw`, `session_id` and `prompt_hash` (a SHA-256 of the prompt text) are set to null. Model, tokens, cost and routing metadata stay, so spend reports do not change; the rows no longer say whose they were.
+- **Usage rollups** (hourly and daily, kept beyond raw retention) with the user's hash: `user_id_hash` is set to null, counted as `usage_rollups`. The totals stay.
 - **Call feedback** with `user_id` equal to the id as sent: `user_id` is set to null. The score stays.
 - **MCP tool usage** rows for the id: merged into the row for the same tool with no user, so the counts stay.
 

@@ -16,11 +16,11 @@ Adds:
 The new tables get the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Numbered 040 by assignment; chained from 037 (main's head when written).
-Re-chain at merge onto whatever lands first (038 #363, 039 #338).
+Numbered 040 by assignment (039 is reserved for #338); chained from 038,
+main's head at merge. Re-chain onto 039 if #338 lands first.
 
 Revision ID: 040
-Revises: 037
+Revises: 038
 Create Date: 2026-11-06
 """
 
@@ -31,7 +31,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 revision: str = "040"
-down_revision: str | None = "037"
+down_revision: str | None = "038"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

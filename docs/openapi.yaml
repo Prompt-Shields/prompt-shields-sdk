@@ -2408,8 +2408,10 @@ components:
           type: object
           additionalProperties: {type: integer}
           description: |
-            Rows changed per table (`ai_usage_events`, and for a `user_id`
-            also `call_feedback` and `mcp_tool_usage`); zeros on a repeat
+            Rows changed per table (`ai_usage_events`; `usage_rollups`, the
+            hourly and daily rollup rows, when the user's hash is known; for a
+            `user_id` also `call_feedback` and `mcp_tool_usage`); zeros on a
+            repeat
         audit_event_id:
           type: string
           format: uuid
