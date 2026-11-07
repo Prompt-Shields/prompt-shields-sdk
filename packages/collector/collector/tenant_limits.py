@@ -5,7 +5,8 @@ Operators override the env defaults for one tenant in
 (``PATCH /operator/v1/tenants/{id}`` with ``{"settings":
 {"ingest_rate_limits": {...}}}``; ``null`` removes the override)::
 
-    {"events": 1000, "kong": 20000, "mcp": 600, "feedback": 600, "feedback_user": 30}
+    {"events": 1000, "kong": 20000, "mcp": 600, "feedback": 600, "feedback_user": 30,
+     "security_events": 600}
 
 Each key is optional and falls back to its env default:
 
@@ -17,6 +18,7 @@ kong            PS_KONG_RATE_LIMIT_PER_MINUTE
 mcp             PS_MCP_RATE_LIMIT_PER_MINUTE
 feedback        PS_FEEDBACK_RATE_LIMIT_PER_MINUTE
 feedback_user   PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE
+security_events PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE
 ==============  =========================================
 
 Values are requests per minute, an integer from 0 to ``MAX_LIMIT``; 0 turns
@@ -50,6 +52,7 @@ ENV_DEFAULTS: dict[str, str] = {
     "mcp": "mcp_rate_limit_per_minute",
     "feedback": "feedback_rate_limit_per_minute",
     "feedback_user": "feedback_user_rate_limit_per_minute",
+    "security_events": "security_events_rate_limit_per_minute",
 }
 
 _MAX_CACHED = 10_000

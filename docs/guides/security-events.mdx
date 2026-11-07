@@ -107,7 +107,7 @@ With `PS_SECURITY_EVENTS_OTLP=true` the gateway also sends each event as an OTLP
 | Variable | Default | Effect |
 |---|---|---|
 | `PS_SECURITY_EVENTS_OTLP` | unset (off) | `true` turns the export on. |
-| `PS_SECURITY_EVENTS_OTLP_ENDPOINT` | derived | Full URL, e.g. `http://otel-collector:4318/v1/logs`. When unset: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, then `PS_OTEL_ENDPOINT` with `/v1/traces` replaced by `/v1/logs`, then `OTEL_EXPORTER_OTLP_ENDPOINT` + `/v1/logs`. The Prompt Shields collector's `/ingest/otel/` path is never used (it takes traces only). |
+| `PS_SECURITY_EVENTS_OTLP_ENDPOINT` | derived | Full URL, e.g. `http://otel-collector:4318/v1/logs`. When unset: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, then `PS_OTEL_ENDPOINT` with `/v1/traces` replaced by `/v1/logs`, then `OTEL_EXPORTER_OTLP_ENDPOINT` + `/v1/logs`. Derived endpoints never use the Prompt Shields collector; to store events there, set this to `<collector>/ingest/otel/v1/logs` (see below). |
 | `PS_SECURITY_EVENTS_OTLP_HEADERS` | the endpoint's headers | `k1=v1,k2=v2`. Otherwise the headers that belong to the chosen endpoint (`OTEL_EXPORTER_OTLP_LOGS_HEADERS` / `OTEL_EXPORTER_OTLP_HEADERS`, or `PS_OTEL_HEADERS`). `PS_API_KEY` is never sent. |
 | `PS_OTEL_MAX_BATCH`, `PS_OTEL_FLUSH_MS`, `PS_OTEL_MAX_QUEUE` | 64, 5000, 2048 | Batching, shared with the trace exporter. |
 | `OTEL_SERVICE_NAME` | `prompt-shields-gateway` | Resource `service.name`. |
@@ -128,6 +128,18 @@ Mapping of each event to a LogRecord:
 | resource | `service.name` |
 
 The privacy contract above applies unchanged: the records carry exactly the fields of the JSON line.
+
+## Store events in the Prompt Shields collector
+
+The collector can store these events per tenant, serve them through the Partner API (`GET /partner/v1/security-events`, scope `security-events:read`) and push them on to Splunk HEC, syslog/CEF or a webhook. Send them with the OTLP export above:
+
+```bash
+PS_SECURITY_EVENTS_OTLP=true
+PS_SECURITY_EVENTS_OTLP_ENDPOINT=https://collector.example.com/ingest/otel/v1/logs
+PS_SECURITY_EVENTS_OTLP_HEADERS=Authorization=Bearer <tenant ingest key>
+```
+
+or forward the stdout lines to `POST /ingest/security-events` (NDJSON). See [SIEM export](/integrations/siem#gateway-security-events-in-the-collector).
 
 ## Send to Splunk
 

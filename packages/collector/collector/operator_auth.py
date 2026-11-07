@@ -64,8 +64,8 @@ OPERATOR_SCOPES: dict[str, str] = {
     "operator:erase": "Erase a tenant and all its data",
     "operator:audit": "Verify the audit trail hash chains",
     "operator:integrations": (
-        "Run provider usage pulls, cloud inventory, LeanIX, ServiceNow and "
-        "Sentinel operator routes"
+        "Run provider usage pulls, cloud inventory, LeanIX, ServiceNow, "
+        "Sentinel and SIEM (Splunk HEC, syslog, webhook) operator routes"
     ),
     "operator:tokens": (
         "Issue, rotate and revoke operator tokens (only with scopes the caller holds)"

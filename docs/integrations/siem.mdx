@@ -1,0 +1,132 @@
+---
+title: Splunk HEC, syslog and webhook SIEM export
+description: Push per-call routing evidence, the audit trail and gateway security events from the collector to Splunk, a syslog/CEF receiver or an HTTPS webhook
+---
+
+# Splunk HEC, syslog and webhook SIEM export
+
+Next to the [Microsoft Sentinel export](/integrations/microsoft-sentinel), the collector can push three kinds of record to any SIEM:
+
+| Kind | One record per | Field names |
+|---|---|---|
+| `calls` | model call (`ai_usage_events` row): served provider, model and jurisdiction, policy version, sensitivity, route, cost, tokens | The Sentinel names (`TimeGenerated`, `EventUid`, `Operation: ai.call`, `Ps*`) |
+| `audit` | row of the tenant's [hash-chained audit trail](/guides/audit-trail), with `PsAuditSeq`, `PsAuditPrevHash` and `PsAuditRowHash` | The Sentinel names |
+| `security` | [gateway security event](/guides/security-events) the collector stored (see below) | The gateway's v1 names (`@timestamp`, `event.name`, `action`, `signature`, `severity`, `ps.*`) plus `ps.tenant_id` |
+
+Records hold metadata only: never prompts, responses, prompt hashes, session ids, user ids, PII values or secrets.
+
+## Configure
+
+One operator environment variable, per tenant and connector (each connector is optional):
+
+```bash
+PS_SIEM_EXPORT='{
+  "<tenant uuid>": {
+    "splunk_hec": {"url": "https://splunk.example.com:8088", "token": "<HEC token>", "index": "prompt_shields"},
+    "syslog":     {"host": "siem.example.com", "port": 6514, "format": "cef"},
+    "webhook":    {"url": "https://hooks.example.com/prompt-shields", "signing_secret": "<secret>"}
+  }
+}'
+```
+
+Options every connector takes:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `include` | `["calls", "audit", "security"]` | Which kinds to push |
+| `batch_records` | 500 | Records read per batch |
+| `max_records_per_run` | 50000 | Per kind and run |
+| `settle_seconds` | 300 | Calls are pushed once this much older than their own time, security events once this long after they arrived, so late events are not skipped |
+| `allow_private_network` | `false` | Allow a receiver on a private address (internal SIEM). Loopback, link-local and cloud metadata addresses (`169.254.169.254`, `fd00:ec2::254`) stay refused; TLS and certificate checks still apply |
+
+Credentials (`token`, `signing_secret`, `bearer_token`) are never logged, stored or returned. A malformed `PS_SIEM_EXPORT` is reported without echoing it.
+
+**Egress.** HTTP connectors use the collector's guarded client: `https` only, one host name (no IP literals), every resolved address must be public (unless `allow_private_network`), the connection goes to the checked address (no DNS rebinding), redirects are never followed, 429 and 5xx are retried a bounded number of times, and errors carry the status code only. Syslog uses the same address check and TLS with the certificate verified for `host`; plain TCP and UDP are not offered.
+
+### Splunk HTTP Event Collector
+
+| Option | Default | Meaning |
+|---|---|---|
+| `url` | required | `https://<host>[:port]`, no path; events go to `/services/collector/event` |
+| `token` | required | HEC token, sent as `Authorization: Splunk <token>` |
+| `index` | the token's default | Splunk index |
+| `source` | `prompt-shields` | |
+| `sourcetype_prefix` | `prompt_shields` | Sourcetypes `prompt_shields:call`, `prompt_shields:audit`, `prompt_shields:security` |
+| `host` | unset | Splunk `host` field |
+
+Events are batched (at most about 900 kB per request), each with `time` set to the record's time.
+
+```spl
+index=prompt_shields sourcetype=prompt_shields:security event.name=injection.detected
+| stats count by signature, gen_ai.provider.name
+```
+
+### Syslog (CEF or JSON over TLS)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `host` | required | DNS name of the receiver |
+| `port` | 6514 | |
+| `format` | `cef` | `cef` (ArcSight CEF) or `json` |
+| `facility` | 13 (log audit) | 0-23 |
+| `app_name` | `prompt-shields` | RFC 5424 APP-NAME |
+| `hostname` | `prompt-shields-collector` | RFC 5424 HOSTNAME |
+| `ca_file` | system trust store | PEM bundle for a receiver with a private CA |
+
+One RFC 5424 message per record over TLS with RFC 5425 octet-counted framing. `MSGID` is `AICall`, `Audit` or `SecurityEvent`; the syslog severity follows the record (informational → 6, low → 5, medium → 4, high → 3).
+
+CEF lines look like:
+
+```text
+CEF:0|Prompt Shields|Prompt Shields Gateway|1.0|injection.detected|injection.detected azure.shieldPrompt|8|rt=1762430400000 externalId=… cat=SecurityEvent outcome=failure act=blocked gen_ai_provider_name=openai …
+```
+
+The header carries the event name (security events) or `Operation` (calls and audit) as the signature id and a CEF severity (informational 1, low 3, medium 6, high 8). Extensions are `rt`, `externalId`, `cat`, `outcome`, `act` (security events) and every other field, with its name's non-alphanumeric characters replaced by `_` (`ps.guardrail.check_id` → `ps_guardrail_check_id`). Syslog has no application-level acknowledgement: a batch counts as delivered once the TLS connection accepted it.
+
+### HTTPS webhook
+
+| Option | Default | Meaning |
+|---|---|---|
+| `url` | required | `https://<host>[:port][/path]`, no query |
+| `signing_secret` | unset | Sign each body like [partner webhooks](/api-reference/sync/webhooks): `Prompt-Shields-Signature: t=<unix>,v1=<hex HMAC-SHA256 of "<t>.<body>">` |
+| `bearer_token` | unset | Sent as `Authorization: Bearer <token>` |
+
+Each request (at most about 900 kB) is:
+
+```json
+{"kind": "security", "schema_version": "1.0", "source": "prompt-shields",
+ "tenant_id": "<uuid>", "records": [ … ]}
+```
+
+Any 2xx response counts as accepted.
+
+## Run
+
+- Operator API (`operator:integrations`): `POST /api/v1/admin/connectors/{splunk-hec|syslog|webhook}/sync` with `{"tenant_id": "<uuid>"}`, and `GET .../status?tenant_id=<uuid>` for the configuration (hosts and options only, never a credential or the webhook path), cursors and last run.
+- Cron: `python -m collector.siem_export --all-tenants` (every configured tenant and connector; `--connector splunk_hec` to limit; `--tenant <uuid>` for one). A tenant that fails is recorded in its own status, the run continues, and the command exits non-zero. The Helm chart takes it as an extra CronJob entry.
+
+Cursors are kept per tenant, connector and kind, and move only past batches the receiver accepted. A failed run resends from the first unaccepted batch; `EventUid` and `event.id` are stable, so a resend is a duplicate, not a different event (at-least-once delivery: deduplicate on those ids in the SIEM). Syslog counts a batch as delivered once the TLS socket accepted it; syslog has no acknowledgement.
+
+## Gateway security events in the collector
+
+The collector stores the gateway's security events per tenant (row-level security), so they can be pushed by the connectors above and queried through the Partner API.
+
+**From the gateway, over OTLP** (no log agent needed):
+
+```bash
+PS_SECURITY_EVENTS_OTLP=true
+PS_SECURITY_EVENTS_OTLP_ENDPOINT=https://collector.example.com/ingest/otel/v1/logs
+PS_SECURITY_EVENTS_OTLP_HEADERS=Authorization=Bearer <tenant ingest key>
+```
+
+The endpoint must pass the gateway's egress check (an in-cluster DNS name or a host in `TRUSTED_CUSTOM_HOSTS` for a private address).
+
+**From a log forwarder**: `POST /ingest/security-events` with the stdout lines (`PS_SECURITY_EVENTS_LOG=true`) as `application/x-ndjson`, or a JSON array. Use a tenant ingest key with `ingest:write`.
+
+Either way the tenant is the ingest key's (the gateway's `ps.tenant` label is not stored), events need `event.id`, `event.name`, `@timestamp` and `log.logger: ps.security`, and an event resent with the same `event.id` is stored once. Both endpoints share a per-tenant rate limit, `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE` (default 600 requests/minute, `0` turns it off; tenant override `ingest_rate_limits.security_events`), counted apart from `/ingest/events`; past it they answer `429` with `Retry-After`. A request holds at most 5000 events and 4 MiB.
+
+**Query**: `GET /partner/v1/security-events` with a partner credential holding `security-events:read` (never granted by default). Filters `since` / `until` (event time), `name`, `severity`, `action`; pages in arrival order with `meta.next_cursor`.
+
+**Retention and erasure**: stored events are purged with the tenant's [retention period](/guides/data-retention), deleted with a tenant erasure, and the end-user erasure (`POST /api/v1/admin/users/erase` with the `user.hash` value, or `DELETE /api/v1/admin/users/{user_id_hash}/data` with its salted hash) clears their `user.hash`.
+
+Once exported, copies in your SIEM follow **your** retention policy and must be erased there.

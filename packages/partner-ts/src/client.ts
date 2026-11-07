@@ -41,6 +41,9 @@ import type {
   AuditTrailPage,
   ListAuditParams,
   ListMcpToolsParams,
+  ListSecurityEventsParams,
+  SecurityEventPage,
+  SecurityEventRow,
   ListMcpUsageParams,
   ListRiskReviewsParams,
   ListSpendAlertsParams,
@@ -234,6 +237,8 @@ export class PartnerClient {
   readonly siem: SiemResource;
   /** The tenant's audit trail as JSON pages. Needs `audit:read`. */
   readonly audit: AuditResource;
+  /** Gateway security events stored by the collector. Needs `security-events:read`. */
+  readonly securityEvents: SecurityEventsResource;
   /** Stored provider admin keys (write-only, masked). Needs `provider-credentials:manage`. */
   readonly providerCredentials: ProviderCredentialsResource;
   /** Provider key id to SDK `api_key_fingerprint` links. Needs `provider-credentials:manage`. */
@@ -296,6 +301,7 @@ export class PartnerClient {
     this.learner = new LearnerResource(this);
     this.siem = new SiemResource(this);
     this.audit = new AuditResource(this);
+    this.securityEvents = new SecurityEventsResource(this);
     this.providerCredentials = new ProviderCredentialsResource(this);
     this.providerKeyFingerprints = new ProviderKeyFingerprintsResource(this);
     this.webhooks = new WebhooksResource(this);
@@ -838,6 +844,27 @@ export class AuditResource {
 
   /** Every audit trail row matching the filters, page by page as you iterate. */
   list(params: ListAuditParams = {}): PageIterator<AuditTrailEvent, AuditTrailPage> {
+    const { cursor, ...rest } = params;
+    return new PageIterator((next) => this.listPage({ ...rest, cursor: next }), cursor ?? undefined);
+  }
+}
+
+/**
+ * `/partner/v1/security-events`: gateway security events (guardrail
+ * verdicts, PII and injection detections, auth failures, policy denials,
+ * rate limits, payload rejections) stored for the tenant, in arrival order.
+ * Needs `security-events:read`.
+ */
+export class SecurityEventsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** One page of security events (up to 1000), oldest arrival first. */
+  listPage(params: ListSecurityEventsParams = {}): Promise<SecurityEventPage> {
+    return this.client.get<SecurityEventPage>('/partner/v1/security-events', { ...params });
+  }
+
+  /** Every security event matching the filters, page by page as you iterate. */
+  list(params: ListSecurityEventsParams = {}): PageIterator<SecurityEventRow, SecurityEventPage> {
     const { cursor, ...rest } = params;
     return new PageIterator((next) => this.listPage({ ...rest, cursor: next }), cursor ?? undefined);
   }

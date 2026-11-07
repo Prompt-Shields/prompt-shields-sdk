@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # flood the routing learner). 0 or less disables either.
     feedback_rate_limit_per_minute: int = 600
     feedback_user_rate_limit_per_minute: int = 30
+    # /ingest/security-events and /ingest/otel/v1/logs (gateway security
+    # events, #353): requests per minute per tenant, counted apart from
+    # /ingest/events; 0 or less disables it.
+    security_events_rate_limit_per_minute: int = 600
     # Tenant key auth (collector/auth_cache.py). Seconds a key that passed
     # bcrypt is remembered (by an HMAC of the key, never the key), so its
     # next requests skip bcrypt while the stored hash is unchanged; the key

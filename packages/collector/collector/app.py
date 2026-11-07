@@ -231,6 +231,16 @@ from collector.sentinel_export import router as sentinel_router
 app.include_router(sentinel_router)
 app.include_router(sentinel_partner_router)
 
+# Generic SIEM connectors (#353): Splunk HEC, syslog/CEF and webhook push;
+# gateway security-event ingest and its partner query API
+from collector.security_events import partner_router as security_events_partner_router
+from collector.security_events import router as security_events_router
+from collector.siem_export import router as siem_router
+
+app.include_router(siem_router)
+app.include_router(security_events_router)
+app.include_router(security_events_partner_router)
+
 # Tenant admin automation credentials: scoped admin tokens and tenant
 # ingest keys (collector/admin_auth.py)
 from collector.admin_api import router as admin_api_router

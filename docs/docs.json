@@ -153,6 +153,7 @@
         "integrations/leanix",
         "integrations/servicenow",
         "integrations/microsoft-sentinel",
+        "integrations/siem",
         "integrations/kong"
       ]
     }

@@ -708,6 +708,63 @@ class SpendAlert(Base):
     )
 
 
+class GatewaySecurityEvent(Base):
+    """A gateway security event (schema v1, docs/security-events.schema.json):
+    a guardrail verdict, PII or injection detection, auth failure, policy
+    denial, rate limit or payload rejection, ingested by
+    ``collector.security_events`` (#353).
+
+    Metadata only, as the gateway sends it: no prompt or response content,
+    PII values, credentials or client IP addresses. ``user_hash`` is the
+    gateway's pseudonymous OIDC subject hash (policy denials only);
+    ``user_id_hash`` is that value hashed with the tenant's user id salt, as
+    ``ai_usage_events.user_id_hash`` is, so erasure by the stored hash finds
+    it (never returned by the API).
+    ``attributes`` holds the event's other ``ps.*`` / ``gen_ai.*`` /
+    ``http.*`` fields (scalars only). One row per (tenant, ``event_id``), so
+    a resent event is stored once. Rows older than the tenant's retention
+    period are purged.
+    """
+
+    __tablename__ = "gateway_security_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    event_id = Column(Text, nullable=False)
+    occurred_at = Column(TIMESTAMP(timezone=True), nullable=False)
+    received_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    name = Column(Text, nullable=False)
+    kind = Column(Text)
+    outcome = Column(Text)
+    severity = Column(Text)
+    action = Column(Text)
+    signature = Column(Text)
+    request_id = Column(Text)
+    route = Column(Text)
+    method = Column(Text)
+    business_unit = Column(Text)
+    environment = Column(Text)
+    provider = Column(Text)
+    model = Column(Text)
+    status_code = Column(Integer)
+    user_hash = Column(Text)
+    user_id_hash = Column(Text)
+    schema_version = Column(Text)
+    attributes = Column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "event_id", name="ux_gateway_security_events_event"),
+        Index("ix_gateway_security_events_tenant_occurred", "tenant_id", "occurred_at"),
+        Index("ix_gateway_security_events_tenant_received", "tenant_id", "received_at", "id"),
+        Index(
+            "ix_gateway_security_events_tenant_user",
+            "tenant_id",
+            "user_id_hash",
+            postgresql_where=text("user_id_hash IS NOT NULL"),
+        ),
+    )
+
+
 def _rollup_count(name: str) -> Column:
     return Column(name, BigInteger, nullable=False, default=0, server_default="0")
 

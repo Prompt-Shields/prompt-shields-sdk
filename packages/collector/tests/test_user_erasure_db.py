@@ -16,6 +16,7 @@ from db.models import (
     AIUsageEvent,
     AuditEvent,
     CallFeedback,
+    GatewaySecurityEvent,
     McpToolUsage,
     PartnerCredential,
     RetentionAuditLog,
@@ -54,6 +55,15 @@ async def _ingest(c: AsyncClient, key: str) -> None:
     mcp.append({"server_name": "jira", "tool_name": "search", "user_id": USER})  # user only
     resp = await c.post("/ingest/mcp", headers=_head(key), json={"events": mcp})
     assert resp.status_code == 200, resp.text
+    denials = [
+        {"@timestamp": "2026-11-06T12:00:00Z", "event.id": f"deny-{user[:4]}",
+         "event.name": "policy.denied", "log.logger": "ps.security",
+         "severity": "medium", "action": "blocked", "user.hash": user,
+         "ps.policy.reason": "model_not_allowed", "http.response.status_code": 403}
+        for user in (USER, OTHER)
+    ]
+    resp = await c.post("/ingest/security-events", headers=_head(key), json=denials)
+    assert resp.status_code == 200 and resp.json()["accepted"] == 2, resp.text
 
 
 def _none_first(row: tuple) -> tuple:
@@ -75,6 +85,10 @@ async def _state(factory, tenant) -> dict:
             .where(McpToolUsage.server_name == "jira")
         )).all()
         salt = (await s.execute(select(TenantSecret.user_id_salt))).scalar_one()
+        security = (await s.execute(
+            select(GatewaySecurityEvent.event_id, GatewaySecurityEvent.user_hash)
+            .where(GatewaySecurityEvent.event_id.like("deny-%"))
+        )).all()
         rollups = dict((await s.execute(
             select(UsageRollupDaily.user_id_hash, func.sum(UsageRollupDaily.requests))
             .group_by(UsageRollupDaily.user_id_hash)
@@ -88,6 +102,7 @@ async def _state(factory, tenant) -> dict:
         "feedback": sorted((tuple(r) for r in feedback), key=_none_first),
         "mcp": sorted(tuple(r) for r in mcp),
         "salt": salt,
+        "security": sorted((tuple(r) for r in security), key=_none_first),
     }
 
 
@@ -114,6 +129,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         assert body["user_id_hash"] == hash_a and body["input"] == "user_id"
         assert body["rows_erased"] == {
             "ai_usage_events": 3, "usage_rollups": 2, "call_feedback": 1, "mcp_tool_usage": 2,
+            "gateway_security_events": 1,
         }
         assert body["audit_event_id"]
 
@@ -127,6 +143,8 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         assert after_a["feedback"] == [
             ("call-0123-0", None), ("call-fedc-0", OTHER),
         ]
+        # The user's security event stays, without the user's hash.
+        assert after_a["security"] == [("deny-0123", None), ("deny-fedc", OTHER)]
         # create: the user's call folded into the no-user row; search moved.
         assert after_a["mcp"] == [
             ("create", "", 2), ("create", OTHER, 1), ("search", "", 1),
@@ -154,11 +172,19 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         assert hash_b != hash_a
         resp = await c.delete(f"/api/v1/admin/users/{hash_b}/data", headers=_head(KEY_B))
         assert resp.status_code == 200, resp.text
-        assert resp.json()["rows_erased"] == {"ai_usage_events": 3, "usage_rollups": 0}
+        assert resp.json()["rows_erased"] == {
+            "ai_usage_events": 3, "usage_rollups": 0, "gateway_security_events": 1,
+        }
+        # The hash route reaches the security event too (salted user.hash).
+        assert (await _state(plain, b))["security"] == [
+            ("deny-0123", None), ("deny-fedc", OTHER),
+        ]
         # a's hash means nothing in b: zero rows, the same answer as for an
         # id b never saw.
         resp = await c.delete(f"/api/v1/admin/users/{other_hash}/data", headers=_head(KEY_B))
-        assert resp.json()["rows_erased"] == {"ai_usage_events": 0, "usage_rollups": 0}
+        assert resp.json()["rows_erased"] == {
+            "ai_usage_events": 0, "usage_rollups": 0, "gateway_security_events": 0,
+        }
 
         resp = await c.delete("/api/v1/admin/users/NOT-A-HASH/data", headers=_head(KEY_B))
         assert resp.status_code == 400
@@ -179,6 +205,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
             "input": "user_id",
             "rows_erased": {
                 "ai_usage_events": 3, "usage_rollups": 2, "call_feedback": 1, "mcp_tool_usage": 2,
+                "gateway_security_events": 1,
             },
         }
         assert first["tenant_id"] == str(a) and first["row_hash"] and first["prev_hash"]
@@ -225,6 +252,7 @@ async def test_erase_without_a_salt_creates_none(rls_db):  # noqa: F811
     assert resp.json()["user_id_hash"] is None
     assert resp.json()["rows_erased"] == {
         "ai_usage_events": 1, "call_feedback": 0, "mcp_tool_usage": 0,
+        "gateway_security_events": 0,
     }
     async with rls_db["plain"]() as s:
         await rls.set_tenant(s, a)
