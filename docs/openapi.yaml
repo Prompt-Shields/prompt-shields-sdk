@@ -7361,9 +7361,12 @@ paths:
         principal with the tenant-wide `owner` role or is unbound and
         holds every admin scope, a caller that can manage owners (an
         owner's token, or an unbound token holding every admin scope).
-        Otherwise 403, audited as `admin_token.revoke` with outcome
-        `failure` and `details.reason` `scope_not_held` or
-        `owner_required`.
+        The owner check applies to every live token revoked with it (a
+        token issued for an owner may have been created by one that was
+        not), also when a token revokes itself. Otherwise 403, audited as
+        `admin_token.revoke` with outcome `failure` and `details.reason`
+        `scope_not_held` or `owner_required` (`details.cascade_blocked_by`
+        names the created token that stopped it).
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7711,7 +7714,12 @@ paths:
       description: |
         Revokes at once, including access tokens already issued. The row is
         kept (`status: revoked`, `is_active: "false"`, readable by id).
-        Revoking a revoked credential is 204.
+        Revoking a revoked credential is 204. Revoking a credential issued
+        for a principal with the tenant-wide `owner` role needs a caller
+        that can manage owners (an owner's token, or an unbound token
+        holding every admin scope): otherwise 403, audited as
+        `partner_credential.revoke` with outcome `failure` and
+        `details.reason` `owner_required`.
       security:
         - TenantApiKey: []
         - AdminToken: []

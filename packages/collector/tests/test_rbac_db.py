@@ -729,6 +729,75 @@ async def test_revoking_owner_tokens_needs_an_owner(env):
     assert (await c.delete(f"{A}/tokens/{owner_tok['id']}", headers=H(owner_tok["token"]))).status_code == 204
 
 
+async def test_revoking_a_parent_cannot_cascade_to_owner_tokens(env):
+    """Revocation cascades to the tokens a token created, so the owner
+    check applies to each of them too: an admin cannot revoke an owner's
+    token by revoking the non-owner token that created it (#372)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    owner = await _member(c, boot, "owner")
+    admin = await _member(c, boot, "admin")
+    owner_tok = await _token_for(c, boot, owner)
+    parent = await _token_for(c, boot, admin)
+    # The admin's token may issue a narrow token for the owner (not owner-
+    # capable), which the admin cannot revoke directly ...
+    child = await _token_for(c, parent["token"], owner, scopes=["admin:read"])
+    other_admin = await _token_for(c, boot, admin)
+    resp = await c.delete(f"{A}/tokens/{child['id']}", headers=H(other_admin["token"]))
+    assert resp.status_code == 403
+    # ... nor through its parent, nor by having the parent revoke itself.
+    for caller in (other_admin, parent):
+        resp = await c.delete(f"{A}/tokens/{parent['id']}", headers=H(caller["token"]))
+        assert resp.status_code == 403, resp.text
+        assert str(child["id"]) in resp.json()["detail"]["detail"]
+    rows = await _refusals(engine, tid, parent["id"])
+    assert len(rows) == 2
+    assert all(r.details["reason"] == "owner_required" for r in rows)
+    assert all(r.details["cascade_blocked_by"] == str(child["id"]) for r in rows)
+    for t in (parent, child):
+        got = (await c.get(f"{A}/tokens/{t['id']}", headers=H(boot))).json()
+        assert got["status"] == "active"
+    # An owner can, and the child goes with the parent.
+    resp = await c.delete(f"{A}/tokens/{parent['id']}", headers=H(owner_tok["token"]))
+    assert resp.status_code == 204
+    got = (await c.get(f"{A}/tokens/{child['id']}", headers=H(boot))).json()
+    assert got["status"] == "revoked"
+
+
+async def test_revoking_an_owner_partner_credential_needs_an_owner(env):
+    """An ``admin:partners`` holder that cannot manage owners gets 403
+    (audited) revoking a partner credential issued for an owner (#372)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    owner = await _member(c, boot, "owner")
+    admin = await _member(c, boot, "admin")
+    owner_tok = await _token_for(c, boot, owner)
+    admin_tok = await _token_for(c, boot, admin)
+    cred = await _partner_for(c, boot, owner)
+    path = f"{A}/partner-credentials/{cred['id']}"
+    for _ in range(2):  # also once revoked: no oracle on its state
+        resp = await c.delete(path, headers=H(admin_tok["token"]))
+        assert resp.status_code == 403, resp.text
+        got = (await c.get(path, headers=H(boot))).json()
+        assert got["status"] == "active"
+    async with _admin(engine)() as s:
+        rows = (
+            await s.execute(
+                select(AuditEvent).where(
+                    AuditEvent.tenant_id == tid,
+                    AuditEvent.action == "partner_credential.revoke",
+                    AuditEvent.outcome == "failure",
+                    AuditEvent.target_id == str(cred["id"]),
+                )
+            )
+        ).scalars().all()
+    assert len(rows) == 2 and rows[0].details["reason"] == "owner_required"
+    # A non-owner's credential is fine; an owner can revoke the owner's.
+    admin_cred = await _partner_for(c, boot, admin)
+    resp = await c.delete(f"{A}/partner-credentials/{admin_cred['id']}", headers=H(admin_tok["token"]))
+    assert resp.status_code == 204
+    assert (await c.delete(path, headers=H(owner_tok["token"]))).status_code == 204
+    assert (await c.get(path, headers=H(boot))).json()["status"] == "revoked"
+
+
 async def test_narrow_member_token_cannot_reenable_an_admin(env):
     """Disabling, re-enabling (which revives its credentials) or changing
     the external_id of a principal needs what granting its roles would."""

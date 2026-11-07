@@ -12,8 +12,11 @@ ingest keys. Mounted at /api/v1/admin. Auth and scopes: collector/admin_auth.py.
      (admin_auth.can_manage_owner) when it is owner-bound (issued for a
      tenant-wide owner) or owner-capable (every admin scope, unbound): an
      ``admin:tokens`` holder must not be able to cut the owner off (#372).
-     A token may always revoke itself. Refusals are 403 and audited as
-     ``admin_token.revoke`` with outcome ``failure``.
+     A token may always revoke itself. The owner check also applies to
+     every live token the cascade would revoke, also on a self-revoke (a
+     token bound to an owner may have been created by one that is not).
+     Refusals are 403 and audited as ``admin_token.revoke`` with outcome
+     ``failure``.
 
   A token issued by another token expires no later than that token (an
   expiry past it, or none, is capped to it).
@@ -49,7 +52,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from db.models import AdminToken, Membership, TenantApiKey
+from db.models import AdminToken, TenantApiKey
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -65,6 +68,7 @@ from collector.admin_auth import (
     cap_child_expiry,
     created_by,
     issue_token,
+    live_descendants,
     require_admin,
     require_full_admin,
     revoke_descendants,
@@ -250,60 +254,90 @@ async def get_token(
     return serialize_token(await _get_token(request, principal.tenant_id, token_id))
 
 
-async def _bound_to_owner(db, tenant_id: UUID, principal_id: UUID | None) -> bool:
-    """Whether ``principal_id`` holds the tenant-wide owner role (disabled
-    or not: a re-enabled owner's tokens work again)."""
-    if principal_id is None:
-        return False
-    return (
-        await db.execute(
-            select(Membership.id).where(
-                Membership.tenant_id == tenant_id,
-                Membership.principal_id == principal_id,
-                Membership.team_id.is_(None),
-                Membership.role == rbac.OWNER,
-            )
+def _revoke_refusal(
+    principal: AdminPrincipal, row: AdminToken, owner_bound: bool, *, check_scopes: bool = True
+):
+    """(reason, detail) when the caller may not revoke ``row``, else None:
+    it needs every scope ``row`` holds (unless ``check_scopes`` is False)
+    and, when ``row`` is owner-bound or owner-capable, to be able to manage
+    owners (#372)."""
+    beyond = sorted(set(row.scopes or ()) - principal.scopes) if check_scopes else []
+    if beyond:
+        return (
+            "scope_not_held",
+            f"Cannot revoke a token holding scopes the caller does not hold: {beyond}",
         )
-    ).first() is not None
+    if can_manage_owner(principal):
+        return None
+    if owner_bound:
+        return "owner_required", "Only an owner can revoke a token issued for an owner"
+    if row.principal_id is None and set(ADMIN_SCOPES) <= set(row.scopes or ()):
+        return (
+            "owner_required",
+            (
+                "Only an owner can revoke an unbound token holding every admin "
+                "scope (it can manage owners)"
+            ),
+        )
+    return None
 
 
 async def _check_can_revoke(request: Request, principal: AdminPrincipal, row: AdminToken) -> None:
-    """403 (audited) unless the caller may revoke ``row``: its own token
-    always; another token only when the caller holds every scope it holds
-    and, when it is owner-bound or owner-capable, can manage owners (#372).
-    Otherwise an ``admin:tokens`` holder could revoke the owner's tokens."""
-    if principal.token_id is not None and principal.token_id == row.id:
-        return
+    """403 (audited) unless the caller may revoke ``row`` and every live
+    token revoked with it (``live_descendants``): its own token always;
+    another token only when the caller holds every scope it holds and, when
+    it is owner-bound or owner-capable, can manage owners (#372). Otherwise
+    an ``admin:tokens`` holder could revoke the owner's tokens, directly or
+    by revoking the token that created them."""
     db = request.state.db
-    reason, detail = None, None
-    beyond = sorted(set(row.scopes or ()) - principal.scopes)
-    if beyond:
-        reason = "scope_not_held"
-        detail = f"Cannot revoke a token holding scopes the caller does not hold: {beyond}"
-    elif not can_manage_owner(principal):
-        if await _bound_to_owner(db, principal.tenant_id, row.principal_id):
-            reason = "owner_required"
-            detail = "Only an owner can revoke a token issued for an owner"
-        elif row.principal_id is None and set(ADMIN_SCOPES) <= set(row.scopes or ()):
-            reason = "owner_required"
-            detail = (
-                "Only an owner can revoke an unbound token holding every admin "
-                "scope (it can manage owners)"
+    tenant_id = principal.tenant_id
+    refusal, blocked_by = None, None
+    if principal.token_id is None or principal.token_id != row.id:
+        refusal = _revoke_refusal(
+            principal, row, await rbac.is_tenant_owner(db, tenant_id, row.principal_id)
+        )
+    if refusal is None:
+        for child in await live_descendants(db, row):
+            if principal.token_id is not None and principal.token_id == child.id:
+                continue
+            # A created token holds no scope its creator lacked, so the
+            # scope check on ``row`` covers it (and must not stop a token
+            # whose principal's roles have since shrunk revoking itself).
+            refusal = _revoke_refusal(
+                principal,
+                child,
+                await rbac.is_tenant_owner(db, tenant_id, child.principal_id),
+                check_scopes=False,
             )
-    if reason is None:
+            if refusal is not None:
+                blocked_by = child
+                reason, detail = refusal
+                refusal = (
+                    reason,
+                    (
+                        f"Revoking this token would also revoke token {child.id}, "
+                        f"which it created. {detail}"
+                    ),
+                )
+                break
+    if refusal is None:
         return
+    reason, detail = refusal
+    details = {"name": row.name, "reason": reason}
+    if blocked_by is not None:
+        details["cascade_blocked_by"] = str(blocked_by.id)
     # Nothing has changed in the request's session yet: the refusal row
     # commits on its own.
     await audit_trail.record_committed(
         db,
-        tenant_id=principal.tenant_id,
+        tenant_id=tenant_id,
         action="admin_token.revoke",
         outcome=audit_trail.FAILURE,
         actor=admin_actor(request, principal),
         target_type="admin_token",
         target_id=str(row.id),
         status_code=403,
-        details={"name": row.name, "reason": reason},
+        details=details,
     )
     raise _problem(403, "Forbidden", detail)
 

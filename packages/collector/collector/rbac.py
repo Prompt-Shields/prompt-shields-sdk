@@ -165,6 +165,25 @@ async def tenant_roles(
     return frozenset(roles)
 
 
+async def is_tenant_owner(
+    db: AsyncSession, tenant_id: UUID, principal_id: UUID | None
+) -> bool:
+    """Whether ``principal_id`` holds the tenant-wide owner role (disabled
+    or not: a re-enabled owner's credentials work again)."""
+    if principal_id is None:
+        return False
+    return (
+        await db.execute(
+            select(Membership.id).where(
+                Membership.tenant_id == tenant_id,
+                Membership.principal_id == principal_id,
+                Membership.team_id.is_(None),
+                Membership.role == OWNER,
+            )
+        )
+    ).first() is not None
+
+
 async def granted_scopes(
     db: AsyncSession, tenant_id: UUID, principal_id: UUID
 ) -> frozenset[str]:
