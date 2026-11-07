@@ -41,6 +41,7 @@ for await (const asset of client.assets.list({ limit: 200 })) {
 | `client.siem.calls({ cursor, since, limit, settleSeconds }, { signal })` / `callsFeed(...)` | `GET /partner/v1/siem/calls` (`evidence:read`; NDJSON, streamed) |
 | `client.siem.audit({ cursor, since, limit }, { signal })` / `auditFeed(...)` | `GET /partner/v1/siem/audit` (`audit:read`; NDJSON, streamed) |
 | `client.audit.list({ since, until, action, limit })` / `listPage(...)` | `GET /partner/v1/audit` (`audit:read`; JSON pages in chain order, `details` kept as stored) |
+| `client.securityEvents.list({ since, until, name, severity, action, limit })` / `listPage(...)` | `GET /partner/v1/security-events` (`security-events:read`; gateway security events in arrival order, `event` kept in the gateway's field names) |
 | `client.providerCredentials.list()` / `get(provider)` | `GET /partner/v1/provider-credentials`, `/{provider}` (`provider-credentials:manage`; masked) |
 | `client.providerCredentials.create(provider, { adminKey })` / `rotate(...)` / `delete(provider)` | `POST /partner/v1/provider-credentials/{provider}`, `POST .../rotate`, `DELETE` (write-only keys) |
 | `client.providerKeyFingerprints.list()` / `put(provider, apiKeyId, { apiKeyFingerprint })` / `delete(provider, apiKeyId)` | `GET /partner/v1/provider-key-fingerprints`, `PUT` / `DELETE .../{provider}/{api_key_id}` (`provider-credentials:manage`) |

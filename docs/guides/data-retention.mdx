@@ -9,6 +9,8 @@ Raw usage events (`ai_usage_events`) can include session ids and prompt hashes, 
 
 MCP tool usage (`mcp_tool_usage`: per server and tool call counts, first and last seen) follows the same retention period: the purge deletes rows not seen since the cutoff, since they only summarise calls older than it. The purge result reports them as `mcp_tool_usage_deleted`.
 
+Gateway security events stored by the collector (`gateway_security_events`, see [SIEM export](/integrations/siem#gateway-security-events-in-the-collector)) follow it too: events that happened before the cutoff are deleted and reported as `security_events_deleted`.
+
 ## Retention period
 
 Each tenant keeps usage events for `retention_days` days:
@@ -96,6 +98,7 @@ What changes, in the caller's tenant only:
 - **Usage rollups** (hourly and daily, kept beyond raw retention) with the user's hash: `user_id_hash` is set to null, counted as `usage_rollups`. The totals stay.
 - **Call feedback** with `user_id` equal to the id as sent: `user_id` is set to null. The score stays.
 - **MCP tool usage** rows for the id: merged into the row for the same tool with no user, so the counts stay.
+- **Gateway security events** whose `user.hash` is the id as sent, or whose salted hash of it (stored at ingest, never returned) is the user's `user_id_hash`: both are set to null; the event stays. Both forms reach them.
 
 Call feedback and MCP usage store the id as the gateway sent it, so only the POST form reaches them.
 

@@ -162,7 +162,7 @@ variable names**. For each component the chart uses the first of:
 
 | Component | Keys |
 |---|---|
-| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_SENTINEL_EXPORT`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
+| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_SENTINEL_EXPORT`, `PS_SIEM_EXPORT`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
 | `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `PS_BUDGET_REDIS_URL`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
 
@@ -227,7 +227,8 @@ CronJob instead.
 Add per-tenant connector syncs as extra entries, e.g.
 `args: ["python", "-m", "collector.leanix", "--tenant", "<uuid>"]` (also
 `collector.servicenow`, `collector.cloud_inventory`; the Microsoft Sentinel
-export takes `python -m collector.sentinel_export --all-tenants`). One-off maintenance
+export takes `python -m collector.sentinel_export --all-tenants`, the Splunk
+HEC / syslog / webhook SIEM export `python -m collector.siem_export --all-tenants`). One-off maintenance
 (`collector.reembed`, `collector.dedup`, `collector.webhooks rekey`) is best
 run with `kubectl create job --from=cronjob/...` or a temporary pod. The
 chart refuses to render webhook delivery or the provider pull in both the
@@ -254,7 +255,7 @@ and counted in `ps_collector_rate_limit_store_errors`.
 Operators can override a tenant's ingest limits in
 `settings.ingest_rate_limits` with `PATCH /api/v1/operator/tenants/{id}`,
 e.g. `{"settings": {"ingest_rate_limits": {"events": 1000}}}` (keys
-`events`, `kong`, `mcp`, `feedback`, `feedback_user`; `null` removes the
+`events`, `kong`, `mcp`, `feedback`, `feedback_user`, `security_events`; `null` removes the
 override). Each process caches overrides for
 `PS_TENANT_LIMITS_CACHE_TTL_SECONDS` (default 30).
 
@@ -328,9 +329,9 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
   it with the drain timeout.
 - Pin images by digest with `gateway.image.digest` / `collector.image.digest`.
 - Tenant admin routes (`/api/v1/admin/*`) accept scoped admin tokens only
-  (`PS_ADMIN_REQUIRE_SCOPED_TOKENS`, default `true` since 0.4.15).
+  (`PS_ADMIN_REQUIRE_SCOPED_TOKENS`, default `true` since 0.4.16).
 
-### To 0.4.15: scoped admin tokens required
+### To 0.4.16: scoped admin tokens required
 
 The collector now ships roles (principals, teams, projects, memberships;
 migration `039`), and `PS_ADMIN_REQUIRE_SCOPED_TOKENS` defaults to `true`:
@@ -580,7 +581,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_DATABASE_URL` (secret) | — | Application role URL (migration Job: owner role URL) |
 | `PS_PARTNER_JWT_SECRET` (secret) | development value | Partner token signing key |
 | `PS_ADMIN_TOKEN` (secret) | empty (off) | Operator endpoints `/api/v1/operator/*` |
-| `PS_ADMIN_REQUIRE_SCOPED_TOKENS` | `true` (since chart 0.4.15) | Tenant admin routes (`/api/v1/admin/*`) take only scoped admin tokens and refuse tenant ingest keys. `false` lets ingest keys back onto every admin route but member management. Set it in `collector.config`; see "To 0.4.15: scoped admin tokens required" |
+| `PS_ADMIN_REQUIRE_SCOPED_TOKENS` | `true` (since chart 0.4.16) | Tenant admin routes (`/api/v1/admin/*`) take only scoped admin tokens and refuse tenant ingest keys. `false` lets ingest keys back onto every admin route but member management. Set it in `collector.config`; see "To 0.4.16: scoped admin tokens required" |
 | `PS_RLS_REQUIRED` (*chart*) | `true` in the chart | Refuse to start unless RLS binds the role |
 | `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `true`; the chart sets `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob | Background loops in the API process |
 | `PS_COLLECTOR_METRICS_ENABLED` (*chart*) | `false` | Prometheus `/metrics` |
@@ -591,6 +592,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_KONG_RATE_LIMIT_PER_MINUTE` | `6000` | Per-tenant `/ingest/kong` limit, counted apart |
 | `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart |
 | `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE` | `600`, `30` | `/ingest/feedback` limits per tenant and per `user_id` |
+| `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant limit on `/ingest/security-events` and `/ingest/otel/v1/logs`, counted apart |
 | `PS_COLLECTOR_REDIS_URL` (*config* or secret) | empty (per process) | Redis shared by the partner and ingest rate limiters, e.g. `redis://redis:6379/0` |
 | `PS_COLLECTOR_REDIS_TIMEOUT_SECONDS`, `PS_COLLECTOR_REDIS_KEY_PREFIX` | `0.5`, `ps:collector:rl` | Redis call deadline before the per-process fallback; key prefix |
 | `PS_TENANT_LIMITS_CACHE_TTL_SECONDS` | `30` | Per-process cache of tenant ingest limit overrides |
@@ -613,6 +615,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_LEANIX`, `PS_LEANIX_ALLOWED_HOST_SUFFIXES` | — | LeanIX connector (JSON config is secret) |
 | `PS_SERVICENOW`, `PS_SERVICENOW_ALLOWED_HOST_SUFFIXES` | — | ServiceNow connector |
 | `PS_SENTINEL_EXPORT` | — | Microsoft Sentinel / Defender XDR export (Logs Ingestion API), per tenant; secret |
+| `PS_SIEM_EXPORT` | — | Splunk HEC, syslog (CEF/JSON over TLS) and webhook SIEM export, per tenant; secret |
 | `PS_CLOUD_INVENTORY` (secret) | — | Cloud inventory connector |
 | `HOME`, `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED` (*chart*) | `/tmp`, `1`, `1` | Read-only root filesystem |
 

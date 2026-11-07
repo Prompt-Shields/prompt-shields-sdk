@@ -121,7 +121,7 @@ curl -sS -X POST "$PS_COLLECTOR/api/v1/operator/tokens" \
 | `operator:retention` | Tenant retention and the usage-event purge |
 | `operator:erase` | Tenant erasure |
 | `operator:audit` | `GET /api/v1/operator/audit/verify` |
-| `operator:integrations` | Provider usage pulls, cloud inventory, LeanIX, ServiceNow and Sentinel operator routes |
+| `operator:integrations` | Provider usage pulls, cloud inventory, LeanIX, ServiceNow, Sentinel and SIEM (Splunk HEC, syslog, webhook) operator routes |
 | `operator:tokens` | Issue, rotate and revoke operator tokens, only those whose scopes the caller holds |
 
 The token (`ps-ot-...`) is shown once. Rotate it with `POST /api/v1/operator/tokens/{id}/rotate` (the old secret stops at once) and revoke it with `DELETE /api/v1/operator/tokens/{id}`. Names are never reused, so an audit row's actor names one token for good. A named token can only issue, rotate or revoke a token whose scopes it holds (403 otherwise), and a token it issues or rotates expires no later than itself: an omitted or later `expires_at` is capped to the caller's own (`PS_ADMIN_TOKEN` is not bounded). Issue, rotate and revoke are audited as `operator_token.issue|rotate|revoke`; a refused attempt is the same action with outcome `failure`, and a capped expiry sets `details.expiry_capped`. Named tokens keep working with `PS_ADMIN_TOKEN` unset. Each operator operation in the OpenAPI spec names its scope in `x-operator-scope`.

@@ -376,6 +376,10 @@ const SCHEMAS: Record<string, string> = {
   AuditTrailEvent: 'AuditTrailEvent',
   AuditTrailPageMeta: 'AuditTrailPageMeta',
   AuditTrailPage: 'AuditTrailPage',
+  // Gateway security events (client.securityEvents).
+  SecurityEventRow: 'SecurityEventRow',
+  SecurityEventPageMeta: 'SecurityEventPageMeta',
+  SecurityEventPage: 'SecurityEventPage',
 };
 /**
  * Schemas whose property names the SDK keeps as sent (not camelCased):
@@ -438,6 +442,8 @@ const UNMAPPED_SCHEMAS = new Set([
   'UpdateProjectRequest',
   'CreateMembershipRequest',
   'UpdateMembershipRequest',
+  // Security event ingest (#353): ingest-key route, not wrapped.
+  'SecurityEventIngestResult',
 ]);
 
 interface Operation {
@@ -607,6 +613,20 @@ const OPERATIONS: Record<string, Operation> = {
   // Erasure by end user (#353): tenant admin, not wrapped.
   'POST /api/v1/admin/users/erase': NOT_WRAPPED,
   'DELETE /api/v1/admin/users/{user_id_hash}/data': NOT_WRAPPED,
+  // Gateway security events (#353): client.securityEvents; ingest and the
+  // SIEM connector operator routes are not wrapped.
+  'GET /partner/v1/security-events': {
+    methods: ['securityEvents.list', 'securityEvents.listPage'],
+    params: 'ListSecurityEventsParams',
+  },
+  'POST /ingest/security-events': NOT_WRAPPED,
+  'POST /ingest/otel/v1/logs': NOT_WRAPPED,
+  'POST /api/v1/admin/connectors/splunk-hec/sync': NOT_WRAPPED,
+  'GET /api/v1/admin/connectors/splunk-hec/status': NOT_WRAPPED,
+  'POST /api/v1/admin/connectors/syslog/sync': NOT_WRAPPED,
+  'GET /api/v1/admin/connectors/syslog/status': NOT_WRAPPED,
+  'POST /api/v1/admin/connectors/webhook/sync': NOT_WRAPPED,
+  'GET /api/v1/admin/connectors/webhook/status': NOT_WRAPPED,
   'GET /api/v1/operator/tenants': NOT_WRAPPED,
   'POST /api/v1/operator/tenants': NOT_WRAPPED,
   'GET /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,

@@ -34,8 +34,10 @@ from collector import (
     rbac_admin,
     risk_reviews,
     risk_suggestions,
+    security_events,
     sentinel_export,
     servicenow,
+    siem_export,
     tenant_keys,
     user_erasure,
     webhook_admin,
@@ -338,6 +340,7 @@ ADMIN_ROUTERS = (
     servicenow.router,
     sentinel_export.router,
     rbac_admin.router,
+    siem_export.router,
     operator_admin.router,
     user_erasure.router,
 )
@@ -647,3 +650,27 @@ def test_partner_member_routes_need_members_read():
         assert SPEC["paths"][path]["get"]["security"][0] == {"OAuth2": ["members:read"]}
     scopes = SPEC["components"]["securitySchemes"]["OAuth2"]["flows"]["clientCredentials"]["scopes"]
     assert "members:read" in scopes
+
+
+def test_security_event_schemas_match_serializers():
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        event_id="e-1",
+        name="injection.detected",
+        occurred_at=datetime.now(UTC),
+        received_at=datetime.now(UTC),
+        status_code=None,
+        attributes={},
+        **dict.fromkeys(security_events.STRING_COLUMNS.values()),
+    )
+    payload = security_events.security_event_payload(row)
+    assert _props("SecurityEventRow") == set(payload)
+    assert set(SCHEMAS["SecurityEventRow"]["required"]) == set(payload)
+    result = security_events.IngestResult().as_dict()
+    assert _props("SecurityEventIngestResult") == set(result)
+    assert set(SCHEMAS["SecurityEventIngestResult"]["required"]) == set(result)
+    op = SPEC["paths"]["/partner/v1/security-events"]["get"]
+    assert op["security"][0] == {"OAuth2": ["security-events:read"]}
+    for path in ("/ingest/security-events", "/ingest/otel/v1/logs"):
+        assert SPEC["paths"][path]["post"]["security"] == [{"TenantApiKey": []}]

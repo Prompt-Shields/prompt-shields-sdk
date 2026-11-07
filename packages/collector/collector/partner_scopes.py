@@ -87,6 +87,11 @@ SCOPES: dict[str, str] = {
         "jurisdiction, policy version, sensitivity) as NDJSON from /siem/calls"
     ),
     "members:read": "List the tenant's teams and projects (/teams, /projects)",
+    "security-events:read": (
+        "List the gateway security events stored for the tenant (guardrail "
+        "verdicts, PII and injection detections, auth failures, policy "
+        "denials, rate limits, payload rejections) from /security-events"
+    ),
 }
 
 # What `registry:read` meant in Phase 1: every read route. Frozen on

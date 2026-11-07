@@ -33,6 +33,7 @@ from db.models import (
     Base,
     CallFeedback,
     DataFlow,
+    GatewaySecurityEvent,
     LearnerRecommendation,
     LearnerSnapshot,
     McpToolUsage,
@@ -219,6 +220,12 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 ),
                 _audit_seed(tenant_id),
                 TenantSecret(tenant_id=tenant_id, user_id_salt=f"seed-salt-{name}"),
+                GatewaySecurityEvent(
+                    tenant_id=tenant_id,
+                    event_id=f"seed-{name}",
+                    name="auth.failure",
+                    occurred_at=datetime.now(UTC),
+                ),
                 UsageRollupHourly(
                     tenant_id=tenant_id,
                     bucket_start=datetime(2026, 1, 1, 12, tzinfo=UTC),
