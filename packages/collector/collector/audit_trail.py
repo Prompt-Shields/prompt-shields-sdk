@@ -14,6 +14,9 @@ module records *changes* and security events in ``audit_events``:
   registry.merge_assets                         (duplicate asset merge)
   registry.risk_review                          (risk mapping confirmed/rejected)
   learner.snapshot_upload|learner.recommendation_review   (routing learner)
+  policy.create|update|delete|version_create|activate   (governance policies,
+                                                #340: versions and SHA-256
+                                                before/after)
   operator.access                               (named operator token, #341)
   operator.break_glass                          (PS_ADMIN_TOKEN, every use)
   operator_token.issue|rotate|revoke            (named operator tokens)

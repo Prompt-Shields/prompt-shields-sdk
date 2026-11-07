@@ -45,6 +45,7 @@ import {
   servedTargetOf,
 } from './psServedTarget';
 import { RoutePolicy } from './router/types';
+import { activePolicyVersion } from './policyPull/state';
 import {
   COST_SOURCE_CACHE,
   COST_SOURCE_PROVIDER_REPORTED,
@@ -113,6 +114,10 @@ interface TelemetryEvent {
   // the call's tokens would have cost on its baseline model, in USD.
   baseline_id?: string;
   counterfactual_cost?: number;
+  // The governance policy in force (#340): the central policy's version
+  // (`default@3+team-eu@2`) when the collector's policy is active, else the
+  // route policy file's policy_version.
+  policy_version?: string;
   // Response cache (#33): the call's lookup, see cacheLookupFields.
   cache_status?: string;
   est_tokens_saved?: number;
@@ -510,11 +515,18 @@ function extractPSHeaders(
  * and loss accounting are in psTelemetrySender; this never rejects.
  */
 async function sendTelemetry(event: TelemetryEvent): Promise<void> {
-  const priced = withBaseline(event);
+  const priced = withPolicyVersion(withBaseline(event));
   // ps_gateway_cost_usd_total (#346): the same cost the collector receives.
   recordCost(priced);
   // Fail-open: never block LLM requests due to telemetry issues
   await psTelemetrySender.send(priced);
+}
+
+/** The event with `policy_version` (#340) when a policy version is known. */
+export function withPolicyVersion(event: TelemetryEvent): TelemetryEvent {
+  if (event.policy_version) return event;
+  const version = activePolicyVersion();
+  return version ? { ...event, policy_version: version } : event;
 }
 
 /**

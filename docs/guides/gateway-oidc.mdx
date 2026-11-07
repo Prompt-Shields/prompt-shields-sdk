@@ -39,7 +39,7 @@ An invalid configuration never falls back to "open": every protected route answe
 | `PS_OIDC_ALGORITHMS` | `RS256,RS384,RS512,PS256,PS384,PS512,ES256,ES384,ES512` | Accepted `alg` values. Asymmetric only (`EdDSA` may be added); `none` and `HS*` are refused at startup. |
 | `PS_OIDC_CLOCK_SKEW_SECONDS` | `60` | Tolerance for `exp` and `nbf` (0-300). |
 | `PS_OIDC_GROUPS_CLAIM` | `groups` | Claim holding the user's groups or roles. A dotted path works, e.g. `realm_access.roles`. |
-| `PS_OIDC_POLICY` | unset | The group policy (JSON, below), or the path of a file containing it. Unset: authentication only, every valid token is allowed. |
+| `PS_OIDC_POLICY` | unset | The group policy (JSON, below), or the path of a file containing it. Unset: authentication only, every valid token is allowed. With the [central policy](/guides/central-policy) pull on, its `access` section replaces this while it is active. |
 | `PS_OIDC_PROVIDER_KEYS` | unset | **Secret.** JSON object of provider to API key, e.g. `{"openai":"sk-...","anthropic":"sk-ant-..."}`, or a file path. See [Provider credentials](#provider-credentials). |
 | `PS_OIDC_TELEMETRY_SUBJECT` | `hash` | What identifies the user in telemetry: `hash` (pseudonym), `raw` (the `sub` claim) or `off`. |
 | `PS_OIDC_SUBJECT_SALT` | unset | **Secret.** Key for the subject pseudonym (HMAC-SHA-256). Recommended; without it the pseudonym is a plain SHA-256 of issuer and subject, which anyone who can guess a subject (an email address, an employee id) can recompute and match. |

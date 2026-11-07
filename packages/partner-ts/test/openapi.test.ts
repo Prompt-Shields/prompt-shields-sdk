@@ -447,6 +447,19 @@ const UNMAPPED_SCHEMAS = new Set([
   'UpdateMembershipRequest',
   // Security event ingest (#353): ingest-key route, not wrapped.
   'SecurityEventIngestResult',
+  // Central governance policy (#340): tenant admin routes and the gateway's
+  // ingest-key policy pull, not wrapped.
+  'Policy',
+  'PolicyWithDocument',
+  'PolicyDocument',
+  'PolicyVersionSummary',
+  'PolicyVersion',
+  'CreatePolicyRequest',
+  'UpdatePolicyRequest',
+  'CreatePolicyVersionRequest',
+  'ActivatePolicyRequest',
+  'EffectivePolicy',
+  'PolicyBundle',
 ]);
 
 interface Operation {
@@ -598,6 +611,17 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /api/v1/admin/memberships/{membership_id}': NOT_WRAPPED,
   'PATCH /api/v1/admin/memberships/{membership_id}': NOT_WRAPPED,
   'DELETE /api/v1/admin/memberships/{membership_id}': NOT_WRAPPED,
+  'POST /api/v1/admin/policies': NOT_WRAPPED,
+  'GET /api/v1/admin/policies': NOT_WRAPPED,
+  'GET /api/v1/admin/policies/{policy_id}': NOT_WRAPPED,
+  'PATCH /api/v1/admin/policies/{policy_id}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/policies/{policy_id}': NOT_WRAPPED,
+  'POST /api/v1/admin/policies/{policy_id}/versions': NOT_WRAPPED,
+  'GET /api/v1/admin/policies/{policy_id}/versions': NOT_WRAPPED,
+  'GET /api/v1/admin/policies/{policy_id}/versions/{version}': NOT_WRAPPED,
+  'POST /api/v1/admin/policies/{policy_id}/activate': NOT_WRAPPED,
+  'GET /api/v1/admin/policy/effective': NOT_WRAPPED,
+  'GET /api/v1/policy/effective': NOT_WRAPPED,
   'GET /partner/v1/spend-alerts/{alert_id}': { methods: ['spendAlerts.get'] },
   'POST /partner/v1/spend-alerts/{alert_id}/acknowledge': { methods: ['spendAlerts.acknowledge'] },
   'POST /api/v1/admin/provider-usage/pull': NOT_WRAPPED,

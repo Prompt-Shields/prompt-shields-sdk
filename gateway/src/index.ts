@@ -16,7 +16,8 @@ import { requestValidator } from './middlewares/requestValidator';
 import { hooks } from './middlewares/hooks';
 import { memoryCache } from './middlewares/cache';
 import { psRouter } from './middlewares/router/hono';
-import { loadedRoutePolicy } from './middlewares/router/policyDoc';
+import { defaultPolicy } from './middlewares/router/policy';
+import { activeRoutePolicy } from './middlewares/policyPull/state';
 import { psBudget } from './middlewares/psBudget';
 import { budgetsRequested } from './middlewares/psBudget/config';
 import { psTelemetry } from './middlewares/ps-telemetry';
@@ -160,8 +161,23 @@ app.post('/v1/feedback', psFeedbackHandler);
 // document (loaded and validated by start-server.ts before serving, so its
 // data policy gate applies to every model call); otherwise PS_ROUTER_ENABLED
 // mounts it with the built-in policy.
+// PS_POLICY_PULL_ENABLED (#340): a central `route` section from the collector
+// replaces either while it is active; with neither and no central route
+// policy, calls pass through untouched (as without the router).
 if (process.env.PS_ROUTE_POLICY_FILE) {
-  app.use('*', psRouter(loadedRoutePolicy));
+  app.use('*', psRouter(activeRoutePolicy));
+} else if (
+  ['true', '1', 'yes'].includes(
+    (process.env.PS_POLICY_PULL_ENABLED ?? '').trim().toLowerCase()
+  )
+) {
+  const routerEnabled = process.env.PS_ROUTER_ENABLED === 'true';
+  const router = psRouter(
+    () => activeRoutePolicy() ?? (routerEnabled ? defaultPolicy : undefined)
+  );
+  app.use('*', (c, next) =>
+    activeRoutePolicy() || routerEnabled ? router(c, next) : next()
+  );
 } else if (process.env.PS_ROUTER_ENABLED === 'true') {
   app.use('*', psRouter());
 }

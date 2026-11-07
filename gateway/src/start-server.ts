@@ -23,6 +23,10 @@ import { loadMcpServersFromEnv } from './mcp/loadConfig';
 import { loadBaselineFromEnv } from './middlewares/router/baselineLoader';
 import { loadBudgetsFromEnv } from './middlewares/psBudget/loader';
 import { loadRoutePolicyFromEnv } from './middlewares/router/policyFileLoader';
+import {
+  policyPullConfig,
+  startPolicyPull,
+} from './middlewares/policyPull/puller';
 import { psMcpTelemetrySender } from './mcp/telemetry';
 
 // Extract the port number from the command line arguments
@@ -78,6 +82,26 @@ try {
     );
 } catch (err) {
   console.error(`Route policy error: ${(err as Error).message}`);
+  process.exit(1);
+}
+// PS fork (#340): the central policy from the collector. A bad setting stops
+// the gateway; an unreachable collector or a malformed policy does not (the
+// local policy settings apply until a valid central policy arrives, and the
+// last good one stays active after that).
+try {
+  const pullConfig = policyPullConfig();
+  if (pullConfig) {
+    console.log(
+      `Central policy: polling ${pullConfig.url} every ${pullConfig.intervalMs / 1000}s`
+    );
+    await startPolicyPull(pullConfig, {
+      oidcEnabled: ['true', '1', 'yes'].includes(
+        (process.env.PS_OIDC_ENABLED ?? '').trim().toLowerCase()
+      ),
+    });
+  }
+} catch (err) {
+  console.error(`Central policy error: ${(err as Error).message}`);
   process.exit(1);
 }
 const hasAdminToken = Boolean(readAdminToken());

@@ -213,7 +213,8 @@ def test_migration_revision_chain():
     assert set(m.TABLES) == {"principals", "teams", "projects", "memberships"}
     # Full-admin tokens stay full admin (like 038 did for admin:privacy).
     assert m.NEW_SCOPE == "admin:members"
-    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == set(ADMIN_SCOPES)
+    # admin:policies came later (043, #340).
+    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == set(ADMIN_SCOPES) - {"admin:policies"}
 
 
 # ──────────────────────────────────────────────────────────────────────

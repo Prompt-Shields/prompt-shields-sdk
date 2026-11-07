@@ -11,6 +11,7 @@ import {
   targetModels,
 } from './identity';
 import { TokenError, verifyToken } from './jwks';
+import { centralAccessPolicy } from '../policyPull/state';
 import {
   groupsFromClaims,
   hasGroupsOverage,
@@ -174,12 +175,15 @@ export function psOidc() {
       config,
     };
 
-    if (config.policy) {
+    // PS fork (#340): the central `access` section, when the collector's
+    // policy has one, replaces PS_OIDC_POLICY.
+    const policy = centralAccessPolicy() ?? config.policy;
+    if (policy) {
       identity.group = matchGroup(
-        config.policy,
+        policy,
         groupsFromClaims(payload, config.groupsClaim)
       );
-      if (!identity.group && config.policy.defaultAction === 'deny')
+      if (!identity.group && policy.defaultAction === 'deny')
         return policyDeniedResponse(
           c,
           identity,

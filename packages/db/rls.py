@@ -67,6 +67,8 @@ TENANT_TABLES: dict[str, str] = {
     "teams": "tenant_id",
     "projects": "tenant_id",
     "memberships": "tenant_id",
+    "policies": "tenant_id",
+    "policy_versions": "tenant_id",
 }
 
 

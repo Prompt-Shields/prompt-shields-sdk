@@ -13,9 +13,10 @@ take ``admin:read``.
                                            and partner credentials
   POST   /teams | GET /teams               create | list
   GET | PATCH | DELETE /teams/{id}         read | rename | delete (409 while
-                                           it has projects)
+                                           it has projects or a policy, #340)
   POST   /projects | GET /projects         create | list (?team_id=)
-  GET | PATCH | DELETE /projects/{id}      read | rename or move | delete
+  GET | PATCH | DELETE /projects/{id}      read | rename or move | delete (409
+                                           while it has a policy, #340)
   POST   /memberships | GET /memberships   grant a role | list (?principal_id=,
                                            ?team_id=, ?project_id=)
   GET | PATCH | DELETE /memberships/{id}   read | change role | remove
@@ -53,6 +54,7 @@ from db.models import (
     AdminToken,
     Membership,
     PartnerCredential,
+    Policy,
     Principal,
     Project,
     Team,
@@ -168,6 +170,13 @@ async def _get(db: AsyncSession, model, tenant_id: UUID, row_id: UUID, what: str
     if row is None:
         raise _problem(404, "Not Found", f"{what} not found")
     return row
+
+
+async def _no_policy(db: AsyncSession, bound, what: str) -> None:
+    """409 while a governance policy (#340) is bound to the team or project:
+    deleting it would drop that policy without its own audited delete."""
+    if (await db.execute(select(Policy.name).where(bound))).first() is not None:
+        raise _problem(409, "Conflict", f"Delete the {what}'s policy first (DELETE /policies/{{id}})")
 
 
 def _check_can_grant(principal: AdminPrincipal, role: str) -> None:
@@ -660,6 +669,7 @@ async def delete_team(
     ).first()
     if has_projects is not None:
         raise _problem(409, "Conflict", "Delete or move the team's projects first")
+    await _no_policy(db, Policy.team_id == row.id, "team")
     memberships = (
         (await db.execute(select(Membership).where(Membership.team_id == row.id)))
         .scalars()
@@ -831,6 +841,7 @@ async def delete_project(
     """Its memberships go with it."""
     db = request.state.db
     row = await _get(db, Project, principal.tenant_id, project_id, "Project")
+    await _no_policy(db, Policy.project_id == row.id, "project")
     memberships = (
         (await db.execute(select(Membership).where(Membership.project_id == row.id)))
         .scalars()
