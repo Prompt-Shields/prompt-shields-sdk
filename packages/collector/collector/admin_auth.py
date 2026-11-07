@@ -11,8 +11,8 @@ Every tenant admin route declares one scope from `ADMIN_SCOPES` with
     Terraform, CI and other automation.
   - a tenant ingest key (the key the SDK sends), only while
     ``PS_ADMIN_REQUIRE_SCOPED_TOKENS=false``: the scopes in
-    ``TENANT_KEY_SCOPES``, i.e. every admin route that existed before roles
-    (#338). Member management (``admin:members``) is never reachable with
+    ``TENANT_KEY_SCOPES``, i.e. every admin scope but member management
+    (#338): ``admin:members`` is never reachable with
     an ingest key. Only a key holding every ingest key scope (tenant_keys
     ALL_KEY_SCOPES: every key from before scopes existed, #341) gets in; a
     narrowed key, such as a new ``ingest:write``-only key, is refused (403).
@@ -90,26 +90,20 @@ ADMIN_SCOPES: dict[str, str] = {
     "admin:registry": (
         "Run the asset lifecycle sweep and risk suggestions, and review risk mappings"
     ),
+    "admin:privacy": (
+        "Erase an end user's identifiers from usage events, call feedback and "
+        "MCP usage (erasure by user)"
+    ),
     "admin:members": (
         "Manage principals, teams, projects and role memberships (granting a "
         "role needs every admin scope it carries; the owner role needs an owner)"
     ),
 }
 
-# What a tenant ingest key reaches while PS_ADMIN_REQUIRE_SCOPED_TOKENS is
-# off: the admin scopes that existed before roles (#338). Frozen on purpose,
-# like partner_scopes.LEGACY_REGISTRY_READ; new admin scopes never join it.
-TENANT_KEY_SCOPES: frozenset[str] = frozenset(
-    {
-        "admin:read",
-        "admin:keys",
-        "admin:tokens",
-        "admin:provider-credentials",
-        "admin:webhooks",
-        "admin:partners",
-        "admin:registry",
-    }
-)
+# What a full-scope tenant ingest key reaches while
+# PS_ADMIN_REQUIRE_SCOPED_TOKENS is off: every admin scope but member
+# management (#338), which only admin tokens get.
+TENANT_KEY_SCOPES: frozenset[str] = frozenset(ADMIN_SCOPES) - {"admin:members"}
 
 READ_SCOPE = "admin:read"
 _READ_METHODS = frozenset({"GET", "HEAD"})

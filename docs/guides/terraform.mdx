@@ -64,7 +64,7 @@ The collector has four kinds of credential. Tenant Terraform should only ever ho
 |------------|---------|------------------|
 | `PS_ADMIN_TOKEN` (operator, break-glass) | `/api/v1/operator/*` and operator pulls, across every tenant, bypassing row-level security. Every use is audited as `operator.break_glass` | No: use it to issue named operator tokens, then keep it for emergencies (or unset it) |
 | Named operator token (`ps-ot-...`) | The operator routes its scopes allow, across every tenant; every action is attributed to the token's name in the audit trail | Only in a separate platform workspace that creates tenants |
-| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | What its scopes allow: `ingest:write`, `registry:read`, `registry:attest`. A key holding all three (every key from before scopes existed) also reaches the pre-roles `/api/v1/admin` routes, but only with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` (default `true`) | No: it is what SDKs and gateways send |
+| Tenant ingest key (`ps-ik-...`, or a key from before admin tokens) | What its scopes allow: `ingest:write`, `registry:read`, `registry:attest`. A key holding all three (every key from before scopes existed) also reaches every `/api/v1/admin` route but member management, but only with `PS_ADMIN_REQUIRE_SCOPED_TOKENS=false` (default `true`) | No: it is what SDKs and gateways send |
 | Admin token (`ps-at-...`) | `/api/v1/admin` routes allowed by its scopes, for one tenant | Yes |
 
 ### Ingest key scopes
@@ -88,6 +88,7 @@ Admin token scopes:
 | `admin:webhooks` | Webhook subscriptions and redelivery |
 | `admin:partners` | Partner API credentials |
 | `admin:registry` | Lifecycle sweep, risk suggestions, risk reviews |
+| `admin:privacy` | Erase an end user's identifiers (`/api/v1/admin/users/...`) |
 | `admin:members` | Principals, teams, projects and role memberships |
 
 Each operation in the OpenAPI spec names its scope in `x-admin-scope`.

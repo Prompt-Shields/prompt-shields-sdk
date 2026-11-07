@@ -50,6 +50,7 @@ _ALL_ADMIN = (
     "admin:webhooks",
     "admin:partners",
     "admin:registry",
+    "admin:privacy",
     "admin:members",
 )
 

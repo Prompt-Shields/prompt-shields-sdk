@@ -18,10 +18,16 @@ unchanged.
 Each new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Follows 037 (ingest key scopes and operator tokens, #341).
+The new admin scope ``admin:members`` is granted to every admin token that
+holds all eight admin scopes that existed before it (like 038 did for
+``admin:privacy``): those tokens were full admin and stay full admin, which
+also lets them create a tenant's first owner. Narrower tokens are unchanged.
+Downgrade removes ``admin:members`` from every token.
 
-Revision ID: 038
-Revises: 037
+Follows 038 (admin:privacy, #353).
+
+Revision ID: 039
+Revises: 038
 Create Date: 2026-11-06
 """
 
@@ -31,12 +37,29 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "038"
-down_revision: str | None = "037"
+revision: str = "039"
+down_revision: str | None = "038"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 POLICY = "tenant_isolation"
+NEW_SCOPE = "admin:members"
+# Every admin scope before admin:members (frozen here, not imported).
+PREVIOUS_SCOPES = (
+    "admin:read",
+    "admin:keys",
+    "admin:tokens",
+    "admin:provider-credentials",
+    "admin:webhooks",
+    "admin:partners",
+    "admin:registry",
+    "admin:privacy",
+)
+
+
+def _bypass() -> None:
+    # admin_tokens is under FORCE ROW LEVEL SECURITY (binds the owner too).
+    op.execute("SELECT set_config('app.rls_bypass', 'migration-039', true)")
 TABLES = ("principals", "teams", "projects", "memberships")
 
 
@@ -179,8 +202,21 @@ def upgrade() -> None:
             "END IF; END $$"
         )
 
+    _bypass()
+    previous = ",".join(PREVIOUS_SCOPES)
+    op.execute(
+        f"UPDATE admin_tokens SET scopes = array_append(scopes, '{NEW_SCOPE}') "
+        f"WHERE scopes @> '{{{previous}}}'::text[] "
+        f"AND NOT ('{NEW_SCOPE}' = ANY(scopes))"
+    )
+
 
 def downgrade() -> None:
+    _bypass()
+    op.execute(
+        f"UPDATE admin_tokens SET scopes = array_remove(scopes, '{NEW_SCOPE}') "
+        f"WHERE '{NEW_SCOPE}' = ANY(scopes)"
+    )
     for table in ("partner_credentials", "admin_tokens"):
         op.drop_constraint(f"fk_{table}_principal_id", table, type_="foreignkey")
         op.drop_column(table, "principal_id")

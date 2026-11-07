@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     # Tenant admin routes (/api/v1/admin/*): refuse tenant ingest keys and
     # accept only scoped admin tokens (PS_ADMIN_REQUIRE_SCOPED_TOKENS). On by
     # default since roles shipped (#338); false restores ingest-key access to
-    # the pre-roles admin routes. See collector/admin_auth.py.
+    # every admin route but member management. See collector/admin_auth.py.
     admin_require_scoped_tokens: bool = True
     # Serve FastAPI's /docs, /redoc and /openapi.json
     # (PS_COLLECTOR_API_DOCS_ENABLED). Off by default: they are

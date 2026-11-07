@@ -17,7 +17,8 @@ Retention
 Erasure
     :func:`erase_tenant` removes every row that belongs to one tenant, then
     the tenant itself (GDPR right to erasure). It is batched and can be rerun
-    after a partial failure.
+    after a partial failure. Erasing one end user of a tenant is
+    collector.user_erasure.
 
 Every statement is filtered on ``tenant_id``; nothing here can reach another
 tenant's rows. Every purge that deletes rows, and every erasure, writes a

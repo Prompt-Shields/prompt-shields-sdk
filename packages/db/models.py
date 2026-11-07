@@ -400,7 +400,7 @@ class AdminToken(Base):
     revoked_at = Column(TIMESTAMP(timezone=True))
     # Issued for a principal (#338): the token then reaches at most what the
     # principal's tenant-wide roles grant now (collector/rbac.py). NULL for
-    # automation tokens that belong to no one (every token before 038).
+    # automation tokens that belong to no one (every token before 039).
     principal_id = Column(
         UUID(as_uuid=True), ForeignKey("principals.id", ondelete="SET NULL")
     )

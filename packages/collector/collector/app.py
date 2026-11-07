@@ -237,6 +237,14 @@ from collector.admin_api import router as admin_api_router
 
 app.include_router(admin_api_router)
 
+# Erasure by end user (#353, admin:privacy) and the tenant audit trail read
+# API (/partner/v1/audit, audit:read)
+from collector.audit_api import partner_router as audit_partner_router
+from collector.user_erasure import router as user_erasure_router
+
+app.include_router(user_erasure_router)
+app.include_router(audit_partner_router)
+
 # RBAC: principals, teams, projects and role memberships (collector/rbac.py)
 from collector.rbac_admin import partner_router as rbac_partner_router
 from collector.rbac_admin import router as rbac_admin_router

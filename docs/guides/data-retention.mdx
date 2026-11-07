@@ -75,7 +75,29 @@ Usage events can carry a `user_id`: the gateway's OIDC subject (see [Gateway OID
 
 The setting applies to events ingested afterwards; stored events are not rewritten. Events also keep `user_group`, `trace_id`, `retry_count`, `attempts` (per-attempt provider, model, status, latency and error class, never content) and the `stream_truncated` / `stream_cancelled` flags.
 
+## Erasing one end user
+
+A tenant erases what the collector holds about one of its end users with the tenant admin API (admin token scope `admin:privacy`, or the tenant API key while `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off):
+
+| Method | Path | Body | Reaches |
+|--------|------|------|---------|
+| `POST` | `/api/v1/admin/users/erase` | `{"user_id": "<id as the gateway or SDK sent it>"}` | usage events, call feedback, MCP tool usage |
+| `DELETE` | `/api/v1/admin/users/{user_id_hash}/data` | none | usage events |
+
+Send the raw id in the POST body, not in a URL, so it never lands in an access log. The collector hashes it with the tenant's salt; it never creates or rotates the salt for an erasure. Admin tokens that held every admin scope before `admin:privacy` existed are given it by migration `038`.
+
+What changes, in the caller's tenant only:
+
+- **Usage events** of the user (matched by `user_id_hash`; an event with `user_id_raw` always has the hash too): `user_id_hash`, `user_id_raw`, `session_id` and `prompt_hash` (a SHA-256 of the prompt text) are set to null. Model, tokens, cost and routing metadata stay, so spend reports do not change; the rows no longer say whose they were.
+- **Call feedback** with `user_id` equal to the id as sent: `user_id` is set to null. The score stays.
+- **MCP tool usage** rows for the id: merged into the row for the same tool with no user, so the counts stay.
+
+Call feedback and MCP usage store the id as the gateway sent it, so only the POST form reaches them.
+
+The response gives the user's salted hash (`user_id_hash`, null if the tenant never stored a user id), per-table counts in `rows_erased` and the audit row's id. The erasure runs immediately, in batches. It is idempotent: a repeat reports zeros. Every request, including a repeat, writes a `user.erase` row to the tenant's [audit trail](/guides/audit-trail) (target: the salted hash, details: the counts) and an `erase_user` row to `retention_audit_log`. Counts only ever cover the caller's tenant, so the answer does not reveal whether another tenant has seen the same id.
+
+Events that arrive after the erasure are stored as usual, so stop sending the id first. Copies already sent elsewhere (webhook receivers, Microsoft Sentinel or another SIEM) are outside the collector: erase them there.
+
 ## Not yet covered
 
-- **Erasure by end user.** Events store `user_id_hash` (and `user_id_raw` when enabled), but there is no delete-by-user endpoint yet.
 - Retention for `partner_audit_log`, which is kept until the tenant is erased.

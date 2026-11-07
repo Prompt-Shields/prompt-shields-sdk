@@ -201,14 +201,17 @@ def test_migration_revision_chain():
         / "db"
         / "alembic"
         / "versions"
-        / "038_rbac_principals.py"
+        / "039_rbac_principals.py"
     )
-    spec = importlib.util.spec_from_file_location("migration_038", path)
+    spec = importlib.util.spec_from_file_location("migration_039", path)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    assert m.revision == "038"
-    assert m.down_revision == "037"
+    assert m.revision == "039"
+    assert m.down_revision == "038"
     assert set(m.TABLES) == {"principals", "teams", "projects", "memberships"}
+    # Full-admin tokens stay full admin (like 038 did for admin:privacy).
+    assert m.NEW_SCOPE == "admin:members"
+    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == set(ADMIN_SCOPES)
 
 
 # ──────────────────────────────────────────────────────────────────────
