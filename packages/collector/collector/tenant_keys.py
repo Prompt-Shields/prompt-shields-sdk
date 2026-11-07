@@ -24,9 +24,12 @@ ingest), ``registry:read`` (the /api/v1/registry reads and
 /telemetry/loss), ``registry:attest`` (POST attestations) and
 ``policy:read`` (the gateway's policy pull, GET /api/v1/policy/effective,
 #340). Keys that existed before migration 037, and a legacy key on the
-tenant row, hold all of them (migration 043 gave ``policy:read`` to every
-key holding the other three), so nothing breaks on upgrade. Holding the
-first three (``ALL_KEY_SCOPES``) is what makes a key "full". A key issued since holds
+tenant row, hold the first three (``ALL_KEY_SCOPES``), so nothing breaks on
+upgrade; holding them is what makes a key "full". ``policy:read`` is never
+granted implicitly (not by migration, not to a legacy key): the compiled
+policy names the tenant's teams, projects and identity-provider groups, and
+ingest keys also live in SDK clients, so the gateway's key is issued with it
+explicitly. A key issued since holds
 ``ingest:write`` unless more are asked for. Only a key holding every scope
 can act on the tenant admin API (collector.admin_auth), because that is
 what an ingest key could do before scopes existed.
@@ -77,8 +80,9 @@ KEY_SCOPES: dict[str, str] = {
 # PS_ADMIN_REQUIRE_SCOPED_TOKENS is off (collector.admin_auth). Frozen:
 # scopes added later (policy:read, #340) do not change what "full" means.
 ALL_KEY_SCOPES: frozenset[str] = frozenset({INGEST_WRITE, REGISTRY_READ, REGISTRY_ATTEST})
-# What a legacy tenant-row key holds: every scope.
-LEGACY_KEY_SCOPES: frozenset[str] = frozenset(KEY_SCOPES)
+# What a legacy tenant-row key holds: the scopes from before #340, not
+# policy:read (issued explicitly, to the gateway's key only).
+LEGACY_KEY_SCOPES: frozenset[str] = ALL_KEY_SCOPES
 # What a newly issued key holds unless more are asked for.
 DEFAULT_KEY_SCOPES: tuple[str, ...] = (INGEST_WRITE,)
 
@@ -188,7 +192,7 @@ async def adopt_legacy_key(db: AsyncSession, tenant_id: UUID) -> TenantApiKey | 
         key_hash=tenant.api_key_hash,
         key_hint=None,
         origin="legacy",
-        scopes=list(KEY_SCOPES),
+        scopes=ordered_scopes(LEGACY_KEY_SCOPES),
         created_at=tenant.created_at or datetime.now(UTC),
     )
     tenant.api_key_prefix = None
@@ -284,7 +288,7 @@ class KeyCandidate:
     tenant_disabled: bool
     # tenant_api_keys.id; None for a legacy key on the tenant row.
     key_id: UUID | None = None
-    # What the key may do (#341); a legacy tenant-row key holds every scope.
+    # What the key may do (#341); a legacy tenant-row key holds LEGACY_KEY_SCOPES.
     scopes: frozenset[str] = LEGACY_KEY_SCOPES
 
 

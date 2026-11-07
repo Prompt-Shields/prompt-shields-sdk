@@ -2626,9 +2626,10 @@ components:
         `/api/v1/registry` and `/telemetry/loss`; `registry:attest` records
         attestations; `policy:read` reads the compiled governance policy
         (`/api/v1/policy/effective`, the gateway's policy pull). Keys issued
-        before scopes existed hold all four; a new key holds `ingest:write`
-        unless more are asked for. Only a key holding the first three can
-        call `/api/v1/admin`.
+        before scopes existed hold the first three; `policy:read` is only
+        ever issued explicitly. A new key holds `ingest:write` unless more
+        are asked for. Only a key holding the first three can call
+        `/api/v1/admin`.
       enum:
         - ingest:write
         - registry:read
@@ -2722,7 +2723,8 @@ components:
           minItems: 1
           default: [ingest:write]
           description: >-
-            What the key may do. A key holding every scope can call
+            What the key may do. A key holding `ingest:write`,
+            `registry:read` and `registry:attest` can call
             `/api/v1/admin`, so while `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off
             issuing one needs every admin scope; any other key needs only
             `admin:keys`.

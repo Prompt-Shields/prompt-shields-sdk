@@ -11,20 +11,21 @@ Adds two tenant tables:
 Each gets the tenant_isolation policy (same SQL as 015) and, if RLS is
 already enforced on ai_assets, enforcement too (same as 020).
 
-Scopes, granted like 038/039 did so nothing that was "full" loses ground:
+Scopes:
 
   - the admin scope ``admin:policies`` goes to every admin token holding all
-    nine admin scopes that existed before it;
+    nine admin scopes that existed before it (as 038/039 did), so nothing
+    that was "full" loses ground;
   - the ingest key scope ``policy:read`` (the gateway's policy pull,
-    GET /api/v1/policy/effective) goes to every ingest key holding all three
-    ingest key scopes that existed before it (keys from before #341 hold
-    all three), so such a key stays "full" and keeps reaching the admin API
-    while PS_ADMIN_REQUIRE_SCOPED_TOKENS is off.
+    GET /api/v1/policy/effective) is NOT granted to existing keys: ingest
+    keys also live in SDK clients, and the compiled policy names the
+    tenant's teams, projects and identity-provider groups, so the gateway's
+    key is issued with it explicitly. A key stays "full" with the three
+    scopes from before (collector.tenant_keys.ALL_KEY_SCOPES).
 
 Downgrade removes both scopes and the tables.
 
-Follows 039 (RBAC, #338). Must be re-chained onto main's head at merge if
-another migration lands first.
+Follows 039 (RBAC, #338), main's head (039 follows 042).
 
 Revision ID: 043
 Revises: 039
@@ -58,9 +59,8 @@ PREVIOUS_ADMIN_SCOPES = (
     "admin:privacy",
     "admin:members",
 )
+# Removed from every key on downgrade; never granted on upgrade.
 NEW_KEY_SCOPE = "policy:read"
-# Every ingest key scope before policy:read (frozen here, not imported).
-PREVIOUS_KEY_SCOPES = ("ingest:write", "registry:read", "registry:attest")
 
 IMMUTABLE_FUNCTION_SQL = """
 CREATE OR REPLACE FUNCTION policy_versions_immutable() RETURNS trigger AS $$
@@ -183,7 +183,6 @@ def upgrade() -> None:
 
     _bypass()
     _grant("admin_tokens", NEW_ADMIN_SCOPE, PREVIOUS_ADMIN_SCOPES)
-    _grant("tenant_api_keys", NEW_KEY_SCOPE, PREVIOUS_KEY_SCOPES)
 
 
 def downgrade() -> None:

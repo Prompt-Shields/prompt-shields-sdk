@@ -157,11 +157,13 @@ def test_migration_043_chain_and_scopes():
     assert m.down_revision == "039"
     assert set(m.TABLES) == {"policies", "policy_versions"}
     assert set(m.PREVIOUS_ADMIN_SCOPES) | {m.NEW_ADMIN_SCOPE} == set(ADMIN_SCOPES)
-    assert set(m.PREVIOUS_KEY_SCOPES) == tenant_keys.ALL_KEY_SCOPES
-    assert set(m.PREVIOUS_KEY_SCOPES) | {m.NEW_KEY_SCOPE} == set(tenant_keys.KEY_SCOPES)
+    assert not hasattr(m, "PREVIOUS_KEY_SCOPES")  # policy:read is never granted
+    assert tenant_keys.ALL_KEY_SCOPES | {m.NEW_KEY_SCOPE} == set(tenant_keys.KEY_SCOPES)
+    # A legacy key does not get it either (issued explicitly to the gateway).
+    assert m.NEW_KEY_SCOPE not in tenant_keys.LEGACY_KEY_SCOPES
 
 
-async def test_migration_043_grants_keep_full_credentials_full(env):
+async def test_migration_043_grants_admin_policies_but_never_policy_read(env):
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
@@ -178,7 +180,7 @@ async def test_migration_043_grants_keep_full_credentials_full(env):
         await c.post(
             A + "/api-keys",
             headers=H(env["boot"]),
-            json={"name": "full", "scopes": list(m.PREVIOUS_KEY_SCOPES)},
+            json={"name": "full", "scopes": sorted(tenant_keys.ALL_KEY_SCOPES)},
         )
     ).json()["key"]
     sdk_key = await _policy_key(c, env["boot"])  # policy:read only: unchanged
@@ -193,7 +195,6 @@ async def test_migration_043_grants_keep_full_credentials_full(env):
                 "SELECT set_config('app.rls_bypass', 'test', true)"
             )
             m._grant("admin_tokens", m.NEW_ADMIN_SCOPE, m.PREVIOUS_ADMIN_SCOPES)
-            m._grant("tenant_api_keys", m.NEW_KEY_SCOPE, m.PREVIOUS_KEY_SCOPES)
 
     async with engine.begin() as conn:
         await conn.run_sync(run)
@@ -201,7 +202,9 @@ async def test_migration_043_grants_keep_full_credentials_full(env):
         await c.post(A + "/policies", headers=H(full), json={"name": "p", "scope": "tenant"})
     ).status_code == 201
     assert (await c.post(A + "/policies", headers=H(narrow), json={})).status_code == 403
-    assert (await c.get("/api/v1/policy/effective", headers=H(full_key))).status_code == 200
+    # An existing full ingest key (e.g. in an SDK client) still cannot pull
+    # the policy; only a key issued with policy:read can.
+    assert (await c.get("/api/v1/policy/effective", headers=H(full_key))).status_code == 403
     assert (await c.get("/api/v1/policy/effective", headers=H(sdk_key))).status_code == 200
 
 
@@ -405,8 +408,8 @@ async def test_scopes_viewer_and_ingest_keys(env, monkeypatch):
     assert resp.status_code == 403
     assert "policy:read" in resp.json()["detail"]["detail"]
     assert (await c.get("/api/v1/policy/effective", headers=H(boot))).status_code == 401
-    # The legacy key holds every scope.
-    assert (await c.get("/api/v1/policy/effective", headers=H(TENANT_KEY))).status_code == 200
+    # Not even the legacy key: policy:read is only ever issued explicitly.
+    assert (await c.get("/api/v1/policy/effective", headers=H(TENANT_KEY))).status_code == 403
 
 
 # ──────────────────────────────────────────────────────────────────────

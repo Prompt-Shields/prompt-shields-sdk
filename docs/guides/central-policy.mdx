@@ -149,11 +149,14 @@ Turn the pull on in the gateway:
 | `PS_POLICY_PULL_ENABLED` | off | `true` polls `${PS_COLLECTOR_URL}/api/v1/policy/effective` |
 | `PS_POLICY_PULL_API_KEY` | `PS_API_KEY` | A tenant ingest key holding `policy:read` |
 | `PS_POLICY_PULL_INTERVAL_SECONDS` | `30` | 5 to 86400 |
+| `PS_POLICY_PULL_ALLOW_HTTP` | off | The pull uses https; plain http only to loopback or an in-cluster name (a single-label host such as the chart's `<release>-collector`, or `*.svc`, `*.svc.cluster.local`, `*.cluster.local`). `true` allows plain http to any host. Any other http URL stops the gateway at start |
 
 Issue the gateway's key with `POST /api/v1/admin/api-keys`
 `{"name": "gateway", "scopes": ["ingest:write", "policy:read"]}` (one key for
-telemetry and the pull). Keys that existed before this release and held every
-scope were given `policy:read` by migration `043`.
+telemetry and the pull). `policy:read` is never granted implicitly: existing
+keys (including a legacy key) do not get it on upgrade, because ingest keys
+also live in SDK clients and the policy names the tenant's teams, projects and
+identity-provider groups. Give it only to the gateway's key.
 
 What the gateway does with it:
 
