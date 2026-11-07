@@ -25,10 +25,10 @@ Scopes:
 
 Downgrade removes both scopes and the tables.
 
-Follows 039 (RBAC, #338), main's head (039 follows 042).
+Follows 046 (cost attribution, #347), main's head.
 
 Revision ID: 043
-Revises: 039
+Revises: 046
 Create Date: 2026-11-07
 """
 
@@ -39,7 +39,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "043"
-down_revision: str | None = "039"
+down_revision: str | None = "046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

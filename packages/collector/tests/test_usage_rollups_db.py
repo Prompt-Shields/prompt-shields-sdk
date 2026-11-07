@@ -399,7 +399,7 @@ async def test_series_by_user_day(env):
 @pytest.mark.parametrize(
     ("group_by", "keys"),
     [
-        ("project", {"support", "search"}),
+        ("use_case", {"support", "search"}),
         ("model", {"gpt-4o-2024-08-06", "gpt-4o", "small", None}),
         ("provider", {"openai", "mistral", None}),
         ("api_surface", {"chat", "responses", None}),
@@ -457,11 +457,11 @@ async def test_series_tenant_isolation_and_windows(env):
             params={"granularity": "hour", "from": (TODAY - timedelta(days=100)).isoformat()},
             headers=env["h_a"],
         )
-        bad_group = await c.get(SERIES, params={"group_by": "team"}, headers=env["h_a"])
+        bad_group = await c.get(SERIES, params={"group_by": "bogus"}, headers=env["h_a"])
     assert b.status_code == 200
     assert [(p["key"], p["tokens_in"]) for p in b.json()["data"]] == [("h-alice", 999)]
     assert backwards.status_code == 400 and too_long.status_code == 400
-    assert bad_group.status_code == 422
+    assert bad_group.status_code == 400
 
 
 async def test_series_is_clamped_to_rollup_retention(env, monkeypatch):

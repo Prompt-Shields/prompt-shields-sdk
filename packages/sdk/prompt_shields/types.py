@@ -46,6 +46,12 @@ class PSMetadata(TypedDict, total=False):
     session_id: str
     user_id: str  # opaque identifier (hashed by client before send)
     call_id: str  # optional own per-call id (#43); generated when absent
+    # Cost attribution (#347): a team / project id or name of the tenant
+    # (resolved by the collector; unknown ones are dropped) and cost tags
+    # ({"env": "prod"} or ["env=prod"]; at most 20, validated there).
+    team: str
+    project: str
+    tags: dict[str, str] | list[str]
 
 
 # Client-level config (set once on construction)

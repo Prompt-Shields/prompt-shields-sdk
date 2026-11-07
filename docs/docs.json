@@ -79,7 +79,8 @@
         "guides/routing",
         "guides/routing-learner",
         "guides/pseudonymisation",
-        "guides/spend-anomaly-alerts"
+        "guides/spend-anomaly-alerts",
+        "guides/cost-attribution"
       ]
     },
     {

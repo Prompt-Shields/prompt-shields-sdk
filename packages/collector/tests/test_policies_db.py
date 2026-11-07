@@ -154,7 +154,7 @@ def test_migration_043_chain_and_scopes():
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     assert m.revision == "043"
-    assert m.down_revision == "039"
+    assert m.down_revision == "046"
     assert set(m.TABLES) == {"policies", "policy_versions"}
     assert set(m.PREVIOUS_ADMIN_SCOPES) | {m.NEW_ADMIN_SCOPE} == set(ADMIN_SCOPES)
     assert not hasattr(m, "PREVIOUS_KEY_SCOPES")  # policy:read is never granted
