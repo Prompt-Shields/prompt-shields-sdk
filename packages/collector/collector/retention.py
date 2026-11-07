@@ -85,7 +85,7 @@ from db.models import (
     WebhookDelivery,
     WebhookSubscription,
 )
-from sqlalchemy import Table, delete, func, select, text
+from sqlalchemy import Table, delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import audit_trail
@@ -380,7 +380,7 @@ async def purge_tenant_events(
     """Delete one tenant's usage events older than its retention cutoff,
     its MCP tool usage rows last seen before it, its call feedback last
     updated before it, its spend alerts for days before it and its gateway
-    security events that happened before it.
+    security events that happened or arrived before it.
 
     Returns None if the tenant does not exist. With ``dry_run`` the matching
     rows are counted, not deleted, and nothing is audited.
@@ -416,7 +416,12 @@ async def purge_tenant_events(
     sa_conditions = [sa.c.tenant_id == tenant_id, sa.c.day < cutoff.date()]
 
     se = GatewaySecurityEvent.__table__
-    se_conditions = [se.c.tenant_id == tenant_id, se.c.occurred_at < cutoff]
+    # occurred_at is the sender's time (clamped at ingest to receipt + a few
+    # minutes); received_at also catches rows stored before that clamp.
+    se_conditions = [
+        se.c.tenant_id == tenant_id,
+        or_(se.c.occurred_at < cutoff, se.c.received_at < cutoff),
+    ]
     # Usage rollups (#346) have their own, longer retention.
     r_cutoff = rollup_cutoff(tenant_settings, now)
     rollups = [

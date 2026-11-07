@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, func, select
 
-from collector import aibom, attestation, focus_export, usage_rollups
+from collector import aibom, attestation, cost_attribution, focus_export, usage_rollups
 from collector.attestation import (
     AttestationState,
     add_attestation_summaries,
@@ -51,7 +51,7 @@ from collector.partner_auth import (
 )
 from collector.partner_rate_limit import get_rate_limiter
 from collector.partner_scopes import DEFAULT_RATE_LIMIT
-from collector.retention import get_retention_cutoff
+from collector.retention import get_retention_cutoff, rollup_cutoff
 from collector.risk_suggestions import RiskStatus, risk_dict, risk_status_filter
 from collector.usage_reports import (
     SavingsGroupBy,
@@ -732,20 +732,36 @@ _SERIES_TO = Query(
 )
 _SERIES_GROUP_BY = Query(
     default="none",
-    description="Split each bucket by user (user id hash), project (the asset's use "
-    "case), model, provider, API surface or asset",
+    max_length=80,
+    description="Split each bucket by user (user id hash), team, project, use_case "
+    "(the asset's use case), service (calling service), model, provider, API "
+    "surface, asset, or tag:<key> for a key in the tenant's settings.cost_tag_keys",
 )
 _SERIES_GRANULARITY = Query(
     default="day", description="UTC hour, day or ISO week (Monday)"
 )
 
 
-async def _series_window(request: Request, principal: PartnerPrincipal, granularity, start, end):
-    tenant_settings = (
+async def _tenant_settings(request: Request, principal: PartnerPrincipal) -> dict:
+    return (
         await request.state.db.execute(
             select(Tenant.settings).where(Tenant.id == principal.tenant_id)
         )
     ).scalar_one_or_none() or {}
+
+
+def _check_group_by(group_by: str, allowed, tenant_settings: dict) -> tuple[str, str | None]:
+    try:
+        return cost_attribution.parse_group_by(group_by, allowed, tenant_settings)
+    except cost_attribution.GroupByError as exc:
+        raise _bad_request(str(exc)) from exc
+
+
+async def _series_window(
+    request: Request, principal: PartnerPrincipal, granularity, start, end, group_by: str
+):
+    tenant_settings = await _tenant_settings(request, principal)
+    _check_group_by(group_by, usage_rollups.GROUP_BY_VALUES, tenant_settings)
     try:
         return usage_rollups.resolve_window(
             granularity,
@@ -762,7 +778,7 @@ async def _series_window(request: Request, principal: PartnerPrincipal, granular
 async def get_usage_series(
     request: Request,
     response: Response,
-    group_by: usage_rollups.GroupBy = _SERIES_GROUP_BY,
+    group_by: str = _SERIES_GROUP_BY,
     granularity: usage_rollups.Granularity = _SERIES_GRANULARITY,
     start: datetime | None = _SERIES_FROM,
     end: datetime | None = _SERIES_TO,
@@ -779,7 +795,7 @@ async def get_usage_series(
     except ValueError as exc:
         raise _bad_request("Invalid cursor") from exc
     await _enforce_rate_limit(request, response, principal)
-    window = await _series_window(request, principal, granularity, start, end)
+    window = await _series_window(request, principal, granularity, start, end, group_by)
     body = await usage_rollups.series_page(
         request.state.db,
         principal.tenant_id,
@@ -797,7 +813,7 @@ async def get_usage_series(
 async def export_usage_series(
     request: Request,
     response: Response,
-    group_by: usage_rollups.GroupBy = _SERIES_GROUP_BY,
+    group_by: str = _SERIES_GROUP_BY,
     granularity: usage_rollups.Granularity = _SERIES_GRANULARITY,
     start: datetime | None = _SERIES_FROM,
     end: datetime | None = _SERIES_TO,
@@ -809,7 +825,7 @@ async def export_usage_series(
     """Every bucket of `/usage/series` for the window in one file, beside the
     FOCUS export. 400 when the window holds more than 100,000 buckets."""
     await _enforce_rate_limit(request, response, principal)
-    window = await _series_window(request, principal, granularity, start, end)
+    window = await _series_window(request, principal, granularity, start, end, group_by)
     rows = await usage_rollups.series_rows(
         request.state.db,
         principal.tenant_id,
@@ -827,7 +843,7 @@ async def export_usage_series(
     headers.update(
         {
             "Content-Disposition": (
-                f'attachment; filename="usage-{granularity}-{group_by}-{stamp}.{format}"'
+                f'attachment; filename="usage-{granularity}-{group_by.replace(":", "-")}-{stamp}.{format}"'
             ),
             "Cache-Control": "no-store",
         }
@@ -837,6 +853,62 @@ async def export_usage_series(
         media_type=focus_export.MEDIA_TYPES[format],
         headers=headers,
     )
+
+
+@router.get("/cost/showback", summary="Monthly cost showback per team, project, user, service or tag")
+async def get_cost_showback(
+    request: Request,
+    response: Response,
+    group_by: str = Query(
+        default="team",
+        max_length=80,
+        description="team, project, user (user id hash), service (calling service) or "
+        "tag:<key> for a key in the tenant's settings.cost_tag_keys",
+    ),
+    period: str | None = Query(
+        default=None,
+        max_length=7,
+        description="UTC month, YYYY-MM. Default: the current month",
+    ),
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),  # noqa: B008 - FastAPI dependency marker, by design
+):
+    """Cost and usage of one UTC month per group, from the daily usage
+    rollups (collector/cost_attribution.py). Spend no group claims is in
+    ``unallocated``; ``cost_cents`` are allocated so the groups plus
+    unallocated equal ``total.cost_cents``, the tenant's total for the
+    month, to the cent."""
+    await _enforce_rate_limit(request, response, principal)
+    tenant_settings = await _tenant_settings(request, principal)
+    dimension, tag_key = _check_group_by(
+        group_by, cost_attribution.SHOWBACK_GROUP_BY, tenant_settings
+    )
+    now = datetime.now(UTC)
+    period = period or f"{now:%Y-%m}"
+    try:
+        start, end = cost_attribution.month_window(period)
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+    body = await cost_attribution.showback(
+        request.state.db,
+        principal.tenant_id,
+        dimension=dimension,
+        tag_key=tag_key,
+        start=start,
+        end=end,
+    )
+    mark = await usage_rollups.watermark(request.state.db, principal.tenant_id)
+    body["meta"] = {
+        "group_by": group_by,
+        "period": period,
+        "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "to": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "currency": "USD",
+        "rolled_up_at": mark.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if mark else None,
+        # The month starts before rollup retention: older days are gone.
+        "partial": start < rollup_cutoff(tenant_settings, now),
+    }
+    await _audit(request, principal, "/partner/v1/cost/showback", "GET", 200, len(body["data"]))
+    return body
 
 
 @router.get(

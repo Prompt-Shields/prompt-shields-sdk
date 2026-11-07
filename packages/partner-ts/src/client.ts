@@ -77,6 +77,8 @@ import type {
   TelemetryCoverage,
   TokenResponse,
   UpdateWebhookSubscriptionParams,
+  ShowbackParams,
+  ShowbackReport,
   UsageSeries,
   UsageSeriesExportParams,
   UsageSeriesParams,
@@ -768,11 +770,22 @@ export class UsageResource {
   /**
    * `GET /partner/v1/usage/series`: requests, tokens, cost, cache savings and
    * error rate per UTC hour, day or week, optionally split by user (hash),
-   * project, model, provider, API surface or asset. One page; follow
+   * team, project, use case, calling service, model, provider, API surface,
+   * asset or cost tag (`tag:<key>`). One page; follow
    * `meta.nextCursor` with `cursor` for the next.
    */
   series(params: UsageSeriesParams = {}): Promise<UsageSeries> {
     return this.client.get<UsageSeries>('/partner/v1/usage/series', { ...params });
+  }
+
+  /**
+   * `GET /partner/v1/cost/showback`: one UTC month's cost per team, project,
+   * user (hash), calling service or cost tag, with the spend no group claims
+   * in `unallocated`. `costCents` add up to `total.costCents` exactly.
+   * Needs `usage:read`.
+   */
+  showback(params: ShowbackParams = {}): Promise<ShowbackReport> {
+    return this.client.get<ShowbackReport>('/partner/v1/cost/showback', { ...params });
   }
 
   /**

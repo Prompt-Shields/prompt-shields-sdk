@@ -39,6 +39,7 @@ from collector import (
     servicenow,
     siem_export,
     tenant_keys,
+    tenant_limits,
     user_erasure,
     webhook_admin,
     webhooks,
@@ -516,6 +517,41 @@ def test_focus_cost_row_schema_matches_the_export_columns():
     assert set(focus_export.MEDIA_TYPES) == set(params["format"]["enum"])
 
 
+def _assert_group_by(schema: dict, values) -> None:
+    """A group_by parameter: the fixed values plus tag:<key>, as a pattern."""
+    import re
+
+    from collector import cost_attribution
+
+    assert schema["x-group-by-values"] == list(values)
+    pattern = re.compile(schema["pattern"])
+    for value in values:
+        assert pattern.fullmatch(value)
+    assert pattern.fullmatch("tag:env")
+    assert not pattern.fullmatch("tag:Bad Key")
+    assert not pattern.fullmatch("nope")
+    assert cost_attribution.TAG_KEY_RE.pattern in schema["pattern"]
+
+
+def test_cost_showback_schema_matches_the_report():
+    from decimal import Decimal
+
+    from collector import cost_attribution
+
+    op = SPEC["paths"]["/partner/v1/cost/showback"]["get"]
+    assert op["security"][0] == {"OAuth2": ["usage:read"]}
+    params = {p["name"]: p["schema"] for p in op["parameters"]}
+    _assert_group_by(params["group_by"], cost_attribution.SHOWBACK_GROUP_BY)
+    report = SCHEMAS["ShowbackReport"]
+    assert set(report["properties"]) == set(report["required"])
+    meta = report["properties"]["meta"]
+    assert set(meta["properties"]) == set(meta["required"])
+    amounts = set(SCHEMAS["ShowbackAmounts"]["required"])
+    assert amounts == set(SCHEMAS["ShowbackAmounts"]["properties"])
+    assert _props("ShowbackGroup") == amounts | {"key", "name", "team_id", "team_name"}
+    assert cost_attribution.allocate_cents([Decimal("0.005")]) == [1]
+
+
 def test_usage_series_schemas_match_the_serializer():
     from typing import get_args
 
@@ -531,7 +567,6 @@ def test_usage_series_schemas_match_the_serializer():
     assert SCHEMAS["UsageSeriesPoint"]["required"] == list(point)
     meta = SCHEMAS["UsageSeries"]["properties"]["meta"]
     assert set(meta["properties"]) == set(meta["required"])
-    assert meta["properties"]["group_by"]["enum"] == list(get_args(usage_rollups.GroupBy))
     assert meta["properties"]["granularity"]["enum"] == list(
         get_args(usage_rollups.Granularity)
     )
@@ -542,7 +577,7 @@ def test_usage_series_schemas_match_the_serializer():
         op = SPEC["paths"][path]["get"]
         assert op["security"][0] == {"OAuth2": [scope]}
         params = {p["name"]: p["schema"] for p in op["parameters"]}
-        assert params["group_by"]["enum"] == list(get_args(usage_rollups.GroupBy))
+        _assert_group_by(params["group_by"], usage_rollups.GROUP_BY_VALUES)
         assert params["granularity"]["enum"] == list(get_args(usage_rollups.Granularity))
     export = SPEC["paths"]["/partner/v1/usage/series/export"]["get"]
     fmt = {p["name"]: p["schema"] for p in export["parameters"]}["format"]
@@ -674,3 +709,11 @@ def test_security_event_schemas_match_serializers():
     assert op["security"][0] == {"OAuth2": ["security-events:read"]}
     for path in ("/ingest/security-events", "/ingest/otel/v1/logs"):
         assert SPEC["paths"][path]["post"]["security"] == [{"TenantApiKey": []}]
+
+
+def test_otel_traces_ingest_documents_its_rate_limit():
+    op = SPEC["paths"]["/ingest/otel/v1/traces"]["post"]
+    assert op["security"] == [{"TenantApiKey": []}]
+    assert "Retry-After" in op["responses"]["429"]["headers"]
+    limits = SCHEMAS["IngestRateLimitSettings"]["properties"]
+    assert set(limits) == set(tenant_limits.ENV_DEFAULTS)
