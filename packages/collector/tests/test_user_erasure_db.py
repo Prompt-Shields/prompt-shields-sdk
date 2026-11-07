@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 
-from collector import rls
+from collector import rls, usage_rollups
 from collector.app import app
 from collector.config import settings
 from db.models import (
@@ -21,9 +21,10 @@ from db.models import (
     PartnerCredential,
     RetentionAuditLog,
     TenantSecret,
+    UsageRollupDaily,
 )
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from tests.test_rls_db import KEY_A, KEY_B, PARTNER_KEY_A, PARTNER_KEY_B, rls_db  # noqa: F401
 
@@ -88,7 +89,12 @@ async def _state(factory, tenant) -> dict:
             select(GatewaySecurityEvent.event_id, GatewaySecurityEvent.user_hash)
             .where(GatewaySecurityEvent.event_id.like("deny-%"))
         )).all()
+        rollups = dict((await s.execute(
+            select(UsageRollupDaily.user_id_hash, func.sum(UsageRollupDaily.requests))
+            .group_by(UsageRollupDaily.user_id_hash)
+        )).all())
     return {
+        "rollups": rollups,
         "events": sorted(
             ((e.user_id_hash, e.session_id, e.prompt_hash, e.tokens_in) for e in events),
             key=_none_first,
@@ -107,9 +113,14 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         await _ingest(c, KEY_A)
         await _ingest(c, KEY_B)
+        # Tenant a's usage rollups (#346) hold the user's hash too.
+        async with plain() as s:
+            await rls.set_tenant(s, a)
+            await usage_rollups.refresh_tenant(s, a)
         before_b = await _state(plain, b)
         before_a = await _state(plain, a)
         hash_a = hmac.new(before_a["salt"].encode(), USER.encode(), hashlib.sha256).hexdigest()
+        assert before_a["rollups"][hash_a] == 3
 
         resp = await c.post("/api/v1/admin/users/erase", headers=_head(KEY_A),
                             json={"user_id": USER})
@@ -117,7 +128,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         body = resp.json()
         assert body["user_id_hash"] == hash_a and body["input"] == "user_id"
         assert body["rows_erased"] == {
-            "ai_usage_events": 3, "call_feedback": 1, "mcp_tool_usage": 2,
+            "ai_usage_events": 3, "usage_rollups": 2, "call_feedback": 1, "mcp_tool_usage": 2,
             "gateway_security_events": 1,
         }
         assert body["audit_event_id"]
@@ -139,6 +150,15 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
             ("create", "", 2), ("create", OTHER, 1), ("search", "", 1),
         ]
         assert after_a["salt"] == before_a["salt"]  # never rotated
+        # The rollups keep the totals and lose the user's hash.
+        assert hash_a not in after_a["rollups"]
+        assert after_a["rollups"][None] == before_a["rollups"].get(None, 0) + 3
+        assert after_a["rollups"][other_hash] == 3
+        async with plain() as s:  # a later rollup run does not bring it back
+            await rls.set_tenant(s, a)
+            await usage_rollups.rebuild_tenant(s, a)
+        rebuilt = (await _state(plain, a))["rollups"]
+        assert hash_a not in rebuilt and rebuilt[other_hash] == 3
         assert await _state(plain, b) == before_b  # the other tenant untouched
 
         # Idempotent: nothing left, still audited.
@@ -153,7 +173,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         resp = await c.delete(f"/api/v1/admin/users/{hash_b}/data", headers=_head(KEY_B))
         assert resp.status_code == 200, resp.text
         assert resp.json()["rows_erased"] == {
-            "ai_usage_events": 3, "gateway_security_events": 1,
+            "ai_usage_events": 3, "usage_rollups": 0, "gateway_security_events": 1,
         }
         # The hash route reaches the security event too (salted user.hash).
         assert (await _state(plain, b))["security"] == [
@@ -163,7 +183,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         # id b never saw.
         resp = await c.delete(f"/api/v1/admin/users/{other_hash}/data", headers=_head(KEY_B))
         assert resp.json()["rows_erased"] == {
-            "ai_usage_events": 0, "gateway_security_events": 0,
+            "ai_usage_events": 0, "usage_rollups": 0, "gateway_security_events": 0,
         }
 
         resp = await c.delete("/api/v1/admin/users/NOT-A-HASH/data", headers=_head(KEY_B))
@@ -184,7 +204,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         assert first["details"] == {
             "input": "user_id",
             "rows_erased": {
-                "ai_usage_events": 3, "call_feedback": 1, "mcp_tool_usage": 2,
+                "ai_usage_events": 3, "usage_rollups": 2, "call_feedback": 1, "mcp_tool_usage": 2,
                 "gateway_security_events": 1,
             },
         }

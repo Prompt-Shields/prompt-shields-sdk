@@ -147,7 +147,7 @@ def test_record_ingest_ignores_zero_counts():
 
 @pytest.fixture
 def fake_loops(monkeypatch):
-    """Replace both loops with ones that record that they ran."""
+    """Replace every loop with one that records that it ran."""
     started: list[str] = []
 
     async def webhook_loop(factory, interval):
@@ -158,19 +158,25 @@ def fake_loops(monkeypatch):
         started.append("provider_usage")
         await asyncio.Event().wait()
 
-    from collector import provider_usage_admin, webhooks
+    async def rollup_loop(factory, interval):
+        started.append("usage_rollups")
+        await asyncio.Event().wait()
+
+    from collector import provider_usage_admin, usage_rollups, webhooks
 
     monkeypatch.setattr(webhooks, "run_worker", webhook_loop)
     monkeypatch.setattr(provider_usage_admin, "run_schedule", usage_loop)
+    monkeypatch.setattr(usage_rollups, "run_worker", rollup_loop)
     monkeypatch.setattr(settings, "webhook_worker_interval_seconds", 5.0)
     monkeypatch.setattr(settings, "provider_usage_pull_interval_seconds", 86400.0)
+    monkeypatch.setattr(settings, "usage_rollup_interval_seconds", 30.0)
     return started
 
 
 async def test_start_workers_runs_each_configured_loop(fake_loops):
     tasks = workers.start_workers(object())
     await asyncio.sleep(0)
-    assert sorted(fake_loops) == ["provider_usage", "webhooks"]
+    assert sorted(fake_loops) == ["provider_usage", "usage_rollups", "webhooks"]
     await workers.stop_workers(tasks)
     assert all(t.cancelled() for t in tasks)
 
@@ -178,10 +184,11 @@ async def test_start_workers_runs_each_configured_loop(fake_loops):
 async def test_start_workers_with_nothing_configured(monkeypatch):
     monkeypatch.setattr(settings, "webhook_worker_interval_seconds", 0)
     monkeypatch.setattr(settings, "provider_usage_pull_interval_seconds", 0)
+    monkeypatch.setattr(settings, "usage_rollup_interval_seconds", 0)
     assert workers.start_workers(object()) == []
 
 
-@pytest.mark.parametrize("run_workers, expected", [(True, 2), (False, 0)])
+@pytest.mark.parametrize("run_workers, expected", [(True, 3), (False, 0)])
 async def test_api_lifespan_honours_run_workers(
     fake_loops, monkeypatch, run_workers, expected
 ):
@@ -194,6 +201,7 @@ async def test_api_lifespan_honours_run_workers(
 async def test_worker_process_exits_when_nothing_is_configured(monkeypatch, capsys):
     monkeypatch.setattr(settings, "webhook_worker_interval_seconds", 0)
     monkeypatch.setattr(settings, "provider_usage_pull_interval_seconds", 0)
+    monkeypatch.setattr(settings, "usage_rollup_interval_seconds", 0)
     monkeypatch.setattr(settings, "rls_required", False)
     assert await workers._run() == 2
     assert "No worker enabled" in capsys.readouterr().err
@@ -208,10 +216,10 @@ async def test_worker_process_runs_loops_until_sigterm(fake_loops, monkeypatch):
     monkeypatch.setattr(settings, "collector_run_workers", False)
     run = asyncio.create_task(workers._run())
     for _ in range(50):
-        if len(fake_loops) == 2:
+        if len(fake_loops) == 3:
             break
         await asyncio.sleep(0.01)
-    assert sorted(fake_loops) == ["provider_usage", "webhooks"]
+    assert sorted(fake_loops) == ["provider_usage", "usage_rollups", "webhooks"]
     os.kill(os.getpid(), signal.SIGTERM)
     assert await asyncio.wait_for(run, 5) == 0
     loop = asyncio.get_running_loop()

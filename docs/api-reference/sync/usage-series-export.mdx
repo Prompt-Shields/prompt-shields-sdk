@@ -1,0 +1,20 @@
+---
+title: Export Usage Time Series
+openapi: get /partner/v1/usage/series/export
+---
+
+Every point of [the usage time series](/api-reference/assets/get-usage-series)
+for a window in one CSV or JSON Lines file, beside the
+[FOCUS export](/api-reference/sync/focus-export). Use it to load usage by user
+hash, project, model, provider, API surface or asset into a spreadsheet or BI
+tool.
+
+```bash
+curl -H "Authorization: Bearer $PS_PARTNER_KEY" \
+  "https://api.promptshields.io/partner/v1/usage/series/export?group_by=user&granularity=week&format=csv" \
+  -o usage-by-user.csv
+```
+
+The credential needs the `usage:export` scope. It is never granted by default,
+and `registry:read` does not include it. A window with more than 100,000
+points is refused with 400: narrow it or use a coarser granularity.

@@ -78,6 +78,7 @@ async def test_startup_warns_when_enabled(monkeypatch, caplog):
     monkeypatch.setattr(settings, "rls_required", False)
     monkeypatch.setattr(settings, "webhook_worker_interval_seconds", 0)
     monkeypatch.setattr(settings, "provider_usage_pull_interval_seconds", 0)
+    monkeypatch.setattr(settings, "usage_rollup_interval_seconds", 0)
     monkeypatch.setattr(app_module, "get_embedder", lambda: None)
     with caplog.at_level(logging.WARNING, logger="prompt_shields.collector"):
         async with lifespan(app):

@@ -11,11 +11,11 @@ period are purged.
 The new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Chained from 038 (main's head when written); 039-041 are reserved for other
+Chained from 040 (main's head when re-chained); 039 and 041 are reserved for other
 open changes, so this may be re-chained at merge.
 
 Revision ID: 042
-Revises: 038
+Revises: 040
 Create Date: 2026-11-07
 """
 
@@ -26,7 +26,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "042"
-down_revision: str | None = "038"
+down_revision: str | None = "040"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

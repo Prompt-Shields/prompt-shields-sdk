@@ -68,7 +68,7 @@ async def test_erase_user_merges_mcp_rows_and_nulls_ids(session_factory):  # noq
         result = await user_erasure.erase_user(db, a, user_id=USER, actor=ACTOR, batch_size=1)
         assert result.user_id_hash == hashed
         assert result.rows_erased == {
-            "ai_usage_events": 3, "call_feedback": 1, "mcp_tool_usage": 2,
+            "ai_usage_events": 3, "usage_rollups": 0, "call_feedback": 1, "mcp_tool_usage": 2,
             "gateway_security_events": 1,
         }
         assert result.audit_event_id is not None

@@ -503,6 +503,67 @@ def test_focus_cost_row_schema_matches_the_export_columns():
     assert set(focus_export.MEDIA_TYPES) == set(params["format"]["enum"])
 
 
+def test_usage_series_schemas_match_the_serializer():
+    from typing import get_args
+
+    from collector import usage_rollups
+
+    row = {c: 0 for c in usage_rollups.SUM_COLUMNS} | {
+        "bucket_start": datetime(2026, 10, 1, tzinfo=UTC),
+        "key": None,
+    }
+    point = usage_rollups.series_point(row)
+    assert list(point) == list(usage_rollups.SERIES_COLUMNS)
+    assert list(SCHEMAS["UsageSeriesPoint"]["properties"]) == list(point)
+    assert SCHEMAS["UsageSeriesPoint"]["required"] == list(point)
+    meta = SCHEMAS["UsageSeries"]["properties"]["meta"]
+    assert set(meta["properties"]) == set(meta["required"])
+    assert meta["properties"]["group_by"]["enum"] == list(get_args(usage_rollups.GroupBy))
+    assert meta["properties"]["granularity"]["enum"] == list(
+        get_args(usage_rollups.Granularity)
+    )
+    for path, scope in (
+        ("/partner/v1/usage/series", "usage:read"),
+        ("/partner/v1/usage/series/export", "usage:export"),
+    ):
+        op = SPEC["paths"][path]["get"]
+        assert op["security"][0] == {"OAuth2": [scope]}
+        params = {p["name"]: p["schema"] for p in op["parameters"]}
+        assert params["group_by"]["enum"] == list(get_args(usage_rollups.GroupBy))
+        assert params["granularity"]["enum"] == list(get_args(usage_rollups.Granularity))
+    export = SPEC["paths"]["/partner/v1/usage/series/export"]["get"]
+    fmt = {p["name"]: p["schema"] for p in export["parameters"]}["format"]
+    assert fmt["enum"] == list(get_args(usage_rollups.ExportFormat))
+
+
+async def test_usage_series_meta_matches_the_schema(monkeypatch):
+    from collector import usage_rollups
+
+    class _Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Db:
+        async def execute(self, *_a, **_k):
+            return _Rows()
+
+    async def no_mark(db, tenant_id):
+        return None
+
+    monkeypatch.setattr(usage_rollups, "watermark", no_mark)
+    window = usage_rollups.Window(datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 10, 2, tzinfo=UTC))
+    body = await usage_rollups.series_page(
+        _Db(), uuid.uuid4(), group_by="none", granularity="day", window=window,
+        limit=10, offset=0,
+    )
+    meta = SCHEMAS["UsageSeries"]["properties"]["meta"]
+    assert set(body["meta"]) == set(meta["properties"])
+    assert set(body) == set(SCHEMAS["UsageSeries"]["required"])
+
+
 def test_user_erasure_and_audit_schemas_match_serializers():
     result = user_erasure.UserEraseResult(user_id_hash=None, input="user_id")
     keys = set(result.as_dict())
