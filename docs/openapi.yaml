@@ -2269,7 +2269,11 @@ components:
         expires_at:
           type: [string, 'null']
           format: date-time
-          description: Must be in the future. Omit for a token that does not expire.
+          description: >-
+            Must be in the future. Omit for a token that does not expire.
+            With a named operator token that expires, the new token expires
+            no later than the caller's (an omitted or later expiry is capped
+            to it).
       required: [name, scopes]
 
     # ── Tenant admin automation: admin tokens and ingest keys ──────────
@@ -3308,7 +3312,8 @@ components:
     OperatorForbidden:
       description: >-
         The operator token lacks the operation's `x-operator-scope` (or
-        `operator:read` on a GET). Audited.
+        `operator:read` on a GET), or, on the operator token routes, a
+        scope it would grant, rotate or revoke. Audited.
       content:
         application/json:
           schema:
@@ -7869,7 +7874,11 @@ paths:
         `PS_ADMIN_REQUIRE_SCOPED_TOKENS` on (the default) no tenant key may
         call `/api/v1/admin/tokens`. Any scope may be granted; a token with
         every scope can create the tenant's first principal and make it
-        `owner`, then issue tokens for it. The token is returned once.
+        `owner`, then issue tokens for it. The token is returned once. With
+        a named operator token that expires, the admin token expires no
+        later than the caller: an omitted or later `expires_at` is capped to
+        the caller's own (`PS_ADMIN_TOKEN` is not bounded), and the
+        `admin_token.create` audit row sets `details.expiry_capped`.
       security:
         - OperatorToken: []
       x-operator-scope: operator:tenants
@@ -8073,8 +8082,13 @@ paths:
       summary: Issue a named operator token
       description: |
         The token is returned once, in this response; only its hash is
-        stored. A caller can only grant scopes it holds. Recorded as
-        `operator_token.issue` on the audit trail's system chain.
+        stored. A caller can only grant scopes it holds (403 otherwise). A
+        named caller that expires cannot issue a longer-lived token: an
+        omitted or later `expires_at` is capped to the caller's own, as for
+        tenant admin tokens (`PS_ADMIN_TOKEN` is not bounded). Recorded as
+        `operator_token.issue` on the audit trail's system chain; a refused
+        attempt is recorded with outcome `failure`, and a capped expiry sets
+        `details.expiry_capped`.
       security:
         - OperatorToken: []
       x-operator-scope: operator:tokens
@@ -8164,7 +8178,10 @@ paths:
       summary: Revoke an operator token
       description: |
         The row is kept (status `revoked`) and its name is never reused.
-        Repeating the DELETE is 204. Recorded as `operator_token.revoke`.
+        Repeating the DELETE is 204. The caller must hold every scope of
+        the token (403 otherwise), so a narrower token cannot revoke a
+        broader one. Recorded as `operator_token.revoke`; a refused attempt
+        is recorded with outcome `failure`.
       security:
         - OperatorToken: []
       x-operator-scope: operator:tokens
@@ -8192,7 +8209,12 @@ paths:
       summary: Replace an operator token's secret (same id)
       description: |
         The old secret stops working at once. The caller must hold every
-        scope of the token. Recorded as `operator_token.rotate`.
+        scope of the token (403 otherwise). The token then expires no later
+        than the caller: if it expires later, or never, its `expires_at` is
+        capped to the caller's own (`PS_ADMIN_TOKEN` is not bounded).
+        Recorded as `operator_token.rotate`; a refused attempt is recorded
+        with outcome `failure`, and a capped expiry sets
+        `details.expiry_capped`.
       security:
         - OperatorToken: []
       x-operator-scope: operator:tokens
