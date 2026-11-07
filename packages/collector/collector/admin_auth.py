@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -395,10 +396,16 @@ async def cap_child_expiry(
     return expires_at
 
 
-async def live_descendants(db: AsyncSession, parent: AdminToken) -> list[AdminToken]:
+async def live_descendants(
+    db: AsyncSession,
+    parent: AdminToken,
+    skip: Callable[[AdminToken], Awaitable[bool]] | None = None,
+) -> list[AdminToken]:
     """Every live token that ``parent`` created, and the tokens those
     created, and so on (linked by ``created_by = token:<token_prefix>``):
-    what revoking ``parent`` revokes with it. Changes nothing."""
+    what revoking ``parent`` revokes with it. Changes nothing. A live token
+    for which ``skip`` returns True is left out with every token below it
+    (a self-revoke leaves an owner's tokens live, #379)."""
     live: list[AdminToken] = []
     seen = {parent.id}
     frontier = [parent.token_prefix]
@@ -420,6 +427,8 @@ async def live_descendants(db: AsyncSession, parent: AdminToken) -> list[AdminTo
             if child.id in seen:
                 continue
             seen.add(child.id)
+            if child.revoked_at is None and skip is not None and await skip(child):
+                continue
             # Walk through already revoked tokens too: their children may
             # still be live.
             frontier.append(child.token_prefix)
@@ -429,11 +438,14 @@ async def live_descendants(db: AsyncSession, parent: AdminToken) -> list[AdminTo
 
 
 async def revoke_descendants(
-    db: AsyncSession, parent: AdminToken, now: datetime
+    db: AsyncSession,
+    parent: AdminToken,
+    now: datetime,
+    skip: Callable[[AdminToken], Awaitable[bool]] | None = None,
 ) -> list[AdminToken]:
     """Revoke every token ``live_descendants`` returns. Returns the tokens
     revoked here. Flushes nothing; the caller audits and commits."""
-    revoked = await live_descendants(db, parent)
+    revoked = await live_descendants(db, parent, skip)
     for child in revoked:
         child.revoked_at = now
     return revoked

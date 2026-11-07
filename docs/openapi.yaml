@@ -8153,6 +8153,14 @@ paths:
       description: |
         The token is returned once, in this response; only its hash is
         stored. An admin token can only grant scopes it holds itself.
+
+        Issuing a token for a principal with the tenant-wide `owner` role
+        (`principal_id`), however narrow, or an unbound token holding every
+        admin scope, needs a caller that can manage owners (an owner's
+        token, or an unbound token holding every admin scope), also when
+        the caller's token is itself issued for that owner. Otherwise 403,
+        audited as `admin_token.create` with outcome
+        `failure` and `details.reason` `owner_required`.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -8253,10 +8261,17 @@ paths:
         owner's token, or an unbound token holding every admin scope).
         The owner check applies to every live token revoked with it (a
         token issued for an owner may have been created by one that was
-        not), also when a token revokes itself. Otherwise 403, audited as
-        `admin_token.revoke` with outcome `failure` and `details.reason`
-        `scope_not_held` or `owner_required` (`details.cascade_blocked_by`
-        names the created token that stopped it).
+        not, e.g. before its principal became an owner). Otherwise 403,
+        audited as `admin_token.revoke` with outcome `failure` and
+        `details.reason` `scope_not_held` or `owner_required`
+        (`details.cascade_blocked_by` names the created token that stopped
+        it).
+
+        A self-revoke is never refused. When the caller cannot manage
+        owners, it leaves live every token in its cascade that would need
+        an owner to revoke, and every token those created; the audit row
+        lists them in `details.cascade_skipped`, and revoking this token
+        again with an owner's token revokes them.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -8486,6 +8501,14 @@ paths:
         Returns the client secret and API key once. Several credentials may
         share a `partner_name` (issue the new one, then revoke the old one
         to rotate), so this is not a 409 on a name in use.
+
+        Issuing a credential for a principal with the tenant-wide `owner`
+        role (`principal_id`) needs a caller that can manage owners (an
+        owner's token, or an unbound token holding every admin scope), also
+        when the caller's token is itself issued for that owner: otherwise
+        403, audited as
+        `partner_credential.create` with outcome `failure` and
+        `details.reason` `owner_required`.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -8571,7 +8594,13 @@ paths:
       operationId: updatePartnerCredential
       tags: [Admin]
       summary: Change a credential's scopes or rate limit
-      description: Takes effect on the partner's next request, including with access tokens issued before. Audited.
+      description: |
+        Takes effect on the partner's next request, including with access
+        tokens issued before. Audited. Changing a credential issued for a
+        principal with the tenant-wide `owner` role needs a caller that can
+        manage owners (an owner's token, or an unbound token holding every
+        admin scope): otherwise 403, audited as `partner_credential.update`
+        with outcome `failure` and `details.reason` `owner_required`.
       security:
         - TenantApiKey: []
         - AdminToken: []

@@ -35,8 +35,10 @@ membership, disable or delete a principal) takes a per-tenant transaction
 advisory lock (``lock_owners``) before it reads anything, and holds it
 through the write and commit, so two concurrent demotions of two different
 owners cannot both pass the check (#372). Disabling, enabling,
-re-identifying (``external_id``) or deleting a principal needs what granting each of its roles would; issuing
-an owner-capable admin token needs an owner (collector/admin_api.py).
+re-identifying (``external_id``) or deleting a principal needs what
+granting each of its roles would; issuing an owner-capable admin token, or
+an admin token or partner credential for an owner, needs an owner
+(collector/admin_api.py, collector/partner_admin.py; #379).
 
 Every change writes a hash-chained audit trail row in the same transaction
 (``principal.*``, ``team.*``, ``project.*``, ``membership.add``,

@@ -12,11 +12,24 @@ ingest keys. Mounted at /api/v1/admin. Auth and scopes: collector/admin_auth.py.
      (admin_auth.can_manage_owner) when it is owner-bound (issued for a
      tenant-wide owner) or owner-capable (every admin scope, unbound): an
      ``admin:tokens`` holder must not be able to cut the owner off (#372).
-     A token may always revoke itself. The owner check also applies to
-     every live token the cascade would revoke, also on a self-revoke (a
-     token bound to an owner may have been created by one that is not).
-     Refusals are 403 and audited as ``admin_token.revoke`` with outcome
-     ``failure``.
+     The owner check also applies to every live token the cascade would
+     revoke (a token bound to an owner may have been created by one that
+     is not). Refusals are 403 and audited as ``admin_token.revoke`` with
+     outcome ``failure``.
+
+  Issuing a token for a tenant-wide owner (``principal_id``), or an
+  unbound one holding every admin scope, needs a caller that can manage
+  owners (admin_auth.can_manage_owner), however narrow, also when the
+  caller's own token is issued for that owner (it may have been issued by
+  a non-owner, e.g. before its principal was promoted); otherwise 403,
+  audited as ``admin_token.create`` with outcome ``failure`` and reason
+  ``owner_required`` (#379).
+
+  A token may always revoke itself. When the caller cannot manage owners,
+  a self-revoke leaves live every token in its cascade that would need an
+  owner to revoke (issued for an owner, or unbound with every admin
+  scope), and every token those created; the audit row lists them as
+  ``cascade_skipped`` and an owner can revoke them later (#379).
 
   A token issued by another token expires no later than that token (an
   expiry past it, or none, is capped to it).
@@ -172,18 +185,40 @@ async def create_token(
                 "None of the requested scopes is granted by the principal's "
                 "tenant-wide roles",
             )
-    # A token that could manage owners (every admin scope, and unbound or
-    # issued for an owner; admin_auth.can_manage_owner) only from a caller
-    # that can: otherwise an admin could mint one and make itself owner.
-    if set(ADMIN_SCOPES) <= set(scopes) and (
-        body.principal_id is None or rbac.OWNER in roles
-    ) and not can_manage_owner(principal):
-        raise _problem(
-            403,
-            "Forbidden",
-            "Only an owner can issue a token holding every admin scope that "
-            "is unbound or issued for an owner",
+    # A token issued for an owner, or one that could manage owners (every
+    # admin scope, unbound; admin_auth.can_manage_owner), only from a caller
+    # that can manage owners: otherwise an admin could mint one and make
+    # itself owner, or act (and be audited) as the owner and leave the
+    # owner holding a token it cannot revoke without them (#379).
+    # No exemption for a token issued for that same owner: it may be held
+    # by a non-owner (issued before its principal was promoted, or before
+    # #379) and would otherwise keep minting owner-bound tokens.
+    refusal = None
+    if not can_manage_owner(principal):
+        if rbac.OWNER in roles:
+            refusal = "Only an owner can issue a token for an owner"
+        elif body.principal_id is None and set(ADMIN_SCOPES) <= set(scopes):
+            refusal = (
+                "Only an owner can issue an unbound token holding every admin "
+                "scope (it can manage owners)"
+            )
+    if refusal is not None:
+        await audit_trail.record_committed(
+            db,
+            tenant_id=principal.tenant_id,
+            action="admin_token.create",
+            outcome=audit_trail.FAILURE,
+            actor=admin_actor(request, principal),
+            target_type="admin_token",
+            status_code=403,
+            details={
+                "name": body.name,
+                "scopes": list(scopes),
+                "principal_id": str(body.principal_id) if body.principal_id else None,
+                "reason": "owner_required",
+            },
         )
+        raise _problem(403, "Forbidden", refusal)
     try:
         row, token = await issue_token(
             db,
@@ -282,6 +317,29 @@ def _revoke_refusal(
     return None
 
 
+def _is_self(principal: AdminPrincipal, row: AdminToken) -> bool:
+    return principal.token_id is not None and principal.token_id == row.id
+
+
+def _owner_skip(request: Request, principal: AdminPrincipal, skipped: list[AdminToken]):
+    """``live_descendants`` skip predicate for a self-revoke by a caller
+    that cannot manage owners: a token that would need an owner to revoke
+    (``_revoke_refusal``) stays live, with every token below it, and is
+    appended to ``skipped`` (#379). None when nothing need be skipped."""
+    if can_manage_owner(principal):
+        return None
+    db = request.state.db
+
+    async def _skip(child: AdminToken) -> bool:
+        owner_bound = await rbac.is_tenant_owner(db, principal.tenant_id, child.principal_id)
+        if _revoke_refusal(principal, child, owner_bound, check_scopes=False) is None:
+            return False
+        skipped.append(child)
+        return True
+
+    return _skip
+
+
 async def _check_can_revoke(request: Request, principal: AdminPrincipal, row: AdminToken) -> None:
     """403 (audited) unless the caller may revoke ``row`` and every live
     token revoked with it (``live_descendants``): its own token always;
@@ -291,11 +349,14 @@ async def _check_can_revoke(request: Request, principal: AdminPrincipal, row: Ad
     by revoking the token that created them."""
     db = request.state.db
     tenant_id = principal.tenant_id
-    refusal, blocked_by = None, None
-    if principal.token_id is None or principal.token_id != row.id:
-        refusal = _revoke_refusal(
-            principal, row, await rbac.is_tenant_owner(db, tenant_id, row.principal_id)
-        )
+    if _is_self(principal, row):
+        # A self-revoke always goes ahead; it leaves live what it may not
+        # revoke (``_owner_skip``, #379).
+        return
+    blocked_by = None
+    refusal = _revoke_refusal(
+        principal, row, await rbac.is_tenant_owner(db, tenant_id, row.principal_id)
+    )
     if refusal is None:
         for child in await live_descendants(db, row):
             if principal.token_id is not None and principal.token_id == child.id:
@@ -351,8 +412,17 @@ async def revoke_token(
     await _check_can_revoke(request, principal, row)
     now = datetime.now(UTC)
     changed = False
+    skipped: list[AdminToken] = []
+    skip = _owner_skip(request, principal, skipped) if _is_self(principal, row) else None
+    # The tokens it created go with it (also on a repeated DELETE, for
+    # children made before revocation cascaded), except, on a self-revoke,
+    # those that need an owner to revoke (#379).
+    children = await revoke_descendants(db, row, now, skip)
     if row.revoked_at is None:
         row.revoked_at = now
+        extra = {}
+        if skipped:
+            extra["cascade_skipped"] = [str(t.id) for t in skipped]
         await add_audit(
             request,
             db,
@@ -363,11 +433,10 @@ async def revoke_token(
             target_type="admin_token",
             target_id=str(row.id),
             name=row.name,
+            **extra,
         )
         changed = True
-    # The tokens it created go with it (also on a repeated DELETE, for
-    # children made before revocation cascaded).
-    for child in await revoke_descendants(db, row, now):
+    for child in children:
         await add_audit(
             request,
             db,
