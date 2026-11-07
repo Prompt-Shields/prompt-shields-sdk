@@ -29,8 +29,12 @@ No privilege escalation: granting a role (or changing a membership to it)
 needs every admin scope that role carries; granting, changing or removing an
 ``owner`` membership needs an owner (``admin_auth.can_manage_owner``), and
 the tenant's last enabled owner cannot be removed, demoted, disabled or
-deleted (409). Disabling, enabling, re-identifying (``external_id``) or
-deleting a principal needs what granting each of its roles would; issuing
+deleted (409). Every route that can drop an owner (change or remove a
+membership, disable or delete a principal) takes a per-tenant transaction
+advisory lock (``lock_owners``) before it reads anything, and holds it
+through the write and commit, so two concurrent demotions of two different
+owners cannot both pass the check (#372). Disabling, enabling,
+re-identifying (``external_id``) or deleting a principal needs what granting each of its roles would; issuing
 an owner-capable admin token needs an owner (collector/admin_api.py).
 
 Every change writes a hash-chained audit trail row in the same transaction
@@ -55,7 +59,7 @@ from db.models import (
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import rbac
@@ -206,10 +210,11 @@ async def _other_owners(db: AsyncSession, tenant_id: UUID, exclude_principal: UU
     ).scalar_one()
 
 
-async def _is_tenant_owner(db: AsyncSession, principal_id: UUID) -> bool:
+async def _is_tenant_owner(db: AsyncSession, tenant_id: UUID, principal_id: UUID) -> bool:
     return (
         await db.execute(
             select(Membership.id).where(
+                Membership.tenant_id == tenant_id,
                 Membership.principal_id == principal_id,
                 Membership.team_id.is_(None),
                 Membership.role == rbac.OWNER,
@@ -218,9 +223,32 @@ async def _is_tenant_owner(db: AsyncSession, principal_id: UUID) -> bool:
     ).first() is not None
 
 
+# Advisory lock namespace for a tenant's owner set (the second key is the
+# tenant id), as collector/usage_rollups.py keys its per-tenant lock.
+_OWNERS_LOCK = "rbac.owners"
+
+
+async def lock_owners(db: AsyncSession, tenant_id: UUID) -> None:
+    """Serialise changes that can drop one of ``tenant_id``'s owners: a
+    transaction advisory lock, held until commit or rollback. Taken before
+    the route reads the membership or principal it changes, so the
+    last-owner check (``_keep_an_owner``) and the write see every owner
+    change committed before them (READ COMMITTED re-reads per statement).
+    Re-entrant within a transaction. Without it, two concurrent demotions
+    of two different owners could each count the other as remaining and
+    leave the tenant with none (#372)."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k), hashtext(:t))"),
+        {"k": _OWNERS_LOCK, "t": str(tenant_id)},
+    )
+
+
 async def _keep_an_owner(db: AsyncSession, tenant_id: UUID, principal_id: UUID) -> None:
-    """409 when ``principal_id`` is the tenant's last enabled owner."""
-    if await _is_tenant_owner(db, principal_id) and not await _other_owners(
+    """409 when ``principal_id`` is the tenant's last enabled owner. Holds
+    the tenant's owner lock (``lock_owners``) until the transaction ends;
+    callers take it before reading the rows they change."""
+    await lock_owners(db, tenant_id)
+    if await _is_tenant_owner(db, tenant_id, principal_id) and not await _other_owners(
         db, tenant_id, principal_id
     ):
         raise _problem(
@@ -375,6 +403,8 @@ async def update_principal(
     principal: AdminPrincipal = _MEMBERS,
 ) -> dict:
     db = request.state.db
+    if body.disabled:
+        await lock_owners(db, principal.tenant_id)
     row = await _get(db, Principal, principal.tenant_id, principal_id, "Principal")
     sent = body.model_fields_set
     changed: list[str] = []
@@ -437,6 +467,7 @@ async def delete_principal(
     """Removes its memberships, revokes the admin tokens and partner
     credentials issued for it (rows kept, unlinked), then deletes it."""
     db = request.state.db
+    await lock_owners(db, principal.tenant_id)
     row = await _get(db, Principal, principal.tenant_id, principal_id, "Principal")
     memberships = (
         (await db.execute(select(Membership).where(Membership.principal_id == row.id)))
@@ -955,6 +986,7 @@ async def update_membership(
     principal: AdminPrincipal = _MEMBERS,
 ) -> dict:
     db = request.state.db
+    await lock_owners(db, principal.tenant_id)
     row = await _get(db, Membership, principal.tenant_id, membership_id, "Membership")
     if body.role == row.role:
         return serialize_membership(row)
@@ -990,6 +1022,7 @@ async def delete_membership(
     membership_id: UUID, request: Request, principal: AdminPrincipal = _MEMBERS
 ) -> Response:
     db = request.state.db
+    await lock_owners(db, principal.tenant_id)
     row = await _get(db, Membership, principal.tenant_id, membership_id, "Membership")
     _check_can_touch(principal, row)
     if row.role == rbac.OWNER and row.team_id is None:

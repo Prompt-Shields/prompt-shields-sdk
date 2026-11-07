@@ -387,14 +387,11 @@ async def cap_child_expiry(
     return expires_at
 
 
-async def revoke_descendants(
-    db: AsyncSession, parent: AdminToken, now: datetime
-) -> list[AdminToken]:
-    """Revoke every live token that ``parent`` created, and the tokens those
-    created, and so on (linked by ``created_by = token:<token_prefix>``).
-    Returns the tokens revoked here. Flushes nothing; the caller audits and
-    commits."""
-    revoked: list[AdminToken] = []
+async def live_descendants(db: AsyncSession, parent: AdminToken) -> list[AdminToken]:
+    """Every live token that ``parent`` created, and the tokens those
+    created, and so on (linked by ``created_by = token:<token_prefix>``):
+    what revoking ``parent`` revokes with it. Changes nothing."""
+    live: list[AdminToken] = []
     seen = {parent.id}
     frontier = [parent.token_prefix]
     while frontier:
@@ -419,8 +416,18 @@ async def revoke_descendants(
             # still be live.
             frontier.append(child.token_prefix)
             if child.revoked_at is None:
-                child.revoked_at = now
-                revoked.append(child)
+                live.append(child)
+    return live
+
+
+async def revoke_descendants(
+    db: AsyncSession, parent: AdminToken, now: datetime
+) -> list[AdminToken]:
+    """Revoke every token ``live_descendants`` returns. Returns the tokens
+    revoked here. Flushes nothing; the caller audits and commits."""
+    revoked = await live_descendants(db, parent)
+    for child in revoked:
+        child.revoked_at = now
     return revoked
 
 
