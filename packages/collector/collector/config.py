@@ -130,6 +130,23 @@ class Settings(BaseSettings):
     # Neither set disables creating subscriptions and delivering.
     webhook_secret_key: str = ""
     webhook_secret_keys: str = ""
+
+    # Inference credential vault (#342); see collector/kms.py and
+    # collector/credential_vault.py. Each credential is encrypted under its
+    # own data key, which is wrapped by a key-encryption key (KEK).
+    # local | azure-keyvault. "local" wraps data keys with
+    # PS_CREDENTIAL_KEK_KEYS (a "kid:key,..." keyring like
+    # PS_WEBHOOK_SECRET_KEYS, but a separate root): development and
+    # non-Azure deployments only, not for production.
+    credential_kek_provider: str = "local"
+    credential_kek_keys: str = ""
+    # Azure Key Vault (or Managed HSM) key that wraps data keys:
+    # https://<vault>.vault.azure.net/keys/<name>[/<version>] or a
+    # sovereign-cloud equivalent. Authenticates with workload identity
+    # (AZURE_FEDERATED_TOKEN_FILE) or managed identity; never a secret.
+    azure_keyvault_key_id: str = ""
+    azure_keyvault_wrap_algorithm: str = "RSA-OAEP-256"
+    azure_keyvault_timeout_seconds: float = 5.0
     # Dev/test only: allow http:// targets; private destinations (RFC 1918,
     # ULA, CGNAT; never loopback, link-local or cloud metadata); loopback
     # destinations (127.0.0.0/8, ::1) for a receiver on the same host.

@@ -210,6 +210,11 @@ from collector.provider_credentials_api import (
 app.include_router(provider_credentials_tenant_router)
 app.include_router(provider_credentials_partner_router)
 
+# Inference credential vault (#342): envelope-encrypted inference keys
+from collector.credential_vault_api import router as credential_vault_router
+
+app.include_router(credential_vault_router)
+
 # Platform signal: cloud AI inventory (admin trigger)
 from collector.cloud_inventory import router as cloud_inventory_router
 from collector.cloud_inventory_import import router as cloud_inventory_import_router

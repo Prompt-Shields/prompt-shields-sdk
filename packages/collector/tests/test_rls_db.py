@@ -34,6 +34,7 @@ from db.models import (
     CallFeedback,
     DataFlow,
     GatewaySecurityEvent,
+    InferenceCredential,
     LearnerRecommendation,
     LearnerSnapshot,
     McpToolUsage,
@@ -237,6 +238,16 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     requests=1,
                 ),
                 UsageRollupState(tenant_id=tenant_id, watermark=None),
+                InferenceCredential(
+                    tenant_id=tenant_id,
+                    provider="openai",
+                    label=f"seed-{name}",
+                    sealed_key="v1.unused",
+                    wrapped_dek="unused",
+                    kek_ref="local:k1",
+                    key_hint="****seed",
+                    key_fingerprint="0" * 16,
+                ),
             ]
         )
         sub = WebhookSubscription(

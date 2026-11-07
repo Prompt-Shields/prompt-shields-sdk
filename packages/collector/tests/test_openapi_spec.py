@@ -21,6 +21,7 @@ from collector import (
     audit_trail,
     cloud_inventory,
     cloud_inventory_import,
+    credential_vault_api,
     leanix,
     learner,
     lifecycle,
@@ -43,6 +44,7 @@ from collector import (
     webhook_admin,
     webhooks,
 )
+from collector import credential_vault as cv
 from collector import provider_credentials as pc
 from collector.admin_auth import ADMIN_SCOPES, serialize_token
 from collector.app import app
@@ -165,6 +167,18 @@ def test_webhook_schemas_match_serializers():
         ("UpdateProjectRequest", rbac_admin.UpdateProjectBody),
         ("CreateMembershipRequest", rbac_admin.CreateMembershipBody),
         ("UpdateMembershipRequest", rbac_admin.UpdateMembershipBody),
+        (
+            "CreateInferenceCredentialRequest",
+            credential_vault_api.CreateInferenceCredentialBody,
+        ),
+        (
+            "RotateInferenceCredentialRequest",
+            credential_vault_api.RotateInferenceCredentialBody,
+        ),
+        (
+            "UpdateInferenceCredentialRequest",
+            credential_vault_api.UpdateInferenceCredentialBody,
+        ),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -279,6 +293,39 @@ def test_provider_credential_schemas_match_serializers():
     assert "admin_key" not in _props("ProviderCredential")
 
 
+def test_inference_credential_schema_matches_serializer():
+    now = datetime.now(UTC)
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        provider="openai",
+        label="prod",
+        key_hint="****abcd",
+        key_fingerprint="0" * 16,
+        kek_ref="local:k1",
+        sealed_key="v1.x",
+        wrapped_dek="x",
+        expires_at=None,
+        disabled_at=None,
+        created_at=now,
+        updated_at=None,
+        rotated_at=None,
+        rewrapped_at=None,
+        last_used_at=None,
+    )
+    keys = set(cv.serialize(row))
+    assert _props("InferenceCredential") == keys
+    assert set(SCHEMAS["InferenceCredential"]["required"]) == keys
+    for secret in ("sealed_key", "wrapped_dek", "api_key"):
+        assert secret not in keys
+    assert SCHEMAS["InferenceCredential"]["properties"]["status"]["enum"] == [
+        cv.ACTIVE,
+        cv.DISABLED,
+        cv.EXPIRED,
+    ]
+    for name in ("CreateInferenceCredentialRequest", "RotateInferenceCredentialRequest"):
+        assert SCHEMAS[name]["properties"]["api_key"]["writeOnly"] is True
+
+
 def test_provider_credential_partner_routes_need_the_scope():
     for path, item in SPEC["paths"].items():
         if not path.startswith("/partner/v1/provider-"):
@@ -343,6 +390,7 @@ ADMIN_ROUTERS = (
     siem_export.router,
     operator_admin.router,
     user_erasure.router,
+    credential_vault_api.router,
 )
 
 
