@@ -6857,7 +6857,11 @@ paths:
         How a tenant's first admin token is made, for example when
         `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is on and no tenant key may call
         `/api/v1/admin/tokens`. Any scope may be granted. The token is
-        returned once.
+        returned once. With a named operator token that expires, the admin
+        token expires no later than the caller: an omitted or later
+        `expires_at` is capped to the caller's own (`PS_ADMIN_TOKEN` is not
+        bounded), and the `admin_token.create` audit row sets
+        `details.expiry_capped`.
       security:
         - OperatorToken: []
       x-operator-scope: operator:tenants

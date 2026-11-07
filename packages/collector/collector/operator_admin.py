@@ -24,6 +24,8 @@ Tenants:
   DELETE /tenants/{id}?confirm={id}   erase the tenant and all its data
                                       (below; unchanged)            operator:erase
   POST   /tenants/{id}/admin-tokens   bootstrap a scoped admin token operator:tenants
+                                      (expires no later than a named
+                                      caller; capped, #364)
   GET|PUT /tenants/{id}/retention     retention override (below)   operator:retention
   POST   /retention/purge             usage-event purge             operator:retention
   GET    /audit/verify                check the hash chains         operator:audit
@@ -533,13 +535,16 @@ async def bootstrap_admin_token(
         raise _problem(
             400, "Bad Request", f"Unknown scopes: {bad}. Allowed: {list(ADMIN_SCOPES)}"
         )
+    requested = _future(body.expires_at)
+    # No later than a named caller's own expiry (#364), as for operator tokens.
+    expires_at = _caller(request).cap_expiry(requested)
     try:
         row, token = await issue_token(
             db,
             tenant.id,
             name=body.name,
             scopes=body.scopes,
-            expires_at=_future(body.expires_at),
+            expires_at=expires_at,
             created_by=_created_by(request),
         )
     except tenant_keys.DuplicateName:
@@ -558,6 +563,7 @@ async def bootstrap_admin_token(
         target_id=out["id"],
         name=row.name,
         scopes=out["scopes"],
+        **({"expiry_capped": True} if expires_at != requested else {}),
     )
     await db.commit()
     return {**out, "token": token, "warning": TOKEN_WARNING}

@@ -132,7 +132,7 @@ curl -sS -X POST "$PS_COLLECTOR/api/v1/operator/tenants/$TENANT_ID/admin-tokens"
        "expires_at": "2027-06-30T00:00:00Z"}'
 ```
 
-The token is in the response's `token` field and is never shown again; the collector keeps only a bcrypt hash. Revoke it with `DELETE /api/v1/admin/tokens/{id}`.
+The token is in the response's `token` field and is never shown again; the collector keeps only a bcrypt hash. A named operator token that expires cannot bootstrap a longer-lived admin token: an omitted or later `expires_at` is capped to the operator token's own. Revoke it with `DELETE /api/v1/admin/tokens/{id}`.
 
 ## 3. Providers
 

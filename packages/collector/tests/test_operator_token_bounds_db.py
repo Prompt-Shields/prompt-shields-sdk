@@ -287,3 +287,82 @@ async def test_refusals_and_caps_under_rls(client, seeded_db):
     assert [(r.action, r.target_id) for r in refused] == [
         ("operator_token.revoke", broad["id"])
     ]
+
+
+async def test_a_token_can_rotate_and_revoke_itself(client, seeded_db):
+    exp = datetime.now(UTC) + timedelta(hours=1)
+    me = await _token(client, ["operator:tokens", "operator:read"], expires_at=exp)
+    path = f"{TOKENS}/{me['id']}"
+    # Self-rotation: the caller holds its own scopes; its expiry is unchanged
+    # (never extended), so rotating itself is no way past the bound.
+    resp = await client.post(path + "/rotate", headers=H(me["token"]))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["expires_at"] == me["expires_at"]
+    new = resp.json()["token"]
+    assert (await client.get(TOKENS, headers=H(me["token"]))).status_code == 401
+    # Self-revocation is allowed.
+    assert (await client.delete(path, headers=H(new))).status_code == 204
+    assert (await client.get(TOKENS, headers=H(new))).status_code == 401
+    rows = [
+        r
+        for r in await _system_rows(seeded_db)
+        if r.target_id == me["id"] and r.action != "operator_token.issue"
+    ]
+    assert [(r.action, r.outcome) for r in rows] == [
+        ("operator_token.rotate", audit_trail.SUCCESS),
+        ("operator_token.revoke", audit_trail.SUCCESS),
+    ]
+    assert "expiry_capped" not in rows[0].details
+
+
+async def test_bootstrapped_admin_token_expires_no_later_than_the_caller(
+    client, seeded_db
+):
+    resp = await client.post(
+        "/api/v1/operator/tenants",
+        headers=OP,
+        json={"name": f"bounds-{uuid.uuid4().hex[:8]}", "issue_api_key": False},
+    )
+    assert resp.status_code == 201, resp.text
+    tid = resp.json()["id"]
+    path = f"/api/v1/operator/tenants/{tid}/admin-tokens"
+    op = await _token(
+        client,
+        ["operator:tenants"],
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    op_exp = _ts(op["expires_at"])
+    o = H(op["token"])
+
+    async def boot(headers, expires_at=None):
+        body = {"name": f"adm-{uuid.uuid4().hex[:8]}", "scopes": ["admin:read"]}
+        if expires_at is not None:
+            body["expires_at"] = expires_at.isoformat()
+        r = await client.post(path, headers=headers, json=body)
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    unbounded = await boot(o)
+    assert _ts(unbounded["expires_at"]) == op_exp
+    later = await boot(o, op_exp + timedelta(days=30))
+    assert _ts(later["expires_at"]) == op_exp
+    shorter_exp = op_exp - timedelta(minutes=5)
+    shorter = await boot(o, shorter_exp)
+    assert _ts(shorter["expires_at"]) == shorter_exp
+    # PS_ADMIN_TOKEN is not bounded.
+    forever = await boot(OP)
+    assert forever["expires_at"] is None
+
+    async with _admin(seeded_db)() as s:
+        rows = {
+            r.target_id: r
+            for r in (
+                await s.execute(
+                    select(AuditEvent).where(AuditEvent.action == "admin_token.create")
+                )
+            ).scalars()
+        }
+    assert rows[unbounded["id"]].details.get("expiry_capped") is True
+    assert rows[later["id"]].details.get("expiry_capped") is True
+    assert "expiry_capped" not in rows[shorter["id"]].details
+    assert "expiry_capped" not in rows[forever["id"]].details
