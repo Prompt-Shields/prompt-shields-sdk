@@ -69,6 +69,8 @@ from db.models import (
     DataFlow,
     RetentionAuditLog,
     RiskMapping,
+    UsageRollupDaily,
+    UsageRollupHourly,
     WebhookDelivery,
 )
 from sqlalchemy import delete, null, select, update
@@ -327,6 +329,9 @@ async def merge_tenant_duplicates(
             counts["webhook_deliveries"] += await _repoint(
                 db, WebhookDelivery, tenant_id, dup.id, survivor.id
             )
+            # Usage rollups (#346) outlive the raw events: follow the merge.
+            for rollup in (UsageRollupHourly, UsageRollupDaily):
+                await _repoint(db, rollup, tenant_id, dup.id, survivor.id)
             counts["data_flows"] += await _move_flows(db, tenant_id, dup.id, survivor.id)
             counts["risk_mappings"] += await _move_risks(db, tenant_id, dup.id, survivor.id)
             db.expunge(dup)

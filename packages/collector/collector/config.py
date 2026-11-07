@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # flood the routing learner). 0 or less disables either.
     feedback_rate_limit_per_minute: int = 600
     feedback_user_rate_limit_per_minute: int = 30
+    # /ingest/security-events and /ingest/otel/v1/logs (gateway security
+    # events, #353): requests per minute per tenant, counted apart from
+    # /ingest/events; 0 or less disables it.
+    security_events_rate_limit_per_minute: int = 600
     # Tenant key auth (collector/auth_cache.py). Seconds a key that passed
     # bcrypt is remembered (by an HMAC of the key, never the key), so its
     # next requests skip bcrypt while the stored hash is unchanged; the key
@@ -157,6 +161,16 @@ class Settings(BaseSettings):
     # finalises late, or a missed run, is picked up next time; re-pulled
     # days overwrite the same rows.
     provider_usage_pull_days: int = 3
+
+    # Usage rollups (#346), see collector/usage_rollups.py. Seconds between
+    # incremental runs of the hourly and daily rollups in the worker set; 0
+    # turns the loop off (then run `python -m collector.usage_rollups
+    # refresh --all-tenants` from cron). Replicas that overlap skip a tenant
+    # another run holds, so running it in every API replica is safe.
+    usage_rollup_interval_seconds: float = 30
+    # Days rollup rows are kept, separately from raw events (default about
+    # 25 months). Never less than a tenant's raw retention.
+    usage_rollup_retention_days: int = 760
 
     # Kubernetes / replicas. PS_COLLECTOR_RUN_WORKERS=false keeps the
     # background loops above (webhook delivery, provider usage pull) out of

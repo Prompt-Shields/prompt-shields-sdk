@@ -9,6 +9,8 @@ Raw usage events (`ai_usage_events`) can include session ids and prompt hashes, 
 
 MCP tool usage (`mcp_tool_usage`: per server and tool call counts, first and last seen) follows the same retention period: the purge deletes rows not seen since the cutoff, since they only summarise calls older than it. The purge result reports them as `mcp_tool_usage_deleted`.
 
+Gateway security events stored by the collector (`gateway_security_events`, see [SIEM export](/integrations/siem#gateway-security-events-in-the-collector)) follow it too: events that happened before the cutoff are deleted and reported as `security_events_deleted`.
+
 ## Retention period
 
 Each tenant keeps usage events for `retention_days` days:
@@ -30,6 +32,10 @@ cutoff = await get_retention_cutoff(db, tenant_id)     # looks the tenant up; No
 ```
 
 The Partner API `usage-summary` endpoint already does this, so a `90d` summary for a tenant with 30-day retention covers only the last 30 days, even before the purge has run.
+
+## Usage rollups
+
+Hourly and daily usage aggregates (`usage_rollup_hourly`, `usage_rollup_daily`, read by `GET /partner/v1/usage/series`) have their own, longer retention: `PS_USAGE_ROLLUP_RETENTION_DAYS` (default `760`, about 25 months), never less than the tenant's raw retention. They hold counts, sums and user id hashes only, never raw user ids or content, and they are not shrunk when the raw events they were computed from are purged. The retention purge deletes rollup rows whose bucket starts before `now - PS_USAGE_ROLLUP_RETENTION_DAYS` (counted as `usage_rollups_deleted`), and erasing a tenant deletes them.
 
 ## Running the purge
 
@@ -81,16 +87,18 @@ A tenant erases what the collector holds about one of its end users with the ten
 
 | Method | Path | Body | Reaches |
 |--------|------|------|---------|
-| `POST` | `/api/v1/admin/users/erase` | `{"user_id": "<id as the gateway or SDK sent it>"}` | usage events, call feedback, MCP tool usage |
-| `DELETE` | `/api/v1/admin/users/{user_id_hash}/data` | none | usage events |
+| `POST` | `/api/v1/admin/users/erase` | `{"user_id": "<id as the gateway or SDK sent it>"}` | usage events, usage rollups, call feedback, MCP tool usage |
+| `DELETE` | `/api/v1/admin/users/{user_id_hash}/data` | none | usage events, usage rollups |
 
 Send the raw id in the POST body, not in a URL, so it never lands in an access log. The collector hashes it with the tenant's salt; it never creates or rotates the salt for an erasure. Admin tokens that held every admin scope before `admin:privacy` existed are given it by migration `038`.
 
 What changes, in the caller's tenant only:
 
 - **Usage events** of the user (matched by `user_id_hash`; an event with `user_id_raw` always has the hash too): `user_id_hash`, `user_id_raw`, `session_id` and `prompt_hash` (a SHA-256 of the prompt text) are set to null. Model, tokens, cost and routing metadata stay, so spend reports do not change; the rows no longer say whose they were.
+- **Usage rollups** (hourly and daily, kept beyond raw retention) with the user's hash: `user_id_hash` is set to null, counted as `usage_rollups`. The totals stay.
 - **Call feedback** with `user_id` equal to the id as sent: `user_id` is set to null. The score stays.
 - **MCP tool usage** rows for the id: merged into the row for the same tool with no user, so the counts stay.
+- **Gateway security events** whose `user.hash` is the id as sent, or whose salted hash of it (stored at ingest, never returned) is the user's `user_id_hash`: both are set to null; the event stays. Both forms reach them.
 
 Call feedback and MCP usage store the id as the gateway sent it, so only the POST form reaches them.
 

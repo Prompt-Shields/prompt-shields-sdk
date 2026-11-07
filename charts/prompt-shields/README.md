@@ -162,7 +162,7 @@ variable names**. For each component the chart uses the first of:
 
 | Component | Keys |
 |---|---|
-| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_SENTINEL_EXPORT`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
+| `collector` (required) | `PS_DATABASE_URL` (application role), `PS_PARTNER_JWT_SECRET` (required in practice: without it the collector signs partner tokens with a public development secret), `PS_ADMIN_TOKEN`, `PS_COLLECTOR_METRICS_TOKEN`, `PS_WEBHOOK_SECRET_KEYS` / `PS_WEBHOOK_SECRET_KEY`, `PS_PROVIDER_ADMIN_KEYS`, `PS_LEANIX`, `PS_SERVICENOW`, `PS_SENTINEL_EXPORT`, `PS_SIEM_EXPORT`, `PS_CLOUD_INVENTORY`, `OPENAI_API_KEY` |
 | `migration` | `PS_DATABASE_URL` (owner role). Falls back to the collector Secret |
 | `gateway` (optional) | `PS_API_KEY`, `PS_GATEWAY_ADMIN_TOKEN`, `PS_METRICS_TOKEN`, `REDIS_CONNECTION_STRING`, `PS_BUDGET_REDIS_URL`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `PS_OTEL_HEADERS`, `PS_MCP_TOKEN` and the MCP server credentials the MCP config names. Callers send their own provider credentials with each request, except with `gateway.oidc`: then `PS_OIDC_PROVIDER_KEYS` (JSON, provider to API key) and `PS_OIDC_SUBJECT_SALT` |
 
@@ -209,17 +209,26 @@ both 0 by default). Run each in exactly one place, not in every API replica:
 | Job | Command | Default | Default schedule |
 |---|---|---|---|
 | `auditPurge` | `python -m collector.audit purge` (partner audit rows older than `PS_AUDIT_RETENTION_DAYS`) | on | `17 2 * * *` |
-| `retentionPurge` | `python -m collector.retention purge` (usage events past retention) | on | `37 2 * * *` |
+| `retentionPurge` | `python -m collector.retention purge` (usage events past retention, and usage rollups past `PS_USAGE_ROLLUP_RETENTION_DAYS`) | on | `37 2 * * *` |
 | `spendAnomaly` | `python -m collector.spend_anomalies --all-tenants` (spend anomaly alerts for yesterday, UTC) | on | `57 3 * * *` |
 | `lifecycleSweep` | `python -m collector.lifecycle` (mark assets stale / retired) | off | `7 3 * * *` |
 | `webhooksDeliver` | `python -m collector.webhooks deliver` (alternative to the worker) | off | every minute |
 | `webhooksPurge` | `python -m collector.webhooks purge` | off | `47 3 * * *` |
 | `providerUsage` | `python -m collector.provider_usage_admin --all-tenants` | off | `27 4 * * *` |
 
+The usage rollups (hourly and daily aggregates behind
+`/partner/v1/usage/series`) are refreshed by a third loop that is on by
+default, `PS_USAGE_ROLLUP_INTERVAL_SECONDS=30`. It is safe in every API
+replica (a run skips a tenant another run is refreshing); set it to `0` in
+`collector.extraEnv` and add an entry running
+`python -m collector.usage_rollups refresh --all-tenants` to run it as a
+CronJob instead.
+
 Add per-tenant connector syncs as extra entries, e.g.
 `args: ["python", "-m", "collector.leanix", "--tenant", "<uuid>"]` (also
 `collector.servicenow`, `collector.cloud_inventory`; the Microsoft Sentinel
-export takes `python -m collector.sentinel_export --all-tenants`). One-off maintenance
+export takes `python -m collector.sentinel_export --all-tenants`, the Splunk
+HEC / syslog / webhook SIEM export `python -m collector.siem_export --all-tenants`). One-off maintenance
 (`collector.reembed`, `collector.dedup`, `collector.webhooks rekey`) is best
 run with `kubectl create job --from=cronjob/...` or a temporary pod. The
 chart refuses to render webhook delivery or the provider pull in both the
@@ -246,7 +255,7 @@ and counted in `ps_collector_rate_limit_store_errors`.
 Operators can override a tenant's ingest limits in
 `settings.ingest_rate_limits` with `PATCH /api/v1/operator/tenants/{id}`,
 e.g. `{"settings": {"ingest_rate_limits": {"events": 1000}}}` (keys
-`events`, `kong`, `mcp`, `feedback`, `feedback_user`; `null` removes the
+`events`, `kong`, `mcp`, `feedback`, `feedback_user`, `security_events`; `null` removes the
 override). Each process caches overrides for
 `PS_TENANT_LIMITS_CACHE_TTL_SECONDS` (default 30).
 
@@ -558,6 +567,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_KONG_RATE_LIMIT_PER_MINUTE` | `6000` | Per-tenant `/ingest/kong` limit, counted apart |
 | `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart |
 | `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE` | `600`, `30` | `/ingest/feedback` limits per tenant and per `user_id` |
+| `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant limit on `/ingest/security-events` and `/ingest/otel/v1/logs`, counted apart |
 | `PS_COLLECTOR_REDIS_URL` (*config* or secret) | empty (per process) | Redis shared by the partner and ingest rate limiters, e.g. `redis://redis:6379/0` |
 | `PS_COLLECTOR_REDIS_TIMEOUT_SECONDS`, `PS_COLLECTOR_REDIS_KEY_PREFIX` | `0.5`, `ps:collector:rl` | Redis call deadline before the per-process fallback; key prefix |
 | `PS_TENANT_LIMITS_CACHE_TTL_SECONDS` | `30` | Per-process cache of tenant ingest limit overrides |
@@ -575,10 +585,12 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` (*chart* on the worker) | `0` | Webhook delivery loop (set by `worker.webhookIntervalSeconds`) |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS`, `PS_WEBHOOK_ALLOW_LOOPBACK_DESTINATIONS` | `false` | Development only (private never admits loopback, link-local or cloud metadata; loopback has its own flag) |
 | `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS` (*chart* on the worker), `PS_PROVIDER_USAGE_PULL_DAYS` | `0`, `3` | Provider usage pull loop (set by `worker.providerUsagePullIntervalSeconds`) |
+| `PS_USAGE_ROLLUP_INTERVAL_SECONDS`, `PS_USAGE_ROLLUP_RETENTION_DAYS` | `30`, `760` | Usage rollup loop (in the worker set: the worker Deployment, else every API replica; overlapping runs skip a tenant another run holds) and how long hourly/daily usage rollups are kept, never less than raw retention |
 | `PS_PROVIDER_ADMIN_KEYS` (secret) | — | Operator-held provider admin keys per tenant (JSON) |
 | `PS_LEANIX`, `PS_LEANIX_ALLOWED_HOST_SUFFIXES` | — | LeanIX connector (JSON config is secret) |
 | `PS_SERVICENOW`, `PS_SERVICENOW_ALLOWED_HOST_SUFFIXES` | — | ServiceNow connector |
 | `PS_SENTINEL_EXPORT` | — | Microsoft Sentinel / Defender XDR export (Logs Ingestion API), per tenant; secret |
+| `PS_SIEM_EXPORT` | — | Splunk HEC, syslog (CEF/JSON over TLS) and webhook SIEM export, per tenant; secret |
 | `PS_CLOUD_INVENTORY` (secret) | — | Cloud inventory connector |
 | `HOME`, `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED` (*chart*) | `/tmp`, `1`, `1` | Read-only root filesystem |
 

@@ -97,7 +97,7 @@ def _break_glass_token() -> str:
 # chain): ``operator.access`` (named token) or ``operator.break_glass``
 # (PS_ADMIN_TOKEN) for every authorised call, with route and method;
 # ``auth.failure`` (rate-limited) otherwise. Shared by the cloud inventory,
-# LeanIX, ServiceNow and Sentinel operator routes.
+# LeanIX, ServiceNow, Sentinel and SIEM connector operator routes.
 require_operator = require_operator_scope("operator:integrations", _break_glass_token)
 
 

@@ -1,5 +1,12 @@
+import { camelizeKeys } from './casing';
 import { APIConnectionError, PartnerError } from './errors';
-import type { FocusCostRow, FocusExportFormat, SiemRecord } from './types';
+import type {
+  FocusCostRow,
+  FocusExportFormat,
+  SiemRecord,
+  UsageSeriesExportFormat,
+  UsageSeriesPoint,
+} from './types';
 
 /** The parts of Node's `fs` and `stream/promises` that `saveTo()` uses. */
 interface NodeWriteStream {
@@ -241,6 +248,36 @@ export class FocusExport extends Download {
         throw new PartnerError(`FOCUS export line ${n} is not JSON: ${line.slice(0, 200)}`, { cause: err });
       }
       yield row;
+    }
+  }
+}
+
+/** The usage time series as one file: `client.usage.seriesExport()`. */
+export class UsageSeriesExport extends Download {
+  /** `csv` or `jsonl`, as requested. */
+  readonly format: UsageSeriesExportFormat;
+
+  constructor(response: Response, format: UsageSeriesExportFormat) {
+    super(response);
+    this.endsWithNewline = true;
+    this.format = format;
+  }
+
+  /** Parsed points of a `jsonl` export (camelCased), one at a time. Throws for `csv`. */
+  async *rows(): AsyncGenerator<UsageSeriesPoint, void, undefined> {
+    if (this.format !== 'jsonl') {
+      throw new PartnerError("rows() needs format: 'jsonl'; parse a CSV export from chunks() or saveTo() a file");
+    }
+    let n = 0;
+    for await (const line of this.lines()) {
+      n++;
+      let row: unknown;
+      try {
+        row = JSON.parse(line);
+      } catch (err) {
+        throw new PartnerError(`Usage series export line ${n} is not JSON: ${line.slice(0, 200)}`, { cause: err });
+      }
+      yield camelizeKeys<UsageSeriesPoint>(row);
     }
   }
 }

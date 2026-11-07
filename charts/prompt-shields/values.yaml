@@ -63,7 +63,7 @@ secrets:
     # README "Database roles"), PS_PARTNER_JWT_SECRET (required),
     # PS_ADMIN_TOKEN, PS_WEBHOOK_SECRET_KEYS, PS_WEBHOOK_SECRET_KEY,
     # PS_PROVIDER_ADMIN_KEYS, PS_LEANIX, PS_SERVICENOW, PS_SENTINEL_EXPORT,
-    # PS_CLOUD_INVENTORY, OPENAI_API_KEY, PS_COLLECTOR_REDIS_URL (when it
+    # PS_SIEM_EXPORT, PS_CLOUD_INVENTORY, OPENAI_API_KEY, PS_COLLECTOR_REDIS_URL (when it
     # holds a password).
     existingSecret: ""
     values: {}
@@ -653,6 +653,7 @@ cronJobs:
     # servicenowAcme: ["python", "-m", "collector.servicenow", "--tenant", "<uuid>"]
     # cloudInventoryAcme: ["python", "-m", "collector.cloud_inventory", "--tenant", "<uuid>"]
     # sentinelExport: ["python", "-m", "collector.sentinel_export", "--all-tenants"]
+    # siemExport: ["python", "-m", "collector.siem_export", "--all-tenants"]
 
 # ──────────────────────────────────────────────────────────────────────
 # Dashboards and alerts

@@ -44,6 +44,11 @@ events per process), so the default leaves room for many processes per tenant.
 off). Kong's http-log plugin sends one request per proxied call unless
 batching is on, and retries a `429`.
 
+`POST /ingest/security-events` and `POST /ingest/otel/v1/logs` (gateway
+security events) share a per-tenant limit of their own, counted separately:
+`PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`, default 600 requests/minute (`0`
+turns it off).
+
 `POST /ingest/feedback` (call feedback from the SDK and the gateway) has two
 limits of its own: per tenant, `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE` (default
 600), and per `user_id` within the tenant when one is sent,

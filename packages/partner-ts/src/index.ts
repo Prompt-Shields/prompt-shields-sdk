@@ -11,6 +11,7 @@ export {
   LearnerResource,
   SiemResource,
   AuditResource,
+  SecurityEventsResource,
   ProviderCredentialsResource,
   ProviderKeyFingerprintsResource,
   WebhooksResource,
@@ -22,7 +23,7 @@ export {
 export type { PartnerClientOptions, FetchLike, SendOptions } from './client';
 export { PageIterator } from './pagination';
 export type { CursorPage } from './pagination';
-export { Download, FocusExport, SiemBatch, SiemFeed } from './download';
+export { Download, FocusExport, SiemBatch, SiemFeed, UsageSeriesExport } from './download';
 export {
   PartnerError,
   APIConnectionError,
@@ -96,6 +97,10 @@ export type {
   ListAssetsParams,
   ListAttestationsParams,
   ListAuditParams,
+  ListSecurityEventsParams,
+  SecurityEventPage,
+  SecurityEventPageMeta,
+  SecurityEventRow,
   ListChangesParams,
   ListLearnerRecommendationsParams,
   ListLearnerSnapshotsParams,
@@ -163,6 +168,14 @@ export type {
   TokenResponse,
   UpdateWebhookSubscriptionParams,
   UsagePeriod,
+  UsageSeries,
+  UsageSeriesExportFormat,
+  UsageSeriesExportParams,
+  UsageSeriesGranularity,
+  UsageSeriesGroupBy,
+  UsageSeriesMeta,
+  UsageSeriesParams,
+  UsageSeriesPoint,
   UsageSummary,
   UsageSummaryParams,
   Vendor,

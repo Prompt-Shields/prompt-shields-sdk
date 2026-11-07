@@ -10,8 +10,9 @@ import {
   PROMETHEUS_CONTENT_TYPE,
 } from './registry';
 import { isMetricsEnabled, labelValue, routeOf } from './labels';
-// Security and telemetry-health metrics register in the same registry.
+// Security, telemetry-health and cost metrics register in the same registry.
 import './security';
+import './cost';
 import {
   cacheResponsesTotal,
   cacheSavedCostTotal,

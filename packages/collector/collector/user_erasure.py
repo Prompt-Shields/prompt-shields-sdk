@@ -22,11 +22,19 @@ What is erased, in the caller's tenant only:
   to NULL. The rest of the row (model, tokens, cost, routing metadata) is
   kept, so spend and usage totals do not change; the row no longer says
   whose it was.
+* ``usage_rollup_hourly`` / ``usage_rollup_daily`` rows (#346) with the
+  user's hash: ``user_id_hash`` is set to NULL (counted together as
+  ``usage_rollups``), under the rollup job's tenant lock so a concurrent
+  rollup run cannot write the hash back.
 * ``call_feedback`` rows with ``user_id`` equal to the id as sent:
   ``user_id`` is set to NULL (score and reason are kept).
 * ``mcp_tool_usage`` rows with ``user_hash`` equal to the id as sent:
   merged into the row for the same tool with no user (``user_hash = ''``),
   so the counts stay and the user's key is gone.
+* ``gateway_security_events`` rows with ``user_hash`` equal to the id as
+  sent (the gateway's OIDC subject hash on policy denials), or with its
+  salted hash (``user_id_hash``, stored at ingest) equal to the user's:
+  both are set to NULL (the event is kept). Both forms reach them.
 
 The feedback and MCP tables store the id as the gateway sent it (a hex
 hash), not the collector's salted hash, so only the POST form, which
@@ -59,13 +67,19 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
-from db.models import AIUsageEvent, CallFeedback, McpToolUsage, RetentionAuditLog
+from db.models import (
+    AIUsageEvent,
+    CallFeedback,
+    GatewaySecurityEvent,
+    McpToolUsage,
+    RetentionAuditLog,
+)
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import audit_trail, user_identity
+from collector import audit_trail, usage_rollups, user_identity
 from collector.admin_auth import AdminPrincipal, admin_actor, require_admin
 from collector.config import settings
 from collector.sanitize import BoundedJsonRoute
@@ -260,6 +274,11 @@ async def erase_user(
     rows[ev.__tablename__] = await _null_in_batches(
         db, ev, [ev.tenant_id == tenant_id, match], dict.fromkeys(EVENT_COLUMNS), size
     )
+    if user_id_hash is not None:
+        # Usage rollups (#346) group by user_id_hash too.
+        rows[usage_rollups.ROWS_KEY] = await usage_rollups.erase_user_hash(
+            db, tenant_id, user_id_hash, size
+        )
     if user_id is not None:
         rows[CallFeedback.__tablename__] = await _null_in_batches(
             db,
@@ -269,6 +288,21 @@ async def erase_user(
             size,
         )
         rows[McpToolUsage.__tablename__] = await _merge_mcp_rows(db, tenant_id, user_id)
+    # Security events: by the id as sent (user.hash) and by the salted hash
+    # of it (user_id_hash), so both forms reach them.
+    se = GatewaySecurityEvent
+    se_match = []
+    if user_id is not None:
+        se_match.append(se.user_hash == user_id)
+    if user_id_hash is not None:
+        se_match.append(se.user_id_hash == user_id_hash)
+    rows[se.__tablename__] = await _null_in_batches(
+        db,
+        se,
+        [se.tenant_id == tenant_id, or_(*se_match)],
+        {"user_hash": None, "user_id_hash": None},
+        size,
+    )
 
     result = UserEraseResult(user_id_hash=user_id_hash, input=input_, rows_erased=rows)
     # The data is committed. If the audit write fails now, report the

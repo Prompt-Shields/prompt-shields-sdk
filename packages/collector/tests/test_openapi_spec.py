@@ -32,8 +32,10 @@ from collector import (
     provider_usage_admin,
     risk_reviews,
     risk_suggestions,
+    security_events,
     sentinel_export,
     servicenow,
+    siem_export,
     tenant_keys,
     user_erasure,
     webhook_admin,
@@ -327,6 +329,7 @@ ADMIN_ROUTERS = (
     leanix.router,
     servicenow.router,
     sentinel_export.router,
+    siem_export.router,
     operator_admin.router,
     user_erasure.router,
 )
@@ -500,6 +503,67 @@ def test_focus_cost_row_schema_matches_the_export_columns():
     assert set(focus_export.MEDIA_TYPES) == set(params["format"]["enum"])
 
 
+def test_usage_series_schemas_match_the_serializer():
+    from typing import get_args
+
+    from collector import usage_rollups
+
+    row = {c: 0 for c in usage_rollups.SUM_COLUMNS} | {
+        "bucket_start": datetime(2026, 10, 1, tzinfo=UTC),
+        "key": None,
+    }
+    point = usage_rollups.series_point(row)
+    assert list(point) == list(usage_rollups.SERIES_COLUMNS)
+    assert list(SCHEMAS["UsageSeriesPoint"]["properties"]) == list(point)
+    assert SCHEMAS["UsageSeriesPoint"]["required"] == list(point)
+    meta = SCHEMAS["UsageSeries"]["properties"]["meta"]
+    assert set(meta["properties"]) == set(meta["required"])
+    assert meta["properties"]["group_by"]["enum"] == list(get_args(usage_rollups.GroupBy))
+    assert meta["properties"]["granularity"]["enum"] == list(
+        get_args(usage_rollups.Granularity)
+    )
+    for path, scope in (
+        ("/partner/v1/usage/series", "usage:read"),
+        ("/partner/v1/usage/series/export", "usage:export"),
+    ):
+        op = SPEC["paths"][path]["get"]
+        assert op["security"][0] == {"OAuth2": [scope]}
+        params = {p["name"]: p["schema"] for p in op["parameters"]}
+        assert params["group_by"]["enum"] == list(get_args(usage_rollups.GroupBy))
+        assert params["granularity"]["enum"] == list(get_args(usage_rollups.Granularity))
+    export = SPEC["paths"]["/partner/v1/usage/series/export"]["get"]
+    fmt = {p["name"]: p["schema"] for p in export["parameters"]}["format"]
+    assert fmt["enum"] == list(get_args(usage_rollups.ExportFormat))
+
+
+async def test_usage_series_meta_matches_the_schema(monkeypatch):
+    from collector import usage_rollups
+
+    class _Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Db:
+        async def execute(self, *_a, **_k):
+            return _Rows()
+
+    async def no_mark(db, tenant_id):
+        return None
+
+    monkeypatch.setattr(usage_rollups, "watermark", no_mark)
+    window = usage_rollups.Window(datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 10, 2, tzinfo=UTC))
+    body = await usage_rollups.series_page(
+        _Db(), uuid.uuid4(), group_by="none", granularity="day", window=window,
+        limit=10, offset=0,
+    )
+    meta = SCHEMAS["UsageSeries"]["properties"]["meta"]
+    assert set(body["meta"]) == set(meta["properties"])
+    assert set(body) == set(SCHEMAS["UsageSeries"]["required"])
+
+
 def test_user_erasure_and_audit_schemas_match_serializers():
     result = user_erasure.UserEraseResult(user_id_hash=None, input="user_id")
     keys = set(result.as_dict())
@@ -528,3 +592,27 @@ def test_user_erasure_and_audit_schemas_match_serializers():
     assert set(SCHEMAS["AuditTrailEvent"]["required"]) == set(payload)
     assert _props("AuditTrailActor") == set(payload["actor"])
     assert _props("AuditTrailTarget") == set(payload["target"])
+
+
+def test_security_event_schemas_match_serializers():
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        event_id="e-1",
+        name="injection.detected",
+        occurred_at=datetime.now(UTC),
+        received_at=datetime.now(UTC),
+        status_code=None,
+        attributes={},
+        **dict.fromkeys(security_events.STRING_COLUMNS.values()),
+    )
+    payload = security_events.security_event_payload(row)
+    assert _props("SecurityEventRow") == set(payload)
+    assert set(SCHEMAS["SecurityEventRow"]["required"]) == set(payload)
+    result = security_events.IngestResult().as_dict()
+    assert _props("SecurityEventIngestResult") == set(result)
+    assert set(SCHEMAS["SecurityEventIngestResult"]["required"]) == set(result)
+    op = SPEC["paths"]["/partner/v1/security-events"]["get"]
+    assert op["security"][0] == {"OAuth2": ["security-events:read"]}
+    for path in ("/ingest/security-events", "/ingest/otel/v1/logs"):
+        assert SPEC["paths"][path]["post"]["security"] == [{"TenantApiKey": []}]

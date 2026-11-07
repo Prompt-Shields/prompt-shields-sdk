@@ -30,6 +30,8 @@ for await (const asset of client.assets.list({ limit: 200 })) {
 | `client.spendAlerts.get(id)` / `acknowledge(id)` | `GET /partner/v1/spend-alerts/{id}`, `POST .../acknowledge` (`spend-alerts:acknowledge`) |
 | `client.usage.focusExport({ start, end, format, granularity, costMode }, { signal })` | `GET /partner/v1/usage/focus-export` (`usage:export`; FinOps FOCUS v1.4 CSV or JSON Lines, streamed) |
 | `client.usage.savings({ period, groupBy })` | `GET /partner/v1/usage/savings` (realised savings vs. counterfactual, by day/week/month, asset, use case or business unit) |
+| `client.usage.series({ groupBy, granularity, from, to, limit, cursor })` | `GET /partner/v1/usage/series` (requests, tokens, cost, cache savings and error rate per hour/day/week, by user hash, project, model, provider, API surface or asset; cursor-paged) |
+| `client.usage.seriesExport({ groupBy, granularity, from, to, format }, { signal })` | `GET /partner/v1/usage/series/export` (`usage:export`; the series as CSV or JSON Lines, streamed; `rows()` parses JSON Lines into camelCased points) |
 | `client.usage.sovereignShare({ period })` | `GET /partner/v1/usage/sovereign-share` (share of calls and spend served in the EEA, per sensitivity level) |
 | `client.mcp.listTools({ serverName, source, limit })` / `listToolsPage(...)` | `GET /partner/v1/mcp/tools` (`mcp:read`; cursor-paged) |
 | `client.mcp.listUsage({ since, until, toolName, serverName, source, limit })` / `listUsagePage(...)` | `GET /partner/v1/mcp/usage` (`mcp:read`; daily tool-call metering, cursor-paged) |
@@ -39,6 +41,7 @@ for await (const asset of client.assets.list({ limit: 200 })) {
 | `client.siem.calls({ cursor, since, limit, settleSeconds }, { signal })` / `callsFeed(...)` | `GET /partner/v1/siem/calls` (`evidence:read`; NDJSON, streamed) |
 | `client.siem.audit({ cursor, since, limit }, { signal })` / `auditFeed(...)` | `GET /partner/v1/siem/audit` (`audit:read`; NDJSON, streamed) |
 | `client.audit.list({ since, until, action, limit })` / `listPage(...)` | `GET /partner/v1/audit` (`audit:read`; JSON pages in chain order, `details` kept as stored) |
+| `client.securityEvents.list({ since, until, name, severity, action, limit })` / `listPage(...)` | `GET /partner/v1/security-events` (`security-events:read`; gateway security events in arrival order, `event` kept in the gateway's field names) |
 | `client.providerCredentials.list()` / `get(provider)` | `GET /partner/v1/provider-credentials`, `/{provider}` (`provider-credentials:manage`; masked) |
 | `client.providerCredentials.create(provider, { adminKey })` / `rotate(...)` / `delete(provider)` | `POST /partner/v1/provider-credentials/{provider}`, `POST .../rotate`, `DELETE` (write-only keys) |
 | `client.providerKeyFingerprints.list()` / `put(provider, apiKeyId, { apiKeyFingerprint })` / `delete(provider, apiKeyId)` | `GET /partner/v1/provider-key-fingerprints`, `PUT` / `DELETE .../{provider}/{api_key_id}` (`provider-credentials:manage`) |

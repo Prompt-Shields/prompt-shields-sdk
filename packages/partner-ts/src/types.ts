@@ -801,6 +801,82 @@ export interface FingerprintLinkResult {
   meta: FingerprintLinkMeta;
 }
 
+// Usage time series (/partner/v1/usage/series and its export).
+
+export type UsageSeriesGroupBy = OpenString<
+  'none' | 'user' | 'project' | 'model' | 'provider' | 'api_surface' | 'asset'
+>;
+export type UsageSeriesGranularity = OpenString<'hour' | 'day' | 'week'>;
+export type UsageSeriesExportFormat = OpenString<'csv' | 'jsonl'>;
+
+export interface UsageSeriesParams {
+  /**
+   * Split each bucket by this dimension (`key` in each point). `user` is the
+   * salted user id hash, never a raw id; `project` the asset's use case.
+   * Default `none`.
+   */
+  groupBy?: UsageSeriesGroupBy;
+  /** UTC hour, day (default) or ISO week starting Monday. */
+  granularity?: UsageSeriesGranularity;
+  /** Inclusive start, rounded down to a whole bucket. */
+  from?: Timestamp;
+  /** Exclusive end, rounded up to a whole bucket. Default: now. */
+  to?: Timestamp;
+  /** Points per page (server default 1000, up to 10000). */
+  limit?: number;
+  /** `meta.nextCursor` of the previous page. */
+  cursor?: string;
+}
+
+export interface UsageSeriesExportParams {
+  groupBy?: UsageSeriesGroupBy;
+  granularity?: UsageSeriesGranularity;
+  from?: Timestamp;
+  to?: Timestamp;
+  /** `csv` (default, with a header row) or `jsonl` (one JSON object per line). */
+  format?: UsageSeriesExportFormat;
+}
+
+/**
+ * One bucket of the usage time series. `costUsd` is `null` when no event
+ * reported a cost, `cacheSavedUsd` and `cacheHitRate` when none reported a
+ * cache lookup, `errorRate` when none reported per-attempt metadata.
+ */
+export interface UsageSeriesPoint {
+  /** UTC start of the hour, day or week. */
+  bucketStart: string;
+  /** Value of `groupBy`; `null` for `none` or when not reported. */
+  key: string | null;
+  requests: number;
+  tokensIn: number;
+  tokensOut: number;
+  tokensCached: number;
+  tokensCacheWrite: number;
+  tokensReasoning: number;
+  costUsd: number | null;
+  cacheSavedUsd: number | null;
+  cacheHitRate: number | null;
+  errorRate: number | null;
+}
+
+export interface UsageSeriesMeta {
+  groupBy: UsageSeriesGroupBy;
+  granularity: UsageSeriesGranularity;
+  /** Effective inclusive start, after rounding and the retention clamp. */
+  from: string;
+  /** Effective exclusive end. */
+  to: string;
+  /** When the tenant's rollups were last refreshed; `null` before the first run. */
+  rolledUpAt: string | null;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface UsageSeries {
+  data: UsageSeriesPoint[];
+  meta: UsageSeriesMeta;
+}
+
 // FinOps FOCUS cost export (/partner/v1/usage/focus-export).
 
 export type FocusExportFormat = OpenString<'csv' | 'jsonl'>;
@@ -1249,6 +1325,48 @@ export interface ListAuditParams {
   /** Only rows with this action, e.g. `user.erase`. */
   action?: string;
   /** Rows per page, 1 to 1000. Server default is 200. */
+  limit?: number;
+}
+
+// ── Gateway security events (client.securityEvents) ────────────────────
+
+/** One stored gateway security event (`GET /partner/v1/security-events`). */
+export interface SecurityEventRow {
+  id: string;
+  /** When the collector stored it (page order). */
+  receivedAt: string;
+  /**
+   * The event in the gateway's schema v1 field names, kept exactly as sent
+   * (`@timestamp`, `event.name`, `severity`, `action`, `signature`, `ps.*`, ...).
+   */
+  event: Record<string, unknown>;
+}
+
+export interface SecurityEventPageMeta {
+  hasMore: boolean;
+  /** Opaque; pass as `cursor` for the next page. */
+  nextCursor: string | null;
+}
+
+export interface SecurityEventPage {
+  data: SecurityEventRow[];
+  meta: SecurityEventPageMeta;
+}
+
+export interface ListSecurityEventsParams {
+  /** `meta.nextCursor` of the previous page. */
+  cursor?: string | null;
+  /** First event time to include. */
+  since?: Timestamp;
+  /** Event time before which to stop (exclusive). */
+  until?: Timestamp;
+  /** Only this `event.name`, e.g. `injection.detected`. */
+  name?: string;
+  /** Only this severity: `informational`, `low`, `medium` or `high`. */
+  severity?: string;
+  /** Only this action: `allowed`, `blocked` or `failure`. */
+  action?: string;
+  /** Events per page, 1 to 1000. Server default is 200. */
   limit?: number;
 }
 

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Date,
     Float,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Numeric,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -256,6 +258,10 @@ class AIUsageEvent(Base):
     # client disconnected before the stream ended.
     stream_truncated = Column(Boolean)
     stream_cancelled = Column(Boolean)
+    # When the collector stored the row (#346): the database's now() at
+    # insert, never sent by a client. The usage rollup job finds the hours
+    # to recompute from it (collector/usage_rollups.py).
+    ingested_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     asset = relationship("AIAsset", back_populates="usage_events")
 
@@ -276,6 +282,7 @@ class AIUsageEvent(Base):
             "trace_id",
             postgresql_where=text("trace_id IS NOT NULL"),
         ),
+        Index("ix_usage_events_tenant_ingested", "tenant_id", "ingested_at"),
     )
 
 
@@ -699,6 +706,133 @@ class SpendAlert(Base):
         Index("ix_spend_alerts_tenant_created", "tenant_id", "created_at"),
         Index("ix_spend_alerts_tenant_day", "tenant_id", "day"),
     )
+
+
+class GatewaySecurityEvent(Base):
+    """A gateway security event (schema v1, docs/security-events.schema.json):
+    a guardrail verdict, PII or injection detection, auth failure, policy
+    denial, rate limit or payload rejection, ingested by
+    ``collector.security_events`` (#353).
+
+    Metadata only, as the gateway sends it: no prompt or response content,
+    PII values, credentials or client IP addresses. ``user_hash`` is the
+    gateway's pseudonymous OIDC subject hash (policy denials only);
+    ``user_id_hash`` is that value hashed with the tenant's user id salt, as
+    ``ai_usage_events.user_id_hash`` is, so erasure by the stored hash finds
+    it (never returned by the API).
+    ``attributes`` holds the event's other ``ps.*`` / ``gen_ai.*`` /
+    ``http.*`` fields (scalars only). One row per (tenant, ``event_id``), so
+    a resent event is stored once. Rows older than the tenant's retention
+    period are purged.
+    """
+
+    __tablename__ = "gateway_security_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    event_id = Column(Text, nullable=False)
+    occurred_at = Column(TIMESTAMP(timezone=True), nullable=False)
+    received_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    name = Column(Text, nullable=False)
+    kind = Column(Text)
+    outcome = Column(Text)
+    severity = Column(Text)
+    action = Column(Text)
+    signature = Column(Text)
+    request_id = Column(Text)
+    route = Column(Text)
+    method = Column(Text)
+    business_unit = Column(Text)
+    environment = Column(Text)
+    provider = Column(Text)
+    model = Column(Text)
+    status_code = Column(Integer)
+    user_hash = Column(Text)
+    user_id_hash = Column(Text)
+    schema_version = Column(Text)
+    attributes = Column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "event_id", name="ux_gateway_security_events_event"),
+        Index("ix_gateway_security_events_tenant_occurred", "tenant_id", "occurred_at"),
+        Index("ix_gateway_security_events_tenant_received", "tenant_id", "received_at", "id"),
+        Index(
+            "ix_gateway_security_events_tenant_user",
+            "tenant_id",
+            "user_id_hash",
+            postgresql_where=text("user_id_hash IS NOT NULL"),
+        ),
+    )
+
+
+def _rollup_count(name: str) -> Column:
+    return Column(name, BigInteger, nullable=False, default=0, server_default="0")
+
+
+class _UsageRollupColumns:
+    """Columns shared by the hourly and daily usage rollups (#346).
+
+    One row per (tenant, bucket, asset, model, provider, API surface, user
+    hash). The dimensions are null when the events did not report them.
+    ``model`` is the served model, else the requested one; ``provider`` the
+    served provider; ``user_id_hash`` the HMAC of the caller's user id
+    (never the raw id). Sums of the events' columns, so a rollup is exactly
+    the raw events it was computed from. Numbers and hashes only.
+    """
+
+    id = Column(BigInteger, Identity(), primary_key=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    # UTC start of the hour (hourly) or day (daily).
+    bucket_start = Column(TIMESTAMP(timezone=True), nullable=False)
+    # No foreign key: rollups outlive raw events, and an asset can be merged
+    # into another (asset_merge repoints these too).
+    asset_id = Column(UUID(as_uuid=True))
+    model = Column(Text)
+    provider = Column(Text)
+    api_surface = Column(Text)
+    user_id_hash = Column(Text)
+    requests = _rollup_count("requests")
+    tokens_in = _rollup_count("tokens_in")
+    tokens_out = _rollup_count("tokens_out")
+    tokens_cached = _rollup_count("tokens_cached")
+    tokens_cache_write = _rollup_count("tokens_cache_write")
+    tokens_reasoning = _rollup_count("tokens_reasoning")
+    # Sum of cost over the events that reported one (cost_requests).
+    cost = Column(Numeric(20, 6), nullable=False, default=0, server_default="0")
+    cost_requests = _rollup_count("cost_requests")
+    cache_saved_cost = Column(Numeric(20, 6), nullable=False, default=0, server_default="0")
+    cache_lookups = _rollup_count("cache_lookups")
+    cache_hits = _rollup_count("cache_hits")
+    # Events that reported per-attempt metadata, and those whose last
+    # attempt failed (HTTP status >= 400): the error rate's two sides.
+    attempts_reported = _rollup_count("attempts_reported")
+    error_requests = _rollup_count("error_requests")
+
+
+class UsageRollupHourly(_UsageRollupColumns, Base):
+    """Hourly usage rollup (#346), kept PS_USAGE_ROLLUP_RETENTION_DAYS."""
+
+    __tablename__ = "usage_rollup_hourly"
+    __table_args__ = (Index("ix_usage_rollup_hourly_tenant_bucket", "tenant_id", "bucket_start"),)
+
+
+class UsageRollupDaily(_UsageRollupColumns, Base):
+    """Daily usage rollup (#346): the sum of the day's hourly rows."""
+
+    __tablename__ = "usage_rollup_daily"
+    __table_args__ = (Index("ix_usage_rollup_daily_tenant_bucket", "tenant_id", "bucket_start"),)
+
+
+class UsageRollupState(Base):
+    """Per-tenant progress of the usage rollup job (#346): ``watermark`` is
+    the database time of its last run; the next run recomputes the buckets
+    of events ingested since then (less an overlap)."""
+
+    __tablename__ = "usage_rollup_state"
+
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True)
+    watermark = Column(TIMESTAMP(timezone=True))
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
 
 
 class DataFlow(Base):
