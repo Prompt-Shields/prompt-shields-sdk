@@ -207,8 +207,58 @@ describe('policyPullConfig', () => {
         PS_POLICY_PULL_INTERVAL_SECONDS: 'soon',
       },
     ],
+    [
+      {
+        PS_POLICY_PULL_ENABLED: 'true',
+        PS_API_KEY: 'k',
+        PS_COLLECTOR_URL: 'http://collector.example.com',
+      },
+    ],
+    [
+      {
+        PS_POLICY_PULL_ENABLED: 'true',
+        PS_API_KEY: 'k',
+        PS_COLLECTOR_URL: 'http://10.0.0.5:8000',
+      },
+    ],
+    [
+      {
+        PS_POLICY_PULL_ENABLED: 'true',
+        PS_API_KEY: 'k',
+        PS_COLLECTOR_URL: 'ftp://collector',
+      },
+    ],
   ])('refuses %j', (env) => {
     expect(() => policyPullConfig(env)).toThrow(PolicyPullConfigError);
+  });
+
+  test.each([
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'http://[::1]:8000',
+    'http://ps-collector:8000',
+    'http://ps-collector.ps.svc:8000',
+    'http://ps-collector.ps.svc.cluster.local:8000',
+    'https://10.0.0.5',
+  ])('plain http only to loopback / in-cluster names: %s', (url) => {
+    expect(
+      policyPullConfig({
+        PS_POLICY_PULL_ENABLED: 'true',
+        PS_API_KEY: 'k',
+        PS_COLLECTOR_URL: url,
+      })
+    ).toMatchObject({ url: `${url}/api/v1/policy/effective` });
+  });
+
+  test('PS_POLICY_PULL_ALLOW_HTTP lifts the https requirement', () => {
+    expect(
+      policyPullConfig({
+        PS_POLICY_PULL_ENABLED: 'true',
+        PS_API_KEY: 'k',
+        PS_COLLECTOR_URL: 'http://10.0.0.5:8000',
+        PS_POLICY_PULL_ALLOW_HTTP: 'true',
+      })
+    ).toMatchObject({ url: 'http://10.0.0.5:8000/api/v1/policy/effective' });
   });
 });
 

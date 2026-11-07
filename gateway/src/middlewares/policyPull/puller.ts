@@ -7,6 +7,13 @@
  * ingest key holding `policy:read` (PS_POLICY_PULL_API_KEY, else
  * PS_API_KEY), sending the last ETag as If-None-Match.
  *
+ * Transport: the pulled policy can widen access (`access` replaces
+ * PS_OIDC_POLICY) and change where data is routed, so it is only fetched
+ * over https, or over plain http to loopback or an in-cluster name (a
+ * single-label host such as the chart's `<release>-collector`, or one
+ * ending in `.svc`, `.svc.cluster.local` or `.cluster.local`).
+ * PS_POLICY_PULL_ALLOW_HTTP=true lifts that for other hosts.
+ *
  * Fail-safe:
  *   - collector unreachable, timeout, non-2xx: the last good policy stays
  *     active (at start: none, so the local PS_ROUTE_POLICY_FILE /
@@ -44,6 +51,46 @@ export interface PolicyPullConfig {
 const isTrue = (v?: string) =>
   ['true', '1', 'yes'].includes((v ?? '').trim().toLowerCase());
 
+const IN_CLUSTER_SUFFIXES = ['.svc', '.svc.cluster.local', '.cluster.local'];
+
+/** Hosts plain http may reach: loopback and in-cluster service names. */
+export function isPlainHttpHostAllowed(hostname: string): boolean {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '');
+  if (
+    host === 'localhost' ||
+    host === '::1' ||
+    /^127\.\d+\.\d+\.\d+$/.test(host)
+  )
+    return true;
+  // An IP literal other than loopback is not an in-cluster name.
+  if (/^[\d.]+$/.test(host) || host.includes(':')) return false;
+  if (!host.includes('.')) return true;
+  return IN_CLUSTER_SUFFIXES.some((s) => host.endsWith(s));
+}
+
+function checkTransport(base: string, allowHttp: boolean): void {
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    throw new PolicyPullConfigError(
+      `PS_COLLECTOR_URL is not a valid URL: "${base}"`
+    );
+  }
+  if (url.protocol === 'https:') return;
+  if (url.protocol !== 'http:')
+    throw new PolicyPullConfigError(
+      `PS_COLLECTOR_URL must be an http(s) URL for the policy pull, got "${url.protocol}"`
+    );
+  if (allowHttp || isPlainHttpHostAllowed(url.hostname)) return;
+  throw new PolicyPullConfigError(
+    `the policy pull needs https for ${url.hostname} (plain http is only used for loopback and in-cluster names); use an https PS_COLLECTOR_URL or set PS_POLICY_PULL_ALLOW_HTTP=true`
+  );
+}
+
 /** The pull's settings, or undefined when PS_POLICY_PULL_ENABLED is off. */
 export function policyPullConfig(
   env: Record<string, string | undefined> = process.env
@@ -71,6 +118,7 @@ export function policyPullConfig(
     /\/+$/,
     ''
   );
+  checkTransport(base, isTrue(env.PS_POLICY_PULL_ALLOW_HTTP));
   return {
     url: `${base}/api/v1/policy/effective`,
     apiKey,
