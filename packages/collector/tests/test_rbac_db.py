@@ -560,10 +560,11 @@ async def test_admin_cannot_mint_an_owner_capable_token(env):
     every = list(ADMIN_SCOPES)
     await _post(c, admin_raw, "/tokens", {"name": "unbound", "scopes": every}, 403)
     await _token_for(c, admin_raw, owner, status=403)
-    # Narrower tokens, or full tokens for a non-owner, are fine.
+    # Narrower unbound tokens, or tokens for a non-owner, are fine; no token
+    # for an owner, however narrow (#379).
     await _post(c, admin_raw, "/tokens", {"name": "ci", "scopes": every[:-1]})
     await _token_for(c, admin_raw, admin)
-    await _token_for(c, admin_raw, owner, scopes=["admin:read"])
+    await _token_for(c, admin_raw, owner, scopes=["admin:read"], status=403)
     # An owner (or the operator's unbound bootstrap token) can.
     await _post(c, owner_raw, "/tokens", {"name": "unbound2", "scopes": every})
     await _token_for(c, owner_raw, owner)
@@ -738,19 +739,26 @@ async def test_revoking_a_parent_cannot_cascade_to_owner_tokens(env):
     admin = await _member(c, boot, "admin")
     owner_tok = await _token_for(c, boot, owner)
     parent = await _token_for(c, boot, admin)
-    # The admin's token may issue a narrow token for the owner (not owner-
-    # capable), which the admin cannot revoke directly ...
-    child = await _token_for(c, parent["token"], owner, scopes=["admin:read"])
+    # The admin's token issues a narrow token for a principal that becomes
+    # an owner afterwards (an admin cannot issue one for an owner, #379),
+    # which the admin cannot revoke directly ...
+    promoted = await _member(c, boot, "admin")
+    child = await _token_for(c, parent["token"], promoted, scopes=["admin:read"])
+    resp = await c.patch(
+        f"{A}/memberships/{await _tenant_mid(c, boot, promoted)}",
+        headers=H(boot),
+        json={"role": "owner"},
+    )
+    assert resp.status_code == 200, resp.text
     other_admin = await _token_for(c, boot, admin)
     resp = await c.delete(f"{A}/tokens/{child['id']}", headers=H(other_admin["token"]))
     assert resp.status_code == 403
-    # ... nor through its parent, nor by having the parent revoke itself.
-    for caller in (other_admin, parent):
-        resp = await c.delete(f"{A}/tokens/{parent['id']}", headers=H(caller["token"]))
-        assert resp.status_code == 403, resp.text
-        assert str(child["id"]) in resp.json()["detail"]["detail"]
+    # ... nor through its parent.
+    resp = await c.delete(f"{A}/tokens/{parent['id']}", headers=H(other_admin["token"]))
+    assert resp.status_code == 403, resp.text
+    assert str(child["id"]) in resp.json()["detail"]["detail"]
     rows = await _refusals(engine, tid, parent["id"])
-    assert len(rows) == 2
+    assert len(rows) == 1
     assert all(r.details["reason"] == "owner_required" for r in rows)
     assert all(r.details["cascade_blocked_by"] == str(child["id"]) for r in rows)
     for t in (parent, child):
@@ -761,6 +769,184 @@ async def test_revoking_a_parent_cannot_cascade_to_owner_tokens(env):
     assert resp.status_code == 204
     got = (await c.get(f"{A}/tokens/{child['id']}", headers=H(boot))).json()
     assert got["status"] == "revoked"
+
+
+async def _failures(engine, tid, action) -> list[AuditEvent]:
+    async with _admin(engine)() as s:
+        return (
+            (
+                await s.execute(
+                    select(AuditEvent)
+                    .where(
+                        AuditEvent.tenant_id == tid,
+                        AuditEvent.action == action,
+                        AuditEvent.outcome == "failure",
+                    )
+                    .order_by(AuditEvent.seq)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def test_self_revoke_leaves_owner_bound_descendants_live(env):
+    """A token can always revoke itself. When it cannot manage owners, the
+    cascade leaves live every token that would need an owner to revoke, and
+    the tokens below it, and the audit row names them; an owner can revoke
+    them later (#379)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    owner = await _member(c, boot, "owner")
+    admin = await _member(c, boot, "admin")
+    owner_tok = await _token_for(c, boot, owner)
+    parent = await _token_for(c, boot, admin)
+    promoted = await _member(c, boot, "admin")
+    child = await _token_for(
+        c, parent["token"], promoted, scopes=["admin:tokens", "admin:read"]
+    )
+    grandchild = await _post(
+        c, child["token"], "/tokens", {"name": "gc", "scopes": ["admin:read"]}
+    )
+    plain = await _token_for(c, parent["token"], admin, scopes=["admin:read"])
+    resp = await c.patch(
+        f"{A}/memberships/{await _tenant_mid(c, boot, promoted)}",
+        headers=H(boot),
+        json={"role": "owner"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await c.delete(f"{A}/tokens/{parent['id']}", headers=H(parent["token"]))
+    assert resp.status_code == 204, resp.text
+
+    async def status(t):
+        return (await c.get(f"{A}/tokens/{t['id']}", headers=H(boot))).json()["status"]
+
+    assert await status(parent) == "revoked"
+    assert await status(plain) == "revoked"
+    assert await status(child) == "active"
+    assert await status(grandchild) == "active"
+    async with _admin(engine)() as s:
+        row = (
+            await s.execute(
+                select(AuditEvent).where(
+                    AuditEvent.tenant_id == tid,
+                    AuditEvent.action == "admin_token.revoke",
+                    AuditEvent.outcome == "success",
+                    AuditEvent.target_id == str(parent["id"]),
+                )
+            )
+        ).scalar_one()
+    assert row.details["cascade_skipped"] == [str(child["id"])]
+    assert await _refusals(engine, tid, parent["id"]) == []
+
+    # An owner revoking the (revoked) parent again takes the rest with it.
+    resp = await c.delete(f"{A}/tokens/{parent['id']}", headers=H(owner_tok["token"]))
+    assert resp.status_code == 204
+    assert await status(child) == "revoked"
+    assert await status(grandchild) == "revoked"
+
+
+async def test_self_revoke_by_an_owner_cascades_fully(env):
+    """An owner's self-revoke skips nothing."""
+    c, boot = env["c"], env["boot"]
+    owner = await _member(c, boot, "owner")
+    other_owner = await _member(c, boot, "owner")
+    owner_tok = await _token_for(c, boot, owner)
+    child = await _token_for(c, owner_tok["token"], other_owner, scopes=["admin:read"])
+    resp = await c.delete(f"{A}/tokens/{owner_tok['id']}", headers=H(owner_tok["token"]))
+    assert resp.status_code == 204
+    got = (await c.get(f"{A}/tokens/{child['id']}", headers=H(boot))).json()
+    assert got["status"] == "revoked"
+
+
+async def test_issuing_credentials_for_an_owner_needs_an_owner(env):
+    """A caller that cannot manage owners gets 403 (audited, reason
+    ``owner_required``) issuing an admin token or a partner credential for
+    an owner, however narrow; an owner's own token may still issue them for
+    that owner, and an owner can for any owner (#379)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    owner = await _member(c, boot, "owner")
+    other_owner = await _member(c, boot, "owner")
+    admin = await _member(c, boot, "admin")
+    admin_raw = (await _token_for(c, boot, admin))["token"]
+
+    await _token_for(c, admin_raw, owner, scopes=["admin:read"], status=403)
+    resp = await c.post(
+        f"{A}/partner-credentials",
+        headers=H(admin_raw),
+        json={"partner_name": "bi-tool", "principal_id": owner, "scopes": ["assets:read"]},
+    )
+    assert resp.status_code == 403, resp.text
+    (tok_row,) = await _failures(engine, tid, "admin_token.create")
+    assert tok_row.status_code == 403
+    assert tok_row.details["reason"] == "owner_required"
+    assert tok_row.details["principal_id"] == owner
+    (cred_row,) = await _failures(engine, tid, "partner_credential.create")
+    assert cred_row.status_code == 403
+    assert cred_row.details["reason"] == "owner_required"
+    assert cred_row.details["principal_id"] == owner
+    async with _admin(engine)() as s:
+        assert (
+            await s.execute(
+                select(PartnerCredential).where(
+                    PartnerCredential.tenant_id == tid,
+                    PartnerCredential.principal_id == uuid.UUID(owner),
+                )
+            )
+        ).first() is None
+
+    # For a non-owner: fine.
+    await _token_for(c, admin_raw, admin, scopes=["admin:read"])
+    await _partner_for(c, admin_raw, admin)
+
+    # An owner's narrow token for that same owner: fine; for another owner: no.
+    narrow = await _token_for(
+        c, boot, owner, scopes=["admin:tokens", "admin:partners", "admin:read"]
+    )
+    await _token_for(c, narrow["token"], owner, scopes=["admin:read"])
+    await _partner_for(c, narrow["token"], owner)
+    await _token_for(c, narrow["token"], other_owner, scopes=["admin:read"], status=403)
+
+    # An owner can manage owners: any owner.
+    owner_raw = (await _token_for(c, boot, owner))["token"]
+    await _token_for(c, owner_raw, other_owner, scopes=["admin:read"])
+    await _partner_for(c, owner_raw, other_owner)
+
+
+async def test_changing_an_owner_partner_credential_needs_an_owner(env):
+    """PATCH on a partner credential issued for an owner, by an
+    ``admin:partners`` holder that cannot manage owners: 403, audited as
+    ``partner_credential.update`` (reason ``owner_required``), unchanged
+    (#379)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    owner = await _member(c, boot, "owner")
+    admin = await _member(c, boot, "admin")
+    owner_raw = (await _token_for(c, boot, owner))["token"]
+    admin_raw = (await _token_for(c, boot, admin))["token"]
+    cred = await _partner_for(c, boot, owner)
+    path = f"{A}/partner-credentials/{cred['id']}"
+    before = (await c.get(path, headers=H(boot))).json()
+    for body in ({"scopes": ["assets:read"]}, {"rate_limit": 1}):
+        resp = await c.patch(path, headers=H(admin_raw), json=body)
+        assert resp.status_code == 403, resp.text
+    assert (await c.get(path, headers=H(boot))).json() == before
+    rows = await _failures(engine, tid, "partner_credential.update")
+    assert len(rows) == 2
+    assert all(r.status_code == 403 for r in rows)
+    assert all(r.details["reason"] == "owner_required" for r in rows)
+    assert all(r.target_id == str(cred["id"]) for r in rows)
+
+    # A non-owner's credential is fine; an owner can change the owner's.
+    admin_cred = await _partner_for(c, boot, admin)
+    resp = await c.patch(
+        f"{A}/partner-credentials/{admin_cred['id']}",
+        headers=H(admin_raw),
+        json={"scopes": ["assets:read"]},
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await c.patch(path, headers=H(owner_raw), json={"scopes": ["assets:read"]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["scopes"] == ["assets:read"]
 
 
 async def test_revoking_an_owner_partner_credential_needs_an_owner(env):
