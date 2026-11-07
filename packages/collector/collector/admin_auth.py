@@ -9,21 +9,27 @@ Every tenant admin route declares one scope from `ADMIN_SCOPES` with
   - an admin token (``ps-at-...``, table ``admin_tokens``): tenant-scoped,
     with explicit scopes, an optional expiry, revocable. Meant for
     Terraform, CI and other automation.
-  - a tenant ingest key (the key the SDK sends): full access to every admin
-    route, as before admin tokens existed. This is the backwards-compatible
-    default. Only a key holding every ingest key scope (tenant_keys
+  - a tenant ingest key (the key the SDK sends), only while
+    ``PS_ADMIN_REQUIRE_SCOPED_TOKENS=false``: the scopes in
+    ``TENANT_KEY_SCOPES``, i.e. every admin scope but member management
+    (#338): ``admin:members`` is never reachable with
+    an ingest key. Only a key holding every ingest key scope (tenant_keys
     ALL_KEY_SCOPES: every key from before scopes existed, #341) gets in; a
     narrowed key, such as a new ``ingest:write``-only key, is refused (403).
 
-``PS_ADMIN_REQUIRE_SCOPED_TOKENS=true`` refuses tenant ingest keys on every
-admin route (403), so only admin tokens with the right scope get in. It is
-off by default so nothing breaks on upgrade. Turning it on is how an
-operator closes the open question of whether any ingest key (including one
-deployed with an SDK) should be able to rotate provider admin keys, issue
-partner credentials or mint more keys. While it is off, an ingest key
-reaches every admin route, so issuing or rotating one (which returns a key)
-needs every admin scope, not just ``admin:keys``; otherwise an
-``admin:keys`` token could mint itself full admin (``require_full_admin``).
+``PS_ADMIN_REQUIRE_SCOPED_TOKENS`` defaults to true since roles shipped
+(#338): ingest keys get 403 on every admin route, so only admin tokens with
+the right scope get in, and an ingest key deployed with an SDK cannot rotate
+provider admin keys, issue partner credentials or mint more keys. Setting it
+to false restores the old behaviour. While it is off, an ingest key reaches
+every route in ``TENANT_KEY_SCOPES``, so issuing or rotating one (which
+returns a key) needs all of those scopes, not just ``admin:keys``;
+otherwise an ``admin:keys`` token could mint itself full admin
+(``require_full_admin``).
+
+A token issued for a principal (``admin_tokens.principal_id``) reaches at
+most what the principal's tenant-wide roles grant at request time
+(collector/rbac.py); a disabled or deleted principal's tokens get 401.
 
 Tokens are stored like ingest keys (SHA-256 lookup prefix + bcrypt hash)
 and returned once. A token can only issue tokens with scopes it holds.
@@ -50,7 +56,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import audit_trail, operator_auth, rls
+from collector import audit_trail, operator_auth, rbac, rls
 from collector.audit import bearer_key_prefix
 from collector.auth import (
     _DUMMY_HASH,
@@ -88,7 +94,16 @@ ADMIN_SCOPES: dict[str, str] = {
         "Erase an end user's identifiers from usage events, call feedback and "
         "MCP usage (erasure by user)"
     ),
+    "admin:members": (
+        "Manage principals, teams, projects and role memberships (granting a "
+        "role needs every admin scope it carries; the owner role needs an owner)"
+    ),
 }
+
+# What a full-scope tenant ingest key reaches while
+# PS_ADMIN_REQUIRE_SCOPED_TOKENS is off: every admin scope but member
+# management (#338), which only admin tokens get.
+TENANT_KEY_SCOPES: frozenset[str] = frozenset(ADMIN_SCOPES) - {"admin:members"}
 
 READ_SCOPE = "admin:read"
 _READ_METHODS = frozenset({"GET", "HEAD"})
@@ -113,6 +128,9 @@ class AdminPrincipal:
     kind: str
     scopes: frozenset[str]
     token_id: UUID | None = None
+    # Set for a token issued for a principal: its id and tenant-wide roles.
+    principal_id: UUID | None = None
+    roles: frozenset[str] = frozenset()
 
     def allows(self, scope: str, method: str) -> bool:
         if scope in self.scopes:
@@ -140,6 +158,7 @@ async def _resolve_admin_token(request: Request, token: str) -> AdminPrincipal:
                     AdminToken.token_hash,
                     AdminToken.expires_at,
                     AdminToken.revoked_at,
+                    AdminToken.principal_id,
                     Tenant.disabled_at,
                 )
                 .join(Tenant, Tenant.id == AdminToken.tenant_id)
@@ -166,11 +185,26 @@ async def _resolve_admin_token(request: Request, token: str) -> AdminPrincipal:
     if row.disabled_at is not None:
         raise tenant_disabled()
     await rls.set_tenant(db, row.tenant_id)
+    scopes = frozenset(row.scopes or ())
+    roles: frozenset[str] = frozenset()
+    if row.principal_id is not None:
+        try:
+            roles = await rbac.tenant_roles(db, row.tenant_id, row.principal_id)
+        except rbac.PrincipalDisabled:
+            record_failed_auth(client)
+            await _audit_failure(request, "principal_disabled", 401, row.tenant_id)
+            raise _problem(
+                401, "Unauthorized", "The token's principal is disabled or deleted"
+            ) from None
+        # Never more than the principal's roles grant now (collector/rbac.py).
+        scopes &= rbac.role_scopes(roles)
     return AdminPrincipal(
         tenant_id=row.tenant_id,
         kind="admin_token",
-        scopes=frozenset(row.scopes or ()),
+        scopes=scopes,
         token_id=row.id,
+        principal_id=row.principal_id,
+        roles=roles,
     )
 
 
@@ -205,9 +239,7 @@ async def resolve_admin(request: Request) -> AdminPrincipal:
             "This collector requires a scoped admin token on /api/v1/admin "
             "(PS_ADMIN_REQUIRE_SCOPED_TOKENS); tenant ingest keys are refused",
         )
-    return AdminPrincipal(
-        tenant_id=tenant_id, kind="tenant_key", scopes=frozenset(ADMIN_SCOPES)
-    )
+    return AdminPrincipal(tenant_id=tenant_id, kind="tenant_key", scopes=TENANT_KEY_SCOPES)
 
 
 async def require_full_admin(
@@ -223,7 +255,7 @@ async def require_full_admin(
         return
     if not ALL_KEY_SCOPES <= set(key_scopes):
         return
-    missing = sorted(set(ADMIN_SCOPES) - principal.scopes)
+    missing = sorted(TENANT_KEY_SCOPES - principal.scopes)
     if missing:
         await _audit_failure(request, "insufficient_scope", 403, principal.tenant_id)
         raise _problem(
@@ -233,6 +265,15 @@ async def require_full_admin(
             "PS_ADMIN_REQUIRE_SCOPED_TOKENS is off (an ingest key then has "
             f"full admin access); missing: {missing}",
         )
+
+
+def can_manage_owner(principal: AdminPrincipal) -> bool:
+    """Whether the caller may grant, change or remove an ``owner``
+    membership: it holds every admin scope and, for a token issued for a
+    principal, that principal is a tenant-wide owner (collector/rbac.py)."""
+    if not set(ADMIN_SCOPES) <= principal.scopes:
+        return False
+    return principal.principal_id is None or rbac.OWNER in principal.roles
 
 
 def require_admin(scope: str):
@@ -307,6 +348,7 @@ def serialize_token(row: AdminToken) -> dict:
         "name": row.name,
         "scopes": list(row.scopes or ()),
         "token_hint": row.token_hint,
+        "principal_id": str(row.principal_id) if row.principal_id else None,
         "status": key_status(row),
         "created_by": row.created_by,
         "created_at": iso(row.created_at),
@@ -390,6 +432,7 @@ async def issue_token(
     scopes: list[str],
     expires_at: datetime | None,
     created_by: str,
+    principal_id: UUID | None = None,
 ) -> tuple[AdminToken, str]:
     """Create a token. Returns (row, plaintext). Flushes; the caller commits."""
     taken = (
@@ -414,6 +457,7 @@ async def issue_token(
         created_by=created_by,
         created_at=datetime.now(UTC),
         expires_at=expires_at,
+        principal_id=principal_id,
     )
     db.add(row)
     await db.flush()

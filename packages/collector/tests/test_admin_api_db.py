@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from collector import audit_trail, rls
-from collector.admin_auth import ADMIN_SCOPES
+from collector.admin_auth import TENANT_KEY_SCOPES
 from collector.app import app
 from collector.config import settings
 from db.api_keys import api_key_lookup_prefix, hash_api_key, verify_api_key
@@ -126,9 +126,9 @@ async def test_tenant_key_keeps_full_admin_access_by_default(client):
     ):
         resp = await client.get(path, headers=H(TENANT_KEY))
         assert resp.status_code == 200, (path, resp.text)
-    # And may grant any scope.
-    tok = await _token(client, list(ADMIN_SCOPES))
-    assert set(tok["scopes"]) == set(ADMIN_SCOPES)
+    # And may grant any scope it holds (every pre-roles admin scope).
+    tok = await _token(client, sorted(TENANT_KEY_SCOPES))
+    assert set(tok["scopes"]) == TENANT_KEY_SCOPES
 
 
 async def test_require_scoped_tokens_refuses_tenant_keys_on_admin_routes(
@@ -222,7 +222,7 @@ async def test_scopes_allow_and_deny(client):
 
 
 async def test_admin_tokens_do_not_reach_tenant_key_routes(client):
-    tok = await _token(client, list(ADMIN_SCOPES))
+    tok = await _token(client, sorted(TENANT_KEY_SCOPES))
     assert await _works(client, tok["token"]) == 401
     resp = await client.post(
         "/ingest/events",
@@ -660,7 +660,7 @@ async def test_tenant_isolation_under_rls(client, seeded_db):
     await _add_tenant_b(seeded_db)
     tok_a = await _token(client, ["admin:tokens", "admin:keys"])
     # Every scope, so the cross-tenant rotate below reaches the lookup.
-    tok_b = await _token(client, list(ADMIN_SCOPES), key=KEY_B)
+    tok_b = await _token(client, sorted(TENANT_KEY_SCOPES), key=KEY_B)
     key_a = (
         await client.post(
             "/api/v1/admin/api-keys",
@@ -707,7 +707,7 @@ async def test_tenant_isolation_under_rls(client, seeded_db):
 
 
 async def test_tenant_routes_are_operator_only(client, monkeypatch):
-    tok = await _token(client, list(ADMIN_SCOPES))
+    tok = await _token(client, sorted(TENANT_KEY_SCOPES))
     for headers in (H(TENANT_KEY), H(tok["token"]), {}):
         assert (
             await client.get("/api/v1/operator/tenants", headers=headers)
@@ -854,7 +854,7 @@ async def test_disabled_tenant_is_refused_everywhere(client):
 async def test_admin_changes_are_audited_without_secrets(client, seeded_db):
     # Issuing and rotating ingest keys needs every scope while
     # PS_ADMIN_REQUIRE_SCOPED_TOKENS is off.
-    tok = await _token(client, list(ADMIN_SCOPES))
+    tok = await _token(client, sorted(TENANT_KEY_SCOPES))
     created = (
         await client.post(
             "/api/v1/admin/api-keys", headers=H(tok["token"]), json={"name": "k"}
@@ -1051,7 +1051,7 @@ def _load_migration_038():
 def test_migration_038_covers_every_scope():
     m = _load_migration_038()
     assert m.NEW_SCOPE == "admin:privacy"
-    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == set(ADMIN_SCOPES)
+    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == TENANT_KEY_SCOPES
 
 
 async def test_migration_038_keeps_full_scope_tokens_full_admin(client, seeded_db):
@@ -1084,7 +1084,7 @@ async def test_migration_038_keeps_full_scope_tokens_full_admin(client, seeded_d
         scopes = dict(
             (await s.execute(select(AdminToken.name, AdminToken.scopes))).all()
         )
-    assert set(scopes["full"]) == set(ADMIN_SCOPES)
+    assert set(scopes["full"]) == TENANT_KEY_SCOPES
     assert sorted(scopes["narrow"]) == ["admin:keys", "admin:read"]
     resp = await client.post(
         "/api/v1/admin/api-keys",
