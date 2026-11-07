@@ -37,6 +37,9 @@ import type {
   ListChangesParams,
   ListLearnerRecommendationsParams,
   ListLearnerSnapshotsParams,
+  AuditTrailEvent,
+  AuditTrailPage,
+  ListAuditParams,
   ListMcpToolsParams,
   ListMcpUsageParams,
   ListRiskReviewsParams,
@@ -226,6 +229,8 @@ export class PartnerClient {
   readonly mcp: McpResource;
   readonly learner: LearnerResource;
   readonly siem: SiemResource;
+  /** The tenant's audit trail as JSON pages. Needs `audit:read`. */
+  readonly audit: AuditResource;
   /** Stored provider admin keys (write-only, masked). Needs `provider-credentials:manage`. */
   readonly providerCredentials: ProviderCredentialsResource;
   /** Provider key id to SDK `api_key_fingerprint` links. Needs `provider-credentials:manage`. */
@@ -287,6 +292,7 @@ export class PartnerClient {
     this.mcp = new McpResource(this);
     this.learner = new LearnerResource(this);
     this.siem = new SiemResource(this);
+    this.audit = new AuditResource(this);
     this.providerCredentials = new ProviderCredentialsResource(this);
     this.providerKeyFingerprints = new ProviderKeyFingerprintsResource(this);
     this.webhooks = new WebhooksResource(this);
@@ -782,6 +788,27 @@ export class McpResource {
   listUsage(params: ListMcpUsageParams = {}): PageIterator<McpUsageDay, McpUsagePage> {
     const { cursor, ...rest } = params;
     return new PageIterator((next) => this.listUsagePage({ ...rest, cursor: next }), cursor ?? undefined);
+  }
+}
+
+/**
+ * `/partner/v1/audit`: the tenant's hash-chained admin audit trail
+ * (credential, scope, webhook, retention, erasure and registry changes), in
+ * chain order. Needs `audit:read`. For log forwarders, `client.siem.audit`
+ * returns the same rows as NDJSON.
+ */
+export class AuditResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** One page of audit trail rows (up to 1000), oldest first. */
+  listPage(params: ListAuditParams = {}): Promise<AuditTrailPage> {
+    return this.client.get<AuditTrailPage>('/partner/v1/audit', { ...params });
+  }
+
+  /** Every audit trail row matching the filters, page by page as you iterate. */
+  list(params: ListAuditParams = {}): PageIterator<AuditTrailEvent, AuditTrailPage> {
+    const { cursor, ...rest } = params;
+    return new PageIterator((next) => this.listPage({ ...rest, cursor: next }), cursor ?? undefined);
   }
 }
 

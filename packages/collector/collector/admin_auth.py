@@ -84,6 +84,10 @@ ADMIN_SCOPES: dict[str, str] = {
     "admin:registry": (
         "Run the asset lifecycle sweep and risk suggestions, and review risk mappings"
     ),
+    "admin:privacy": (
+        "Erase an end user's identifiers from usage events, call feedback and "
+        "MCP usage (erasure by user)"
+    ),
 }
 
 READ_SCOPE = "admin:read"

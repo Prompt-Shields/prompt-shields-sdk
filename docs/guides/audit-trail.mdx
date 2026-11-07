@@ -21,6 +21,7 @@ This is separate from the **registry read log** (`partner_audit_log`), which rec
 | `webhook_delivery.redeliver` | A delivery is queued again |
 | `tenant.retention.read` / `tenant.retention.set` / `tenant.erase` | Operator routes under `/api/v1/operator` |
 | `retention.purge` | A retention run deleted a tenant's expired usage events (row counts) |
+| `user.erase` | A tenant admin erased one end user's identifiers (`POST /api/v1/admin/users/erase` or `DELETE /api/v1/admin/users/{hash}/data`; target: the user's salted hash; `details`: `input` and per-table `rows_erased`). See [Data retention](/guides/data-retention). |
 | `registry.attest` / `registry.retire` / `registry.unretire` | An attestation is recorded; an owner retires or un-retires an asset |
 | `registry.risk_review` | A risk mapping is confirmed or rejected (admin or Partner API; `details`: review id, asset id, new and previous status) |
 | `learner.snapshot_upload` | A routing learner snapshot is stored (`details`: learner version, recommendation and superseded counts) |
@@ -106,6 +107,8 @@ Every tenant row is also queued in the existing webhook outbox as an event of ty
 2. Create a subscription for that partner with `"event_types": ["audit.*"]`. A subscription that names no event types still gets asset events only.
 
 For Microsoft Sentinel and Defender XDR, the collector can push the rows to a Log Analytics custom table through the Logs Ingestion API. With the same `audit:read` scope, a partner can also pull them as NDJSON from `GET /partner/v1/siem/audit`. See [Microsoft Sentinel and Defender XDR](/integrations/microsoft-sentinel).
+
+To read the trail without a SIEM, a partner with `audit:read` lists it as JSON from `GET /partner/v1/audit`: rows in chain order, in the form shown below under `data.audit`, with `since`, `until` and `action` filters (`?action=user.erase` lists the erasures) and a `meta.next_cursor` to page with. The partner SDK wraps it as `client.audit.list()`.
 
 ```json
 {
