@@ -26,6 +26,11 @@ import httpx
 # through a NAT64 gateway, e.g. 64:ff9b::a9fe:a9fe -> 169.254.169.254),
 # IPv4-compatible ::/96 and site-local fec0::/10.
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
+# Local-use NAT64 64:ff9b:1::/48 (RFC 8215) and IPv4-translated
+# ::ffff:0:0/96 (SIIT, RFC 2765) also reach an IPv4 address through a
+# translator; the embedded address is in the last 32 bits for a /96 prefix.
+_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+_IPV4_TRANSLATED = ipaddress.ip_network("::ffff:0:0:0/96")
 _IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
 _SITE_LOCAL = ipaddress.ip_network("fec0::/10")
 # Cloud instance metadata services outside link-local: AWS IPv6 IMDS (in
@@ -55,8 +60,14 @@ def ip_is_public(
         if ip in _IPV4_COMPATIBLE or ip in _SITE_LOCAL:
             return False
         embedded = ip.ipv4_mapped or ip.sixtofour or (ip.teredo[1] if ip.teredo else None)
-        if embedded is None and ip in _NAT64:
+        if embedded is None and (
+            ip in _NAT64 or ip in _NAT64_LOCAL or ip in _IPV4_TRANSLATED
+        ):
             embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        # A local-use NAT64 prefix shorter than /96 embeds the address at
+        # other bit positions: refuse it outright when local is refused.
+        if not allow_local and ip in _NAT64_LOCAL:
+            return False
         if embedded is not None and not ip_is_public(
             embedded, allow_private=allow_private, allow_local=allow_local
         ):

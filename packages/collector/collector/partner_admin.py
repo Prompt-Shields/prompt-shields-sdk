@@ -14,7 +14,9 @@ expose them. Scopes and rate-limit tiers come from `collector.partner_scopes`.
 
 DELETE revokes, like admin tokens and tenant keys: 204, the row is kept
 (``status: revoked``, still readable by id and listed unless filtered out)
-and a repeated DELETE is 204 too.
+and a repeated DELETE is 204 too. Revoking a credential issued for a
+tenant-wide owner needs a caller that can manage owners
+(admin_auth.can_manage_owner); otherwise 403, audited (#372).
 
 This is the dashboard's hook for the "Partners > Add Integration" UX.
 
@@ -35,7 +37,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from collector import audit_trail, rbac
-from collector.admin_auth import AdminPrincipal, admin_actor, require_admin
+from collector.admin_auth import (
+    AdminPrincipal,
+    admin_actor,
+    can_manage_owner,
+    require_admin,
+)
 from collector.partner_auth import (
     generate_api_key,
     generate_client_id,
@@ -420,6 +427,32 @@ async def revoke_partner_credential(
     principal: AdminPrincipal = _PARTNERS,
 ) -> None:
     row = await _get_credential(request, principal.tenant_id, credential_id)
+    # A credential issued for an owner only by a caller that can manage
+    # owners, as for admin tokens (#372): otherwise an ``admin:partners``
+    # holder could cut the owner off.
+    if not can_manage_owner(principal) and await rbac.is_tenant_owner(
+        request.state.db, principal.tenant_id, row.principal_id
+    ):
+        await audit_trail.record_committed(
+            request.state.db,
+            tenant_id=principal.tenant_id,
+            action="partner_credential.revoke",
+            outcome=audit_trail.FAILURE,
+            actor=admin_actor(request, principal),
+            target_type="partner_credential",
+            target_id=row.id,
+            status_code=403,
+            details={"reason": "owner_required"},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "type": "about:blank",
+                "title": "Forbidden",
+                "status": 403,
+                "detail": "Only an owner can revoke a partner credential issued for an owner",
+            },
+        )
     if row.is_active == "false":
         return
     row.is_active = "false"
