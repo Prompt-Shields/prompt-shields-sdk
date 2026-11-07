@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 from collector import (
     admin_api,
+    audit_trail,
     cloud_inventory,
     cloud_inventory_import,
     leanix,
@@ -34,6 +35,7 @@ from collector import (
     sentinel_export,
     servicenow,
     tenant_keys,
+    user_erasure,
     webhook_admin,
     webhooks,
 )
@@ -150,6 +152,7 @@ def test_webhook_schemas_match_serializers():
         ("CreateOperatorTokenRequest", operator_admin.CreateOperatorTokenBody),
         ("RiskReviewRequest", risk_reviews.ReviewBody),
         ("LearnerReviewRequest", learner.LearnerReviewBody),
+        ("EraseUserRequest", user_erasure.EraseUserBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -325,6 +328,7 @@ ADMIN_ROUTERS = (
     servicenow.router,
     sentinel_export.router,
     operator_admin.router,
+    user_erasure.router,
 )
 
 
@@ -555,3 +559,33 @@ async def test_usage_series_meta_matches_the_schema(monkeypatch):
     meta = SCHEMAS["UsageSeries"]["properties"]["meta"]
     assert set(body["meta"]) == set(meta["properties"])
     assert set(body) == set(SCHEMAS["UsageSeries"]["required"])
+
+
+def test_user_erasure_and_audit_schemas_match_serializers():
+    result = user_erasure.UserEraseResult(user_id_hash=None, input="user_id")
+    keys = set(result.as_dict())
+    assert _props("UserErasureResult") == keys
+    assert set(SCHEMAS["UserErasureResult"]["required"]) == keys
+
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        seq=1,
+        created_at=datetime.now(UTC),
+        action="user.erase",
+        outcome="success",
+        actor_type="tenant_key",
+        actor_id="abc",
+        target_type="user",
+        target_id="0" * 64,
+        request_id=None,
+        status_code=200,
+        details={},
+        prev_hash="0" * 64,
+        row_hash="1" * 64,
+    )
+    payload = audit_trail.audit_payload(row)
+    assert _props("AuditTrailEvent") == set(payload)
+    assert set(SCHEMAS["AuditTrailEvent"]["required"]) == set(payload)
+    assert _props("AuditTrailActor") == set(payload["actor"])
+    assert _props("AuditTrailTarget") == set(payload["target"])

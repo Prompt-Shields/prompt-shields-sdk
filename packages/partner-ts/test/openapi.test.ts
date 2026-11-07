@@ -368,6 +368,12 @@ const SCHEMAS: Record<string, string> = {
   AdminKeyRequest: 'AdminKeyRequest',
   ProviderKeyFingerprintLink: 'ProviderKeyFingerprintLink',
   FingerprintRequest: 'FingerprintRequest',
+  // Audit trail (client.audit).
+  AuditTrailActor: 'AuditTrailActor',
+  AuditTrailTarget: 'AuditTrailTarget',
+  AuditTrailEvent: 'AuditTrailEvent',
+  AuditTrailPageMeta: 'AuditTrailPageMeta',
+  AuditTrailPage: 'AuditTrailPage',
 };
 /**
  * Schemas whose property names the SDK keeps as sent (not camelCased):
@@ -414,6 +420,9 @@ const UNMAPPED_SCHEMAS = new Set([
   'ConnectorSyncRequest',
   'LeanIXSyncRequest',
   'ServiceNowSyncRequest',
+  // Erasure by end user (#353): tenant admin route, not wrapped.
+  'EraseUserRequest',
+  'UserErasureResult',
 ]);
 
 interface Operation {
@@ -555,6 +564,11 @@ const OPERATIONS: Record<string, Operation> = {
   // SIEM export (#32): NDJSON for log forwarders, streamed (client.siem).
   'GET /partner/v1/siem/calls': { methods: ['siem.calls', 'siem.callsFeed'], params: 'SiemCallsParams' },
   'GET /partner/v1/siem/audit': { methods: ['siem.audit', 'siem.auditFeed'], params: 'SiemAuditParams' },
+  // Audit trail read API (#353): client.audit.
+  'GET /partner/v1/audit': { methods: ['audit.list', 'audit.listPage'], params: 'ListAuditParams' },
+  // Erasure by end user (#353): tenant admin, not wrapped.
+  'POST /api/v1/admin/users/erase': NOT_WRAPPED,
+  'DELETE /api/v1/admin/users/{user_id_hash}/data': NOT_WRAPPED,
   'GET /api/v1/operator/tenants': NOT_WRAPPED,
   'POST /api/v1/operator/tenants': NOT_WRAPPED,
   'GET /api/v1/operator/tenants/{tenant_id}': NOT_WRAPPED,

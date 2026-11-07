@@ -1269,6 +1269,65 @@ export interface SiemCallsParams {
   settleSeconds?: number;
 }
 
+// ── Audit trail (client.audit) ─────────────────────────────────────────
+
+export interface AuditTrailActor {
+  /** `tenant_key`, `partner`, `operator` or `system`. */
+  type: string;
+  /** Key prefix, partner credential id or job name; never a secret. */
+  id: string | null;
+}
+
+export interface AuditTrailTarget {
+  type: string | null;
+  id: string | null;
+}
+
+/** One row of the tenant's hash-chained audit trail (`GET /partner/v1/audit`). */
+export interface AuditTrailEvent {
+  schemaVersion: string;
+  id: string;
+  tenantId: string;
+  seq: number;
+  createdAt: string;
+  /** e.g. `user.erase`, `provider_credential.rotate`. */
+  action: string;
+  outcome: 'success' | 'failure';
+  actor: AuditTrailActor;
+  target: AuditTrailTarget;
+  requestId: string | null;
+  statusCode: number | null;
+  /** Ids and counts, kept exactly as sent (keys not camelCased), so the chain can be re-verified. */
+  details: Record<string, unknown>;
+  prevHash: string;
+  rowHash: string;
+  hashVersion: number;
+}
+
+export interface AuditTrailPageMeta {
+  hasMore: boolean;
+  /** Pass as `cursor` for the next page. */
+  nextCursor: string | null;
+}
+
+export interface AuditTrailPage {
+  data: AuditTrailEvent[];
+  meta: AuditTrailPageMeta;
+}
+
+export interface ListAuditParams {
+  /** `meta.nextCursor` of the previous page. */
+  cursor?: string | null;
+  /** First `createdAt` to include; ignored with a cursor. */
+  since?: Timestamp;
+  /** `createdAt` before which to stop (exclusive). */
+  until?: Timestamp;
+  /** Only rows with this action, e.g. `user.erase`. */
+  action?: string;
+  /** Rows per page, 1 to 1000. Server default is 200. */
+  limit?: number;
+}
+
 export interface SiemAuditParams {
   /** `cursor` of the previous batch (the `seq` of its last row). */
   cursor?: string | number | null;
