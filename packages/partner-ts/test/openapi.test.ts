@@ -649,6 +649,7 @@ const OPERATIONS: Record<string, Operation> = {
   },
   'POST /ingest/security-events': NOT_WRAPPED,
   'POST /ingest/otel/v1/logs': NOT_WRAPPED,
+  'POST /ingest/otel/v1/traces': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/splunk-hec/sync': NOT_WRAPPED,
   'GET /api/v1/admin/connectors/splunk-hec/status': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/syslog/sync': NOT_WRAPPED,

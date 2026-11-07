@@ -594,6 +594,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_MCP_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant `/ingest/mcp` limit, counted apart |
 | `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE`, `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE` | `600`, `30` | `/ingest/feedback` limits per tenant and per `user_id` |
 | `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant limit on `/ingest/security-events` and `/ingest/otel/v1/logs`, counted apart |
+| `PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE` | `600` | Per-tenant limit on `/ingest/otel/v1/traces`, counted apart |
 | `PS_COLLECTOR_REDIS_URL` (*config* or secret) | empty (per process) | Redis shared by the partner and ingest rate limiters, e.g. `redis://redis:6379/0` |
 | `PS_COLLECTOR_REDIS_TIMEOUT_SECONDS`, `PS_COLLECTOR_REDIS_KEY_PREFIX` | `0.5`, `ps:collector:rl` | Redis call deadline before the per-process fallback; key prefix |
 | `PS_TENANT_LIMITS_CACHE_TTL_SECONDS` | `30` | Per-process cache of tenant ingest limit overrides |

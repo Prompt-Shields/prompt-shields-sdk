@@ -49,6 +49,11 @@ security events) share a per-tenant limit of their own, counted separately:
 `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`, default 600 requests/minute (`0`
 turns it off).
 
+`POST /ingest/otel/v1/traces` (OTLP GenAI spans) has its own per-tenant limit,
+counted separately: `PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE`, default 600
+requests/minute (`0` turns it off). OTLP exporters retry a `429` after
+`Retry-After`.
+
 `POST /ingest/feedback` (call feedback from the SDK and the gateway) has two
 limits of its own: per tenant, `PS_FEEDBACK_RATE_LIMIT_PER_MINUTE` (default
 600), and per `user_id` within the tenant when one is sent,

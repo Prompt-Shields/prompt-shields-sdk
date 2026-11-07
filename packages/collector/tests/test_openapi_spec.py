@@ -40,6 +40,7 @@ from collector import (
     servicenow,
     siem_export,
     tenant_keys,
+    tenant_limits,
     user_erasure,
     webhook_admin,
     webhooks,
@@ -751,3 +752,11 @@ def test_policy_schemas_match_serializers():
     assert set(SCHEMAS["PolicyBundle"]["required"]) == set(bundle)
     assert set(SCHEMAS["EffectivePolicy"]["required"]) == set(bundle["tenant"])
     assert SCHEMAS["PolicyBundle"]["properties"]["schema"]["const"] == bundle["schema"]
+
+
+def test_otel_traces_ingest_documents_its_rate_limit():
+    op = SPEC["paths"]["/ingest/otel/v1/traces"]["post"]
+    assert op["security"] == [{"TenantApiKey": []}]
+    assert "Retry-After" in op["responses"]["429"]["headers"]
+    limits = SCHEMAS["IngestRateLimitSettings"]["properties"]
+    assert set(limits) == set(tenant_limits.ENV_DEFAULTS)
