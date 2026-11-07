@@ -6,7 +6,14 @@ ingest keys. Mounted at /api/v1/admin. Auth and scopes: collector/admin_auth.py.
   GET    /tokens                           list (metadata)               admin:tokens | admin:read
   GET    /tokens/{token_id}                read                          admin:tokens | admin:read
   DELETE /tokens/{token_id}                revoke, with every token it
-                                           created (cascade)             admin:tokens
+                                           created (cascade)             admin:tokens **
+
+  ** Revoking another token needs every scope it holds, and an owner
+     (admin_auth.can_manage_owner) when it is owner-bound (issued for a
+     tenant-wide owner) or owner-capable (every admin scope, unbound): an
+     ``admin:tokens`` holder must not be able to cut the owner off (#372).
+     A token may always revoke itself. Refusals are 403 and audited as
+     ``admin_token.revoke`` with outcome ``failure``.
 
   A token issued by another token expires no later than that token (an
   expiry past it, or none, is capped to it).
@@ -42,17 +49,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from db.models import AdminToken, TenantApiKey
+from db.models import AdminToken, Membership, TenantApiKey
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from collector import auth_cache, rbac, tenant_keys
+from collector import audit_trail, auth_cache, rbac, tenant_keys
 from collector.admin_auth import (
     ADMIN_SCOPES,
     TOKEN_WARNING,
     AdminPrincipal,
     add_audit,
+    admin_actor,
     can_manage_owner,
     cap_child_expiry,
     created_by,
@@ -242,12 +250,71 @@ async def get_token(
     return serialize_token(await _get_token(request, principal.tenant_id, token_id))
 
 
+async def _bound_to_owner(db, tenant_id: UUID, principal_id: UUID | None) -> bool:
+    """Whether ``principal_id`` holds the tenant-wide owner role (disabled
+    or not: a re-enabled owner's tokens work again)."""
+    if principal_id is None:
+        return False
+    return (
+        await db.execute(
+            select(Membership.id).where(
+                Membership.tenant_id == tenant_id,
+                Membership.principal_id == principal_id,
+                Membership.team_id.is_(None),
+                Membership.role == rbac.OWNER,
+            )
+        )
+    ).first() is not None
+
+
+async def _check_can_revoke(request: Request, principal: AdminPrincipal, row: AdminToken) -> None:
+    """403 (audited) unless the caller may revoke ``row``: its own token
+    always; another token only when the caller holds every scope it holds
+    and, when it is owner-bound or owner-capable, can manage owners (#372).
+    Otherwise an ``admin:tokens`` holder could revoke the owner's tokens."""
+    if principal.token_id is not None and principal.token_id == row.id:
+        return
+    db = request.state.db
+    reason, detail = None, None
+    beyond = sorted(set(row.scopes or ()) - principal.scopes)
+    if beyond:
+        reason = "scope_not_held"
+        detail = f"Cannot revoke a token holding scopes the caller does not hold: {beyond}"
+    elif not can_manage_owner(principal):
+        if await _bound_to_owner(db, principal.tenant_id, row.principal_id):
+            reason = "owner_required"
+            detail = "Only an owner can revoke a token issued for an owner"
+        elif row.principal_id is None and set(ADMIN_SCOPES) <= set(row.scopes or ()):
+            reason = "owner_required"
+            detail = (
+                "Only an owner can revoke an unbound token holding every admin "
+                "scope (it can manage owners)"
+            )
+    if reason is None:
+        return
+    # Nothing has changed in the request's session yet: the refusal row
+    # commits on its own.
+    await audit_trail.record_committed(
+        db,
+        tenant_id=principal.tenant_id,
+        action="admin_token.revoke",
+        outcome=audit_trail.FAILURE,
+        actor=admin_actor(request, principal),
+        target_type="admin_token",
+        target_id=str(row.id),
+        status_code=403,
+        details={"name": row.name, "reason": reason},
+    )
+    raise _problem(403, "Forbidden", detail)
+
+
 @router.delete("/tokens/{token_id}", status_code=204, summary="Revoke an admin token")
 async def revoke_token(
     token_id: UUID, request: Request, principal: AdminPrincipal = _TOKENS
 ) -> None:
     db = request.state.db
     row = await _get_token(request, principal.tenant_id, token_id)
+    await _check_can_revoke(request, principal, row)
     now = datetime.now(UTC)
     changed = False
     if row.revoked_at is None:

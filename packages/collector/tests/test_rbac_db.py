@@ -12,18 +12,20 @@ isolation with row-level security enforced.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import uuid
 from pathlib import Path
 
 import pytest
-from collector import audit_trail, rbac, rls
+from collector import audit_trail, rbac, rbac_admin, rls
 from collector.admin_auth import ADMIN_SCOPES, TENANT_KEY_SCOPES
 from collector.app import app
 from collector.config import Settings, settings
 from collector.partner_scopes import SCOPES
 from db.api_keys import api_key_lookup_prefix, hash_api_key
-from db.models import AuditEvent, PartnerCredential, Tenant
+from db.models import AuditEvent, Membership, PartnerCredential, Tenant
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -565,6 +567,166 @@ async def test_admin_cannot_mint_an_owner_capable_token(env):
     # An owner (or the operator's unbound bootstrap token) can.
     await _post(c, owner_raw, "/tokens", {"name": "unbound2", "scopes": every})
     await _token_for(c, owner_raw, owner)
+
+
+async def _owner_count(engine, tid) -> int:
+    async with _admin(engine)() as s:
+        rows = await s.execute(
+            select(Membership.id).where(
+                Membership.tenant_id == tid,
+                Membership.team_id.is_(None),
+                Membership.role == rbac.OWNER,
+            )
+        )
+        return len(rows.all())
+
+
+async def _tenant_mid(c, boot, principal_id) -> str:
+    got = (await c.get(f"{A}/memberships?principal_id={principal_id}", headers=H(boot))).json()
+    return next(m["id"] for m in got["data"] if m["team_id"] is None)
+
+
+async def test_concurrent_owner_demotions_cannot_leave_zero_owners(env):
+    """Two sessions each demote a different one of the tenant's two owners.
+    The second blocks on the tenant's owner lock until the first commits,
+    then sees one owner left and is refused (409) (#372)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    x = uuid.UUID(await _member(c, boot, "owner"))
+    y = uuid.UUID(await _member(c, boot, "owner"))
+    assert await _owner_count(engine, tid) == 2
+
+    async def demote(s, pid):
+        await rbac_admin.lock_owners(s, tid)
+        m = (
+            await s.execute(
+                select(Membership).where(
+                    Membership.principal_id == pid, Membership.team_id.is_(None)
+                )
+            )
+        ).scalar_one()
+        await rbac_admin._keep_an_owner(s, tid, pid)
+        m.role = "admin"
+        await s.flush()
+
+    factory = _admin(engine)
+    async with factory() as s1, factory() as s2:
+        await demote(s1, x)  # passes: y is still an owner
+        second = asyncio.ensure_future(demote(s2, y))
+        # Without the lock this would run to completion here, also seeing x
+        # as an owner (s1 has not committed), and both would commit.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(second), 0.5)
+        assert not second.done()
+        await s1.commit()
+        with pytest.raises(HTTPException) as exc:
+            await second
+        assert exc.value.status_code == 409
+        await s2.rollback()
+    assert await _owner_count(engine, tid) == 1
+
+
+@pytest.mark.parametrize("drop", ["demote", "remove", "disable", "delete"])
+async def test_concurrent_owner_changes_over_http_keep_an_owner(env, drop):
+    """Each route that can drop an owner, raced against the demotion of the
+    tenant's other owner: one wins, the other is 409, one owner remains."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    x = await _member(c, boot, "owner")
+    y = await _member(c, boot, "owner")
+    assert await _owner_count(engine, tid) == 2
+    mx, my = await _tenant_mid(c, boot, x), await _tenant_mid(c, boot, y)
+    other = {
+        "demote": lambda: c.patch(f"{A}/memberships/{my}", headers=H(boot), json={"role": "admin"}),
+        "remove": lambda: c.delete(f"{A}/memberships/{my}", headers=H(boot)),
+        "disable": lambda: c.patch(f"{A}/principals/{y}", headers=H(boot), json={"disabled": True}),
+        "delete": lambda: c.delete(f"{A}/principals/{y}", headers=H(boot)),
+    }[drop]
+    r1, r2 = await asyncio.gather(
+        c.patch(f"{A}/memberships/{mx}", headers=H(boot), json={"role": "admin"}), other()
+    )
+    codes = sorted([r1.status_code, r2.status_code])
+    assert codes[1] == 409 and codes[0] in (200, 204), (r1.text, r2.text)
+    if drop == "disable" and r2.status_code != 409:
+        # y is disabled, x is still the owner: the membership count is 2 but
+        # only x is enabled.
+        assert await _owner_count(engine, tid) == 2
+        got = (await c.get(f"{A}/principals/{x}", headers=H(boot))).json()
+        assert got["status"] == "active"
+    else:
+        assert await _owner_count(engine, tid) == 1
+
+
+async def _refusals(engine, tid, target_id) -> list[AuditEvent]:
+    async with _admin(engine)() as s:
+        return (
+            (
+                await s.execute(
+                    select(AuditEvent).where(
+                        AuditEvent.tenant_id == tid,
+                        AuditEvent.action == "admin_token.revoke",
+                        AuditEvent.outcome == "failure",
+                        AuditEvent.target_id == str(target_id),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def test_revoking_owner_tokens_needs_an_owner(env):
+    """An ``admin:tokens`` holder that cannot manage owners gets 403
+    (audited) revoking a token issued for an owner, or an unbound token
+    holding every admin scope, or one holding scopes it lacks (#372)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    owner = await _member(c, boot, "owner")
+    admin = await _member(c, boot, "admin")
+    owner_tok = await _token_for(c, boot, owner)
+    owner_narrow = await _token_for(c, boot, owner, scopes=["admin:read"])
+    admin_tok = await _token_for(c, boot, admin)
+    admin_raw = admin_tok["token"]
+    every = list(ADMIN_SCOPES)
+    unbound_full = await _post(c, boot, "/tokens", {"name": "unbound-full", "scopes": every})
+
+    for target, reason in (
+        (owner_tok, "owner_required"),
+        (owner_narrow, "owner_required"),
+        (unbound_full, "owner_required"),
+    ):
+        resp = await c.delete(f"{A}/tokens/{target['id']}", headers=H(admin_raw))
+        assert resp.status_code == 403, resp.text
+        got = (await c.get(f"{A}/tokens/{target['id']}", headers=H(boot))).json()
+        assert got["status"] == "active"
+        rows = await _refusals(engine, tid, target["id"])
+        assert len(rows) == 1 and rows[0].status_code == 403
+        assert rows[0].details["reason"] == reason
+
+    # Scopes the caller lacks.
+    narrow = await _post(c, boot, "/tokens", {"name": "tok-admin", "scopes": ["admin:tokens"]})
+    reader = await _post(c, boot, "/tokens", {"name": "reader", "scopes": ["admin:read"]})
+    resp = await c.delete(f"{A}/tokens/{reader['id']}", headers=H(narrow["token"]))
+    assert resp.status_code == 403
+    rows = await _refusals(engine, tid, reader["id"])
+    assert len(rows) == 1 and rows[0].details["reason"] == "scope_not_held"
+    # A token within the caller's scopes, not owner-bound, is fine.
+    peer = await _post(c, boot, "/tokens", {"name": "peer", "scopes": ["admin:tokens"]})
+    assert (await c.delete(f"{A}/tokens/{peer['id']}", headers=H(narrow["token"]))).status_code == 204
+    # The admin may revoke a non-owner token, e.g. its own principal's.
+    other_admin = await _token_for(c, boot, admin, scopes=["admin:read"])
+    assert (await c.delete(f"{A}/tokens/{other_admin['id']}", headers=H(admin_raw))).status_code == 204
+
+    # An owner (or the operator's bootstrap token) can revoke owner tokens.
+    resp = await c.delete(f"{A}/tokens/{owner_narrow['id']}", headers=H(owner_tok["token"]))
+    assert resp.status_code == 204
+    assert (await c.delete(f"{A}/tokens/{unbound_full['id']}", headers=H(boot))).status_code == 204
+
+    # A token can always revoke itself: the owner's narrow-scoped self, a
+    # token without admin:tokens cannot call the route at all, so use one
+    # that can.
+    owner_tokens = await _token_for(c, boot, owner, scopes=["admin:tokens"])
+    resp = await c.delete(f"{A}/tokens/{owner_tokens['id']}", headers=H(owner_tokens["token"]))
+    assert resp.status_code == 204
+    assert (await c.delete(f"{A}/tokens/{narrow['id']}", headers=H(narrow["token"]))).status_code == 204
+    assert (await c.delete(f"{A}/tokens/{owner_tok['id']}", headers=H(owner_tok["token"]))).status_code == 204
 
 
 async def test_narrow_member_token_cannot_reenable_an_admin(env):
