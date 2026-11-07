@@ -444,6 +444,11 @@ const UNMAPPED_SCHEMAS = new Set([
   'UpdateMembershipRequest',
   // Security event ingest (#353): ingest-key route, not wrapped.
   'SecurityEventIngestResult',
+  // Inference credential vault (#342): tenant admin routes, not wrapped.
+  'InferenceCredential',
+  'CreateInferenceCredentialRequest',
+  'RotateInferenceCredentialRequest',
+  'UpdateInferenceCredentialRequest',
 ]);
 
 interface Operation {
@@ -574,6 +579,12 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/teams': { methods: ['teams.list'] },
   'GET /partner/v1/projects': { methods: ['projects.list'], params: 'ListProjectsParams' },
   'GET /api/v1/admin/roles': NOT_WRAPPED,
+  'GET /api/v1/admin/inference-credentials': NOT_WRAPPED,
+  'POST /api/v1/admin/inference-credentials': NOT_WRAPPED,
+  'GET /api/v1/admin/inference-credentials/{credential_id}': NOT_WRAPPED,
+  'PATCH /api/v1/admin/inference-credentials/{credential_id}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/inference-credentials/{credential_id}': NOT_WRAPPED,
+  'POST /api/v1/admin/inference-credentials/{credential_id}/rotate': NOT_WRAPPED,
   'GET /api/v1/admin/principals': NOT_WRAPPED,
   'POST /api/v1/admin/principals': NOT_WRAPPED,
   'GET /api/v1/admin/principals/{principal_id}': NOT_WRAPPED,
