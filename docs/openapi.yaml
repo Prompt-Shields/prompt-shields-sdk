@@ -755,7 +755,7 @@ components:
         reported a cache lookup, `error_rate` (events whose last attempt
         returned HTTP 400 or more, over events reporting attempts) when none
         reported attempts.
-      required: [bucket_start, key, requests, tokens_in, tokens_out, tokens_cached,
+      required: [bucket_start, key, name, requests, tokens_in, tokens_out, tokens_cached,
                  tokens_cache_write, tokens_reasoning, cost_usd, cache_saved_usd,
                  cache_hit_rate, error_rate]
       properties:
@@ -768,10 +768,19 @@ components:
           type: string
           nullable: true
           description: |
-            Value of `group_by`: user id hash, use case, model, provider, API
-            surface or asset id. Null for `group_by=none` and for events that
-            did not report the dimension.
+            Value of `group_by`: user id hash, team id, project id, use case,
+            calling service, model, provider, API surface, asset id or the
+            value of the tag. Null for `group_by=none` and for events that
+            did not report the dimension (unattributed spend for team,
+            project, service and tags).
           example: gpt-4o
+        name:
+          type: string
+          nullable: true
+          description: |
+            The team or project name for `group_by=team` or `project` (null
+            when it has been deleted since); null for every other `group_by`.
+          example: null
         requests:
           type: integer
           example: 120
@@ -811,6 +820,95 @@ components:
           nullable: true
           example: 0.0083
 
+    ShowbackAmounts:
+      type: object
+      required: [cost_usd, cost_cents, requests, cost_requests, tokens_in, tokens_out]
+      properties:
+        cost_usd:
+          type: string
+          description: Summed estimated cost in USD, exact to 6 decimal places (a decimal string)
+          example: "12.345678"
+        cost_cents:
+          type: integer
+          description: |
+            Whole cents, allocated with the largest-remainder method so the
+            groups plus `unallocated` add up to `total.cost_cents` exactly
+          example: 1235
+        requests:
+          type: integer
+          example: 1200
+        cost_requests:
+          type: integer
+          description: Requests that reported a cost
+          example: 1180
+        tokens_in:
+          type: integer
+          example: 480000
+        tokens_out:
+          type: integer
+          example: 90000
+
+    ShowbackGroup:
+      allOf:
+        - type: object
+          required: [key, name, team_id, team_name]
+          properties:
+            key:
+              type: string
+              description: Team id, project id, user id hash, calling service or tag value
+            name:
+              type: string
+              nullable: true
+              description: Team or project name (null for other groupings, or once deleted)
+            team_id:
+              type: string
+              nullable: true
+              description: For `group_by=project`, the project's current team (org > team > project)
+            team_name:
+              type: string
+              nullable: true
+        - $ref: '#/components/schemas/ShowbackAmounts'
+
+    ShowbackReport:
+      type: object
+      required: [data, unallocated, total, meta]
+      properties:
+        data:
+          type: array
+          description: One entry per group, most expensive first
+          items:
+            $ref: '#/components/schemas/ShowbackGroup'
+        unallocated:
+          $ref: '#/components/schemas/ShowbackAmounts'
+        total:
+          $ref: '#/components/schemas/ShowbackAmounts'
+        meta:
+          type: object
+          required: [group_by, period, from, to, currency, rolled_up_at, partial]
+          properties:
+            group_by:
+              type: string
+              example: team
+            period:
+              type: string
+              example: "2026-11"
+            from:
+              type: string
+              format: date-time
+            to:
+              type: string
+              format: date-time
+            currency:
+              type: string
+              example: USD
+            rolled_up_at:
+              type: string
+              format: date-time
+              nullable: true
+            partial:
+              type: boolean
+              description: The month starts before rollup retention, so its oldest days are gone
+
     UsageSeries:
       type: object
       required: [data, meta]
@@ -825,7 +923,8 @@ components:
           properties:
             group_by:
               type: string
-              enum: [none, user, project, model, provider, api_surface, asset]
+              description: The `group_by` asked for
+              example: team
             granularity:
               type: string
               enum: [hour, day, week]
@@ -958,6 +1057,9 @@ components:
         - BillingAccountId
         - BillingAccountName
         - BillingAccountType
+        - SubAccountId
+        - SubAccountName
+        - SubAccountType
         - BillingPeriodStart
         - BillingPeriodEnd
         - ChargePeriodStart
@@ -993,6 +1095,9 @@ components:
         - x_BusinessUnit
         - x_UseCaseName
         - x_Environment
+        - x_ProjectId
+        - x_ProjectName
+        - x_CallingService
       properties:
         BilledCost:
           type: number
@@ -1010,6 +1115,15 @@ components:
           type: ["string", "null"]
         BillingAccountType:
           type: string
+        SubAccountId:
+          type: ["string", "null"]
+          description: "Team the spend is attributed to; null when unattributed"
+        SubAccountName:
+          type: ["string", "null"]
+          description: "Team name; null when unattributed or the team was deleted"
+        SubAccountType:
+          type: ["string", "null"]
+          description: "`Team`; null when unattributed"
         BillingPeriodStart:
           type: string
           format: date-time
@@ -1092,6 +1206,15 @@ components:
         x_Environment:
           type: ["string", "null"]
           description: "Asset environment"
+        x_ProjectId:
+          type: ["string", "null"]
+          description: "Project the spend is attributed to"
+        x_ProjectName:
+          type: ["string", "null"]
+          description: "Project name; null when the project was deleted"
+        x_CallingService:
+          type: ["string", "null"]
+          description: "Calling service the events reported"
     SovereignShareReport:
       type: object
       description: Tenant-wide sovereign share over the period, in total and per sensitivity level.
@@ -3114,7 +3237,11 @@ components:
     UpdateProjectRequest:
       type: object
       additionalProperties: false
-      description: Fields left out are unchanged. A project stays in its team.
+      description: |
+        Fields left out are unchanged. `team_id` moves the project to another
+        team of the tenant: its memberships move with it, and spend
+        attributed to the project from then on counts for the new team;
+        spend already recorded keeps the team it was attributed to.
       properties:
         name:
           type: [string, 'null']
@@ -3124,6 +3251,10 @@ components:
         description:
           type: [string, 'null']
           maxLength: 1000
+        team_id:
+          type: [string, 'null']
+          format: uuid
+          description: Move the project to this team
 
     CreateMembershipRequest:
       type: object
@@ -5016,7 +5147,10 @@ paths:
         `PS_USAGE_ROLLUP_INTERVAL_SECONDS` (default 30): `meta.rolled_up_at`
         is when they were last refreshed. `group_by=user` groups by the
         salted user id hash (`user_id_hash`), never a raw user id;
-        `project` is the asset's use case. Points are ordered by
+        `team` and `project` are the tenant's teams and projects the calls
+        were attributed to (`X-PS-Team` / `X-PS-Project`, see the cost
+        attribution guide), `use_case` the asset's use case, `service` the
+        calling service, `tag:<key>` a cost tag. Points are ordered by
         `bucket_start`, then `key`, and paged with `cursor`. The window is
         rounded out to whole buckets and clamped to rollup retention.
         Aggregates only.
@@ -5025,9 +5159,17 @@ paths:
           in: query
           schema:
             type: string
-            enum: [none, user, project, model, provider, api_surface, asset]
+            maxLength: 80
+            pattern: '^(none|user|team|project|use_case|service|model|provider|api_surface|asset|tag:[a-z0-9][a-z0-9_.:/-]{0,62})$'
             default: none
-          description: Split each bucket by this dimension (`key` in each point)
+            x-group-by-values: [none, user, team, project, use_case, service, model, provider, api_surface, asset]
+          description: |
+            Split each bucket by this dimension (`key` in each point): `user`
+            (user id hash), `team`, `project` (the tenant's projects),
+            `use_case` (the asset's use case), `service` (calling service),
+            `model`, `provider`, `api_surface`, `asset`, or `tag:<key>` for a
+            cost tag key listed in the tenant's `settings.cost_tag_keys`
+            (only those keys are kept in the rollups; 400 otherwise).
         - name: granularity
           in: query
           schema:
@@ -5069,7 +5211,8 @@ paths:
         '400':
           description: |
             `from` is not before `to`, the window is longer than 93 days
-            (hour) or 800 days (day, week), or the cursor is invalid
+            (hour) or 800 days (day, week), the cursor is invalid, or
+            `group_by=tag:<key>` names a key not in `settings.cost_tag_keys`
           content:
             application/json:
               schema:
@@ -5100,8 +5243,10 @@ paths:
           in: query
           schema:
             type: string
-            enum: [none, user, project, model, provider, api_surface, asset]
+            maxLength: 80
+            pattern: '^(none|user|team|project|use_case|service|model|provider|api_surface|asset|tag:[a-z0-9][a-z0-9_.:/-]{0,62})$'
             default: none
+            x-group-by-values: [none, user, team, project, use_case, service, model, provider, api_surface, asset]
         - name: granularity
           in: query
           schema:
@@ -5154,6 +5299,57 @@ paths:
             application/x-ndjson:
               schema:
                 $ref: '#/components/schemas/UsageSeriesPoint'
+
+  /partner/v1/cost/showback:
+    get:
+      operationId: getCostShowback
+      tags: [Assets]
+      summary: Get the monthly cost showback
+      description: |
+        Cost and usage of one UTC month per team, project, user (salted user
+        id hash), calling service or cost tag, read from the daily usage
+        rollups (refreshed every `PS_USAGE_ROLLUP_INTERVAL_SECONDS`). Spend
+        that no group claims (no team, project, user, service or tag) is in
+        `unallocated`, never dropped. `cost_cents` are allocated so the
+        groups plus `unallocated` equal `total.cost_cents`, the tenant's
+        total for the month, to the cent. `group_by=project` also returns
+        each project's current team. Aggregates only.
+      parameters:
+        - name: group_by
+          in: query
+          schema:
+            type: string
+            maxLength: 80
+            pattern: '^(team|project|user|service|tag:[a-z0-9][a-z0-9_.:/-]{0,62})$'
+            default: team
+            x-group-by-values: [team, project, user, service]
+          description: |
+            `team`, `project`, `user`, `service`, or `tag:<key>` for a key
+            listed in the tenant's `settings.cost_tag_keys`
+        - name: period
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+          description: "UTC month, YYYY-MM. Default: the current month"
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: An invalid `group_by` or `period`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Showback report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowbackReport'
 
   /partner/v1/usage/focus-export:
     get:
@@ -6999,7 +7195,7 @@ paths:
     patch:
       operationId: updateProject
       tags: [Admin]
-      summary: Rename or describe a project
+      summary: Rename, describe or move a project
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7723,8 +7919,9 @@ paths:
         `user_id` is the id as the gateway or SDK sent it (in the body, so it
         never reaches an access log); the collector hashes it with the
         tenant's salt. On the user's usage events `user_id_hash`,
-        `user_id_raw`, `session_id` and `prompt_hash` are set to null (usage,
-        cost and routing metadata are kept); call feedback with this
+        `user_id_raw`, `session_id`, `prompt_hash` and the cost `tags` are
+        set to null (usage, cost, team, project and routing metadata are
+        kept); call feedback with this
         `user_id` loses it; MCP tool usage rows for it are merged into the
         no-user row of the same tool. Synchronous and idempotent: a repeat
         reports zero rows. Every call writes a `user.erase` row to the

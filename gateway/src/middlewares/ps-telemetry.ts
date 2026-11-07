@@ -85,6 +85,14 @@ interface TelemetryEvent {
   owner_email?: string;
   data_classification?: string;
   environment?: string;
+  // Cost attribution (#347): X-PS-Team / X-PS-Project (a team or project id
+  // or name, resolved by the collector against the tenant's teams; unknown
+  // ones are dropped there), X-PS-Service and X-PS-Tags (key=value,...;
+  // validated and capped at 20 by the collector). Never sent upstream.
+  team?: string;
+  project?: string;
+  calling_service?: string;
+  tags?: string;
   // Cost-aware routing (populated when ps-router made a decision)
   requested_model?: string;
   served_model?: string;
@@ -490,6 +498,10 @@ function extractPSHeaders(
     owner_email: headers['x-ps-owner'],
     data_classification: headers['x-ps-data-classification'],
     environment: headers['x-ps-environment'],
+    team: headers['x-ps-team'],
+    project: headers['x-ps-project'],
+    calling_service: headers['x-ps-service'],
+    tags: headers['x-ps-tags'],
   };
 }
 

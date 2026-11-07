@@ -328,6 +328,9 @@ const SCHEMAS: Record<string, string> = {
   SovereignShareReport: 'SovereignShareReport',
   UsageSeriesPoint: 'UsageSeriesPoint',
   UsageSeries: 'UsageSeries',
+  ShowbackAmounts: 'ShowbackAmounts',
+  ShowbackGroup: 'ShowbackGroup',
+  ShowbackReport: 'ShowbackReport',
   ChangeEvent: 'ChangeEvent',
   AttestationStatus: 'AttestationStatus',
   Attestation: 'Attestation',
@@ -486,6 +489,7 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/usage/focus-export': { methods: ['usage.focusExport'], params: 'FocusExportParams' },
   'GET /partner/v1/usage/series': { methods: ['usage.series'], params: 'UsageSeriesParams' },
   'GET /partner/v1/usage/series/export': { methods: ['usage.seriesExport'], params: 'UsageSeriesExportParams' },
+  'GET /partner/v1/cost/showback': { methods: ['usage.showback'], params: 'ShowbackParams' },
   'GET /partner/v1/health': { methods: ['health'] },
   // Provider admin credentials (#93): client.providerCredentials and
   // client.providerKeyFingerprints. The /api/v1/admin copies take the tenant
