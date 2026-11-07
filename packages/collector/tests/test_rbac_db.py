@@ -207,7 +207,7 @@ def test_migration_revision_chain():
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     assert m.revision == "039"
-    assert m.down_revision == "038"
+    assert m.down_revision == "040"
     assert set(m.TABLES) == {"principals", "teams", "projects", "memberships"}
     # Full-admin tokens stay full admin (like 038 did for admin:privacy).
     assert m.NEW_SCOPE == "admin:members"

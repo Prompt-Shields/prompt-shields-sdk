@@ -419,7 +419,7 @@ collector:
   #   PS_AUDIT_RETENTION_DAYS: "365"
   #   PS_RETENTION_DAYS_DEFAULT: "365"
   #   PS_WEBHOOK_TIMEOUT_SECONDS: "10"
-  #   PS_ADMIN_REQUIRE_SCOPED_TOKENS: "false" # default true since 0.4.14: "false" lets
+  #   PS_ADMIN_REQUIRE_SCOPED_TOKENS: "false" # default true since 0.4.15: "false" lets
   #                                           # ingest keys back onto /api/v1/admin
   config:
     PYTHONDONTWRITEBYTECODE: "1"

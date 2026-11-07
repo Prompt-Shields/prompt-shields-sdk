@@ -1,8 +1,10 @@
-"""Background workers: partner webhook delivery and the provider usage pull.
+"""Background workers: partner webhook delivery, the provider usage pull
+and the usage rollups.
 
 Which loops run is set by their intervals:
   PS_WEBHOOK_WORKER_INTERVAL_SECONDS       webhook delivery (0 = off)
   PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS  provider usage pull (0 = off)
+  PS_USAGE_ROLLUP_INTERVAL_SECONDS         usage rollups (default 30, 0 = off)
 
 Where they run:
 - In the API process (collector.app lifespan), the default. Every replica
@@ -11,7 +13,8 @@ Where they run:
   loops without the HTTP API, for a single-replica worker Deployment. It
   ignores PS_COLLECTOR_RUN_WORKERS, so one shared environment can serve both.
 - Or as one-shot CronJobs instead of loops: ``python -m collector.webhooks
-  deliver`` and ``python -m collector.provider_usage_admin --all-tenants``.
+  deliver``, ``python -m collector.provider_usage_admin --all-tenants`` and
+  ``python -m collector.usage_rollups refresh --all-tenants``.
 """
 
 from __future__ import annotations
@@ -50,6 +53,14 @@ def start_workers(session_factory) -> list[asyncio.Task]:
                 )
             )
         )
+    if settings.usage_rollup_interval_seconds > 0:
+        from collector.usage_rollups import run_worker as run_rollups
+
+        tasks.append(
+            asyncio.create_task(
+                run_rollups(session_factory, settings.usage_rollup_interval_seconds)
+            )
+        )
     return tasks
 
 
@@ -72,8 +83,9 @@ async def _run() -> int:
         tasks = start_workers(SessionLocal)
         if not tasks:
             print(
-                "No worker enabled: set PS_WEBHOOK_WORKER_INTERVAL_SECONDS and/or "
-                "PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS above 0.",
+                "No worker enabled: set PS_WEBHOOK_WORKER_INTERVAL_SECONDS, "
+                "PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS and/or "
+                "PS_USAGE_ROLLUP_INTERVAL_SECONDS above 0.",
                 file=sys.stderr,
             )
             return 2

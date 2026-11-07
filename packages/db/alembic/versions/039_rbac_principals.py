@@ -24,10 +24,10 @@ holds all eight admin scopes that existed before it (like 038 did for
 also lets them create a tenant's first owner. Narrower tokens are unchanged.
 Downgrade removes ``admin:members`` from every token.
 
-Follows 038 (admin:privacy, #353).
+Follows 040 (usage rollups, #346; ids are not in order: 040 merged first).
 
 Revision ID: 039
-Revises: 038
+Revises: 040
 Create Date: 2026-11-06
 """
 
@@ -38,7 +38,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "039"
-down_revision: str | None = "038"
+down_revision: str | None = "040"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

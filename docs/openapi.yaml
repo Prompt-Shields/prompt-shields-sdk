@@ -106,7 +106,7 @@ components:
             assets:read: Read AI assets, vendors, models, business units
             data-flows:read: Read data flow lineage per asset
             risks:read: Read risk mappings per asset
-            usage:read: Read aggregated usage statistics
+            usage:read: Read aggregated usage statistics and the usage time series
             export:read: Access bulk export endpoint
             changes:read: Access delta feed endpoint
             webhooks:manage: Manage webhook subscriptions (never granted by default)
@@ -121,7 +121,7 @@ components:
             spend-alerts:read: List spend anomaly alerts and receive them as `spend.anomaly` webhook events (never granted by default)
             members:read: List the tenant's teams and projects (never granted by default)
             spend-alerts:acknowledge: Acknowledge spend anomaly alerts (never granted by default)
-            usage:export: Bulk export AI usage cost in the FinOps FOCUS format (never granted by default)
+            usage:export: Bulk export AI usage cost in the FinOps FOCUS format and the usage time series (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
@@ -744,6 +744,108 @@ components:
           required:
             - key
         - $ref: '#/components/schemas/SavingsTotals'
+
+    UsageSeriesPoint:
+      type: object
+      description: |
+        One bucket of the usage time series. Token counts are 0 when no
+        event reported them; `cost_usd` is null when no event in the bucket
+        reported a cost, `cache_saved_usd` and `cache_hit_rate` when none
+        reported a cache lookup, `error_rate` (events whose last attempt
+        returned HTTP 400 or more, over events reporting attempts) when none
+        reported attempts.
+      required: [bucket_start, key, requests, tokens_in, tokens_out, tokens_cached,
+                 tokens_cache_write, tokens_reasoning, cost_usd, cache_saved_usd,
+                 cache_hit_rate, error_rate]
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+          description: UTC start of the hour, day or week
+          example: "2026-10-01T00:00:00Z"
+        key:
+          type: string
+          nullable: true
+          description: |
+            Value of `group_by`: user id hash, use case, model, provider, API
+            surface or asset id. Null for `group_by=none` and for events that
+            did not report the dimension.
+          example: gpt-4o
+        requests:
+          type: integer
+          example: 120
+        tokens_in:
+          type: integer
+          example: 48000
+        tokens_out:
+          type: integer
+          example: 9000
+        tokens_cached:
+          type: integer
+          description: Cache reads, part of tokens_in
+          example: 12000
+        tokens_cache_write:
+          type: integer
+          description: Cache writes, part of tokens_in
+          example: 0
+        tokens_reasoning:
+          type: integer
+          description: Reasoning tokens, part of tokens_out
+          example: 0
+        cost_usd:
+          type: number
+          nullable: true
+          example: 0.42
+        cache_saved_usd:
+          type: number
+          nullable: true
+          description: Upstream cost the gateway cache avoided
+          example: 0.03
+        cache_hit_rate:
+          type: number
+          nullable: true
+          example: 0.25
+        error_rate:
+          type: number
+          nullable: true
+          example: 0.0083
+
+    UsageSeries:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageSeriesPoint'
+        meta:
+          type: object
+          required: [group_by, granularity, from, to, rolled_up_at, has_more, next_cursor]
+          properties:
+            group_by:
+              type: string
+              enum: [none, user, project, model, provider, api_surface, asset]
+            granularity:
+              type: string
+              enum: [hour, day, week]
+            from:
+              type: string
+              format: date-time
+              description: Effective inclusive start, after rounding and the retention clamp
+            to:
+              type: string
+              format: date-time
+              description: Effective exclusive end
+            rolled_up_at:
+              type: string
+              format: date-time
+              nullable: true
+              description: When the tenant's rollups were last refreshed; null before the first run
+            has_more:
+              type: boolean
+            next_cursor:
+              type: string
+              nullable: true
 
     SavingsReport:
       type: object
@@ -2324,8 +2426,10 @@ components:
           type: object
           additionalProperties: {type: integer}
           description: |
-            Rows changed per table (`ai_usage_events`, and for a `user_id`
-            also `call_feedback` and `mcp_tool_usage`); zeros on a repeat
+            Rows changed per table (`ai_usage_events`; `usage_rollups`, the
+            hourly and daily rollup rows, when the user's hash is known; for a
+            `user_id` also `call_feedback` and `mcp_tool_usage`); zeros on a
+            repeat
         audit_event_id:
           type: string
           format: uuid
@@ -4689,6 +4793,162 @@ paths:
           description: The recommendation is not pending
         '422':
           description: Invalid body (e.g. a blank `reviewed_by`)
+
+  /partner/v1/usage/series:
+    get:
+      operationId: getUsageSeries
+      tags: [Assets]
+      summary: Get the usage time series
+      description: |
+        Tenant-wide requests, tokens by type, cost, cache savings and error
+        rate per UTC hour, day or ISO week (Monday), optionally split by one
+        dimension. Read from the usage rollups, which are kept about 25
+        months (`PS_USAGE_ROLLUP_RETENTION_DAYS`, never less than raw
+        retention) and survive the raw event purge; for days still in raw
+        retention the daily rollup equals the raw events to the token.
+
+        The rollups are refreshed incrementally every
+        `PS_USAGE_ROLLUP_INTERVAL_SECONDS` (default 30): `meta.rolled_up_at`
+        is when they were last refreshed. `group_by=user` groups by the
+        salted user id hash (`user_id_hash`), never a raw user id;
+        `project` is the asset's use case. Points are ordered by
+        `bucket_start`, then `key`, and paged with `cursor`. The window is
+        rounded out to whole buckets and clamped to rollup retention.
+        Aggregates only.
+      parameters:
+        - name: group_by
+          in: query
+          schema:
+            type: string
+            enum: [none, user, project, model, provider, api_surface, asset]
+            default: none
+          description: Split each bucket by this dimension (`key` in each point)
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [hour, day, week]
+            default: day
+          description: UTC hour, day or ISO week (starting Monday)
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive start, ISO 8601 (UTC when no offset), rounded down to a
+            whole bucket. Default: 2 days (hour), 30 days (day) or 182 days
+            (week) before `to`.
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: "Exclusive end, ISO 8601, rounded up to a whole bucket. Default: now."
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 1000
+            minimum: 1
+            maximum: 10000
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: "`meta.next_cursor` of the previous page"
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: |
+            `from` is not before `to`, the window is longer than 93 days
+            (hour) or 800 days (day, week), or the cursor is invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Usage time series
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSeries'
+
+  /partner/v1/usage/series/export:
+    get:
+      operationId: exportUsageSeries
+      tags: [Assets]
+      summary: Export the usage time series
+      description: |
+        Every point of `/usage/series` for the window in one file, as CSV
+        (header row; null is an empty cell; cells that would start a
+        spreadsheet formula get a leading `'`) or JSON Lines. Same
+        parameters as `/usage/series` without paging. Beside the FOCUS
+        export, for tools that want the time series rather than cost rows.
+        Requires `usage:export`, which `registry:read` does not include.
+      parameters:
+        - name: group_by
+          in: query
+          schema:
+            type: string
+            enum: [none, user, project, model, provider, api_surface, asset]
+            default: none
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [hour, day, week]
+            default: day
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, jsonl]
+            default: csv
+          description: CSV with a header row, or one JSON object per line
+      security:
+        - OAuth2: [usage:export]
+        - PartnerApiKey: []
+      responses:
+        '400':
+          description: An invalid window, or more than 100,000 points in it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The usage time series
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="usage-day-model-20261001T000000Z-20261101T000000Z.csv"
+          content:
+            text/csv:
+              schema:
+                type: string
+              example: |
+                bucket_start,key,requests,tokens_in,tokens_out,tokens_cached,tokens_cache_write,tokens_reasoning,cost_usd,cache_saved_usd,cache_hit_rate,error_rate
+                2026-10-01T00:00:00Z,gpt-4o,120,48000,9000,12000,0,0,0.42,0.03,0.25,0.0083
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/UsageSeriesPoint'
 
   /partner/v1/usage/focus-export:
     get:

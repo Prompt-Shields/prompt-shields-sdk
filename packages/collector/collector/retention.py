@@ -78,6 +78,9 @@ from db.models import (
     Tenant,
     TenantApiKey,
     TenantSecret,
+    UsageRollupDaily,
+    UsageRollupHourly,
+    UsageRollupState,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -127,6 +130,9 @@ ERASE_ORDER: tuple[type, ...] = (
     TenantApiKey,
     AdminToken,
     TenantSecret,
+    UsageRollupHourly,
+    UsageRollupDaily,
+    UsageRollupState,
     # After the credentials that may name a principal (#338).
     Membership,
     Project,
@@ -154,6 +160,7 @@ class PurgeResult:
     mcp_tool_usage_deleted: int = 0
     call_feedback_deleted: int = 0
     spend_alerts_deleted: int = 0
+    usage_rollups_deleted: int = 0
 
 
 @dataclass
@@ -223,6 +230,23 @@ def retention_cutoff(
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
     return now - timedelta(days=retention_days_for(tenant))
+
+
+def rollup_retention_days(tenant: Tenant | Mapping[str, Any] | None) -> int:
+    """Days usage rollups (#346) are kept: PS_USAGE_ROLLUP_RETENTION_DAYS,
+    but never less than the tenant's raw retention, so a rollup is never
+    purged before the events it sums."""
+    return max(settings.usage_rollup_retention_days, retention_days_for(tenant))
+
+
+def rollup_cutoff(
+    tenant: Tenant | Mapping[str, Any] | None, now: datetime | None = None
+) -> datetime:
+    """Oldest rollup bucket start still kept for this tenant (UTC)."""
+    now = now or _utcnow()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    return now - timedelta(days=rollup_retention_days(tenant))
 
 
 async def get_retention_cutoff(
@@ -387,19 +411,35 @@ async def purge_tenant_events(
     sa = SpendAlert.__table__
     sa_conditions = [sa.c.tenant_id == tenant_id, sa.c.day < cutoff.date()]
 
+    # Usage rollups (#346) have their own, longer retention.
+    r_cutoff = rollup_cutoff(tenant_settings, now)
+    rollups = [
+        (m.__table__, [m.__table__.c.tenant_id == tenant_id, m.__table__.c.bucket_start < r_cutoff])
+        for m in (UsageRollupHourly, UsageRollupDaily)
+    ]
+
     if dry_run:
         deleted = await _count(db, table, conditions)
         mcp_deleted = await _count(db, mcp, mcp_conditions)
         daily_deleted = await _count(db, daily, daily_conditions)
         fb_deleted = await _count(db, fb, fb_conditions)
         sa_deleted = await _count(db, sa, sa_conditions)
+        rollups_deleted = sum([await _count(db, t, c) for t, c in rollups])
     else:
         deleted = await _delete_in_batches(db, table, conditions, size)
         mcp_deleted = await _delete_in_batches(db, mcp, mcp_conditions, size)
         daily_deleted = await _delete_in_batches(db, daily, daily_conditions, size)
         fb_deleted = await _delete_in_batches(db, fb, fb_conditions, size)
         sa_deleted = await _delete_in_batches(db, sa, sa_conditions, size)
-        if deleted or mcp_deleted or daily_deleted or fb_deleted or sa_deleted:
+        rollups_deleted = sum([await _delete_in_batches(db, t, c, size) for t, c in rollups])
+        if (
+            deleted
+            or mcp_deleted
+            or daily_deleted
+            or fb_deleted
+            or sa_deleted
+            or rollups_deleted
+        ):
             details = {AIUsageEvent.__tablename__: deleted}
             if mcp_deleted:
                 details[McpToolUsage.__tablename__] = mcp_deleted
@@ -409,6 +449,8 @@ async def purge_tenant_events(
                 details[CallFeedback.__tablename__] = fb_deleted
             if sa_deleted:
                 details[SpendAlert.__tablename__] = sa_deleted
+            if rollups_deleted:
+                details["usage_rollups"] = rollups_deleted
             await _audit(
                 db,
                 tenant_id=tenant_id,
@@ -435,6 +477,7 @@ async def purge_tenant_events(
         mcp_tool_usage_deleted=mcp_deleted,
         call_feedback_deleted=fb_deleted,
         spend_alerts_deleted=sa_deleted,
+        usage_rollups_deleted=rollups_deleted,
     )
 
 

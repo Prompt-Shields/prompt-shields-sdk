@@ -935,17 +935,189 @@
     },
     {
       "id": 19,
-      "type": "text",
+      "type": "row",
       "title": "Cost",
+      "collapsed": false,
       "gridPos": {
         "x": 0,
         "y": 48,
         "w": 24,
-        "h": 3
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Estimated cost / hour by provider (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "ps_gateway_cost_usd_total: the estimated cost the gateway reports on each call's telemetry event (provider-reported, else the pricing table). Estimates, not invoiced amounts.",
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (provider) (rate(ps_gateway_cost_usd_total{provider=~\"$provider\"}[$__rate_interval])) * 3600",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
       },
       "options": {
-        "mode": "markdown",
-        "content": "The gateway exports **tokens**, not currency: there is no cost metric on `/metrics`. Spend per business unit and model is computed by the collector from ingested usage (FinOps views and exports). Multiply the token panels above by your contracted prices for a rough in-Grafana estimate."
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "type": "bargauge",
+      "title": "Estimated cost in range by provider and model (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 49,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "topk(15, sum by (provider, model) (increase(ps_gateway_cost_usd_total{provider=~\"$provider\"}[$__range])))",
+          "legendFormat": "{{provider}} / {{model}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        }
+      }
+    },
+    {
+      "id": 25,
+      "type": "bargauge",
+      "title": "Estimated cost in range by team (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "team is \"none\" until principals and virtual keys ship.",
+      "gridPos": {
+        "x": 0,
+        "y": 57,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sort_desc(sum by (team) (increase(ps_gateway_cost_usd_total{provider=~\"$provider\"}[$__range])))",
+          "legendFormat": "{{team}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        }
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Cache savings / hour (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 57,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (provider) (rate(ps_gateway_cache_saved_cost_usd_total{provider=~\"$provider\"}[$__rate_interval])) * 3600",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -955,7 +1127,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 65,
         "w": 24,
         "h": 1
       },
@@ -971,7 +1143,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 66,
         "w": 12,
         "h": 8
       },
@@ -1030,7 +1202,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 52,
+        "y": 66,
         "w": 12,
         "h": 8
       },

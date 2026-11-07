@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, func, select
 
-from collector import aibom, attestation, focus_export
+from collector import aibom, attestation, focus_export, usage_rollups
 from collector.attestation import (
     AttestationState,
     add_attestation_summaries,
@@ -715,6 +715,128 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+_SERIES_FROM = Query(
+    default=None,
+    alias="from",
+    description="Inclusive start (ISO 8601, UTC if no offset), rounded down to a "
+    "whole bucket. Default: 2 days (hour), 30 days (day) or 182 days (week) "
+    "before `to`. Clamped to rollup retention",
+)
+_SERIES_TO = Query(
+    default=None,
+    alias="to",
+    description="Exclusive end (ISO 8601, UTC if no offset), rounded up to a whole "
+    "bucket. Default: now",
+)
+_SERIES_GROUP_BY = Query(
+    default="none",
+    description="Split each bucket by user (user id hash), project (the asset's use "
+    "case), model, provider, API surface or asset",
+)
+_SERIES_GRANULARITY = Query(
+    default="day", description="UTC hour, day or ISO week (Monday)"
+)
+
+
+async def _series_window(request: Request, principal: PartnerPrincipal, granularity, start, end):
+    tenant_settings = (
+        await request.state.db.execute(
+            select(Tenant.settings).where(Tenant.id == principal.tenant_id)
+        )
+    ).scalar_one_or_none() or {}
+    try:
+        return usage_rollups.resolve_window(
+            granularity,
+            _utc(start) if start is not None else None,
+            _utc(end) if end is not None else None,
+            tenant_settings,
+            datetime.now(UTC),
+        )
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+
+
+@router.get("/usage/series", summary="Tenant-wide usage time series")
+async def get_usage_series(
+    request: Request,
+    response: Response,
+    group_by: usage_rollups.GroupBy = _SERIES_GROUP_BY,
+    granularity: usage_rollups.Granularity = _SERIES_GRANULARITY,
+    start: datetime | None = _SERIES_FROM,
+    end: datetime | None = _SERIES_TO,
+    limit: int = Query(default=1000, ge=1, le=usage_rollups.MAX_PAGE),
+    cursor: str | None = None,
+    principal: PartnerPrincipal = Depends(require_scope("usage:read")),  # noqa: B008 - FastAPI dependency marker, by design
+):
+    """Requests, tokens by type, cost, cache savings and error rate per UTC
+    hour, day or week, optionally split by one dimension, read from the
+    usage rollups (kept about 25 months, beyond raw retention). Aggregates
+    only; users appear as their salted hash, never a raw id."""
+    try:
+        offset = usage_rollups.decode_cursor(cursor)
+    except ValueError as exc:
+        raise _bad_request("Invalid cursor") from exc
+    await _enforce_rate_limit(request, response, principal)
+    window = await _series_window(request, principal, granularity, start, end)
+    body = await usage_rollups.series_page(
+        request.state.db,
+        principal.tenant_id,
+        group_by=group_by,
+        granularity=granularity,
+        window=window,
+        limit=limit,
+        offset=offset,
+    )
+    await _audit(request, principal, "/partner/v1/usage/series", "GET", 200, len(body["data"]))
+    return body
+
+
+@router.get("/usage/series/export", summary="Export the usage time series as CSV or JSON Lines")
+async def export_usage_series(
+    request: Request,
+    response: Response,
+    group_by: usage_rollups.GroupBy = _SERIES_GROUP_BY,
+    granularity: usage_rollups.Granularity = _SERIES_GRANULARITY,
+    start: datetime | None = _SERIES_FROM,
+    end: datetime | None = _SERIES_TO,
+    format: usage_rollups.ExportFormat = Query(  # noqa: B008 - FastAPI query marker, by design
+        default="csv", description="`csv` or `jsonl` (one JSON object per line)"
+    ),
+    principal: PartnerPrincipal = Depends(require_scope("usage:export")),  # noqa: B008 - FastAPI dependency marker, by design
+):
+    """Every bucket of `/usage/series` for the window in one file, beside the
+    FOCUS export. 400 when the window holds more than 100,000 buckets."""
+    await _enforce_rate_limit(request, response, principal)
+    window = await _series_window(request, principal, granularity, start, end)
+    rows = await usage_rollups.series_rows(
+        request.state.db,
+        principal.tenant_id,
+        group_by=group_by,
+        granularity=granularity,
+        window=window,
+    )
+    if rows is None:
+        raise _bad_request(
+            f"The window holds more than {usage_rollups.EXPORT_MAX_ROWS} buckets; narrow it"
+        )
+    await _audit(request, principal, "/partner/v1/usage/series/export", "GET", 200, len(rows))
+    stamp = f"{window.start:%Y%m%dT%H%M%SZ}-{window.end:%Y%m%dT%H%M%SZ}"
+    headers = {k: v for k, v in response.headers.items() if k.startswith("x-ratelimit-")}
+    headers.update(
+        {
+            "Content-Disposition": (
+                f'attachment; filename="usage-{granularity}-{group_by}-{stamp}.{format}"'
+            ),
+            "Cache-Control": "no-store",
+        }
+    )
+    return Response(
+        usage_rollups.serialize(rows, format),
+        media_type=focus_export.MEDIA_TYPES[format],
+        headers=headers,
+    )
 
 
 @router.get(

@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
-from collector import audit_trail, learner, rls, spend_anomalies
+from collector import audit_trail, learner, rls, spend_anomalies, usage_rollups
 from collector.app import app
 from collector.config import settings
 from collector.partner_auth import hash_secret
@@ -53,6 +53,9 @@ from db.models import (
     Tenant,
     TenantApiKey,
     TenantSecret,
+    UsageRollupDaily,
+    UsageRollupHourly,
+    UsageRollupState,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -216,6 +219,17 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 ),
                 _audit_seed(tenant_id),
                 TenantSecret(tenant_id=tenant_id, user_id_salt=f"seed-salt-{name}"),
+                UsageRollupHourly(
+                    tenant_id=tenant_id,
+                    bucket_start=datetime(2026, 1, 1, 12, tzinfo=UTC),
+                    requests=1,
+                ),
+                UsageRollupDaily(
+                    tenant_id=tenant_id,
+                    bucket_start=datetime(2026, 1, 1, tzinfo=UTC),
+                    requests=1,
+                ),
+                UsageRollupState(tenant_id=tenant_id, watermark=None),
             ]
         )
         sub = WebhookSubscription(
@@ -949,6 +963,37 @@ async def test_spend_anomaly_job_and_partner_api_under_rls(rls_db, caplog):
         assert acked.status_code == 200, acked.text
         cross = await c.post(f"/partner/v1/spend-alerts/{alert_b}/acknowledge", headers=head)
         assert cross.status_code == 404
+
+
+async def test_usage_rollup_job_and_series_under_rls(rls_db, caplog):
+    a, b = rls_db["a"], rls_db["b"]
+    with caplog.at_level(logging.INFO, logger="collector.rls"):
+        results = await usage_rollups.refresh_all_tenants(rls_db["plain"])
+    assert "rls bypass granted reason=usage-rollup-job" in caplog.text
+    assert {r["tenant_id"] for r in results} == {str(a), str(b)}
+    assert all("error" not in r and not r["skipped"] for r in results)
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        rows = (
+            await s.execute(text("SELECT tenant_id, requests FROM usage_rollup_hourly"))
+        ).all()
+        assert {r.tenant_id for r in rows} == {a}
+        # The seeded rollup row plus the hour of the seeded recent event
+        # (the 400-day-old one is past raw retention and never rolled up).
+        assert sorted(r.requests for r in rows) == [1, 1]
+        s.add(UsageRollupHourly(tenant_id=b, bucket_start=datetime.now(UTC), requests=9))
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+
+    head = {"Authorization": f"Bearer {PARTNER_KEY_A}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get(
+            "/partner/v1/usage/series", params={"granularity": "hour"}, headers=head
+        )
+    assert r.status_code == 200, r.text
+    assert [p["requests"] for p in r.json()["data"]] == [1]
+    assert r.json()["meta"]["rolled_up_at"] is not None
 
 
 async def test_operator_routes_bypass_with_an_audit_log(rls_db, monkeypatch, caplog):

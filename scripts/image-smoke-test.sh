@@ -60,9 +60,11 @@ case "$kind" in
     wait_http http://127.0.0.1:18000/metrics 200
     # Migrations run from the same image (alembic reads its scripts only).
     docker run --rm "${restricted[@]}" "$image" alembic -c packages/db/alembic.ini heads
-    # The worker entrypoint exists and refuses to idle with nothing enabled.
+    # The worker entrypoint exists and refuses to idle with nothing enabled
+    # (usage rollups are on by default, so switch them off here).
     set +e
-    docker run --rm "${restricted[@]}" "$image" python -m collector.workers
+    timeout 60 docker run --rm "${restricted[@]}" \
+      -e PS_USAGE_ROLLUP_INTERVAL_SECONDS=0 "$image" python -m collector.workers
     status=$?
     set -e
     if [ "$status" != "2" ]; then

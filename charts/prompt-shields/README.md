@@ -209,12 +209,20 @@ both 0 by default). Run each in exactly one place, not in every API replica:
 | Job | Command | Default | Default schedule |
 |---|---|---|---|
 | `auditPurge` | `python -m collector.audit purge` (partner audit rows older than `PS_AUDIT_RETENTION_DAYS`) | on | `17 2 * * *` |
-| `retentionPurge` | `python -m collector.retention purge` (usage events past retention) | on | `37 2 * * *` |
+| `retentionPurge` | `python -m collector.retention purge` (usage events past retention, and usage rollups past `PS_USAGE_ROLLUP_RETENTION_DAYS`) | on | `37 2 * * *` |
 | `spendAnomaly` | `python -m collector.spend_anomalies --all-tenants` (spend anomaly alerts for yesterday, UTC) | on | `57 3 * * *` |
 | `lifecycleSweep` | `python -m collector.lifecycle` (mark assets stale / retired) | off | `7 3 * * *` |
 | `webhooksDeliver` | `python -m collector.webhooks deliver` (alternative to the worker) | off | every minute |
 | `webhooksPurge` | `python -m collector.webhooks purge` | off | `47 3 * * *` |
 | `providerUsage` | `python -m collector.provider_usage_admin --all-tenants` | off | `27 4 * * *` |
+
+The usage rollups (hourly and daily aggregates behind
+`/partner/v1/usage/series`) are refreshed by a third loop that is on by
+default, `PS_USAGE_ROLLUP_INTERVAL_SECONDS=30`. It is safe in every API
+replica (a run skips a tenant another run is refreshing); set it to `0` in
+`collector.extraEnv` and add an entry running
+`python -m collector.usage_rollups refresh --all-tenants` to run it as a
+CronJob instead.
 
 Add per-tenant connector syncs as extra entries, e.g.
 `args: ["python", "-m", "collector.leanix", "--tenant", "<uuid>"]` (also
@@ -320,9 +328,9 @@ and the optional fastembed cache. The collector gets `HOME=/tmp` and
   it with the drain timeout.
 - Pin images by digest with `gateway.image.digest` / `collector.image.digest`.
 - Tenant admin routes (`/api/v1/admin/*`) accept scoped admin tokens only
-  (`PS_ADMIN_REQUIRE_SCOPED_TOKENS`, default `true` since 0.4.14).
+  (`PS_ADMIN_REQUIRE_SCOPED_TOKENS`, default `true` since 0.4.15).
 
-### To 0.4.14: scoped admin tokens required
+### To 0.4.15: scoped admin tokens required
 
 The collector now ships roles (principals, teams, projects, memberships;
 migration `039`), and `PS_ADMIN_REQUIRE_SCOPED_TOKENS` defaults to `true`:
@@ -572,7 +580,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_DATABASE_URL` (secret) | — | Application role URL (migration Job: owner role URL) |
 | `PS_PARTNER_JWT_SECRET` (secret) | development value | Partner token signing key |
 | `PS_ADMIN_TOKEN` (secret) | empty (off) | Operator endpoints `/api/v1/operator/*` |
-| `PS_ADMIN_REQUIRE_SCOPED_TOKENS` | `true` (since chart 0.4.14) | Tenant admin routes (`/api/v1/admin/*`) take only scoped admin tokens and refuse tenant ingest keys. `false` lets ingest keys back onto every admin route but member management. Set it in `collector.config`; see "To 0.4.14: scoped admin tokens required" |
+| `PS_ADMIN_REQUIRE_SCOPED_TOKENS` | `true` (since chart 0.4.15) | Tenant admin routes (`/api/v1/admin/*`) take only scoped admin tokens and refuse tenant ingest keys. `false` lets ingest keys back onto every admin route but member management. Set it in `collector.config`; see "To 0.4.15: scoped admin tokens required" |
 | `PS_RLS_REQUIRED` (*chart*) | `true` in the chart | Refuse to start unless RLS binds the role |
 | `PS_COLLECTOR_RUN_WORKERS` (*chart*) | `true`; the chart sets `false` with the worker or the `webhooksDeliver` / `providerUsage` CronJob | Background loops in the API process |
 | `PS_COLLECTOR_METRICS_ENABLED` (*chart*) | `false` | Prometheus `/metrics` |
@@ -600,6 +608,7 @@ in the component's Secret. The chart itself sets the ones marked *chart*.
 | `PS_WEBHOOK_WORKER_INTERVAL_SECONDS` (*chart* on the worker) | `0` | Webhook delivery loop (set by `worker.webhookIntervalSeconds`) |
 | `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | Development only |
 | `PS_PROVIDER_USAGE_PULL_INTERVAL_SECONDS` (*chart* on the worker), `PS_PROVIDER_USAGE_PULL_DAYS` | `0`, `3` | Provider usage pull loop (set by `worker.providerUsagePullIntervalSeconds`) |
+| `PS_USAGE_ROLLUP_INTERVAL_SECONDS`, `PS_USAGE_ROLLUP_RETENTION_DAYS` | `30`, `760` | Usage rollup loop (in the worker set: the worker Deployment, else every API replica; overlapping runs skip a tenant another run holds) and how long hourly/daily usage rollups are kept, never less than raw retention |
 | `PS_PROVIDER_ADMIN_KEYS` (secret) | — | Operator-held provider admin keys per tenant (JSON) |
 | `PS_LEANIX`, `PS_LEANIX_ALLOWED_HOST_SUFFIXES` | — | LeanIX connector (JSON config is secret) |
 | `PS_SERVICENOW`, `PS_SERVICENOW_ALLOWED_HOST_SUFFIXES` | — | ServiceNow connector |

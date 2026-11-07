@@ -101,6 +101,7 @@
         "api-reference/assets/get-usage-summary",
         "api-reference/assets/get-usage-savings",
         "api-reference/assets/get-usage-sovereign-share",
+        "api-reference/assets/get-usage-series",
         "api-reference/assets/get-telemetry-coverage"
       ]
     },
@@ -118,6 +119,7 @@
         "api-reference/sync/get-changes",
         "api-reference/sync/export",
         "api-reference/sync/focus-export",
+        "api-reference/sync/usage-series-export",
         "api-reference/sync/webhooks"
       ]
     },

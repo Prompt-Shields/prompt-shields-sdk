@@ -1,0 +1,49 @@
+---
+title: Get Usage Time Series
+openapi: get /partner/v1/usage/series
+---
+
+Tenant-wide usage per UTC hour, day or ISO week: requests, tokens by type
+(input, output, cache reads, cache writes, reasoning), cost, the upstream cost
+the gateway cache saved, the cache hit rate and the error rate. Pass `group_by`
+to split each bucket by user, project, model, provider, API surface or asset.
+
+```bash
+curl -H "Authorization: Bearer $PS_PARTNER_KEY" \
+  "https://api.promptshields.io/partner/v1/usage/series?group_by=model&granularity=day&from=2026-10-01&to=2026-11-01"
+```
+
+## Rollups
+
+The series is read from hourly and daily rollups, not from raw events. They
+are kept for `PS_USAGE_ROLLUP_RETENTION_DAYS` (default 760 days, about 25
+months, and never less than the tenant's raw retention), so they stay after the
+raw events are purged. For days still in raw retention the daily rollup equals
+the raw events to the token.
+
+The collector refreshes the rollups incrementally every
+`PS_USAGE_ROLLUP_INTERVAL_SECONDS` (default 30). `meta.rolled_up_at` says when
+the tenant's rollups were last refreshed. An operator can recompute every
+bucket still in raw retention with
+`python -m collector.usage_rollups rebuild --tenant <id>`.
+
+## Dimensions
+
+| `group_by` | `key` |
+|---|---|
+| `user` | The caller's user id as a salted HMAC hash (`user_id_hash`). Never the raw id. |
+| `project` | The asset's use case. |
+| `model` | The served model, else the requested one. |
+| `provider` | The served provider. |
+| `api_surface` | The API the caller spoke (`chat`, `messages`, `responses`, ...). |
+| `asset` | The asset id. |
+
+`key` is null for events that did not report the dimension. Grouping by team
+needs principals and is not available yet.
+
+<Note>
+`cost_usd` is null for a bucket where no call reported a cost, `cache_saved_usd`
+and `cache_hit_rate` where no call reported a cache lookup, and `error_rate`
+(calls whose last attempt returned HTTP 400 or more) where no call reported
+per-attempt metadata. A null is "not measured", never zero.
+</Note>
