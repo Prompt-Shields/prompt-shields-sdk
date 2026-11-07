@@ -31,6 +31,9 @@ LOCAL = [
     "2002:a9fe:a9fe::1",  # 6to4 of 169.254.169.254
     "2001:0:4136:e378:8000:63bf:80ff:fffe",  # Teredo, client 127.0.0.1
     "::a9fe:a9fe",  # IPv4-compatible
+    "64:ff9b:1::a9fe:a9fe",  # local-use NAT64 (RFC 8215) of 169.254.169.254
+    "64:ff9b:1:ffff::7f00:1",  # local-use NAT64 of 127.0.0.1
+    "::ffff:0:a9fe:a9fe",  # IPv4-translated (SIIT) of 169.254.169.254
 ]
 # What the private opt-ins are for: internal networks.
 PRIVATE = ["10.0.0.7", "172.16.0.1", "192.168.1.10", "fd12:3456::1", "100.64.0.1"]
@@ -207,3 +210,12 @@ def test_webhook_loopback_opt_in_is_off_by_default():
     from collector.config import Settings
 
     assert Settings.model_fields["webhook_allow_loopback_destinations"].default is False
+
+
+@pytest.mark.parametrize("addr", ["::ffff:0:a9fe:a9fe", "::ffff:0:7f00:1", "::ffff:0:a00:7"])
+def test_egress_default_refuses_ipv4_translated_non_public(addr):
+    assert not egress.ip_is_public(_ip(addr))
+
+
+def test_egress_default_admits_ipv4_translated_public():
+    assert egress.ip_is_public(_ip("::ffff:0:808:808"))
