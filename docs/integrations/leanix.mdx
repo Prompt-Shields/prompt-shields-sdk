@@ -82,7 +82,9 @@ default 500), `verify` (default `false`, see
   the LDIF `lxWorkspace`, so a token for another workspace makes the run
   fail instead of writing there. The workspace is otherwise taken from the
   API token. For a collector reached over an internal network, set
-`"allow_private_network": true` under `partner_api`; it must still be https.
+`"allow_private_network": true` under `partner_api`; it must still be https,
+and loopback, link-local and cloud metadata addresses (for example
+`127.0.0.1`, `169.254.169.254`, `fd00:ec2::254`) stay refused.
 
 ### Security
 
