@@ -28,10 +28,11 @@ What is erased, in the caller's tenant only:
   merged into the row for the same tool with no user (``user_hash = ''``),
   so the counts stay and the user's key is gone.
 * ``gateway_security_events`` rows with ``user_hash`` equal to the id as
-  sent (the gateway's OIDC subject hash on policy denials): ``user_hash``
-  is set to NULL (the event is kept).
+  sent (the gateway's OIDC subject hash on policy denials), or with its
+  salted hash (``user_id_hash``, stored at ingest) equal to the user's:
+  both are set to NULL (the event is kept). Both forms reach them.
 
-The feedback, MCP and security event tables store the id as the gateway sent it (a hex
+The feedback and MCP tables store the id as the gateway sent it (a hex
 hash), not the collector's salted hash, so only the POST form, which
 carries that id, reaches them.
 
@@ -71,7 +72,7 @@ from db.models import (
 )
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import audit_trail, user_identity
@@ -278,16 +279,21 @@ async def erase_user(
             size,
         )
         rows[McpToolUsage.__tablename__] = await _merge_mcp_rows(db, tenant_id, user_id)
-        rows[GatewaySecurityEvent.__tablename__] = await _null_in_batches(
-            db,
-            GatewaySecurityEvent,
-            [
-                GatewaySecurityEvent.tenant_id == tenant_id,
-                GatewaySecurityEvent.user_hash == user_id,
-            ],
-            {"user_hash": None},
-            size,
-        )
+    # Security events: by the id as sent (user.hash) and by the salted hash
+    # of it (user_id_hash), so both forms reach them.
+    se = GatewaySecurityEvent
+    se_match = []
+    if user_id is not None:
+        se_match.append(se.user_hash == user_id)
+    if user_id_hash is not None:
+        se_match.append(se.user_id_hash == user_id_hash)
+    rows[se.__tablename__] = await _null_in_batches(
+        db,
+        se,
+        [se.tenant_id == tenant_id, or_(*se_match)],
+        {"user_hash": None, "user_id_hash": None},
+        size,
+    )
 
     result = UserEraseResult(user_id_hash=user_id_hash, input=input_, rows_erased=rows)
     # The data is committed. If the audit write fails now, report the

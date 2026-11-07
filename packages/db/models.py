@@ -709,7 +709,10 @@ class GatewaySecurityEvent(Base):
 
     Metadata only, as the gateway sends it: no prompt or response content,
     PII values, credentials or client IP addresses. ``user_hash`` is the
-    gateway's pseudonymous OIDC subject hash (policy denials only).
+    gateway's pseudonymous OIDC subject hash (policy denials only);
+    ``user_id_hash`` is that value hashed with the tenant's user id salt, as
+    ``ai_usage_events.user_id_hash`` is, so erasure by the stored hash finds
+    it (never returned by the API).
     ``attributes`` holds the event's other ``ps.*`` / ``gen_ai.*`` /
     ``http.*`` fields (scalars only). One row per (tenant, ``event_id``), so
     a resent event is stored once. Rows older than the tenant's retention
@@ -738,6 +741,7 @@ class GatewaySecurityEvent(Base):
     model = Column(Text)
     status_code = Column(Integer)
     user_hash = Column(Text)
+    user_id_hash = Column(Text)
     schema_version = Column(Text)
     attributes = Column(JSONB, nullable=False, default=dict)
 
@@ -745,6 +749,12 @@ class GatewaySecurityEvent(Base):
         UniqueConstraint("tenant_id", "event_id", name="ux_gateway_security_events_event"),
         Index("ix_gateway_security_events_tenant_occurred", "tenant_id", "occurred_at"),
         Index("ix_gateway_security_events_tenant_received", "tenant_id", "received_at", "id"),
+        Index(
+            "ix_gateway_security_events_tenant_user",
+            "tenant_id",
+            "user_id_hash",
+            postgresql_where=text("user_id_hash IS NOT NULL"),
+        ),
     )
 
 

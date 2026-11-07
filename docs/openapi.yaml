@@ -2889,6 +2889,11 @@ components:
           minimum: 0
           maximum: 10000000
           description: /ingest/feedback per user_id (default `PS_FEEDBACK_USER_RATE_LIMIT_PER_MINUTE`)
+        security_events:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+          description: /ingest/security-events and /ingest/otel/v1/logs (default `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`)
 
     SpendAnomalySettings:
       type: object
@@ -3488,6 +3493,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          description: The tenant's security-event ingest rate limit (`PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`) is exhausted
+          headers:
+            Retry-After:
+              description: Seconds until the limit resets
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /ingest/otel/v1/logs:
     post:
@@ -3540,6 +3556,17 @@ paths:
                 $ref: '#/components/schemas/Error'
         '415':
           description: Not OTLP/HTTP JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: The tenant's security-event ingest rate limit (`PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`) is exhausted
+          headers:
+            Retry-After:
+              description: Seconds until the limit resets
+              schema:
+                type: integer
           content:
             application/json:
               schema:

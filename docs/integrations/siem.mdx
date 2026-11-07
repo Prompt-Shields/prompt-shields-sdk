@@ -37,7 +37,7 @@ Options every connector takes:
 | `batch_records` | 500 | Records read per batch |
 | `max_records_per_run` | 50000 | Per kind and run |
 | `settle_seconds` | 300 | Calls are pushed once this much older than their own time, security events once this long after they arrived, so late events are not skipped |
-| `allow_private_network` | `false` | Allow a receiver on a private address (internal SIEM). TLS and certificate checks still apply |
+| `allow_private_network` | `false` | Allow a receiver on a private address (internal SIEM). Loopback, link-local and cloud metadata addresses (`169.254.169.254`, `fd00:ec2::254`) stay refused; TLS and certificate checks still apply |
 
 Credentials (`token`, `signing_secret`, `bearer_token`) are never logged, stored or returned. A malformed `PS_SIEM_EXPORT` is reported without echoing it.
 
@@ -105,7 +105,7 @@ Any 2xx response counts as accepted.
 - Operator API (`operator:integrations`): `POST /api/v1/admin/connectors/{splunk-hec|syslog|webhook}/sync` with `{"tenant_id": "<uuid>"}`, and `GET .../status?tenant_id=<uuid>` for the configuration (hosts and options only, never a credential or the webhook path), cursors and last run.
 - Cron: `python -m collector.siem_export --all-tenants` (every configured tenant and connector; `--connector splunk_hec` to limit; `--tenant <uuid>` for one). A tenant that fails is recorded in its own status, the run continues, and the command exits non-zero. The Helm chart takes it as an extra CronJob entry.
 
-Cursors are kept per tenant, connector and kind, and move only past batches the receiver accepted. A failed run resends from the first unaccepted batch; `EventUid` and `event.id` are stable, so a resend is a duplicate, not a different event.
+Cursors are kept per tenant, connector and kind, and move only past batches the receiver accepted. A failed run resends from the first unaccepted batch; `EventUid` and `event.id` are stable, so a resend is a duplicate, not a different event (at-least-once delivery: deduplicate on those ids in the SIEM). Syslog counts a batch as delivered once the TLS socket accepted it; syslog has no acknowledgement.
 
 ## Gateway security events in the collector
 
@@ -123,10 +123,10 @@ The endpoint must pass the gateway's egress check (an in-cluster DNS name or a h
 
 **From a log forwarder**: `POST /ingest/security-events` with the stdout lines (`PS_SECURITY_EVENTS_LOG=true`) as `application/x-ndjson`, or a JSON array. Use a tenant ingest key with `ingest:write`.
 
-Either way the tenant is the ingest key's (the gateway's `ps.tenant` label is not stored), events need `event.id`, `event.name`, `@timestamp` and `log.logger: ps.security`, and an event resent with the same `event.id` is stored once.
+Either way the tenant is the ingest key's (the gateway's `ps.tenant` label is not stored), events need `event.id`, `event.name`, `@timestamp` and `log.logger: ps.security`, and an event resent with the same `event.id` is stored once. Both endpoints share a per-tenant rate limit, `PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE` (default 600 requests/minute, `0` turns it off; tenant override `ingest_rate_limits.security_events`), counted apart from `/ingest/events`; past it they answer `429` with `Retry-After`. A request holds at most 5000 events and 4 MiB.
 
 **Query**: `GET /partner/v1/security-events` with a partner credential holding `security-events:read` (never granted by default). Filters `since` / `until` (event time), `name`, `severity`, `action`; pages in arrival order with `meta.next_cursor`.
 
-**Retention and erasure**: stored events are purged with the tenant's [retention period](/guides/data-retention), deleted with a tenant erasure, and the end-user erasure (`POST /api/v1/admin/users/erase`) clears their `user.hash`.
+**Retention and erasure**: stored events are purged with the tenant's [retention period](/guides/data-retention), deleted with a tenant erasure, and the end-user erasure (`POST /api/v1/admin/users/erase` with the `user.hash` value, or `DELETE /api/v1/admin/users/{user_id_hash}/data` with its salted hash) clears their `user.hash`.
 
 Once exported, copies in your SIEM follow **your** retention policy and must be erased there.

@@ -265,6 +265,7 @@ _INGEST = _Lazy("ingest")
 _KONG = _Lazy("kong")
 _MCP = _Lazy("mcp")
 _FEEDBACK = _Lazy("feedback")
+_SECURITY_EVENTS = _Lazy("security_events")
 
 
 def get_rate_limiter() -> RateLimiter:
@@ -291,3 +292,9 @@ def get_mcp_rate_limiter() -> RateLimiter:
 # /ingest/feedback: per-tenant and per-user buckets, apart from the rest.
 def get_feedback_rate_limiter() -> RateLimiter:
     return _FEEDBACK()
+
+
+# /ingest/security-events and /ingest/otel/v1/logs (gateway security events)
+# count apart from /ingest/events (PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE).
+def get_security_events_rate_limiter() -> RateLimiter:
+    return _SECURITY_EVENTS()

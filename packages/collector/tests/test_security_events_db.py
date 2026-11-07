@@ -11,11 +11,18 @@ import importlib.util
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from collector import retention, rls
+from collector import partner_rate_limit, retention, rls, tenant_limits
 from collector import security_events as se
 from collector.app import app
+from collector.config import settings
+from collector.partner_rate_limit import (
+    FixedWindowRateLimiter,
+    get_ingest_rate_limiter,
+    get_security_events_rate_limiter,
+)
 from db.models import GatewaySecurityEvent, PartnerCredential
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import inspect, select, update
@@ -186,6 +193,10 @@ async def test_otlp_logs_from_the_gateway_are_stored_for_the_key_tenant(rls_db):
     # From attributes only (no body): the record time, int and array values.
     assert second.name == "policy.denied" and second.status_code == 403
     assert second.user_hash == "0123456789abcdef0123456789abcdef"
+    # Salted like ai_usage_events.user_id_hash (erasure by stored hash).
+    assert second.user_id_hash and len(second.user_id_hash) == 64
+    assert first.user_id_hash is None
+    assert "user_id_hash" not in se.event_fields(second)
     assert second.occurred_at == datetime(2026, 11, 6, 12, tzinfo=UTC)
     assert second.attributes["event.category"] == ["iam"]
     assert second.attributes["ps.policy.reason"] == "model_not_allowed"
@@ -235,6 +246,66 @@ async def test_forwarded_lines_validation_and_duplicates(rls_db):  # noqa: F811
     assert [r.event_id for r in rows] == ["n-1", "n-5", "n-6"]
     big = rows[1]
     assert big.signature is None and "ps.big" not in big.attributes
+
+
+async def test_ingest_rate_limit_is_per_tenant_and_apart_from_events(
+    rls_db, monkeypatch  # noqa: F811
+):
+    """Both security-event ingest routes share the tenant's
+    PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE bucket (429 past it, with
+    Retry-After), apart from /ingest/events and from other tenants; a
+    tenant override applies."""
+    monkeypatch.setattr(settings, "security_events_rate_limit_per_minute", 2)
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 1)
+    monkeypatch.setattr(
+        partner_rate_limit, "time", SimpleNamespace(time=lambda: 1_700_000_030.0)
+    )
+    tenant_limits.invalidate()
+    fresh, events = FixedWindowRateLimiter(), FixedWindowRateLimiter()
+    app.dependency_overrides[get_security_events_rate_limiter] = lambda: fresh
+    app.dependency_overrides[get_ingest_rate_limiter] = lambda: events
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            first = await c.post(
+                "/ingest/security-events", json=[_event("rl-1")], headers=_head(KEY_A)
+            )
+            second = await c.post(
+                "/ingest/otel/v1/logs", json=_otlp([_log_record(_event("rl-2"))]),
+                headers=_head(KEY_A),
+            )
+            blocked = await c.post(
+                "/ingest/security-events", json=[_event("rl-3")], headers=_head(KEY_A)
+            )
+            blocked_otlp = await c.post(
+                "/ingest/otel/v1/logs", json=_otlp([_log_record(_event("rl-4"))]),
+                headers=_head(KEY_A),
+            )
+            other_tenant = await c.post(
+                "/ingest/security-events", json=[_event("rl-5")], headers=_head(KEY_B)
+            )
+            sdk = await c.post("/ingest/events", json={"events": []}, headers=_head(KEY_A))
+            assert [first.status_code, second.status_code] == [200, 200], second.text
+            assert first.headers["X-RateLimit-Limit"] == "2"
+            assert blocked.status_code == 429 and int(blocked.headers["Retry-After"]) > 0
+            assert blocked_otlp.status_code == 429
+            assert other_tenant.status_code == 200
+            assert sdk.status_code == 200
+
+            monkeypatch.setattr(settings, "security_events_rate_limit_per_minute", 0)
+            codes = [
+                (
+                    await c.post(
+                        "/ingest/security-events", json=[], headers=_head(KEY_A)
+                    )
+                ).status_code
+                for _ in range(3)
+            ]
+            assert codes == [200] * 3
+    finally:
+        app.dependency_overrides.pop(get_security_events_rate_limiter, None)
+        app.dependency_overrides.pop(get_ingest_rate_limiter, None)
+        tenant_limits.invalidate()
+    assert [r.event_id for r in await _rows(rls_db["plain"], rls_db["a"])] == ["rl-1", "rl-2"]
 
 
 async def test_query_api_scope_filters_and_paging(rls_db):  # noqa: F811

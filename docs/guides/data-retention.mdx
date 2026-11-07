@@ -93,6 +93,7 @@ What changes, in the caller's tenant only:
 - **Usage events** of the user (matched by `user_id_hash`; an event with `user_id_raw` always has the hash too): `user_id_hash`, `user_id_raw`, `session_id` and `prompt_hash` (a SHA-256 of the prompt text) are set to null. Model, tokens, cost and routing metadata stay, so spend reports do not change; the rows no longer say whose they were.
 - **Call feedback** with `user_id` equal to the id as sent: `user_id` is set to null. The score stays.
 - **MCP tool usage** rows for the id: merged into the row for the same tool with no user, so the counts stay.
+- **Gateway security events** whose `user.hash` is the id as sent, or whose salted hash of it (stored at ingest, never returned) is the user's `user_id_hash`: both are set to null; the event stays. Both forms reach them.
 
 Call feedback and MCP usage store the id as the gateway sent it, so only the POST form reaches them.
 

@@ -27,6 +27,12 @@ never a field of the event):
                                   (one event per line), or ``application/json``
                                   (an array, or ``{"events": [...]}``).
 
+Both are limited per tenant (``PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE``,
+default 600 requests/minute, or the tenant's ``ingest_rate_limits.
+security_events``; 429 with ``Retry-After``), counted apart from
+``/ingest/events``; the body is bounded like the OTLP receiver's (4 MiB,
+JSON nesting depth limited) and to 5000 events per request.
+
 Each event is validated: ``event.id``, ``event.name``, ``@timestamp`` and
 ``log.logger: ps.security`` are required; known fields go to columns
 (strings over 256 characters are dropped), other ``ps.*``, ``gen_ai.*``
@@ -45,7 +51,8 @@ own time, ``name``, ``severity`` and ``action`` on exact values.
 
 Retention: rows older than the tenant's retention period are purged with
 its usage events (collector.retention); a tenant erasure deletes them; the
-end-user erasure clears ``user_hash`` (collector.user_erasure).
+end-user erasure (by id as sent or by the stored hash) clears
+``user_hash`` and its salted ``user_id_hash`` (collector.user_erasure).
 """
 
 from __future__ import annotations
@@ -57,7 +64,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from db.models import GatewaySecurityEvent, uuid7
@@ -66,10 +73,12 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import tenant_keys
+from collector import tenant_keys, tenant_limits, user_identity
 from collector.auth import resolve_tenant
+from collector.ingest import _enforce_rate_limit as _enforce_ingest_rate_limit
 from collector.otel_ingest import _read_bounded_body
 from collector.partner_auth import PartnerPrincipal, require_scope
+from collector.partner_rate_limit import RateLimiter, get_security_events_rate_limiter
 from collector.partner_registry import _audit, _enforce_rate_limit
 from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
 
@@ -237,6 +246,17 @@ async def store_events(
             continue
         rows[row["event_id"]] = row
     if rows:
+        # The salted hash of user.hash (as ai_usage_events.user_id_hash), so
+        # erasure by the stored hash reaches these rows too.
+        salt = None
+        if any(row["user_hash"] for row in rows.values()):
+            salt = await user_identity.tenant_salt(db, tenant_id)
+        for row in rows.values():
+            row["user_id_hash"] = (
+                user_identity.hash_user_id(salt, row["user_hash"])
+                if salt and row["user_hash"]
+                else None
+            )
         table = GatewaySecurityEvent.__table__
         now = datetime.now(UTC)
         stmt = (
@@ -274,6 +294,18 @@ async def store_events(
 # ──────────────────────────────────────────────────────────────────────
 
 router = APIRouter()
+
+_LIMITER = Depends(get_security_events_rate_limiter)
+
+
+async def _rate_limit(
+    request: Request, response: Response, limiter: RateLimiter, tenant_id: UUID
+) -> None:
+    """The tenant's request limit on security-event ingest
+    (``PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE`` or the tenant's
+    ``ingest_rate_limits.security_events``; 429 past it)."""
+    limit = await tenant_limits.limit_for(request.state.db, tenant_id, "security_events")
+    await _enforce_ingest_rate_limit(limiter, tenant_id, response, limit)
 
 
 def _content_type(request: Request) -> str:
@@ -313,17 +345,21 @@ def _time_from_nanos(value: Any) -> str | None:
     return datetime.fromtimestamp(nanos / 1e9, UTC).isoformat()
 
 
+def _list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
 def otlp_log_events(payload: dict) -> list[Any]:
     """The security events in an ExportLogsServiceRequest (JSON), one per
     log record: the body's JSON object, else the record's attributes."""
     out: list[Any] = []
-    for resource_logs in payload.get("resourceLogs") or []:
+    for resource_logs in _list(payload.get("resourceLogs")):
         if not isinstance(resource_logs, dict):
             out.append(None)
             continue
-        for scope_logs in resource_logs.get("scopeLogs") or []:
+        for scope_logs in _list(resource_logs.get("scopeLogs")):
             records = scope_logs.get("logRecords") if isinstance(scope_logs, dict) else None
-            for record in records or []:
+            for record in _list(records):
                 if not isinstance(record, dict):
                     out.append(None)
                     continue
@@ -349,9 +385,14 @@ def otlp_log_events(payload: dict) -> list[Any]:
 
 
 @router.post("/ingest/otel/v1/logs")
-async def ingest_otel_logs(request: Request) -> dict:
+async def ingest_otel_logs(
+    request: Request,
+    response: Response,
+    limiter: Annotated[RateLimiter, _LIMITER],
+) -> dict:
     """OTLP/HTTP JSON logs carrying gateway security events."""
     tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
+    await _rate_limit(request, response, limiter, tenant_id)
     if _content_type(request) != "application/json":
         raise _problem(
             415, "Unsupported Media Type", "Use OTLP/HTTP JSON (application/json)"
@@ -381,9 +422,14 @@ async def ingest_otel_logs(request: Request) -> dict:
 
 
 @router.post("/ingest/security-events")
-async def ingest_security_events(request: Request) -> dict:
+async def ingest_security_events(
+    request: Request,
+    response: Response,
+    limiter: Annotated[RateLimiter, _LIMITER],
+) -> dict:
     """Security events as JSON lines or a JSON array (log forwarders)."""
     tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
+    await _rate_limit(request, response, limiter, tenant_id)
     content_type = _content_type(request)
     if content_type not in ("application/json", NDJSON):
         raise _problem(

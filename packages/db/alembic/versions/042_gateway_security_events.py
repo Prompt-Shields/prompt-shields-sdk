@@ -69,6 +69,7 @@ def upgrade() -> None:
         sa.Column("model", sa.Text),
         sa.Column("status_code", sa.Integer),
         sa.Column("user_hash", sa.Text),
+        sa.Column("user_id_hash", sa.Text),
         sa.Column("schema_version", sa.Text),
         sa.Column(
             "attributes",
@@ -88,6 +89,12 @@ def upgrade() -> None:
         TABLE,
         ["tenant_id", "received_at", "id"],
     )
+    op.create_index(
+        "ix_gateway_security_events_tenant_user",
+        TABLE,
+        ["tenant_id", "user_id_hash"],
+        postgresql_where=sa.text("user_id_hash IS NOT NULL"),
+    )
 
     op.execute(
         f"CREATE POLICY {POLICY} ON {TABLE} FOR ALL "
@@ -104,6 +111,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_gateway_security_events_tenant_user", table_name=TABLE)
     op.drop_index("ix_gateway_security_events_tenant_received", table_name=TABLE)
     op.drop_index("ix_gateway_security_events_tenant_occurred", table_name=TABLE)
     op.drop_table(TABLE)

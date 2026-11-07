@@ -152,11 +152,19 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         assert hash_b != hash_a
         resp = await c.delete(f"/api/v1/admin/users/{hash_b}/data", headers=_head(KEY_B))
         assert resp.status_code == 200, resp.text
-        assert resp.json()["rows_erased"] == {"ai_usage_events": 3}
+        assert resp.json()["rows_erased"] == {
+            "ai_usage_events": 3, "gateway_security_events": 1,
+        }
+        # The hash route reaches the security event too (salted user.hash).
+        assert (await _state(plain, b))["security"] == [
+            ("deny-0123", None), ("deny-fedc", OTHER),
+        ]
         # a's hash means nothing in b: zero rows, the same answer as for an
         # id b never saw.
         resp = await c.delete(f"/api/v1/admin/users/{other_hash}/data", headers=_head(KEY_B))
-        assert resp.json()["rows_erased"] == {"ai_usage_events": 0}
+        assert resp.json()["rows_erased"] == {
+            "ai_usage_events": 0, "gateway_security_events": 0,
+        }
 
         resp = await c.delete("/api/v1/admin/users/NOT-A-HASH/data", headers=_head(KEY_B))
         assert resp.status_code == 400
