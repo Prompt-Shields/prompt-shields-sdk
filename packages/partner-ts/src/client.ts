@@ -7,7 +7,7 @@ import {
   RateLimitError,
   makeAPIError,
 } from './errors';
-import { FocusExport, SiemBatch, SiemFeed } from './download';
+import { FocusExport, SiemBatch, SiemFeed, UsageSeriesExport } from './download';
 import { PageIterator } from './pagination';
 import type {
   AdminKeyRequest,
@@ -71,6 +71,9 @@ import type {
   TelemetryCoverage,
   TokenResponse,
   UpdateWebhookSubscriptionParams,
+  UsageSeries,
+  UsageSeriesExportParams,
+  UsageSeriesParams,
   UsageSummary,
   UsageSummaryParams,
   WebhookDelivery,
@@ -682,7 +685,11 @@ export class TelemetryResource {
   }
 }
 
-/** `/partner/v1/usage/*`: tenant-wide routing savings and sovereign share. Needs `usage:read`. */
+/**
+ * `/partner/v1/usage/*`: tenant-wide routing savings, sovereign share and the
+ * usage time series (`usage:read`), and the FOCUS and time-series exports
+ * (`usage:export`).
+ */
 export class UsageResource {
   constructor(private readonly client: PartnerClient) {}
 
@@ -721,6 +728,30 @@ export class UsageResource {
       { signal: options.signal, accept: format === 'jsonl' ? 'application/x-ndjson' : 'text/csv' },
     );
     return new FocusExport(res, format);
+  }
+
+  /**
+   * `GET /partner/v1/usage/series`: requests, tokens, cost, cache savings and
+   * error rate per UTC hour, day or week, optionally split by user (hash),
+   * project, model, provider, API surface or asset. One page; follow
+   * `meta.nextCursor` with `cursor` for the next.
+   */
+  series(params: UsageSeriesParams = {}): Promise<UsageSeries> {
+    return this.client.get<UsageSeries>('/partner/v1/usage/series', { ...params });
+  }
+
+  /**
+   * `GET /partner/v1/usage/series/export`: every point of the window as CSV
+   * (default) or JSON Lines, streamed like `focusExport`. Needs `usage:export`.
+   */
+  async seriesExport(params: UsageSeriesExportParams = {}, options: DownloadOptions = {}): Promise<UsageSeriesExport> {
+    const format = params.format ?? 'csv';
+    const res = await this.client.getStream(
+      '/partner/v1/usage/series/export',
+      { ...params },
+      { signal: options.signal, accept: format === 'jsonl' ? 'application/x-ndjson' : 'text/csv' },
+    );
+    return new UsageSeriesExport(res, format);
   }
 }
 

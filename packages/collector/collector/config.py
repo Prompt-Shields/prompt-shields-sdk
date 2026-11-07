@@ -156,6 +156,16 @@ class Settings(BaseSettings):
     # days overwrite the same rows.
     provider_usage_pull_days: int = 3
 
+    # Usage rollups (#346), see collector/usage_rollups.py. Seconds between
+    # incremental runs of the hourly and daily rollups in the worker set; 0
+    # turns the loop off (then run `python -m collector.usage_rollups
+    # refresh --all-tenants` from cron). Replicas that overlap skip a tenant
+    # another run holds, so running it in every API replica is safe.
+    usage_rollup_interval_seconds: float = 30
+    # Days rollup rows are kept, separately from raw events (default about
+    # 25 months). Never less than a tenant's raw retention.
+    usage_rollup_retention_days: int = 760
+
     # Kubernetes / replicas. PS_COLLECTOR_RUN_WORKERS=false keeps the
     # background loops above (webhook delivery, provider usage pull) out of
     # the API process even when their intervals are set, so API replicas can

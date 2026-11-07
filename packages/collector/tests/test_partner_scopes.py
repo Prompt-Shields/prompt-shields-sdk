@@ -43,6 +43,8 @@ ROUTES = [
     ("/partner/v1/changes?since=2026-01-01T00:00:00", "changes:read"),
     ("/partner/v1/export", "export:read"),
     ("/partner/v1/usage/focus-export", "usage:export"),
+    ("/partner/v1/usage/series", "usage:read"),
+    ("/partner/v1/usage/series/export", "usage:export"),
     ("/partner/v1/mcp/tools", "mcp:read"),
     ("/partner/v1/mcp/usage", "mcp:read"),
 ]

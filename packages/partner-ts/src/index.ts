@@ -22,7 +22,7 @@ export {
 export type { PartnerClientOptions, FetchLike, SendOptions } from './client';
 export { PageIterator } from './pagination';
 export type { CursorPage } from './pagination';
-export { Download, FocusExport, SiemBatch, SiemFeed } from './download';
+export { Download, FocusExport, SiemBatch, SiemFeed, UsageSeriesExport } from './download';
 export {
   PartnerError,
   APIConnectionError,
@@ -163,6 +163,14 @@ export type {
   TokenResponse,
   UpdateWebhookSubscriptionParams,
   UsagePeriod,
+  UsageSeries,
+  UsageSeriesExportFormat,
+  UsageSeriesExportParams,
+  UsageSeriesGranularity,
+  UsageSeriesGroupBy,
+  UsageSeriesMeta,
+  UsageSeriesParams,
+  UsageSeriesPoint,
   UsageSummary,
   UsageSummaryParams,
   Vendor,

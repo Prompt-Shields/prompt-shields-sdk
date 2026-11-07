@@ -36,7 +36,10 @@ SCOPES: dict[str, str] = {
     "assets:read": "List and get AI assets, vendors, models and business units",
     "data-flows:read": "Read an asset's data flows",
     "risks:read": "Read an asset's risk mappings and their review history",
-    "usage:read": "Read an asset's aggregated usage summary",
+    "usage:read": (
+        "Read aggregated usage: an asset's usage summary, tenant-wide savings, "
+        "sovereign share and the usage time series"
+    ),
     "changes:read": "Read the /changes delta feed",
     "export:read": "Bulk export the registry (JSON or CycloneDX)",
     "webhooks:manage": "Create, list and delete webhook subscriptions",
@@ -71,7 +74,8 @@ SCOPES: dict[str, str] = {
     "spend-alerts:acknowledge": "Acknowledge spend anomaly alerts",
     "usage:export": (
         "Bulk export AI usage cost in the FinOps FOCUS format "
-        "(CSV or JSON Lines, per asset, model and provider)"
+        "(CSV or JSON Lines, per asset, model and provider) and the usage "
+        "time series (CSV or JSON Lines)"
     ),
     "audit:read": (
         "Receive the tenant's admin audit trail as `audit.*` webhook events "
