@@ -328,6 +328,9 @@ const SCHEMAS: Record<string, string> = {
   SovereignShareReport: 'SovereignShareReport',
   UsageSeriesPoint: 'UsageSeriesPoint',
   UsageSeries: 'UsageSeries',
+  ShowbackAmounts: 'ShowbackAmounts',
+  ShowbackGroup: 'ShowbackGroup',
+  ShowbackReport: 'ShowbackReport',
   ChangeEvent: 'ChangeEvent',
   AttestationStatus: 'AttestationStatus',
   Attestation: 'Attestation',
@@ -504,6 +507,7 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/usage/focus-export': { methods: ['usage.focusExport'], params: 'FocusExportParams' },
   'GET /partner/v1/usage/series': { methods: ['usage.series'], params: 'UsageSeriesParams' },
   'GET /partner/v1/usage/series/export': { methods: ['usage.seriesExport'], params: 'UsageSeriesExportParams' },
+  'GET /partner/v1/cost/showback': { methods: ['usage.showback'], params: 'ShowbackParams' },
   'GET /partner/v1/health': { methods: ['health'] },
   // Provider admin credentials (#93): client.providerCredentials and
   // client.providerKeyFingerprints. The /api/v1/admin copies take the tenant
@@ -664,6 +668,7 @@ const OPERATIONS: Record<string, Operation> = {
   },
   'POST /ingest/security-events': NOT_WRAPPED,
   'POST /ingest/otel/v1/logs': NOT_WRAPPED,
+  'POST /ingest/otel/v1/traces': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/splunk-hec/sync': NOT_WRAPPED,
   'GET /api/v1/admin/connectors/splunk-hec/status': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/syslog/sync': NOT_WRAPPED,

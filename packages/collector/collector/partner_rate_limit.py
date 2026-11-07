@@ -21,7 +21,7 @@ limit)``):
   request.
 
 Each limiter has a namespace (``partner``, ``ingest``, ``kong``, ``mcp``,
-``feedback``) so counters for different endpoints never share a bucket. Keys
+``feedback``, ``security_events``, ``otel_traces``) so counters for different endpoints never share a bucket. Keys
 are hashed before they reach Redis, so no tenant id or user id is stored
 there in the clear. The minute window comes from the collector's clock;
 keep replica clocks in sync (NTP) as usual.
@@ -266,6 +266,7 @@ _KONG = _Lazy("kong")
 _MCP = _Lazy("mcp")
 _FEEDBACK = _Lazy("feedback")
 _SECURITY_EVENTS = _Lazy("security_events")
+_OTEL_TRACES = _Lazy("otel_traces")
 
 
 def get_rate_limiter() -> RateLimiter:
@@ -298,3 +299,9 @@ def get_feedback_rate_limiter() -> RateLimiter:
 # count apart from /ingest/events (PS_SECURITY_EVENTS_RATE_LIMIT_PER_MINUTE).
 def get_security_events_rate_limiter() -> RateLimiter:
     return _SECURITY_EVENTS()
+
+
+# /ingest/otel/v1/traces counts apart from /ingest/events
+# (PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE).
+def get_otel_traces_rate_limiter() -> RateLimiter:
+    return _OTEL_TRACES()

@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # events, #353): requests per minute per tenant, counted apart from
     # /ingest/events; 0 or less disables it.
     security_events_rate_limit_per_minute: int = 600
+    # /ingest/otel/v1/traces (OTLP GenAI spans): requests per minute per
+    # tenant, counted apart from /ingest/events; 0 or less disables it.
+    otel_traces_rate_limit_per_minute: int = 600
     # Tenant key auth (collector/auth_cache.py). Seconds a key that passed
     # bcrypt is remembered (by an HMAC of the key, never the key), so its
     # next requests skip bcrypt while the stored hash is unchanged; the key

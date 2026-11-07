@@ -19,11 +19,11 @@ externalId). Existing rows keep NULL.
 Each new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Follows 039 (RBAC, #338). Must be re-chained onto main's head at merge if
+Follows 046 (cost attribution, #347; ids are not in order). Must be re-chained onto main's head at merge if
 another migration lands first.
 
 Revision ID: 045
-Revises: 039
+Revises: 046
 Create Date: 2026-11-07
 """
 
@@ -34,7 +34,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "045"
-down_revision: str | None = "039"
+down_revision: str | None = "046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

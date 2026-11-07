@@ -6,7 +6,8 @@ commit ``f1eeb30``). The Partner API serves them as CSV or JSON Lines from
 ``GET /partner/v1/usage/focus-export`` (scope ``usage:export``).
 
 One row is one charge: the cost of one asset's calls to one model at one
-provider in one UTC hour or day (``granularity``). Events without a ``cost``
+provider in one UTC hour or day (``granularity``), for one team, project,
+calling service and set of cost tags. Events without a ``cost``
 are left out: FOCUS cost columns must not be null, and a 0 would be a
 placeholder for a cost that was never measured.
 
@@ -48,6 +49,14 @@ AI usage telemetry, plus custom ``x_`` columns (`CUSTOM_COLUMNS`). Values:
 - ``Tags`` holds the asset's ``ps:business_unit``, ``ps:use_case`` and
   ``ps:environment`` (the ``ps:`` prefix marks them as Prompt Shields
   registry tags), keys with no value left out, null when none is set.
+- ``SubAccountId`` / ``SubAccountName`` are the team the calls are
+  attributed to (#347, collector/cost_attribution.py), ``SubAccountType``
+  "Team"; all three null for unattributed spend. A team deleted since keeps
+  its id with a null name.
+- ``Tags`` also holds the calls' cost tags (``X-PS-Tags``, unprefixed) and
+  ``ps:project_id`` / ``ps:project`` for the project they are attributed
+  to; ``x_ProjectId``, ``x_ProjectName`` and ``x_CallingService`` repeat
+  the project and calling service.
 - Always null: ``ChargeClass`` (no corrections to closed periods),
   ``AllocatedMethodDetails`` (no split cost allocation) and
   ``AvailabilityZone`` (not reported).
@@ -59,9 +68,8 @@ data the collector does not have): ``SkuPriceId``, ``SkuMeter``,
 prices differ for input, output and cache tokens), the ``PricingCurrency*``
 columns (pricing and billing currency are both USD), ``InvoiceId`` and
 ``InvoiceDetailId`` (no invoices), ``Commitment*``, ``CapacityReservation*``
-and ``ContractApplied`` (no commitment or contract data), the other
-``Allocated*`` columns, and ``SubAccount*`` (business unit is in ``Tags``
-and ``x_BusinessUnit``).
+and ``ContractApplied`` (no commitment or contract data) and the other
+``Allocated*`` columns (no shared-cost allocation rules yet).
 
 Known gaps against a strict FOCUS validator: FOCUS ties ``PricingQuantity``
 and ``SkuId`` to a ``SkuPriceId`` (and ``ListUnitPrice``) for every Usage
@@ -91,7 +99,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from db.models import AIAsset, AIUsageEvent
+from db.models import AIAsset, AIUsageEvent, Project, Team
 from sqlalchemy import and_, func, select
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -124,6 +132,9 @@ FOCUS_COLUMNS: tuple[str, ...] = (
     "BillingAccountId",
     "BillingAccountName",
     "BillingAccountType",
+    "SubAccountId",
+    "SubAccountName",
+    "SubAccountType",
     "BillingPeriodStart",
     "BillingPeriodEnd",
     "ChargePeriodStart",
@@ -162,11 +173,15 @@ CUSTOM_COLUMNS: tuple[str, ...] = (
     "x_BusinessUnit",
     "x_UseCaseName",
     "x_Environment",
+    "x_ProjectId",
+    "x_ProjectName",
+    "x_CallingService",
 )
 
 COLUMNS: tuple[str, ...] = FOCUS_COLUMNS + CUSTOM_COLUMNS
 
 TAG_PREFIX = "ps:"
+SUB_ACCOUNT_TYPE = "Team"
 SERVICE_CATEGORY = "AI and Machine Learning"
 SERVICE_SUBCATEGORY = "Generative AI"
 BILLING_ACCOUNT_TYPE = "Prompt Shields Tenant"
@@ -213,11 +228,20 @@ def _bucket_width(granularity: str) -> timedelta:
 
 
 def _tags(row: Mapping[str, Any]) -> dict | None:
-    tags = {
-        f"{TAG_PREFIX}business_unit": row["business_unit"],
-        f"{TAG_PREFIX}use_case": row["use_case_name"],
-        f"{TAG_PREFIX}environment": row["environment"],
-    }
+    # The event's cost tags (#347) never start with "ps:" (reserved at
+    # ingest), so they cannot collide with the registry tags.
+    user_tags = row.get("tags")
+    tags = dict(user_tags) if isinstance(user_tags, dict) else {}
+    project_id = row.get("project_id")
+    tags.update(
+        {
+            f"{TAG_PREFIX}business_unit": row["business_unit"],
+            f"{TAG_PREFIX}use_case": row["use_case_name"],
+            f"{TAG_PREFIX}environment": row["environment"],
+            f"{TAG_PREFIX}project_id": str(project_id) if project_id else None,
+            f"{TAG_PREFIX}project": row.get("project_name"),
+        }
+    )
     tags = {k: v for k, v in tags.items() if v is not None}
     return tags or None
 
@@ -263,6 +287,8 @@ def focus_row(
     unit = TOKEN_UNIT if tokens_reported else None
     region = row["region"]
     tags = _tags(row)
+    team_id = row.get("team_id")
+    project_id = row.get("project_id")
 
     plural = "" if requests == 1 else "s"
     return {
@@ -274,6 +300,9 @@ def focus_row(
         "BillingAccountId": str(tenant_id),
         "BillingAccountName": tenant_name,
         "BillingAccountType": BILLING_ACCOUNT_TYPE,
+        "SubAccountId": str(team_id) if team_id else None,
+        "SubAccountName": row.get("team_name") if team_id else None,
+        "SubAccountType": SUB_ACCOUNT_TYPE if team_id else None,
         "BillingPeriodStart": focus_datetime(period_start),
         "BillingPeriodEnd": focus_datetime(period_end),
         "ChargePeriodStart": focus_datetime(charge_start),
@@ -309,6 +338,9 @@ def focus_row(
         "x_BusinessUnit": row["business_unit"],
         "x_UseCaseName": row["use_case_name"],
         "x_Environment": row["environment"],
+        "x_ProjectId": str(project_id) if project_id else None,
+        "x_ProjectName": row.get("project_name") if project_id else None,
+        "x_CallingService": row.get("calling_service"),
     }
 
 
@@ -370,6 +402,12 @@ def focus_query(tenant_id: UUID, start: datetime, end: datetime, granularity: st
         AIAsset.region.label("region"),
         model.label("model"),
         provider.label("provider"),
+        AIUsageEvent.team_id.label("team_id"),
+        Team.name.label("team_name"),
+        AIUsageEvent.project_id.label("project_id"),
+        Project.name.label("project_name"),
+        AIUsageEvent.calling_service.label("calling_service"),
+        AIUsageEvent.tags.label("tags"),
     ]
     return (
         select(
@@ -387,6 +425,17 @@ def focus_query(tenant_id: UUID, start: datetime, end: datetime, granularity: st
             and_(
                 AIAsset.id == AIUsageEvent.asset_id,
                 AIAsset.tenant_id == AIUsageEvent.tenant_id,
+            ),
+        )
+        .outerjoin(
+            Team,
+            and_(Team.id == AIUsageEvent.team_id, Team.tenant_id == AIUsageEvent.tenant_id),
+        )
+        .outerjoin(
+            Project,
+            and_(
+                Project.id == AIUsageEvent.project_id,
+                Project.tenant_id == AIUsageEvent.tenant_id,
             ),
         )
         .where(

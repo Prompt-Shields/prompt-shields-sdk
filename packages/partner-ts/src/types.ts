@@ -803,8 +803,18 @@ export interface FingerprintLinkResult {
 
 // Usage time series (/partner/v1/usage/series and its export).
 
+/** A fixed dimension, or `tag:<key>` for a key in the tenant's `settings.cost_tag_keys`. */
 export type UsageSeriesGroupBy = OpenString<
-  'none' | 'user' | 'project' | 'model' | 'provider' | 'api_surface' | 'asset'
+  | 'none'
+  | 'user'
+  | 'team'
+  | 'project'
+  | 'use_case'
+  | 'service'
+  | 'model'
+  | 'provider'
+  | 'api_surface'
+  | 'asset'
 >;
 export type UsageSeriesGranularity = OpenString<'hour' | 'day' | 'week'>;
 export type UsageSeriesExportFormat = OpenString<'csv' | 'jsonl'>;
@@ -812,8 +822,9 @@ export type UsageSeriesExportFormat = OpenString<'csv' | 'jsonl'>;
 export interface UsageSeriesParams {
   /**
    * Split each bucket by this dimension (`key` in each point). `user` is the
-   * salted user id hash, never a raw id; `project` the asset's use case.
-   * Default `none`.
+   * salted user id hash, never a raw id; `team` and `project` the tenant's
+   * teams and projects; `use_case` the asset's use case; `service` the
+   * calling service; `tag:<key>` a cost tag. Default `none`.
    */
   groupBy?: UsageSeriesGroupBy;
   /** UTC hour, day (default) or ISO week starting Monday. */
@@ -847,6 +858,8 @@ export interface UsageSeriesPoint {
   bucketStart: string;
   /** Value of `groupBy`; `null` for `none` or when not reported. */
   key: string | null;
+  /** Team or project name for `groupBy` `team` / `project`; else `null`. */
+  name: string | null;
   requests: number;
   tokensIn: number;
   tokensOut: number;
@@ -875,6 +888,60 @@ export interface UsageSeriesMeta {
 export interface UsageSeries {
   data: UsageSeriesPoint[];
   meta: UsageSeriesMeta;
+}
+
+// Cost showback (/partner/v1/cost/showback).
+
+/** `team`, `project`, `user`, `service`, or `tag:<key>` for a key in `settings.cost_tag_keys`. */
+export type ShowbackGroupBy = OpenString<'team' | 'project' | 'user' | 'service'>;
+
+export interface ShowbackParams {
+  /** Default `team`. */
+  groupBy?: ShowbackGroupBy;
+  /** UTC month, `YYYY-MM`. Default: the current month. */
+  period?: string;
+}
+
+export interface ShowbackAmounts {
+  /** Summed estimated cost in USD, exact to 6 decimal places (a decimal string). */
+  costUsd: string;
+  /** Whole cents; the groups plus `unallocated` add up to `total.costCents`. */
+  costCents: number;
+  requests: number;
+  /** Requests that reported a cost. */
+  costRequests: number;
+  tokensIn: number;
+  tokensOut: number;
+}
+
+export interface ShowbackGroup extends ShowbackAmounts {
+  /** Team id, project id, user id hash, calling service or tag value. */
+  key: string;
+  /** Team or project name; `null` for other groupings or once deleted. */
+  name: string | null;
+  /** For `groupBy: 'project'`, the project's current team. */
+  teamId: string | null;
+  teamName: string | null;
+}
+
+export interface ShowbackMeta {
+  groupBy: ShowbackGroupBy;
+  period: string;
+  from: string;
+  to: string;
+  currency: string;
+  rolledUpAt: string | null;
+  /** The month starts before rollup retention, so its oldest days are gone. */
+  partial: boolean;
+}
+
+export interface ShowbackReport {
+  /** Most expensive first. */
+  data: ShowbackGroup[];
+  /** Spend no group claims. */
+  unallocated: ShowbackAmounts;
+  total: ShowbackAmounts;
+  meta: ShowbackMeta;
 }
 
 // FinOps FOCUS cost export (/partner/v1/usage/focus-export).
@@ -912,6 +979,11 @@ export interface FocusCostRow {
   BillingAccountId: string;
   BillingAccountName: string | null;
   BillingAccountType: string;
+  /** Team the spend is attributed to; `null` when unattributed. */
+  SubAccountId: string | null;
+  SubAccountName: string | null;
+  /** `Team`, or `null` when unattributed. */
+  SubAccountType: string | null;
   BillingPeriodStart: string;
   BillingPeriodEnd: string;
   ChargePeriodStart: string;
@@ -950,6 +1022,9 @@ export interface FocusCostRow {
   x_BusinessUnit: string | null;
   x_UseCaseName: string | null;
   x_Environment: string | null;
+  x_ProjectId: string | null;
+  x_ProjectName: string | null;
+  x_CallingService: string | null;
 }
 
 /** Options for `client.usage.focusExport()` and `client.getStream()` that are not query parameters. */
