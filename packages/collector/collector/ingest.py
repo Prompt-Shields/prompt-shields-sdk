@@ -382,6 +382,7 @@ class IngestEvent(BaseModel):
 # Longer or out-of-range values are dropped (stored as null), not truncated:
 # half a model name is wrong data.
 MAX_MODEL_NAME_LENGTH = 256
+MAX_SERVICE_NAME_LENGTH = 256  # the event's calling_service (#347)
 MAX_LABEL_LENGTH = 64
 MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
@@ -879,7 +880,9 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             **(user_ids.columns(event.user_id) if user_ids else {}),
             team_id=attributed.team_id,
             project_id=attributed.project_id,
-            calling_service=event.calling_service,
+            # A rollup and showback dimension: bounded like a model name
+            # (longer is dropped, not truncated; the asset keeps it as sent).
+            calling_service=_lenient_str(event.calling_service, MAX_SERVICE_NAME_LENGTH),
             tags=event.tags,
         )
         db.add(usage_event)

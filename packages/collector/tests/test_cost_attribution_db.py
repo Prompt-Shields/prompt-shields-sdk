@@ -119,7 +119,8 @@ async def test_ingest_resolves_team_project_and_tags(env):
         # Unknown, other tenant's and malformed references: unattributed.
         _ev(cost=0.04, team="nope"),
         _ev(cost=0.05, team=str(env["foreign"])),
-        _ev(cost=0.06, team="bad\nname", project=123, tags={"k": "v" * 200}),
+        _ev(cost=0.06, team="bad\nname", project=123, tags={"k": "v" * 200},
+            calling_service="s" * 257),
     ])
     rows = await _events(env)
     assert [(r.team_id, r.project_id) for r in rows] == [
@@ -133,6 +134,8 @@ async def test_ingest_resolves_team_project_and_tags(env):
     assert rows[0].tags == {"env": "prod", "owner": "ana"}
     assert rows[1].calling_service == "api"
     assert rows[5].tags is None
+    # An over-long calling service is not a rollup dimension.
+    assert rows[5].calling_service is None
 
 
 def test_parse_tags_bounds():
