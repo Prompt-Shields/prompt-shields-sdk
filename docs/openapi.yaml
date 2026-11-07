@@ -6252,7 +6252,7 @@ paths:
         '403':
           $ref: '#/components/responses/AdminForbidden'
     get:
-      operationId: listTeams
+      operationId: listAdminTeams
       tags: [Admin]
       summary: List teams
       security:
@@ -6388,7 +6388,7 @@ paths:
         '403':
           $ref: '#/components/responses/AdminForbidden'
     get:
-      operationId: listProjects
+      operationId: listAdminProjects
       tags: [Admin]
       summary: List projects
       security:
