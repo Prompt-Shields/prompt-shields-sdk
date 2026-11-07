@@ -365,6 +365,16 @@ def _self_signed(tmp_path) -> tuple[str, str]:
     return str(cert_path), str(key_path)
 
 
+INTERNAL_IP = "10.20.30.40"
+
+
+async def _to_loopback(address, port, context, server_hostname):
+    """The checked internal address, connected to the test receiver on
+    127.0.0.1 (the sink itself never admits loopback)."""
+    assert address == INTERNAL_IP
+    return await sx.default_opener("127.0.0.1", port, context, server_hostname)
+
+
 class SyslogReceiver:
     """A TLS syslog receiver (RFC 5425 octet counting) on 127.0.0.1."""
 
@@ -397,15 +407,17 @@ async def test_syslog_over_tls(tmp_path):
     server = await asyncio.start_server(receiver.handle, "127.0.0.1", 0, ssl=server_ctx)
     port = server.sockets[0].getsockname()[1]
 
-    async def loopback(host: str, p: int) -> list[str]:
+    async def internal(host: str, p: int) -> list[str]:
         assert host == SYSLOG_HOST
-        return ["127.0.0.1"]
+        return [INTERNAL_IP]
 
     conn = sx.SyslogConnection(
         host=SYSLOG_HOST, port=port, ca_file=cert, allow_private_network=True
     )
     async with server:
-        async with sx.SyslogSink(conn, TENANT, resolver=loopback, sleep=_no_sleep) as sink:
+        async with sx.SyslogSink(
+            conn, TENANT, resolver=internal, opener=_to_loopback, sleep=_no_sleep
+        ) as sink:
             for kind, records in _records().items():
                 assert await sink.send(kind, records) == 1
         await asyncio.wait_for(receiver.done.wait(), 5)
@@ -436,13 +448,15 @@ async def test_syslog_refuses_private_addresses_and_unverified_certs(tmp_path):
     server = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0, ssl=server_ctx)
     port = server.sockets[0].getsockname()[1]
 
-    async def loopback(host: str, p: int) -> list[str]:
-        return ["127.0.0.1"]
+    async def internal(host: str, p: int) -> list[str]:
+        return [INTERNAL_IP]
 
     strict = sx.SyslogConnection(host=SYSLOG_HOST, port=port, allow_private_network=True)
     async with (
         server,
-        sx.SyslogSink(strict, TENANT, resolver=loopback, sleep=_no_sleep) as sink,
+        sx.SyslogSink(
+            strict, TENANT, resolver=internal, opener=_to_loopback, sleep=_no_sleep
+        ) as sink,
     ):
         with pytest.raises(ConnectorError, match="connection failed"):
             await sink.send("calls", _records()["calls"])
@@ -453,3 +467,49 @@ def test_ingest_model_has_no_content_columns():
     assert not cols & {"prompt", "response", "client_ip", "email", "prompt_hash"}
     assert "user_id_raw" not in cols
     assert AIUsageEvent.__tablename__ != GatewaySecurityEvent.__tablename__
+
+
+LOCAL_ADDRESSES = [
+    "127.0.0.1",
+    "::1",
+    "169.254.169.254",
+    "fe80::1",
+    "fd00:ec2::254",
+    "100.100.100.200",
+    "::ffff:169.254.169.254",
+    "64:ff9b::a9fe:a9fe",
+]
+
+
+@pytest.mark.parametrize("address", LOCAL_ADDRESSES)
+async def test_private_network_opt_in_still_refuses_local_and_metadata(address):
+    """allow_private_network admits an internal SIEM, never this host or a
+    cloud metadata service (HTTP connectors and syslog)."""
+
+    async def resolver(host: str, p: int) -> list[str]:
+        return [address]
+
+    rec = Recorder()
+    conn = sx.SplunkHecConnection(
+        url="https://splunk.example.com", token=HEC_TOKEN, allow_private_network=True
+    )
+    async with sx.SplunkHecSink(
+        conn, TENANT, transport=httpx.MockTransport(rec), resolver=resolver, sleep=_no_sleep
+    ) as sink:
+        with pytest.raises(ConnectorError, match="non-public"):
+            await sink.send("calls", _records()["calls"])
+    hook = sx.WebhookConnection(url="https://hooks.example.com/ps", allow_private_network=True)
+    async with sx.WebhookSink(
+        hook, TENANT, transport=httpx.MockTransport(rec), resolver=resolver, sleep=_no_sleep
+    ) as sink:
+        with pytest.raises(ConnectorError, match="non-public"):
+            await sink.send("calls", _records()["calls"])
+    assert rec.requests == []
+
+    async def opener(*args):
+        raise AssertionError("must not connect")
+
+    syslog = sx.SyslogConnection(host=SYSLOG_HOST, allow_private_network=True)
+    async with sx.SyslogSink(syslog, TENANT, resolver=resolver, opener=opener) as sink:
+        with pytest.raises(ConnectorError, match="non-public"):
+            await sink.send("calls", _records()["calls"])

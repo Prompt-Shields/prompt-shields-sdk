@@ -39,7 +39,9 @@ only). Syslog uses the same check (`connectors.assert_public_host`) and
 connects to the checked address over TLS with the certificate verified for
 the configured host name (RFC 5425 octet-counted framing; plain TCP and UDP
 are not offered). ``allow_private_network: true`` admits private addresses
-for a SIEM on an internal network (operator choice, per connector).
+for a SIEM on an internal network (operator choice, per connector);
+loopback, link-local and cloud metadata addresses (169.254.169.254,
+fd00:ec2::254) stay refused.
 
 Splunk HEC
     ``POST <url>/services/collector/event`` with ``Authorization: Splunk
@@ -536,6 +538,8 @@ def _http_client(
         resolver=resolver,
         sleep=sleep,
         allow_private_network=conn.allow_private_network,
+        # Never this host or its cloud metadata service, even with the opt-in.
+        allow_local_network=False,
     )
 
 
@@ -698,6 +702,7 @@ class SyslogSink:
                 conn.port,
                 self._resolver,
                 allow_private=conn.allow_private_network,
+                allow_local=False,
             )
             try:
                 _, writer = await self._opener(address, conn.port, context, conn.host)
