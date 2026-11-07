@@ -312,7 +312,7 @@ async def test_query_api_scope_filters_and_paging(rls_db):  # noqa: F811
     events = [
         _event("q-1"),
         _event("q-2", "auth.failure", severity="medium", action="failure"),
-        _event("q-3", **{"@timestamp": "2026-11-07T08:00:00Z"}),
+        _event("q-3", **{"@timestamp": "2026-11-06T20:00:00Z"}),
     ]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         for ev in events:  # separate requests: distinct arrival times
@@ -354,13 +354,13 @@ async def test_query_api_scope_filters_and_paging(rls_db):  # noqa: F811
 
         r = await c.get(
             "/partner/v1/security-events",
-            params={"since": "2026-11-07T00:00:00Z", "severity": "high", "action": "blocked"},
+            params={"since": "2026-11-06T18:00:00Z", "severity": "high", "action": "blocked"},
             headers=h,
         )
         assert [e["event"]["event.id"] for e in r.json()["data"]] == ["q-3"]
         r = await c.get(
             "/partner/v1/security-events",
-            params={"until": "2026-11-07T00:00:00Z", "name": "auth.failure"},
+            params={"until": "2026-11-06T18:00:00Z", "name": "auth.failure"},
             headers=h,
         )
         assert [e["event"]["event.id"] for e in r.json()["data"]] == ["q-2"]
@@ -384,6 +384,72 @@ async def test_retention_purges_old_security_events(rls_db):  # noqa: F811
         await s.commit()
     assert result.security_events_deleted == 1
     assert [r.event_id for r in await _rows(rls_db["plain"], a)] == ["new"]
+
+
+async def test_future_dated_events_are_clamped_at_ingest(rls_db):  # noqa: F811
+    """An @timestamp more than MAX_CLOCK_SKEW ahead of receipt is stored as
+    receipt + MAX_CLOCK_SKEW, the sent value kept in attributes; a small
+    skew is stored as sent."""
+    a = rls_db["a"]
+    before = datetime.now(UTC)
+    far = (before + timedelta(days=3650)).isoformat()
+    near = (before + timedelta(minutes=1)).replace(microsecond=0)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/ingest/security-events",
+            json=[
+                _event("far", **{"@timestamp": far}),
+                _event("near", **{"@timestamp": near.isoformat()}),
+            ],
+            headers=_head(KEY_A),
+        )
+        assert r.json()["accepted"] == 2
+        otlp = await c.post(
+            "/ingest/otel/v1/logs",
+            json=_otlp([_log_record(_event("far-otlp", **{"@timestamp": far}), body=False)]),
+            headers=_head(KEY_A),
+        )
+        assert otlp.status_code == 200 and otlp.json() == {}, otlp.text
+    rows = {r.event_id: r for r in await _rows(rls_db["plain"], a)}
+    for event_id in ("far", "far-otlp"):
+        row = rows[event_id]
+        assert row.occurred_at == row.received_at + se.MAX_CLOCK_SKEW
+        assert datetime.fromisoformat(row.attributes["ps.original_timestamp"]) > (
+            before + timedelta(days=3000)
+        )
+    assert rows["near"].occurred_at == near
+    assert "ps.original_timestamp" not in rows["near"].attributes
+
+
+async def test_retention_purges_future_dated_events_by_arrival(rls_db):  # noqa: F811
+    """A row stored with a future occurred_at (before the ingest clamp) is
+    purged once it arrived before the retention cutoff."""
+    a = rls_db["a"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/ingest/security-events",
+            json=[_event("future"), _event("recent")],
+            headers=_head(KEY_A),
+        )
+        assert r.json()["accepted"] == 2
+    long_ago = datetime.now(UTC) - timedelta(days=400)
+    async with rls_db["admin"]() as s:
+        await s.execute(
+            update(GatewaySecurityEvent)
+            .where(GatewaySecurityEvent.event_id == "future")
+            .values(
+                occurred_at=datetime.now(UTC) + timedelta(days=3650), received_at=long_ago
+            )
+        )
+        await s.commit()
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        dry = await retention.purge_tenant_events(s, a, dry_run=True)
+        result = await retention.purge_tenant_events(s, a)
+        await s.commit()
+    assert dry.security_events_deleted == 1
+    assert result.security_events_deleted == 1
+    assert "future" not in [r.event_id for r in await _rows(rls_db["plain"], a)]
 
 
 # ──────────────────────────────────────────────────────────────────────
