@@ -24,6 +24,7 @@ import { loadBaselineFromEnv } from './middlewares/router/baselineLoader';
 import { loadBudgetsFromEnv } from './middlewares/psBudget/loader';
 import { loadRoutePolicyFromEnv } from './middlewares/router/policyFileLoader';
 import { psMcpTelemetrySender } from './mcp/telemetry';
+import { initEgressGuard } from './utils/egressGuard';
 
 // Extract the port number from the command line arguments
 const defaultPort = 8787;
@@ -32,6 +33,10 @@ const portArg = args.find((arg) => arg.startsWith('--port='));
 const port = portArg ? parseInt(portArg.split('=')[1]) : defaultPort;
 
 const isHeadless = args.includes('--headless');
+
+// PS fork (#377): create fetch's default dispatcher now, so the first
+// guarded egress request is already pinned to its checked address.
+await initEgressGuard();
 
 // PS fork (#63): MCP proxy servers. An invalid file stops the gateway rather
 // than running with part of its MCP policy.
