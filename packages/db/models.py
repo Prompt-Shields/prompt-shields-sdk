@@ -258,6 +258,16 @@ class AIUsageEvent(Base):
     # client disconnected before the stream ended.
     stream_truncated = Column(Boolean)
     stream_cancelled = Column(Boolean)
+    # Cost attribution (#347), all optional; see collector/cost_attribution.py.
+    # team_id / project_id: the tenant's team and project (#338) the call is
+    # attributed to, resolved at ingest (no foreign key: events outlive a
+    # deleted team). A project fixes the team, so moving a project later
+    # re-attributes future spend only. calling_service: as sent. tags: up to
+    # 20 validated {key: value} cost tags; NULL when none.
+    team_id = Column(UUID(as_uuid=True))
+    project_id = Column(UUID(as_uuid=True))
+    calling_service = Column(Text)
+    tags = Column(JSONB(none_as_null=True))
     # When the collector stored the row (#346): the database's now() at
     # insert, never sent by a client. The usage rollup job finds the hours
     # to recompute from it (collector/usage_rollups.py).
@@ -906,7 +916,7 @@ class _UsageRollupColumns:
     """Columns shared by the hourly and daily usage rollups (#346).
 
     One row per (tenant, bucket, asset, model, provider, API surface, user
-    hash). The dimensions are null when the events did not report them.
+    hash, team, project, calling service, cost tags). The dimensions are null when the events did not report them.
     ``model`` is the served model, else the requested one; ``provider`` the
     served provider; ``user_id_hash`` the HMAC of the caller's user id
     (never the raw id). Sums of the events' columns, so a rollup is exactly
@@ -924,6 +934,13 @@ class _UsageRollupColumns:
     provider = Column(Text)
     api_surface = Column(Text)
     user_id_hash = Column(Text)
+    # Cost attribution (#347): the events' team, project and calling service,
+    # and their tags restricted to the tenant's settings.cost_tag_keys (NULL
+    # when none of those keys is set), so tag cardinality stays bounded.
+    team_id = Column(UUID(as_uuid=True))
+    project_id = Column(UUID(as_uuid=True))
+    calling_service = Column(Text)
+    tags = Column(JSONB(none_as_null=True))
     requests = _rollup_count("requests")
     tokens_in = _rollup_count("tokens_in")
     tokens_out = _rollup_count("tokens_out")

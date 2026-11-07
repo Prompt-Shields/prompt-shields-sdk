@@ -18,12 +18,13 @@ What is erased, in the caller's tenant only:
 
 * ``ai_usage_events`` of the user (by hash; an event with ``user_id_raw``
   always has the hash too): ``user_id_hash``, ``user_id_raw``,
-  ``session_id`` and ``prompt_hash`` (a SHA-256 of the prompt text) are set
-  to NULL. The rest of the row (model, tokens, cost, routing metadata) is
-  kept, so spend and usage totals do not change; the row no longer says
+  ``session_id``, ``prompt_hash`` (a SHA-256 of the prompt text) and the
+  free-form cost ``tags`` (#347, which may name the user) are set to NULL.
+  The rest of the row (model, tokens, cost, team, project, routing
+  metadata) is kept, so spend and usage totals do not change; the row no longer says
   whose it was.
 * ``usage_rollup_hourly`` / ``usage_rollup_daily`` rows (#346) with the
-  user's hash: ``user_id_hash`` is set to NULL (counted together as
+  user's hash: ``user_id_hash`` and ``tags`` are set to NULL (counted together as
   ``usage_rollups``), under the rollup job's tenant lock so a concurrent
   rollup run cannot write the hash back.
 * ``call_feedback`` rows with ``user_id`` equal to the id as sent:
@@ -93,7 +94,7 @@ USER_ID_HASH_RE = re.compile(r"[0-9a-f]{64}")
 MAX_USER_ID_LENGTH = 512
 
 # Columns set to NULL on the user's usage events.
-EVENT_COLUMNS = ("user_id_hash", "user_id_raw", "session_id", "prompt_hash")
+EVENT_COLUMNS = ("user_id_hash", "user_id_raw", "session_id", "prompt_hash", "tags")
 
 Input = Literal["user_id", "user_id_hash"]
 
