@@ -237,7 +237,9 @@ and `verify` (default `false`; see
 [Read-back verification](#read-back-verification)).
 For a
 collector reached over an internal network, set
-`"allow_private_network": true` under `partner_api`; it must still be https.
+`"allow_private_network": true` under `partner_api`; it must still be https,
+and loopback, link-local and cloud metadata addresses (for example
+`127.0.0.1`, `169.254.169.254`, `fd00:ec2::254`) stay refused.
 
 ### Security
 

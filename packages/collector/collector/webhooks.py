@@ -425,11 +425,24 @@ def check_url(url: str) -> SplitResult:
     return parts
 
 
+def _is_loopback(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
+
+
 def ip_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True for publicly routable unicast addresses only (see
-    `collector.egress.ip_is_public`)."""
+    `collector.egress.ip_is_public`). PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS
+    admits private networks but never loopback, link-local or cloud
+    metadata addresses; loopback has its own dev-only opt-in,
+    PS_WEBHOOK_ALLOW_LOOPBACK_DESTINATIONS."""
+    if settings.webhook_allow_loopback_destinations and _is_loopback(ip):
+        return True
     return egress.ip_is_public(
-        ip, allow_private=settings.webhook_allow_private_destinations
+        ip,
+        allow_private=settings.webhook_allow_private_destinations,
+        allow_local=False,
     )
 
 

@@ -262,7 +262,8 @@ curl -X PATCH https://collector.example.com/api/v1/admin/webhooks/subscriptions/
 | `PS_WEBHOOK_MAX_ATTEMPTS` | `8` | Attempts before a delivery is marked `dead` |
 | `PS_WEBHOOK_TIMEOUT_SECONDS` | `10` | Overall deadline for each attempt (resolve, connect, send, response headers). Above 0 and at most 60, so attempts fit inside the worker's 5-minute claim lease; the collector refuses to start otherwise |
 | `PS_WEBHOOK_DELIVERY_RETENTION_DAYS` | `30` | `succeeded` and `dead` rows older than this are deleted (by the worker once an hour, or by `python -m collector.webhooks purge`). The same run deletes rotated-out secrets whose grace period is over. |
-| `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | For local development only |
+| `PS_WEBHOOK_ALLOW_HTTP`, `PS_WEBHOOK_ALLOW_PRIVATE_DESTINATIONS` | `false` | For local development only. Private destinations are internal networks (RFC 1918, ULA, CGNAT); loopback, link-local and cloud metadata addresses (`169.254.169.254`, `fd00:ec2::254`) stay refused |
+| `PS_WEBHOOK_ALLOW_LOOPBACK_DESTINATIONS` | `false` | For local development only: a receiver on the collector's own host (`127.0.0.0/8`, `::1`). Link-local and metadata addresses stay refused |
 
 Events are written to the `webhook_deliveries` outbox in the same transaction as the change that caused them. Ingest requests never wait on partner endpoints.
 
