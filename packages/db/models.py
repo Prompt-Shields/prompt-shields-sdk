@@ -442,6 +442,8 @@ class Principal(Base):
     external_id = Column(Text)
     email = Column(Text)
     display_name = Column(Text)
+    # SCIM userName (#339); unique per tenant, compared case-insensitively.
+    user_name = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True))
     disabled_at = Column(TIMESTAMP(timezone=True))
@@ -457,6 +459,13 @@ class Principal(Base):
             unique=True,
             postgresql_where=text("external_id IS NOT NULL"),
         ),
+        Index(
+            "ux_principals_tenant_user_name",
+            "tenant_id",
+            text("lower(user_name)"),
+            unique=True,
+            postgresql_where=text("user_name IS NOT NULL"),
+        ),
         Index("ix_principals_tenant", "tenant_id", "created_at"),
     )
 
@@ -470,6 +479,8 @@ class Team(Base):
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     name = Column(Text, nullable=False)
     description = Column(Text)
+    # SCIM Group externalId (#339): the identity provider's id for the group.
+    external_id = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True))
 
@@ -549,6 +560,123 @@ class Membership(Base):
         ),
         Index("ix_memberships_tenant", "tenant_id"),
         Index("ix_memberships_team", "team_id"),
+    )
+
+
+class TenantOidcConfig(Base):
+    """A tenant's OpenID Connect identity provider for admin API login
+    (#339, collector/sso.py). One per tenant.
+
+    ``client_secret_ciphertext`` is sealed with the PS_WEBHOOK_SECRET_KEYS
+    keyring (bound to the tenant and row id); NULL for a public client
+    (PKCE only).
+    """
+
+    __tablename__ = "tenant_oidc_configs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    issuer = Column(Text, nullable=False)
+    client_id = Column(Text, nullable=False)
+    client_secret_ciphertext = Column(Text)
+    redirect_uri = Column(Text, nullable=False)
+    # Expected ``aud``; NULL means the client id.
+    audience = Column(Text)
+    algorithms = Column(ARRAY(Text), nullable=False)
+    # ID token claim matched against principals.external_id.
+    subject_claim = Column(Text, nullable=False, default="sub")
+    session_ttl_seconds = Column(Integer, nullable=False, default=3600)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        Index("ux_tenant_oidc_configs_tenant", "tenant_id", unique=True),
+    )
+
+
+class OidcLoginState(Base):
+    """One pending admin API login (#339): the ``state`` (by SHA-256), the
+    browser binding cookie (by SHA-256), the ``nonce`` and the PKCE
+    ``code_verifier``. Single use; expires after a few minutes."""
+
+    __tablename__ = "oidc_login_states"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    state_hash = Column(Text, nullable=False)
+    browser_hash = Column(Text, nullable=False)
+    nonce = Column(Text, nullable=False)
+    code_verifier = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    expires_at = Column(TIMESTAMP(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ux_oidc_login_states_state", "state_hash", unique=True),
+        Index("ix_oidc_login_states_tenant", "tenant_id", "expires_at"),
+    )
+
+
+class ScimToken(Base):
+    """A per-tenant SCIM 2.0 bearer token (#339, collector/scim.py).
+
+    Reaches /scim/v2 only, with its scopes (``scim:users``,
+    ``scim:groups``). Hashed like admin tokens and shown once.
+    """
+
+    __tablename__ = "scim_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    scopes = Column(ARRAY(Text), nullable=False)
+    token_prefix = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False)
+    token_hint = Column(Text, nullable=False)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    expires_at = Column(TIMESTAMP(timezone=True))
+    revoked_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        Index("ux_scim_tokens_prefix", "token_prefix", unique=True),
+        Index(
+            "ux_scim_tokens_tenant_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+
+class IdpGroupRole(Base):
+    """Roles that come with an identity provider group (#339): a SCIM Group
+    is a team; its members get a team membership with ``member_role`` and,
+    with ``tenant_role`` set, that tenant-wide role (collector/scim.py).
+    Never ``owner``."""
+
+    __tablename__ = "idp_group_roles"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    team_id = Column(
+        UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    member_role = Column(Text, nullable=False, default="viewer")
+    tenant_role = Column(Text)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "member_role <> 'owner' AND (tenant_role IS NULL OR tenant_role <> 'owner')",
+            name="ck_idp_group_roles_not_owner",
+        ),
+        Index("ux_idp_group_roles_team", "team_id", unique=True),
+        Index("ix_idp_group_roles_tenant", "tenant_id"),
     )
 
 

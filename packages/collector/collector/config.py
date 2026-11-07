@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     webhook_allow_http: bool = False
     webhook_allow_private_destinations: bool = False
     webhook_allow_loopback_destinations: bool = False
+    # Admin API SSO (#339): let the OIDC identity provider (discovery, JWKS
+    # and token endpoints) be on a private network, e.g. an on-premises
+    # Keycloak. Loopback, link-local and cloud metadata addresses stay
+    # refused either way.
+    sso_idp_allow_private_network: bool = False
     # Deadline for one whole delivery attempt, at most
     # WEBHOOK_MAX_TIMEOUT_SECONDS (well under the claim lease).
     webhook_timeout_seconds: float = 10.0

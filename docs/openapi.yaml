@@ -75,6 +75,18 @@ tags:
       The tenant's teams and projects (scope `members:read`). Principals and
       role memberships are managed through the tenant admin API
       (`/api/v1/admin`, scope `admin:members`).
+  - name: SSO
+    description: |
+      OpenID Connect single sign-on for the tenant admin API: the login
+      redirect and the callback that returns a short-lived admin session
+      token (`ps-at-...`) for the principal whose `external_id` equals the ID
+      token's subject. Configure it with `PUT /api/v1/admin/sso/oidc`.
+  - name: SCIM
+    description: |
+      SCIM 2.0 provisioning (RFC 7643 / RFC 7644) of user principals and
+      teams (Groups), with a per-tenant SCIM token (`ScimToken`). Bodies and
+      responses use `application/scim+json`; errors use the SCIM error
+      schema. Filters: one `<attribute> eq "<value>"`.
   - name: Learner
     description: |
       Routing learner (`recommend` mode, PRD 0001 §7.13): versioned
@@ -191,6 +203,16 @@ components:
         `operator.break_glass`. With `PS_ADMIN_TOKEN` unset and no
         `ps-ot-` token presented those routes answer 404. Never put either
         in automation that manages a single tenant; use an admin token.
+
+    ScimToken:
+      type: http
+      scheme: bearer
+      description: |
+        A per-tenant SCIM token (`ps-scim-...`) for `/scim/v2` only, issued
+        by an owner with `POST /api/v1/admin/scim-tokens`. Each operation
+        names the scope it needs in `x-scim-scope` (`scim:users` or
+        `scim:groups`). Admin tokens and ingest keys do not reach `/scim/v2`,
+        and a SCIM token reaches nothing else.
 
   schemas:
     AIAsset:
@@ -1521,7 +1543,7 @@ components:
       properties:
         type:
           type: string
-          description: tenant_key, partner, operator or system
+          description: tenant_key, admin_token, partner, operator, operator_token, scim_token, principal, system or anonymous
         id:
           type: string
           nullable: true
@@ -3468,7 +3490,407 @@ components:
                 for this run even when the tenant enables it. Ignored with
                 `dry_run`.
 
+    OidcAlgorithm:
+      type: string
+      description: Asymmetric JWS algorithms only; HS* and none are never accepted
+      enum: [RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512, EdDSA]
+
+    OidcConfig:
+      type: object
+      description: The tenant's OpenID Connect identity provider for admin API login.
+      properties:
+        id:
+          type: string
+          format: uuid
+        issuer:
+          type: string
+          description: Compared exactly with the discovery document's and the ID token's `iss`
+        client_id:
+          type: string
+        client_secret_set:
+          type: boolean
+          description: Whether a client secret is stored (write-only, never returned)
+        redirect_uri:
+          type: string
+          description: Registered at the IdP; must reach `GET /api/v1/sso/callback`
+        audience:
+          type: [string, 'null']
+          description: Expected `aud`; null means the client id
+        algorithms:
+          type: array
+          items:
+            $ref: '#/components/schemas/OidcAlgorithm'
+        subject_claim:
+          type: string
+          description: ID token claim matched against principals' `external_id` (default `sub`)
+        session_ttl_seconds:
+          type: integer
+        enabled:
+          type: boolean
+        login_path:
+          type: string
+          description: Where a browser starts a login
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, issuer, client_id, client_secret_set, redirect_uri, audience, algorithms, subject_claim, session_ttl_seconds, enabled, login_path, created_by, created_at, updated_at]
+
+    PutOidcConfigRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        issuer:
+          type: string
+          description: https URL, exactly as the IdP publishes it
+        client_id:
+          type: string
+        client_secret:
+          type: [string, 'null']
+          description: >-
+            Write-only. Omitted keeps the stored secret; null removes it (a
+            public client, PKCE only). Needs `PS_WEBHOOK_SECRET_KEYS`.
+        redirect_uri:
+          type: string
+          description: https URL of this collector's `/api/v1/sso/callback`
+        audience:
+          type: [string, 'null']
+        algorithms:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/OidcAlgorithm'
+          description: Default every asymmetric algorithm but EdDSA
+        subject_claim:
+          type: string
+          default: sub
+        session_ttl_seconds:
+          type: integer
+          minimum: 300
+          maximum: 43200
+          default: 3600
+        enabled:
+          type: boolean
+          default: true
+      required: [issuer, client_id, redirect_uri]
+
+    SsoSession:
+      type: object
+      description: >-
+        A short-lived admin token issued for the principal, holding the admin
+        scopes its tenant-wide roles grant. Shown once.
+      properties:
+        token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        token_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        expires_in:
+          type: integer
+        principal_id:
+          type: string
+          format: uuid
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminScope'
+        warning:
+          type: string
+      required: [token, token_type, token_id, expires_at, expires_in, principal_id, roles, scopes, warning]
+
+    ScimTokenScope:
+      type: string
+      enum: [scim:users, scim:groups]
+
+    ScimToken:
+      type: object
+      description: A SCIM token's metadata. The token and its hash are never included.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScimTokenScope'
+        token_hint:
+          type: string
+        status:
+          type: string
+          enum: [active, revoked, expired]
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, name, scopes, token_hint, status, created_by, created_at, expires_at, revoked_at]
+
+    ScimTokenWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/ScimToken'
+        - type: object
+          properties:
+            token:
+              type: string
+            warning:
+              type: string
+          required: [token, warning]
+
+    CreateScimTokenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScimTokenScope'
+          description: Default both
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+      required: [name]
+
+    GroupRole:
+      type: string
+      description: Any built-in role but owner
+      enum: [admin, developer, viewer, auditor, billing]
+
+    IdpGroupRoles:
+      type: object
+      description: >-
+        The roles members of an identity provider group (a team provisioned
+        through SCIM) get: a team membership with `member_role` and, when
+        `tenant_role` is set, that tenant-wide role (the highest of admin,
+        developer, billing, auditor, viewer across their groups). Never owner.
+        A tenant-wide role granted through the admin API is never touched.
+      properties:
+        team_id:
+          type: string
+          format: uuid
+        member_role:
+          $ref: '#/components/schemas/GroupRole'
+        tenant_role:
+          oneOf:
+            - $ref: '#/components/schemas/GroupRole'
+            - type: 'null'
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+      required: [team_id, member_role, tenant_role, created_by, created_at, updated_at]
+
+    PutIdpGroupRolesRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        member_role:
+          $ref: '#/components/schemas/GroupRole'
+        tenant_role:
+          oneOf:
+            - $ref: '#/components/schemas/GroupRole'
+            - type: 'null'
+
+    ScimMeta:
+      type: object
+      properties:
+        resourceType:
+          type: string
+          enum: [User, Group]
+        created:
+          type: string
+          format: date-time
+        lastModified:
+          type: string
+          format: date-time
+        location:
+          type: string
+      required: [resourceType, created, lastModified, location]
+
+    ScimUser:
+      type: object
+      description: >-
+        A user principal. On input `userName` is required; `externalId` is the
+        IdP's id (matched against the ID token subject at SSO login);
+        `displayName` (or `name.formatted`, or given + family name), the
+        primary email and `active` are stored; other attributes (roles
+        included) are ignored.
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+          format: uuid
+        externalId:
+          type: string
+        userName:
+          type: string
+        displayName:
+          type: string
+        name:
+          type: object
+          properties:
+            formatted:
+              type: string
+        emails:
+          type: array
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+              primary:
+                type: boolean
+              type:
+                type: string
+        active:
+          type: boolean
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+              display:
+                type: string
+              type:
+                type: string
+        meta:
+          $ref: '#/components/schemas/ScimMeta'
+      required: [schemas, id, userName, active, groups, meta]
+
+    ScimGroup:
+      type: object
+      description: A team. Members are its user principals.
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+          format: uuid
+        externalId:
+          type: string
+        displayName:
+          type: string
+        members:
+          type: array
+          description: Left out with `excludedAttributes=members`
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+                format: uuid
+              display:
+                type: string
+              type:
+                type: string
+        meta:
+          $ref: '#/components/schemas/ScimMeta'
+      required: [schemas, id, displayName, meta]
+
+    ScimListResponse:
+      type: object
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+        totalResults:
+          type: integer
+        startIndex:
+          type: integer
+        itemsPerPage:
+          type: integer
+        Resources:
+          type: array
+          items: {}
+      required: [schemas, totalResults, startIndex, itemsPerPage, Resources]
+
+    ScimPatchOp:
+      type: object
+      description: >-
+        RFC 7644 §3.5.2. `op` is add, remove or replace (any case). Users:
+        paths active, userName, externalId, displayName, name.formatted,
+        emails, emails.value, `emails[type eq "work"].value`, or no path with
+        an object value; unknown attributes are ignored. Groups: members,
+        `members[value eq "<id>"]` (remove), displayName, externalId, or no
+        path with an object value.
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+            enum: ['urn:ietf:params:scim:api:messages:2.0:PatchOp']
+        Operations:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              op:
+                type: string
+              path:
+                type: string
+              value: {}
+            required: [op]
+      required: [schemas, Operations]
+
+    ScimError:
+      type: object
+      description: RFC 7644 §3.12
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+        scimType:
+          type: string
+          description: uniqueness, invalidFilter, invalidValue, invalidSyntax, invalidPath, noTarget, mutability, tooMany
+        detail:
+          type: string
+      required: [schemas, status, detail]
+
   responses:
+    ScimError:
+      description: SCIM error (401 bad or missing token, 403 missing scope, 404, 409, 400)
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
     AdminForbidden:
       description: >-
         The admin token lacks the operation's `x-admin-scope` (or `admin:read`
@@ -7219,6 +7641,723 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/AdminForbidden'
+
+  # ── SSO and SCIM configuration (tenant admin, #339) ─────────────────
+
+  /api/v1/admin/sso/oidc:
+    get:
+      operationId: getOidcConfig
+      tags: [Admin]
+      summary: Get the tenant's OIDC login configuration
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: The configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OidcConfig'
+        '404':
+          description: SSO is not configured
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    put:
+      operationId: putOidcConfig
+      tags: [Admin]
+      summary: Create or replace the tenant's OIDC login configuration
+      description: |
+        Owner only: the issuer decides which identity logs in as which principal.
+        Not contacted here; discovery, JWKS and token requests happen at login
+        through the SSRF-safe egress client. Audited as `sso.oidc.update` (never
+        the secret).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutOidcConfigRequest'
+      responses:
+        '200':
+          description: The configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OidcConfig'
+        '400':
+          description: A URL is not https, or a client secret without `PS_WEBHOOK_SECRET_KEYS`
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    delete:
+      operationId: deleteOidcConfig
+      tags: [Admin]
+      summary: Remove the tenant's OIDC login configuration
+      description: |
+        Owner only. Sessions already issued keep working until they expire or
+        are revoked. Audited as `sso.oidc.delete`.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '204':
+          description: Removed (or there was none)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/scim-tokens:
+    post:
+      operationId: createScimToken
+      tags: [Admin]
+      summary: Issue a SCIM token
+      description: |
+        Owner only (a SCIM token can disable any principal but the last enabled
+        owner). The token is shown once. Audited as `scim_token.create`.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateScimTokenRequest'
+      responses:
+        '201':
+          description: The token, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScimTokenWithSecret'
+        '409':
+          description: An unrevoked SCIM token with this name exists
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    get:
+      operationId: listScimTokens
+      tags: [Admin]
+      summary: List SCIM tokens (metadata only)
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: SCIM tokens, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ScimToken'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/scim-tokens/{token_id}:
+    parameters:
+      - name: token_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: revokeScimToken
+      tags: [Admin]
+      summary: Revoke a SCIM token
+      description: |
+        Audited as `scim_token.revoke`. A repeated DELETE is 204.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '204':
+          description: Revoked
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/idp-group-roles:
+    get:
+      operationId: listIdpGroupRoles
+      tags: [Admin]
+      summary: List the roles that come with identity provider groups
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '200':
+          description: Group roles, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IdpGroupRoles'
+                required: [data]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/idp-group-roles/{team_id}:
+    parameters:
+      - name: team_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: putIdpGroupRoles
+      tags: [Admin]
+      summary: Set the roles that come with a group
+      description: |
+        Needs what granting each role (old and new) would; owner is never
+        accepted. Applies at once to the members SCIM put in the team.
+        Audited as `idp_group_role.set`, with the membership changes it causes.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutIdpGroupRolesRequest'
+      responses:
+        '200':
+          description: The group's roles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdpGroupRoles'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    delete:
+      operationId: deleteIdpGroupRoles
+      tags: [Admin]
+      summary: Reset the roles that come with a group
+      description: |
+        Back to a viewer team membership and no tenant role, applied at once.
+        Audited as `idp_group_role.delete`.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:members
+      responses:
+        '204':
+          description: Reset
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+
+  # ── SSO login (public, #339) ──────────────────────────────────────────
+
+  /api/v1/sso/{tenant_id}/login:
+    get:
+      operationId: ssoLogin
+      tags: [SSO]
+      summary: Start an admin API SSO login
+      description: |
+        Redirects the browser to the tenant's identity provider (authorization
+        code flow, PKCE S256, `state` and `nonce`) and sets an HttpOnly,
+        Secure, SameSite=Lax browser binding cookie for `/api/v1/sso`. No
+        authentication.
+      security: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '302':
+          description: To the IdP's authorization endpoint
+        '404':
+          description: SSO is not configured or not enabled for this tenant
+        '429':
+          description: Too many logins in progress for the tenant
+        '502':
+          description: The identity provider could not be reached
+
+  /api/v1/sso/callback:
+    get:
+      operationId: ssoCallback
+      tags: [SSO]
+      summary: Finish an admin API SSO login
+      description: |
+        Single use. Needs the browser binding cookie set by the login. Exchanges
+        the code (with the PKCE verifier), verifies the ID token (asymmetric
+        signature against the issuer's JWKS, issuer, audience / azp, exp, nbf,
+        iat, nonce) and maps its subject to an enabled user principal by
+        `external_id` (no just-in-time provisioning). Audited as `sso.login`
+        (success and failure).
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The session token, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoSession'
+        '400':
+          description: Unknown, expired or replayed state, another browser, or an IdP error
+        '401':
+          description: The ID token was refused
+        '403':
+          description: No enabled user principal has this subject, or its roles grant no admin scope
+        '502':
+          description: The code could not be exchanged
+
+  # ── SCIM 2.0 provisioning (#339) ──────────────────────────────────────
+  /scim/v2/ServiceProviderConfig:
+    get:
+      operationId: scimServiceProviderConfig
+      tags: [SCIM]
+      summary: SCIM service provider configuration
+      security:
+        - ScimToken: []
+      x-scim-scope: any
+      responses:
+        '200':
+          description: What this server supports
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+  /scim/v2/Users:
+    post:
+      operationId: scimCreateUser
+      tags: [SCIM]
+      summary: Create a user
+      description: |
+        Audited as `principal.create`. `userName` and `externalId` are unique in the tenant (409 `uniqueness`).
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:users
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+      responses:
+        '201':
+          description: The user
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '409':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    get:
+      operationId: scimListUsers
+      tags: [SCIM]
+      summary: List users
+      description: |
+        Filter on userName, externalId, id or emails.value with `eq`.
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:users
+      parameters:
+        - name: filter
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: startIndex
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: count
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            maximum: 200
+      responses:
+        '200':
+          description: Users, oldest first
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimListResponse'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+  /scim/v2/Users/{user_id}:
+    parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: scimGetUser
+      tags: [SCIM]
+      summary: Get a user
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:users
+      responses:
+        '200':
+          description: The user
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    put:
+      operationId: scimReplaceUser
+      tags: [SCIM]
+      summary: Replace a user
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:users
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+      responses:
+        '200':
+          description: The user
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '409':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    patch:
+      operationId: scimPatchUser
+      tags: [SCIM]
+      summary: Change or deactivate a user
+      description: |
+        `active=false` disables the principal: its admin tokens and partner
+        credentials fail on the next request, and its SSO sessions and every
+        token they created are revoked (`principal.disable`). A SCIM token
+        cannot disable the last enabled owner (409), nor re-enable or
+        re-identify an owner (403).
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:users
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimPatchOp'
+      responses:
+        '200':
+          description: The user
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '409':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    delete:
+      operationId: scimDeleteUser
+      tags: [SCIM]
+      summary: Delete a user
+      description: |
+        Revokes its admin tokens and partner credentials and removes its
+        memberships (`principal.delete`). An owner cannot be deleted through
+        SCIM (403).
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:users
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+  /scim/v2/Groups:
+    post:
+      operationId: scimCreateGroup
+      tags: [SCIM]
+      summary: Create a group (team)
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:groups
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimGroup'
+      responses:
+        '201':
+          description: The group
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '409':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    get:
+      operationId: scimListGroups
+      tags: [SCIM]
+      summary: List groups (teams)
+      description: |
+        Filter on displayName, externalId or id with `eq`.
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:groups
+      parameters:
+        - name: filter
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: startIndex
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: count
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            maximum: 200
+        - name: excludedAttributes
+          in: query
+          required: false
+          schema:
+            type: string
+          description: '`members` leaves the members out'
+      responses:
+        '200':
+          description: Groups, oldest first
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimListResponse'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+  /scim/v2/Groups/{group_id}:
+    parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: scimGetGroup
+      tags: [SCIM]
+      summary: Get a group (team)
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:groups
+      parameters:
+        - name: excludedAttributes
+          in: query
+          required: false
+          schema:
+            type: string
+          description: '`members` leaves the members out'
+      responses:
+        '200':
+          description: The group
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    put:
+      operationId: scimReplaceGroup
+      tags: [SCIM]
+      summary: Replace a group (team) and its members
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:groups
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimGroup'
+      responses:
+        '200':
+          description: The group
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '409':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    patch:
+      operationId: scimPatchGroup
+      tags: [SCIM]
+      summary: Change a group (team) and its members
+      description: |
+        Members get a team membership with the group's member role and, if
+        the group has one, its tenant role (`PUT /api/v1/admin/idp-group-roles/{team_id}`).
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:groups
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimPatchOp'
+      responses:
+        '200':
+          description: The group
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '400':
+          $ref: '#/components/responses/ScimError'
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '409':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
+    delete:
+      operationId: scimDeleteGroup
+      tags: [SCIM]
+      summary: Delete a group (team)
+      description: |
+        409 while the team has projects.
+      security:
+        - ScimToken: []
+      x-scim-scope: scim:groups
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/ScimError'
+        '409':
+          $ref: '#/components/responses/ScimError'
+        '401':
+          $ref: '#/components/responses/ScimError'
+        '403':
+          $ref: '#/components/responses/ScimError'
 
   # ── Admin tokens and tenant ingest keys (tenant admin) ────────────────
 

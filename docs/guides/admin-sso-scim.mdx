@@ -1,0 +1,108 @@
+---
+title: Admin SSO and SCIM Provisioning
+description: Log in to the collector admin API with your identity provider (OIDC) and provision users and teams with SCIM 2.0
+---
+
+# Admin SSO and SCIM Provisioning
+
+The collector's tenant admin API (`/api/v1/admin`) takes scoped admin tokens. With **SSO**, people get a short-lived admin token by logging in with your identity provider (IdP) instead of being handed a long-lived one. With **SCIM**, the IdP creates, updates and deactivates their principals and team memberships for you, so leaving the company in the IdP ends their access to the collector.
+
+Both are per tenant and both build on [roles](/guides/terraform#roles): what a person can do comes from their principal's tenant-wide role.
+
+## OIDC login
+
+### Configure
+
+An owner configures the tenant's IdP (owner only, because the issuer decides which identity logs in as which principal):
+
+```bash
+curl -X PUT "$COLLECTOR/api/v1/admin/sso/oidc" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "issuer": "https://login.example.com/oauth2/default",
+    "client_id": "prompt-shields-admin",
+    "redirect_uri": "https://collector.example.com/api/v1/sso/callback",
+    "session_ttl_seconds": 3600
+  }'
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `issuer` | required | https URL, exactly as the IdP's discovery document publishes it |
+| `client_id` | required | The app registered at the IdP |
+| `client_secret` | none | For a confidential client (sent with HTTP Basic). Write-only, sealed with `PS_WEBHOOK_SECRET_KEYS`. Leave it out for a public client: PKCE alone protects the code |
+| `redirect_uri` | required | This collector's `/api/v1/sso/callback`, registered at the IdP |
+| `audience` | the client id | Expected `aud` |
+| `algorithms` | RS256..ES512 (no EdDSA) | Asymmetric only; `HS*` and `none` are refused |
+| `subject_claim` | `sub` | The ID token claim matched against the principal's `external_id` (`oid` for Microsoft Entra ID, whose `sub` is pairwise) |
+| `session_ttl_seconds` | `3600` | 300 to 43200 |
+| `enabled` | `true` | |
+
+The response's `login_path` (`/api/v1/sso/{tenant_id}/login`) is where a browser starts a login.
+
+### Log in
+
+1. Open `https://collector.example.com/api/v1/sso/<tenant_id>/login` in a browser. The collector redirects to the IdP with an authorization code request (PKCE S256, `state`, `nonce`) and sets an HttpOnly browser binding cookie.
+2. After the IdP login, the IdP redirects to `/api/v1/sso/callback`. The collector checks the `state` (single use, ten minutes) and the cookie, exchanges the code with the PKCE verifier, and verifies the ID token: signature against the issuer's JWKS, `iss`, `aud` (and `azp`), `exp`, `nbf`, `iat` and `nonce`.
+3. It finds the enabled **user** principal whose `external_id` equals the token's subject and returns a session token (`ps-at-...`) once, with the admin scopes that principal's tenant-wide roles grant:
+
+```json
+{
+  "token": "ps-at-...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "principal_id": "…",
+  "roles": ["developer"],
+  "scopes": ["admin:read", "admin:webhooks", "admin:registry"]
+}
+```
+
+There is no just-in-time provisioning: an identity without a principal is refused (403). Create principals through SCIM (below) or `POST /api/v1/admin/principals` with the IdP subject as `external_id`. A principal whose roles grant no admin scope (an `auditor`, say) gets no session.
+
+The session is an ordinary admin token issued for the principal: it never reaches more than the principal's roles grant at request time, demoting the principal narrows it at once, and disabling the principal stops it on the next request.
+
+### Network
+
+Discovery, JWKS and token requests go through the collector's SSRF-safe egress client: https only, every resolved address checked and the connection pinned to it, no redirects, a timeout and a size cap. Keys are cached for the JWKS response's `Cache-Control: max-age` (one minute to one day); a token signed with a new key id triggers one refresh (at most every 30 seconds), and a failed refresh keeps the cached keys. An IdP on a private network (an on-premises Keycloak) needs `PS_SSO_IDP_ALLOW_PRIVATE_NETWORK=true`; loopback, link-local and cloud metadata addresses stay refused.
+
+## SCIM 2.0
+
+### Token
+
+An owner issues a SCIM token and gives it, with the base URL `https://collector.example.com/scim/v2`, to the IdP's SCIM app:
+
+```bash
+curl -X POST "$COLLECTOR/api/v1/admin/scim-tokens" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "okta"}'
+```
+
+The token (`ps-scim-...`) is shown once and stored hashed. It holds `scim:users` and `scim:groups` unless `scopes` narrows it, reaches `/scim/v2` and nothing else, and is revoked with `DELETE /api/v1/admin/scim-tokens/{id}`.
+
+### Users
+
+`/scim/v2/Users` supports create, list (one `eq` filter on `userName`, `externalId`, `id` or `emails.value`), get, replace (`PUT`), `PATCH` and delete. A SCIM User is a principal of kind `user`: `userName`, `externalId` (the IdP subject SSO matches), `displayName` and the primary email are stored. Roles in the payload are ignored.
+
+**Deactivating** a user (`active: false`, by `PATCH` or `PUT`) disables the principal. Every admin token and partner credential issued for it fails on the next request, and its SSO sessions, and every token those or its other tokens created, are revoked. Re-activating restores the principal's own tokens and credentials, not the revoked sessions.
+
+### Groups and roles
+
+A SCIM Group is a team. Group members get a team membership with the group's member role (`viewer` by default). To give a group's members a tenant-wide role, map it:
+
+```bash
+curl -X PUT "$COLLECTOR/api/v1/admin/idp-group-roles/$TEAM_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"member_role": "developer", "tenant_role": "developer"}'
+```
+
+Group membership changes in the IdP change team membership, and the tenant-wide role, on the next SCIM sync. A principal in several mapped groups gets the first of `admin`, `developer`, `billing`, `auditor`, `viewer` among them. A tenant-wide role granted through the admin API is never changed by sync. Setting a mapping needs what granting its roles would.
+
+### What a SCIM token can never do
+
+- Grant `owner`: SCIM carries no roles and a group's roles are never `owner`.
+- Disable the tenant's last enabled owner (409), or re-enable, re-identify (`externalId`) or delete an owner (403). An owner does that through the admin API.
+- See or change service accounts.
+
+## Audit
+
+Logins are `sso.login` rows on the tenant's [audit trail](/guides/audit-trail) (success and failure, with the reason). SCIM changes use the admin API's actions (`principal.*`, `team.*`, `membership.*`, `role.change`) with `source: scim` and the SCIM token as the actor. Configuration changes are `sso.oidc.update`, `sso.oidc.delete`, `scim_token.create`, `scim_token.revoke`, `idp_group_role.set` and `idp_group_role.delete`. No email, user name, display name, secret or token is written to the trail.
