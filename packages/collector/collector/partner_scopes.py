@@ -72,6 +72,10 @@ SCOPES: dict[str, str] = {
         "webhook events"
     ),
     "spend-alerts:acknowledge": "Acknowledge spend anomaly alerts",
+    "usage:reconcile": (
+        "Run the monthly cost reconciliation against the provider usage pull "
+        "(/cost-reconciliations/run); reading the results needs usage:read"
+    ),
     "usage:export": (
         "Bulk export AI usage cost in the FinOps FOCUS format "
         "(CSV or JSON Lines, per asset, model and provider) and the usage "

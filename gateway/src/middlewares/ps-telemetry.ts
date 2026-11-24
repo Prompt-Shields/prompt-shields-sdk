@@ -45,7 +45,8 @@ import {
   servedTargetOf,
 } from './psServedTarget';
 import { RoutePolicy } from './router/types';
-import { activePolicyVersion } from './policyPull/state';
+import { activePolicyVersion, centralPriceBook } from './policyPull/state';
+import { COST_SOURCE_NEGOTIATED, negotiatedCost } from './policyPull/prices';
 import {
   COST_SOURCE_CACHE,
   COST_SOURCE_PRICING_TABLE,
@@ -53,7 +54,9 @@ import {
   COST_SOURCE_PROVIDER_REPORTED,
   costFields,
   endpointScopeOf,
+  pricingCandidates,
   PricingUsage,
+  withBedrockBaseModels,
 } from './psPricing';
 
 // Set by psOidc (./psOidc/index.ts OIDC_IDENTITY_KEY).
@@ -416,14 +419,27 @@ export function withCost(
     endpoint_scope: endpointScopeOf(event.vendor, event.model, event.region),
   };
   const model = event.model === 'unknown' ? undefined : event.model;
-  const priced = costFields(event.vendor, model, servedModel, usage);
+  const fields = costFields(event.vendor, model, servedModel, usage);
   // As the SDK: a table price of estimated tokens says so (#389).
   if (
     event.usage_source === 'estimated' &&
-    priced.cost_source === COST_SOURCE_PRICING_TABLE
+    fields.cost_source === COST_SOURCE_PRICING_TABLE
   )
-    priced.cost_source = COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS;
-  return { ...event, ...priced };
+    fields.cost_source = COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS;
+  // Negotiated prices from the central policy (#348).
+  const negotiated = negotiatedCost(
+    centralPriceBook(),
+    event.vendor,
+    withBedrockBaseModels(event.vendor, pricingCandidates(model, servedModel)),
+    usage,
+    fields.cost,
+    fields.cost_source
+  );
+  if (negotiated !== null) {
+    fields.cost = negotiated;
+    fields.cost_source = COST_SOURCE_NEGOTIATED;
+  }
+  return { ...event, ...fields };
 }
 
 /**

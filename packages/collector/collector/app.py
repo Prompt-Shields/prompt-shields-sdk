@@ -193,6 +193,12 @@ app.include_router(learner_partner_router)
 from collector.spend_anomalies import partner_router as spend_alerts_partner_router
 
 app.include_router(spend_alerts_partner_router)
+# Monthly cost reconciliation against the provider usage pull (#348)
+from collector.cost_reconciliation import (
+    partner_router as cost_reconciliation_partner_router,
+)
+
+app.include_router(cost_reconciliation_partner_router)
 
 # Platform signal: provider org usage pull (admin trigger)
 from collector.provider_usage_admin import router as provider_usage_router

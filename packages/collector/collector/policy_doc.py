@@ -42,6 +42,14 @@ Sections today:
     rate limit, by identity-provider group. Same format as the gateway's
     PS_OIDC_POLICY (docs/guides/gateway-oidc.mdx) and enforced by the gateway's
     OIDC authentication, so it needs PS_OIDC_ENABLED there.
+``prices`` v1
+    ``{"version": 1, "currency": "USD", "overrides": [...]}``: the tenant's
+    negotiated model prices (#348), effective-dated, per provider and model
+    (or ``"*"`` for every model of a provider): either per-1k token rates
+    or a ``multiplier`` on the list price. Applied by the gateway to its
+    telemetry cost and cost metric, and by the collector at ingest. Only a
+    tenant-scope policy may carry it (a negotiated contract is the
+    tenant's); see collector/prices.py and docs/guides/negotiated-prices.mdx.
 ``pseudonymisation`` v1
     ``{"version": 1, "enabled": bool, "categories": [...], "on_unsupported":
     "refuse"|"passthrough"}``: the gateway's reversible pseudonymisation
@@ -129,11 +137,13 @@ the sections a gateway must enforce to apply the bundle at all (see
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import Any
 
 from collector import route_policy_schema
@@ -143,10 +153,9 @@ BUNDLE_SCHEMA = "ps-policy-bundle.v1"
 # A policy document is a few KB; anything larger is not one.
 MAX_DOCUMENT_BYTES = 256 * 1024
 
-# Planned sections, refused until the issue that enforces them adds them.
-RESERVED_SECTIONS: dict[str, str] = {
-    "prices": "model prices (#348)",
-}
+# Planned sections, refused until the issue that enforces them adds them
+# (none at the moment).
+RESERVED_SECTIONS: dict[str, str] = {}
 
 ROUTE_SCHEMA_VERSION = "route-policy.v1"
 
@@ -288,6 +297,128 @@ def _access_v1(at: str, body: dict, problems: list[str]) -> None:
                 problems.append(f'{where}.rate_limit.per must be "user" or "group"')
         if "mcp" in g:
             _mcp(f"{where}.mcp", g["mcp"], problems)
+
+
+# prices v1 (#348).
+PRICE_PROVIDER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+PRICE_CURRENCY = re.compile(r"^[A-Z]{3}$")
+PRICE_RATE_KEYS = ("input_per_1k", "output_per_1k", "cached_input_per_1k", "cache_write_per_1k")
+PRICE_OVERRIDE_KEYS = frozenset(
+    {"provider", "model", "valid_from", "valid_to", "multiplier", *PRICE_RATE_KEYS}
+)
+MAX_PRICE_OVERRIDES = 1000
+MAX_PRICE_MODEL_LENGTH = 200
+# A multiplier above this is a typo, not a contract.
+MAX_PRICE_MULTIPLIER = 10.0
+
+
+def parse_instant(value: Any) -> datetime | None:
+    """``YYYY-MM-DD`` (midnight UTC) or an ISO 8601 date-time with a UTC
+    offset, as an aware datetime; None if it is neither."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        if len(value) == 10:
+            return datetime.combine(date.fromisoformat(value), datetime.min.time(), UTC)
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo else None
+
+
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _prices_v1(at: str, body: dict, problems: list[str]) -> None:
+    extra = sorted(set(body) - {"version", "currency", "usd_per_unit", "overrides"})
+    if extra:
+        problems.append(f"{at}: unknown keys {extra}")
+    currency = body.get("currency", "USD")
+    if not (isinstance(currency, str) and PRICE_CURRENCY.match(currency)):
+        problems.append(f'{at}.currency must be an ISO 4217 code such as "USD"')
+    elif currency == "USD":
+        if body.get("usd_per_unit", 1) != 1:
+            problems.append(f"{at}.usd_per_unit must be 1 (or left out) for USD prices")
+    else:
+        rate = body.get("usd_per_unit")
+        if not (_number(rate) and rate > 0):
+            problems.append(
+                f"{at}.usd_per_unit (USD per 1 {currency}, the contract's fixed rate) "
+                "is required for a non-USD currency and must be a positive number"
+            )
+    overrides = body.get("overrides")
+    if not isinstance(overrides, list):
+        problems.append(f"{at}.overrides must be an array")
+        return
+    if len(overrides) > MAX_PRICE_OVERRIDES:
+        problems.append(f"{at}.overrides has more than {MAX_PRICE_OVERRIDES} entries")
+        return
+    windows: dict[tuple[str, str], list[tuple[datetime, datetime | None, int]]] = {}
+    for i, o in enumerate(overrides):
+        where = f"{at}.overrides[{i}]"
+        if not _is_obj(o):
+            problems.append(f"{where} must be an object")
+            continue
+        unknown = sorted(set(o) - PRICE_OVERRIDE_KEYS)
+        if unknown:
+            problems.append(f"{where}: unknown keys {unknown}")
+        provider, model = o.get("provider"), o.get("model")
+        ok = True
+        if not (isinstance(provider, str) and PRICE_PROVIDER.match(provider)):
+            problems.append(f"{where}.provider must be a lower-case provider id")
+            ok = False
+        if not (
+            isinstance(model, str) and model.strip() and len(model) <= MAX_PRICE_MODEL_LENGTH
+        ):
+            problems.append(
+                f'{where}.model must be a model id (1-{MAX_PRICE_MODEL_LENGTH} characters) or "*"'
+            )
+            ok = False
+        start = parse_instant(o.get("valid_from"))
+        if start is None:
+            problems.append(
+                f"{where}.valid_from must be a date (YYYY-MM-DD, UTC) or an ISO 8601 "
+                "date-time with an offset"
+            )
+            ok = False
+        end = None
+        if o.get("valid_to") is not None:
+            end = parse_instant(o["valid_to"])
+            if end is None:
+                problems.append(f"{where}.valid_to must be a date or date-time like valid_from")
+                ok = False
+            elif start is not None and end <= start:
+                problems.append(f"{where}.valid_to must be after valid_from")
+                ok = False
+        rates = [k for k in PRICE_RATE_KEYS if k in o]
+        if "multiplier" in o:
+            m = o["multiplier"]
+            if rates:
+                problems.append(f"{where}: give either multiplier or per-1k rates, not both")
+            elif not (_number(m) and 0 < m <= MAX_PRICE_MULTIPLIER):
+                problems.append(
+                    f"{where}.multiplier must be a number above 0 and at most "
+                    f"{MAX_PRICE_MULTIPLIER:g}"
+                )
+        else:
+            missing = [k for k in PRICE_RATE_KEYS[:2] if k not in o]
+            if missing:
+                problems.append(f"{where} needs a multiplier or at least {missing}")
+            for k in rates:
+                if not (_number(o[k]) and o[k] >= 0):
+                    problems.append(f"{where}.{k} must be a number of at least 0")
+        if ok:
+            # Keyed as matched: "azure-openai" and "azure_openai" are one vendor.
+            windows.setdefault((provider.replace("-", "_"), model), []).append((start, end, i))
+    for (provider, model), spans in windows.items():
+        spans.sort(key=lambda s: s[0])
+        for (_s1, e1, i1), (s2, _e2, i2) in itertools.pairwise(spans):
+            if e1 is None or e1 > s2:
+                problems.append(
+                    f"{at}.overrides[{i1}] and [{i2}] overlap for {provider}/{model}: "
+                    "at most one price applies at a time"
+                )
 
 
 def _pseudonymisation_v1(at: str, body: dict, problems: list[str]) -> None:
@@ -625,12 +756,18 @@ SECTIONS: dict[str, Section] = {
         "tenant, team and project",
         {1: _guardrails_v1},
     ),
+    "prices": Section(
+        "Negotiated model prices per provider and model, effective-dated "
+        "(tenant-scope policies only)",
+        {1: _prices_v1},
+    ),
 }
 
 
-def validate_document(doc: Any) -> dict:
+def validate_document(doc: Any, scope: str | None = None) -> dict:
     """The document unchanged if valid, else PolicyDocumentError listing
-    every problem found."""
+    every problem found. With ``scope`` (the policy's binding), the
+    `tenant_only_problems` of that scope are listed too."""
     if not _is_obj(doc):
         raise PolicyDocumentError(["the policy document must be a JSON object"])
     problems: list[str] = []
@@ -664,6 +801,7 @@ def validate_document(doc: Any) -> dict:
             problems.append(f"{at}.version must be one of {sorted(spec.versions)}")
             continue
         spec.versions[version](at, body, problems)
+    problems += tenant_only_problems(doc, scope)
     if problems:
         raise PolicyDocumentError(problems)
     return doc
@@ -701,20 +839,26 @@ REQUIRED_WHEN: dict[str, Callable[[Any], bool]] = {
     "pseudonymisation": lambda body: isinstance(body, dict) and body.get("enabled") is True,
 }
 
-# Sections the gateway applies from the tenant-wide policy only (it does not
-# apply team and project policies yet): refused in team and project policies,
-# so a team never believes it has a protection that nothing enforces.
-TENANT_ONLY_SECTIONS = frozenset({"pseudonymisation"})
+# Sections only a tenant-scope policy may carry; refused (422) in team and
+# project policies. `pseudonymisation`: the gateway applies it from the
+# tenant-wide policy only (not team or project policies yet), so a team never
+# believes it has a protection nothing enforces. `prices`: a negotiated
+# contract is the tenant's, and the gateway and collector read it from the
+# tenant policy only. The one check for both: `tenant_only_problems`.
+TENANT_ONLY_SECTIONS = frozenset({"prices", "pseudonymisation"})
 
 
-def tenant_only_problems(document: Mapping[str, Any] | None, scope: str) -> list[str]:
-    """Problems with ``document`` as the document of a ``scope`` policy."""
-    if scope == "tenant":
+def tenant_only_problems(document: Mapping[str, Any] | None, scope: str | None) -> list[str]:
+    """Problems with ``document`` as the document of a ``scope`` policy
+    (none for a tenant policy, or when the scope is not known)."""
+    if scope is None or scope == "tenant":
         return []
     sections = (document or {}).get("sections") or {}
+    if not isinstance(sections, Mapping):
+        return []
     return [
-        f"$.sections.{name}: applied tenant-wide only (gateways do not apply team "
-        f"and project policies yet); set it in the tenant policy"
+        f"$.sections.{name}: only a tenant-scope policy may carry this section "
+        f"(applied tenant-wide only); set it in the tenant policy"
         for name in sorted(TENANT_ONLY_SECTIONS & set(sections))
     ]
 

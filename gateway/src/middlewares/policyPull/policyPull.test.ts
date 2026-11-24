@@ -88,8 +88,9 @@ describe('parsePolicyBundle', () => {
   });
 
   test('sections this gateway does not enforce are ignored', () => {
-    const p = parsePolicyBundle(bundle({ prices: { version: 1, x: 1 } }));
-    expect(p.ignored).toEqual(['prices']);
+    // Every known section is enforced now: a section added later.
+    const p = parsePolicyBundle(bundle({ later: { version: 1, x: 1 } }));
+    expect(p.ignored).toEqual(['later']);
   });
 
   test.each([
@@ -157,18 +158,18 @@ describe('parsePolicyBundle', () => {
     const required = (req: unknown) => {
       const b: any = bundle({
         pseudonymisation: { version: 1, enabled: true },
-        prices: { version: 1 },
+        later: { version: 1 },
       });
       b.tenant.required = req;
       return b;
     };
     expect(parsePolicyBundle(required(['pseudonymisation'])).ignored).toEqual([
-      'prices',
+      'later',
     ]);
-    for (const bad of [['prices'], 'pseudonymisation', [1]])
+    for (const bad of [['later'], 'pseudonymisation', [1]])
       expect(() => parsePolicyBundle(required(bad))).toThrow(PolicyBundleError);
-    expect(() => parsePolicyBundle(required(['prices']))).toThrow(
-      /does not enforce \["prices"\]/
+    expect(() => parsePolicyBundle(required(['later']))).toThrow(
+      /does not enforce \["later"\]/
     );
   });
 

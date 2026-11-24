@@ -336,7 +336,7 @@ async def test_invalid_documents_are_refused_with_every_problem(env):
     assert any("route.policy: missing default_group" in x for x in problems)
     assert any("access.version" in x for x in problems)
     assert any("rate_limits.rules must be an array" in x for x in problems)
-    assert any("reserved for model prices" in x for x in problems)
+    assert any("prices.overrides must be an array" in x for x in problems)
     assert any("bogus: unknown section" in x for x in problems)
     # Nothing was created.
     assert (await c.get(A + "/policies", headers=H(boot))).json()["data"] == []

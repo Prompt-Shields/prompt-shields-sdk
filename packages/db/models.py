@@ -1162,6 +1162,47 @@ class SpendAlert(Base):
     )
 
 
+class CostReconciliation(Base):
+    """A month's cost reconciliation for one provider and model (#348):
+    the usage the SDK and gateway reported against the usage the provider's
+    usage API reports, both valued at the same prices (``basis`` ``price``)
+    or, without a price, in tokens (``tokens``). Written by
+    ``collector.cost_reconciliation``; re-running a month replaces its rows.
+    ``flagged`` when ``|variance_pct|`` is over ``threshold_pct``. Numbers
+    only."""
+
+    __tablename__ = "cost_reconciliations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    month = Column(Date, nullable=False)
+    provider = Column(Text, nullable=False)
+    model = Column(Text, nullable=False)
+    estimated_tokens_in = Column(BigInteger, nullable=False, default=0, server_default="0")
+    estimated_tokens_out = Column(BigInteger, nullable=False, default=0, server_default="0")
+    # Sum of the reported (negotiated or list) cost; NULL when none reported one.
+    estimated_cost = Column(Numeric(20, 6))
+    provider_tokens_in = Column(BigInteger, nullable=False, default=0, server_default="0")
+    provider_tokens_out = Column(BigInteger, nullable=False, default=0, server_default="0")
+    basis = Column(Text, nullable=False)
+    estimated_value = Column(Numeric(20, 6), nullable=False)
+    provider_value = Column(Numeric(20, 6), nullable=False)
+    # (estimated - provider) / provider * 100; NULL when the provider side is 0.
+    variance_pct = Column(Float)
+    threshold_pct = Column(Float, nullable=False)
+    flagged = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "month", "provider", "model", name="ux_cost_reconciliations_key"
+        ),
+        CheckConstraint("basis IN ('price', 'tokens')", name="ck_cost_reconciliations_basis"),
+        Index("ix_cost_reconciliations_tenant_month", "tenant_id", "month"),
+    )
+
+
 class GatewaySecurityEvent(Base):
     """A gateway security event (schema v1, docs/security-events.schema.json):
     a guardrail verdict, PII or injection detection, auth failure, policy
