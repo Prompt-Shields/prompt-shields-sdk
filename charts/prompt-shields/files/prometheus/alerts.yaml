@@ -8,12 +8,20 @@
 #
 # Every expression uses metrics that exist today:
 #   gateway   /metrics (PS_METRICS_ENABLED=true):
-#     ps_gateway_requests_total, ps_gateway_guardrail_verdicts_total,
-#     ps_gateway_telemetry_dropped_total
+#     ps_gateway_requests_total, ps_gateway_request_duration_seconds,
+#     ps_gateway_guardrail_verdicts_total, ps_gateway_telemetry_dropped_total,
+#     ps_gateway_rate_limited_total, ps_gateway_cost_usd_total,
+#     ps_gateway_budget_spend_usd, ps_gateway_budget_limit_usd
 #   collector /metrics (PS_COLLECTOR_METRICS_ENABLED=true):
 #     ps_collector_requests_total, ps_collector_ingest_events_total
 #
-# Thresholds are starting points; tune them per deployment.
+# Thresholds are starting points; tune them per deployment. In the alerts
+# that have one, the number on a line ending in `# threshold` is the alert
+# threshold and the number on a line ending in `# minimum` is the traffic
+# (or spend) floor below which the alert stays quiet. The Helm chart can
+# override both, and `for`, `severity` or the whole rule, per alert
+# (prometheusRule.rules in values.yaml). Runbooks for these alerts:
+# docs/guides/alert-runbooks.mdx (the `runbook_url` annotation).
 groups:
   - name: prompt-shields-gateway
     rules:
@@ -194,3 +202,256 @@ groups:
           description: >-
             {{ $value | humanizePercentage }} of ingested events were rate
             limited, rejected or failed to write over the last 10 minutes.
+
+  # Latency and errors per provider and per route (#387). Provider rules
+  # leave out provider="unknown" (requests with no provider: health, MCP,
+  # admin routes); the route rules cover every route.
+  - name: prompt-shields-gateway-slo
+    rules:
+      - alert: PromptShieldsProviderLatencyP95High
+        # Duration runs until the gateway has the response headers, so for a
+        # streamed call it is the time to the first byte, not the whole stream.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (provider, le) (
+              rate(ps_gateway_request_duration_seconds_bucket{provider!="unknown"}[10m])
+            )
+          )
+            > 20  # threshold
+          and on (provider)
+          sum by (provider) (
+            rate(ps_gateway_request_duration_seconds_count{provider!="unknown"}[10m])
+          )
+            > 0.05  # minimum
+        for: 15m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "p95 latency through {{ $labels.provider }} is high"
+          description: >-
+            The 95th percentile of gateway request duration for provider
+            {{ $labels.provider }} was {{ $value | humanizeDuration }} over
+            the last 10 minutes.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsproviderlatencyp95high
+
+      - alert: PromptShieldsRouteLatencyP95High
+        expr: |
+          histogram_quantile(0.95,
+            sum by (route, le) (
+              rate(ps_gateway_request_duration_seconds_bucket[10m])
+            )
+          )
+            > 20  # threshold
+          and on (route)
+          sum by (route) (
+            rate(ps_gateway_request_duration_seconds_count[10m])
+          )
+            > 0.05  # minimum
+        for: 15m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "p95 latency on {{ $labels.route }} is high"
+          description: >-
+            The 95th percentile of gateway request duration on route
+            {{ $labels.route }} was {{ $value | humanizeDuration }} over the
+            last 10 minutes.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsroutelatencyp95high
+
+      - alert: PromptShieldsProvider5xxRatioHigh
+        # 5xx answers: upstream failures the gateway passes through and its
+        # own errors (e.g. 502/504 after failed attempts).
+        expr: |
+          (
+            sum by (provider) (rate(ps_gateway_requests_total{provider!="unknown",status=~"5.."}[10m]))
+              /
+            sum by (provider) (rate(ps_gateway_requests_total{provider!="unknown"}[10m]))
+          )
+            > 0.05  # threshold
+          and on (provider)
+          sum by (provider) (rate(ps_gateway_requests_total{provider!="unknown"}[10m]))
+            > 0.05  # minimum
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "5xx ratio through {{ $labels.provider }} is high"
+          description: >-
+            {{ $value | humanizePercentage }} of requests to provider
+            {{ $labels.provider }} returned a 5xx over the last 10 minutes.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsprovider5xxratiohigh
+
+      - alert: PromptShieldsProvider4xxRatioHigh
+        # 4xx answers other than 429 (PromptShieldsRateLimitedRatioHigh) and
+        # 446 (guardrail block, PromptShieldsGuardrailDenyRateHigh): mostly
+        # provider refusals such as 400, 401, 403 and 404 (bad request,
+        # revoked key, unknown model). The status does not tell a
+        # provider's 4xx from one the gateway returned itself.
+        expr: |
+          (
+            sum by (provider) (rate(ps_gateway_requests_total{provider!="unknown",status=~"4..",status!~"429|446"}[10m]))
+              /
+            sum by (provider) (rate(ps_gateway_requests_total{provider!="unknown"}[10m]))
+          )
+            > 0.25  # threshold
+          and on (provider)
+          sum by (provider) (rate(ps_gateway_requests_total{provider!="unknown"}[10m]))
+            > 0.05  # minimum
+        for: 15m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "4xx ratio through {{ $labels.provider }} is high"
+          description: >-
+            {{ $value | humanizePercentage }} of requests to provider
+            {{ $labels.provider }} returned a 4xx (429 and 446 excluded) over
+            the last 10 minutes.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsprovider4xxratiohigh
+
+      - alert: PromptShieldsRoute5xxRatioHigh
+        expr: |
+          (
+            sum by (route) (rate(ps_gateway_requests_total{status=~"5.."}[10m]))
+              /
+            sum by (route) (rate(ps_gateway_requests_total[10m]))
+          )
+            > 0.05  # threshold
+          and on (route)
+          sum by (route) (rate(ps_gateway_requests_total[10m]))
+            > 0.05  # minimum
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "5xx ratio on {{ $labels.route }} is high"
+          description: >-
+            {{ $value | humanizePercentage }} of requests on route
+            {{ $labels.route }} returned a 5xx over the last 10 minutes.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsroute5xxratiohigh
+
+      - alert: PromptShieldsRoute4xxRatioHigh
+        expr: |
+          (
+            sum by (route) (rate(ps_gateway_requests_total{status=~"4..",status!~"429|446"}[10m]))
+              /
+            sum by (route) (rate(ps_gateway_requests_total[10m]))
+          )
+            > 0.25  # threshold
+          and on (route)
+          sum by (route) (rate(ps_gateway_requests_total[10m]))
+            > 0.05  # minimum
+        for: 15m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "4xx ratio on {{ $labels.route }} is high"
+          description: >-
+            {{ $value | humanizePercentage }} of requests on route
+            {{ $labels.route }} returned a 4xx (429 and 446 excluded) over
+            the last 10 minutes.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsroute4xxratiohigh
+
+      - alert: PromptShieldsRateLimitedRatioHigh
+        # Share of all requests answered with 429, per source: upstream (a
+        # provider), gateway (the gateway's own limits) or budget (a spend
+        # budget refused the call).
+        expr: |
+          (
+            sum by (source) (rate(ps_gateway_rate_limited_total[10m]))
+              / on () group_left
+            sum(rate(ps_gateway_requests_total[10m]))
+          )
+            > 0.1  # threshold
+          and on ()
+          sum(rate(ps_gateway_requests_total[10m]))
+            > 0.05  # minimum
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "Many requests are rate limited ({{ $labels.source }})"
+          description: >-
+            {{ $value | humanizePercentage }} of gateway requests were
+            answered with 429 by source {{ $labels.source }} over the last
+            10 minutes.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsratelimitedratiohigh
+
+  # Budgets and spend (#387). Budget gauges are per replica (each exports
+  # the spend it last saw), so the rules take the highest value.
+  - name: prompt-shields-gateway-spend
+    rules:
+      - alert: PromptShieldsBudgetNearLimit
+        # No `for`: spend only grows within a window, and the alert should
+        # reach someone before the budget starts refusing calls.
+        expr: |
+          (
+            max by (budget, window) (ps_gateway_budget_spend_usd)
+              /
+            max by (budget, window) (ps_gateway_budget_limit_usd > 0)
+          )
+            >= 0.8  # threshold
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "Budget {{ $labels.budget }} is near its limit"
+          description: >-
+            Budget {{ $labels.budget }} has used {{ $value | humanizePercentage }}
+            of its {{ $labels.window }} limit.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetnearlimit
+
+      - alert: PromptShieldsBudgetExhausted
+        expr: |
+          (
+            max by (budget, window) (ps_gateway_budget_spend_usd)
+              /
+            max by (budget, window) (ps_gateway_budget_limit_usd > 0)
+          )
+            >= 1  # threshold
+        labels:
+          severity: critical
+          service: prompt-shields-gateway
+        annotations:
+          summary: "Budget {{ $labels.budget }} is exhausted"
+          description: >-
+            Budget {{ $labels.budget }} has used {{ $value | humanizePercentage }}
+            of its {{ $labels.window }} limit; calls it covers are now
+            blocked or downgraded, as the budget's action says.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetexhausted
+
+      - alert: PromptShieldsCostSpike
+        # Spend in the last hour against the average hourly spend over the
+        # 7 days before it (fewer days while less history exists). Quiet
+        # below the minimum hourly spend (USD), so cents do not page, and
+        # until there are 24 hourly baseline points, so a new deployment's
+        # first day (traffic still ramping up) does not page.
+        expr: |
+          (
+            sum(increase(ps_gateway_cost_usd_total[1h]))
+              /
+            avg_over_time(sum(increase(ps_gateway_cost_usd_total[1h]))[7d:1h] offset 1h)
+          )
+            > 3  # threshold
+          and on ()
+          sum(increase(ps_gateway_cost_usd_total[1h]))
+            > 1  # minimum
+          and on ()
+          count_over_time(sum(increase(ps_gateway_cost_usd_total[1h]))[7d:1h] offset 1h)
+            >= 24
+        for: 10m
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: Gateway spend this hour is far above its usual rate
+          description: >-
+            Estimated gateway spend over the last hour is {{ $value | humanize }}x
+            the average hourly spend of the previous 7 days.
+          runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldscostspike

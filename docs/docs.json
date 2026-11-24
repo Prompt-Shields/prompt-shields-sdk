@@ -73,6 +73,7 @@
         "guides/security-events",
         "guides/observability",
         "guides/agent-traces",
+        "guides/alert-runbooks",
         "guides/gateway-oidc",
         "guides/central-policy",
         "guides/gateway-rate-limits",
