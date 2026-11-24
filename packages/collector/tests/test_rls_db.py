@@ -75,6 +75,8 @@ from db.models import (
     UsageRollupDaily,
     UsageRollupHourly,
     UsageRollupState,
+    VirtualKey,
+    VirtualKeyCredential,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -386,6 +388,28 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     created_by="operator",
                 ),
             ]
+        )
+        # Virtual keys (#343): one key with the tenant's seeded credential.
+        vkey = VirtualKey(
+            tenant_id=tenant_id,
+            name=f"vk-{name}",
+            key_hash=f"{name:0>64}",
+            key_hint="seed",
+            team_id=team.id,
+            project_id=project.id,
+            principal_id=principal.id,
+        )
+        s.add(vkey)
+        await s.flush()
+        seed_cred = (
+            await s.execute(
+                select(InferenceCredential.id).where(InferenceCredential.tenant_id == tenant_id)
+            )
+        ).scalar_one()
+        s.add(
+            VirtualKeyCredential(
+                tenant_id=tenant_id, virtual_key_id=vkey.id, credential_id=seed_cred
+            )
         )
         policy = Policy(
             tenant_id=tenant_id,

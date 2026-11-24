@@ -64,6 +64,18 @@ tags:
       a local keyring (`PS_CREDENTIAL_KEK_KEYS`). Tenant admin only
       (`admin:inference-credentials`; GET also `admin:read`). Keys are never
       returned, logged or audited; 400 and 422 bodies never echo them.
+  - name: Virtual Keys
+    description: |
+      Gateway virtual keys (`ps-vk-...`, #343). A caller holding only a
+      virtual key makes model calls through the gateway, which resolves it
+      here (`POST /api/v1/virtual-keys/resolve`, ingest key with
+      `virtual-keys:resolve`) and sends the provider a key from the virtual
+      key's credential pool (inference credentials, #342), in memory only.
+      A key is bound to a team, project and/or principal, which the gateway
+      stamps on telemetry, rate limits, budgets and guardrails in place of
+      the caller-declared `X-PS-Team` / `X-PS-Project`. Tenant admin only
+      (`admin:virtual-keys`; GET also `admin:read`). The key is returned
+      once, at issue, and stored as a SHA-256 hash.
   - name: Webhooks
     description: |
       Tenant admin API (`/api/v1/admin/webhooks`, tenant API key) for
@@ -2731,6 +2743,285 @@ components:
           nullable: true
           description: "`true` disables (never served), `false` enables"
 
+    VirtualKey:
+      type: object
+      description: A gateway virtual key. The key and its hash are never returned (the key only once, at issue).
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: checkout-service
+        key_hint:
+          type: string
+          description: The key's last four characters
+        status:
+          type: string
+          enum: [active, revoked, expired]
+        team_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The team calls are attributed to (a project's team when bound to a project)
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        principal_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The person or service account the key belongs to; while it is
+            disabled the key does not resolve
+        allowed_models:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Model names or globs (`*`, `?`, `[...]`) the key may call; `null` = any
+        strategy:
+          type: string
+          enum: [round_robin, least_recently_limited]
+          description: How the gateway picks among a provider's credentials in the pool
+        credentials:
+          type: array
+          description: The pool, in order (masked)
+          items:
+            type: object
+            required: [id, provider, label, key_fingerprint, status]
+            properties:
+              id:
+                type: string
+                format: uuid
+              provider:
+                type: string
+              label:
+                type: string
+              key_fingerprint:
+                type: string
+              status:
+                type: string
+                enum: [active, disabled, expired]
+        created_by:
+          type: string
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - name
+        - key_hint
+        - status
+        - team_id
+        - project_id
+        - principal_id
+        - allowed_models
+        - strategy
+        - credentials
+        - created_by
+        - expires_at
+        - revoked_at
+        - created_at
+        - updated_at
+        - last_resolved_at
+
+    VirtualKeyWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/VirtualKey'
+        - type: object
+          required: [key, warning]
+          properties:
+            key:
+              type: string
+              description: The virtual key (`ps-vk-...`). Returned only here.
+            warning:
+              type: string
+
+    CreateVirtualKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [name, credential_ids]
+      properties:
+        name:
+          type: string
+          description: 1-128 characters from A-Z a-z 0-9 . _ -, unique per tenant
+        credential_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: The pool (1-20 inference credentials of this tenant), in order
+        team_id:
+          type: string
+          format: uuid
+          nullable: true
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Implies its team; a different `team_id` is refused
+        principal_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: An enabled principal (person or service account)
+        allowed_models:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Model names or globs (1-100); omitted or `null` = any model
+        strategy:
+          type: string
+          enum: [round_robin, least_recently_limited]
+          default: round_robin
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    UpdateVirtualKeyRequest:
+      type: object
+      additionalProperties: false
+      description: The binding (team, project, principal) is fixed; issue a new key to change it.
+      properties:
+        name:
+          type: string
+        credential_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        allowed_models:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: "`null` allows any model"
+        strategy:
+          type: string
+          enum: [round_robin, least_recently_limited]
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: New expiry; `null` clears it
+
+    ResolveVirtualKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [key]
+      properties:
+        key:
+          type: string
+          writeOnly: true
+          description: The caller's virtual key. Never echoed, logged or audited.
+
+    VirtualKeyResolution:
+      type: object
+      description: >-
+        What the gateway needs to serve a call made with a virtual key.
+        Inactive keys carry only `active`, `reason` and `cache_ttl_seconds`.
+      required: [active, cache_ttl_seconds]
+      properties:
+        active:
+          type: boolean
+        reason:
+          type: string
+          enum: [not_found, revoked, expired, principal_disabled]
+        cache_ttl_seconds:
+          type: integer
+          description: How long the gateway may cache this answer (30)
+        virtual_key:
+          type: object
+          required: [id, name, team_id, project_id, principal_id, user_id, allowed_models, strategy, expires_at]
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            team_id:
+              type: string
+              format: uuid
+              nullable: true
+            project_id:
+              type: string
+              format: uuid
+              nullable: true
+            principal_id:
+              type: string
+              format: uuid
+              nullable: true
+            user_id:
+              type: string
+              nullable: true
+              description: "`principal:<id>`, the pseudonymous user id reported for the key's calls"
+            allowed_models:
+              type: array
+              nullable: true
+              items:
+                type: string
+            strategy:
+              type: string
+              enum: [round_robin, least_recently_limited]
+            expires_at:
+              type: string
+              format: date-time
+              nullable: true
+        credentials:
+          type: array
+          description: The pool's usable credentials, decrypted, in pool order
+          items:
+            type: object
+            required: [id, provider, label, key_fingerprint, api_key]
+            properties:
+              id:
+                type: string
+                format: uuid
+              provider:
+                type: string
+              label:
+                type: string
+              key_fingerprint:
+                type: string
+              api_key:
+                type: string
+                description: The provider key, for the gateway to use in memory only
+        unavailable_credentials:
+          type: array
+          description: Pool credentials that could not be served, with the reason
+          items:
+            type: object
+            required: [id, reason]
+            properties:
+              id:
+                type: string
+                format: uuid
+              reason:
+                type: string
+                enum: [disabled, expired, not_found, key_provider, corrupt]
+
     ProviderKeyFingerprintLink:
       type: object
       description: Links a provider's opaque API key id to the SDK's `api_key_fingerprint`.
@@ -2865,9 +3156,9 @@ components:
         `/api/v1/admin`; the others grant one resource family. While
         `PS_ADMIN_REQUIRE_SCOPED_TOKENS` is off an ingest key reaches every
         admin route but member management, governance policies and the
-        inference credential vault, so issuing or rotating one needs every
-        admin scope but `admin:members`, `admin:policies` and
-        `admin:inference-credentials`.
+        inference credential vault and virtual keys, so issuing or rotating
+        one needs every admin scope but `admin:members`, `admin:policies`,
+        `admin:inference-credentials` and `admin:virtual-keys`.
       enum:
         - admin:read
         - admin:keys
@@ -2880,6 +3171,7 @@ components:
         - admin:members
         - admin:policies
         - admin:inference-credentials
+        - admin:virtual-keys
 
     PayloadLoggingMode:
       type: string
@@ -3210,9 +3502,13 @@ components:
         Kong, MCP, learner snapshots, feedback); `registry:read` reads
         `/api/v1/registry` and `/telemetry/loss`; `registry:attest` records
         attestations; `policy:read` reads the compiled governance policy
-        (`/api/v1/policy/effective`, the gateway's policy pull). Keys issued
-        before scopes existed hold the first three; `policy:read` is only
-        ever issued explicitly. A new key holds `ingest:write` unless more
+        (`/api/v1/policy/effective`, the gateway's policy pull);
+        `virtual-keys:resolve` resolves gateway virtual keys to their
+        binding and decrypted credential pool
+        (`/api/v1/virtual-keys/resolve`, the gateway's credential only).
+        Keys issued before scopes existed hold the first three;
+        `policy:read` and `virtual-keys:resolve` are only ever issued
+        explicitly. A new key holds `ingest:write` unless more
         are asked for. Only a key holding the first three can call
         `/api/v1/admin`.
       enum:
@@ -3220,6 +3516,7 @@ components:
         - registry:read
         - registry:attest
         - policy:read
+        - virtual-keys:resolve
 
     TenantApiKey:
       type: object
@@ -4955,6 +5252,12 @@ components:
                 type: array
                 items:
                   $ref: '#/components/schemas/InferenceCredential'
+    VirtualKey:
+      description: The virtual key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/VirtualKey'
     KeyProviderUnavailable:
       description: >-
         The credential vault's key provider is not configured
@@ -10248,6 +10551,47 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/virtual-keys/resolve:
+    post:
+      operationId: resolveVirtualKey
+      tags: [Virtual Keys]
+      summary: Resolve a virtual key (gateway; returns provider keys)
+      description: |
+        The key's binding and its pool's active credentials, decrypted, for
+        the gateway to use in memory (`PS_VIRTUAL_KEYS_ENABLED`). Needs an
+        ingest key holding `virtual-keys:resolve`. Unknown, revoked and
+        expired keys, and keys bound to a disabled principal, are
+        `{"active": false}` with a reason. Each decrypt writes an
+        `inference_credential.use` audit row; decrypted keys are cached in
+        the collector for `PS_VIRTUAL_KEY_CREDENTIAL_CACHE_SECONDS` (300).
+        Responses are `Cache-Control: no-store`. See
+        docs/guides/gateway-virtual-keys.mdx.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveVirtualKeyRequest'
+      responses:
+        '200':
+          description: The resolution
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualKeyResolution'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The key lacks `virtual-keys:resolve`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Malformed body; the error lists type, location and message without the submitted values
+
   /api/v1/admin/token-scopes:
     get:
       operationId: listAdminTokenScopes
@@ -12197,6 +12541,162 @@ paths:
           $ref: '#/components/responses/OperatorForbidden'
         '404':
           $ref: '#/components/responses/OperatorNotFound'
+
+  /api/v1/admin/virtual-keys:
+    get:
+      operationId: listVirtualKeys
+      tags: [Virtual Keys]
+      summary: List virtual keys
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:virtual-keys
+      responses:
+        '200':
+          description: The tenant's virtual keys
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VirtualKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    post:
+      operationId: createVirtualKey
+      tags: [Virtual Keys]
+      summary: Issue a virtual key (shown once)
+      description: |
+        Audited as `virtual_key.create` (ids only, never the key). The key
+        is in this response only (`Cache-Control: no-store`).
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:virtual-keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVirtualKeyRequest'
+      responses:
+        '201':
+          description: The new key, with its secret
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualKeyWithSecret'
+        '400':
+          description: Invalid name, binding, pool, models, strategy or expiry
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '409':
+          description: The name is taken, or the tenant holds the maximum (1000)
+
+  /api/v1/admin/virtual-keys/{key_id}:
+    parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getVirtualKey
+      tags: [Virtual Keys]
+      summary: Get a virtual key
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:virtual-keys
+      responses:
+        '200':
+          $ref: '#/components/responses/VirtualKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: updateVirtualKey
+      tags: [Virtual Keys]
+      summary: Rename a virtual key or change its pool, models, strategy or expiry
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:virtual-keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateVirtualKeyRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/VirtualKey'
+        '400':
+          description: Invalid name, pool, models, strategy or expiry
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The name is taken
+    delete:
+      operationId: deleteVirtualKey
+      tags: [Virtual Keys]
+      summary: Delete a virtual key
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:virtual-keys
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/virtual-keys/{key_id}/revoke:
+    parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: revokeVirtualKey
+      tags: [Virtual Keys]
+      summary: Revoke a virtual key
+      description: Gateways stop accepting it within their 30 s resolution cache.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:virtual-keys
+      responses:
+        '200':
+          $ref: '#/components/responses/VirtualKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/v1/admin/inference-credentials:
     get:

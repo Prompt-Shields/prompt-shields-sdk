@@ -68,6 +68,7 @@ from db.models import (
     Principal,
     Project,
     Team,
+    VirtualKey,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -196,6 +197,16 @@ async def _no_policy(db: AsyncSession, bound, what: str) -> None:
     stmt = select(Policy.name).where(bound, Policy.deleted_at.is_(None))
     if (await db.execute(stmt)).first() is not None:
         raise _problem(409, "Conflict", f"Delete the {what}'s policy first (DELETE /policies/{{id}})")
+
+
+async def _no_virtual_keys(db: AsyncSession, bound, what: str) -> None:
+    """409 while a virtual key (#343), live or revoked, is bound to the team
+    or project: its calls are attributed there, so it is deleted first
+    (DELETE /virtual-keys/{id})."""
+    if (await db.execute(select(VirtualKey.id).where(bound))).first() is not None:
+        raise _problem(
+            409, "Conflict", f"Delete the {what}'s virtual keys first (DELETE /virtual-keys/{{id}})"
+        )
 
 
 async def _flush_delete(db: AsyncSession, what: str) -> None:
@@ -555,6 +566,16 @@ async def delete_principal(
     for c in creds:
         c.is_active = "false"
         c.principal_id = None
+    # Virtual keys bound to the principal (#343) are revoked and unlinked.
+    bound_keys = (
+        (await db.execute(select(VirtualKey).where(VirtualKey.principal_id == row.id)))
+        .scalars()
+        .all()
+    )
+    for v in bound_keys:
+        if v.revoked_at is None:
+            v.revoked_at = now
+        v.principal_id = None
     for m in memberships:
         await db.delete(m)
     await db.flush()
@@ -576,6 +597,15 @@ async def delete_principal(
             "revoked_token_ids": sorted({str(t.id) for t in [*tokens, *revoked.tokens]}),
             "partner_credentials_revoked": sorted(
                 {str(c.id) for c in [*creds, *revoked.partner_credentials]}
+            ),
+            **(
+                {
+                    "revoked_virtual_key_ids": sorted(
+                        {str(v.id) for v in [*bound_keys, *revoked.virtual_keys]}
+                    )
+                }
+                if bound_keys or revoked.virtual_keys
+                else {}
             ),
         },
     )
@@ -724,6 +754,7 @@ async def delete_team(
     if has_projects is not None:
         raise _problem(409, "Conflict", "Delete or move the team's projects first")
     await _no_policy(db, Policy.team_id == row.id, "team")
+    await _no_virtual_keys(db, VirtualKey.team_id == row.id, "team")
     memberships = (
         (await db.execute(select(Membership).where(Membership.team_id == row.id)))
         .scalars()
@@ -916,6 +947,7 @@ async def delete_project(
     db = request.state.db
     row = await _get(db, Project, principal.tenant_id, project_id, "Project", lock=True)
     await _no_policy(db, Policy.project_id == row.id, "project")
+    await _no_virtual_keys(db, VirtualKey.project_id == row.id, "project")
     memberships = (
         (await db.execute(select(Membership).where(Membership.project_id == row.id)))
         .scalars()

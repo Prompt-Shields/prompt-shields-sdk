@@ -13,8 +13,8 @@ Every tenant admin route declares one scope from `ADMIN_SCOPES` with
     ``PS_ADMIN_REQUIRE_SCOPED_TOKENS=false``: the scopes in
     ``TENANT_KEY_SCOPES``, i.e. every admin scope but member management
     (#338), governance policies (#340) and the inference credential vault
-    (#342): ``admin:members``, ``admin:policies`` and
-    ``admin:inference-credentials`` are never reachable with an ingest key. Only a key holding every ingest key scope (tenant_keys
+    (#342) and virtual keys (#343): ``admin:members``, ``admin:policies``,
+    ``admin:inference-credentials`` and ``admin:virtual-keys`` are never reachable with an ingest key. Only a key holding every ingest key scope (tenant_keys
     ALL_KEY_SCOPES: every key from before scopes existed, #341) gets in; a
     narrowed key, such as a new ``ingest:write``-only key, is refused (403).
 
@@ -109,16 +109,21 @@ ADMIN_SCOPES: dict[str, str] = {
         "Store, rotate, disable and delete inference API keys in the credential "
         "vault (write-only: no route returns a key)"
     ),
+    "admin:virtual-keys": (
+        "Issue, change, revoke and delete gateway virtual keys and their "
+        "credential pools (a key is shown once, at issue)"
+    ),
 }
 
 # What a full-scope tenant ingest key reaches while
 # PS_ADMIN_REQUIRE_SCOPED_TOKENS is off: every admin scope but member
-# management (#338), governance policies (#340) and the inference credential
-# vault (#342), which only admin tokens get.
+# management (#338), governance policies (#340), the inference credential
+# vault (#342) and virtual keys (#343), which only admin tokens get.
 TENANT_KEY_SCOPES: frozenset[str] = frozenset(ADMIN_SCOPES) - {
     "admin:members",
     "admin:policies",
     "admin:inference-credentials",
+    "admin:virtual-keys",
 }
 
 READ_SCOPE = "admin:read"
@@ -280,6 +285,42 @@ async def require_full_admin(
             "Issuing or rotating an ingest key needs every admin scope while "
             "PS_ADMIN_REQUIRE_SCOPED_TOKENS is off (an ingest key then has "
             f"full admin access); missing: {missing}",
+        )
+
+
+# Issuing or rotating an ingest key that holds one of these ingest scopes
+# needs an admin token holding every admin scope listed: the key reaches
+# data no ``admin:keys`` caller could read otherwise.
+# ``virtual-keys:resolve`` returns decrypted inference keys (#343), which the
+# write-only vault (``admin:inference-credentials``) never hands out, so it
+# takes both vault and virtual key administration, and never an ingest key.
+SENSITIVE_KEY_SCOPES: dict[str, frozenset[str]] = {
+    "virtual-keys:resolve": frozenset({"admin:inference-credentials", "admin:virtual-keys"}),
+}
+
+
+async def require_sensitive_key_scopes(
+    request: Request, principal: AdminPrincipal, key_scopes
+) -> None:
+    """403 unless the caller may hand out an ingest key with ``key_scopes``
+    (SENSITIVE_KEY_SCOPES): an admin token holding the admin scopes each
+    sensitive ingest scope requires. Applies whatever
+    PS_ADMIN_REQUIRE_SCOPED_TOKENS says."""
+    needed: set[str] = set()
+    for scope in set(key_scopes):
+        needed |= SENSITIVE_KEY_SCOPES.get(scope, frozenset())
+    if not needed:
+        return
+    missing = sorted(needed - principal.scopes)
+    if principal.kind != "admin_token" or missing:
+        await _audit_failure(request, "insufficient_scope", 403, principal.tenant_id)
+        sensitive = sorted(set(key_scopes) & set(SENSITIVE_KEY_SCOPES))
+        raise _problem(
+            403,
+            "Forbidden",
+            f"Issuing or rotating an ingest key with {sensitive} needs an admin "
+            f"token holding {sorted(needed)}"
+            + (f"; missing: {missing}" if missing else "; ingest keys are refused"),
         )
 
 

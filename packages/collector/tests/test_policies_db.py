@@ -157,12 +157,17 @@ def test_migration_043_chain_and_scopes():
     assert m.revision == "043"
     assert m.down_revision == "046"
     assert set(m.TABLES) == {"policies", "policy_versions"}
-    # admin:inference-credentials came later (044, #342).
+    # admin:inference-credentials (044, #342) and admin:virtual-keys (059,
+    # #343) came later.
     assert set(m.PREVIOUS_ADMIN_SCOPES) | {m.NEW_ADMIN_SCOPE} == set(ADMIN_SCOPES) - {
-        "admin:inference-credentials"
+        "admin:inference-credentials",
+        "admin:virtual-keys",
     }
     assert not hasattr(m, "PREVIOUS_KEY_SCOPES")  # policy:read is never granted
-    assert tenant_keys.ALL_KEY_SCOPES | {m.NEW_KEY_SCOPE} == set(tenant_keys.KEY_SCOPES)
+    # virtual-keys:resolve came later (059, #343).
+    assert tenant_keys.ALL_KEY_SCOPES | {m.NEW_KEY_SCOPE} == set(tenant_keys.KEY_SCOPES) - {
+        tenant_keys.VIRTUAL_KEYS_RESOLVE
+    }
     # A legacy key does not get it either (issued explicitly to the gateway).
     assert m.NEW_KEY_SCOPE not in tenant_keys.LEGACY_KEY_SCOPES
 

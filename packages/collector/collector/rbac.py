@@ -54,6 +54,7 @@ _ALL_ADMIN = (
     "admin:members",
     "admin:inference-credentials",
     "admin:policies",
+    "admin:virtual-keys",
 )
 
 # Partner read scopes that expose no audit trail, call evidence or cost

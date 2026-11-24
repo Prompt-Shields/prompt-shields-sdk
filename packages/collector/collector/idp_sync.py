@@ -63,6 +63,7 @@ from db.models import (
     PartnerCredential,
     ScimToken,
     TenantApiKey,
+    VirtualKey,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -182,6 +183,7 @@ class Revoked:
     api_keys: list[TenantApiKey] = field(default_factory=list)
     scim_tokens: list[ScimToken] = field(default_factory=list)
     partner_credentials: list[PartnerCredential] = field(default_factory=list)
+    virtual_keys: list[VirtualKey] = field(default_factory=list)
     skipped_tokens: list[AdminToken] = field(default_factory=list)
     skipped_partner_credentials: list[PartnerCredential] = field(default_factory=list)
 
@@ -196,6 +198,8 @@ class Revoked:
                 str(c.id) for c in self.partner_credentials
             ),
         }
+        if self.virtual_keys:
+            out["revoked_virtual_key_ids"] = sorted(str(k.id) for k in self.virtual_keys)
         if self.skipped_tokens:
             out["cascade_skipped"] = sorted(str(t.id) for t in self.skipped_tokens)
         if self.skipped_partner_credentials:
@@ -328,5 +332,13 @@ async def revoke_created_credentials(
                 continue
             c.is_active = "false"
             out.partner_credentials.append(c)
+        # Virtual keys (#343) create nothing, so they add no frontier.
+        for v in (await db.execute(created_by_frontier(VirtualKey))).scalars().all():
+            if v.id in seen:
+                continue
+            seen.add(v.id)
+            if v.revoked_at is None:
+                v.revoked_at = now
+                out.virtual_keys.append(v)
         frontier = nxt - visited
     return out

@@ -98,6 +98,8 @@ from db.models import (
     UsageRollupDaily,
     UsageRollupHourly,
     UsageRollupState,
+    VirtualKey,
+    VirtualKeyCredential,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -142,6 +144,10 @@ ERASE_ORDER: tuple[type, ...] = (
     TelemetryClientStats,
     ProviderKeyFingerprint,
     ProviderCredential,
+    # Virtual keys (#343): the pool before the credentials it names, the
+    # keys before the teams, projects and principals they are bound to.
+    VirtualKeyCredential,
+    VirtualKey,
     InferenceCredential,
     McpToolUsage,
     McpToolUsageDaily,

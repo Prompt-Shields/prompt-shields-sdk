@@ -923,6 +923,90 @@ class InferenceCredential(Base):
     )
 
 
+class VirtualKey(Base):
+    """A gateway virtual key (``ps-vk-...``, #343).
+
+    A caller holding only the virtual key gets model calls through the
+    gateway: the gateway resolves it with the collector
+    (POST /api/v1/virtual-keys/resolve, collector/virtual_keys.py) and sends
+    the provider a key from the virtual key's credential pool
+    (``virtual_key_credentials`` -> ``inference_credentials``), in memory
+    only. The key is bound to a team, project and/or principal (person or
+    service account), so the gateway stamps them on telemetry instead of the
+    caller-declared X-PS-Team / X-PS-Project, and may restrict the models it
+    can call (``allowed_models``, glob patterns; NULL = any).
+
+    Stored as ``key_hash`` (SHA-256 of the key: it is 256 random bits, so a
+    fast hash is enough and resolution needs no bcrypt) and ``key_hint``
+    (last four characters). The key is shown once, at creation. Revocable
+    (``revoked_at``) and expiring (``expires_at``); a key bound to a
+    disabled principal does not resolve. ``created_by`` takes the values of
+    ``AdminToken.created_by`` so disabling a principal revokes the keys its
+    tokens created (collector/idp_sync.py).
+    """
+
+    __tablename__ = "virtual_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    key_hash = Column(Text, nullable=False)
+    key_hint = Column(Text, nullable=False)
+    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id"))
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"))
+    principal_id = Column(
+        UUID(as_uuid=True), ForeignKey("principals.id", ondelete="SET NULL")
+    )
+    allowed_models = Column(ARRAY(Text))
+    # round_robin | least_recently_limited (collector/virtual_keys.py)
+    strategy = Column(Text, nullable=False, default="round_robin", server_default="round_robin")
+    created_by = Column(Text)
+    expires_at = Column(TIMESTAMP(timezone=True))
+    revoked_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+    last_resolved_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_virtual_keys_tenant_name"),
+        UniqueConstraint("key_hash", name="uq_virtual_keys_key_hash"),
+        CheckConstraint(
+            "strategy IN ('round_robin', 'least_recently_limited')",
+            name="ck_virtual_keys_strategy",
+        ),
+        Index("ix_virtual_keys_team", "team_id"),
+        Index("ix_virtual_keys_project", "project_id"),
+        Index("ix_virtual_keys_principal", "principal_id"),
+    )
+
+
+class VirtualKeyCredential(Base):
+    """One inference credential in a virtual key's pool (#343), in order
+    (``position``). Deleting the credential or the virtual key removes the
+    row."""
+
+    __tablename__ = "virtual_key_credentials"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    virtual_key_id = Column(
+        UUID(as_uuid=True), ForeignKey("virtual_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    credential_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("inference_credentials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position = Column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "virtual_key_id", "credential_id", name="uq_virtual_key_credentials_pair"
+        ),
+        Index("ix_virtual_key_credentials_credential", "credential_id"),
+    )
+
+
 class McpToolUsage(Base):
     """Observed MCP tool calls, aggregated (#63, Phase 0: observe only).
 

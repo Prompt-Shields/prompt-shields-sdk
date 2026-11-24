@@ -47,6 +47,7 @@ _KEY_SCOPE_NAMES = {
     "REGISTRY_READ": tenant_keys.REGISTRY_READ,
     "REGISTRY_ATTEST": tenant_keys.REGISTRY_ATTEST,
     "POLICY_READ": tenant_keys.POLICY_READ,
+    "VIRTUAL_KEYS_RESOLVE": tenant_keys.VIRTUAL_KEYS_RESOLVE,
 }
 
 

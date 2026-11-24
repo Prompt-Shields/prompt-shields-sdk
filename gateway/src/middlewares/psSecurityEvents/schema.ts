@@ -123,10 +123,11 @@ export interface AuthFailureEvent extends SecurityEventBase {
   'event.name': 'auth.failure';
   /**
    * What was protected: the admin console/log stream, `/metrics`, the MCP
-   * proxy (`/v1/mcp/{server}`), or the model and proxy routes behind OIDC
-   * (`PS_OIDC_ENABLED`).
+   * proxy (`/v1/mcp/{server}`), the model and proxy routes behind OIDC
+   * (`PS_OIDC_ENABLED`), or a call made with a gateway virtual key that does
+   * not resolve (`PS_VIRTUAL_KEYS_ENABLED`, #343).
    */
-  'ps.auth.realm': 'admin' | 'metrics' | 'mcp' | 'oidc';
+  'ps.auth.realm': 'admin' | 'metrics' | 'mcp' | 'oidc' | 'virtual_key';
   'ps.auth.reason': 'missing_credentials' | 'invalid_credentials';
   /** OIDC only: why the bearer token was refused. */
   'ps.auth.detail'?:

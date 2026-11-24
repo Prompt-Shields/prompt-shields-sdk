@@ -597,25 +597,24 @@ async def test_tenants_cannot_reach_each_others_credentials_under_rls(env):
 # ── migration ─────────────────────────────────────────────────────────
 
 
-def _load_migration_044():
+def _load_migration(filename: str):
     pytest.importorskip("alembic")
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "db"
-        / "alembic"
-        / "versions"
-        / "044_inference_credentials.py"
-    )
-    spec = importlib.util.spec_from_file_location("migration_044", path)
+    path = Path(__file__).resolve().parents[2] / "db" / "alembic" / "versions" / filename
+    spec = importlib.util.spec_from_file_location(f"migration_{filename[:3]}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
+def _load_migration_044():
+    return _load_migration("044_inference_credentials.py")
+
+
 def test_migration_044_covers_every_scope():
     m = _load_migration_044()
     assert m.NEW_SCOPE == "admin:inference-credentials"
-    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == set(ADMIN_SCOPES)
+    # admin:virtual-keys came later (059, #343).
+    assert set(m.PREVIOUS_SCOPES) | {m.NEW_SCOPE} == set(ADMIN_SCOPES) - {"admin:virtual-keys"}
 
 
 async def test_migration_044_upgrade_and_downgrade(env):
@@ -637,14 +636,20 @@ async def test_migration_044_upgrade_and_downgrade(env):
             rows = await s.execute(select(AdminToken.scopes).order_by(AdminToken.created_at))
             return [set(x) for x in rows.scalars()]
 
+    # The virtual key pool (059, #343) references the table: take 059 down
+    # first and back up last, as alembic would.
+    m059 = _load_migration("059_virtual_keys.py")
+
     # The test schema comes from the models; let the migration build it.
     async with engine.begin() as conn:
+        await conn.run_sync(run, m059.downgrade)
         await conn.run_sync(run, m.downgrade)  # drops the table, strips the scope
     assert all("admin:inference-credentials" not in s for s in await token_scopes())
     body = {"provider": "openai", "label": "x", "api_key": API_KEY}
     assert (await c.post(BASE, headers=H(full), json=body)).status_code == 403
     async with engine.begin() as conn:
         await conn.run_sync(run, m.upgrade)
+        await conn.run_sync(run, m059.upgrade)
         policies = (
             await conn.execute(
                 text("SELECT policyname FROM pg_policies WHERE tablename = 'inference_credentials'")
