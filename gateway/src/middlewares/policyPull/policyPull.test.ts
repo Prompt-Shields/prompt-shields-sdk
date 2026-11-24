@@ -11,8 +11,11 @@ import {
   setCentralPolicy,
 } from './state';
 import {
+  BundleBodyError,
+  MAX_BUNDLE_BYTES,
   policyPullConfig,
   PolicyPullConfigError,
+  readBodyCapped,
   startPolicyPull,
 } from './puller';
 import { withPolicyVersion } from '../ps-telemetry';
@@ -373,6 +376,127 @@ describe('startPolicyPull', () => {
     try {
       expect(fetch).not.toHaveBeenCalled();
       expect(l.error.mock.calls[0][0]).toContain('TRUSTED_CUSTOM_HOSTS');
+    } finally {
+      puller.stop();
+    }
+  });
+});
+
+describe('readBodyCapped (#383)', () => {
+  /** A stream of `chunks`, recording how many were pulled and whether it was cancelled. */
+  function streamOf(chunks: Iterable<Uint8Array>) {
+    const it = chunks[Symbol.iterator]();
+    const seen = { pulled: 0, cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = it.next();
+        if (next.done) controller.close();
+        else {
+          seen.pulled++;
+          controller.enqueue(next.value);
+        }
+      },
+      cancel() {
+        seen.cancelled = true;
+      },
+    });
+    return { body, seen };
+  }
+
+  test('reads a body within the cap', async () => {
+    const text = JSON.stringify({ a: 'ø'.repeat(10) });
+    expect(await readBodyCapped(new Response(text), 1024)).toBe(text);
+    expect(await readBodyCapped(new Response(null), 1024)).toBe('');
+  });
+
+  test('counts bytes, not UTF-16 code units', async () => {
+    // 600 characters, 1200 bytes in UTF-8.
+    const text = 'ø'.repeat(600);
+    expect(text.length).toBeLessThan(1000);
+    await expect(readBodyCapped(new Response(text), 1000)).rejects.toThrow(
+      BundleBodyError
+    );
+    expect(await readBodyCapped(new Response(text), 1200)).toBe(text);
+  });
+
+  test('stops reading and cancels the stream once over the cap', async () => {
+    function* endless() {
+      for (;;) yield new Uint8Array(64 * 1024).fill(0x20);
+    }
+    const { body, seen } = streamOf(endless());
+    await expect(
+      readBodyCapped(new Response(body), 256 * 1024)
+    ).rejects.toThrow(/larger than 262144 bytes/);
+    expect(seen.cancelled).toBe(true);
+    expect(seen.pulled).toBeLessThanOrEqual(6);
+  });
+
+  test('refuses a Content-Length over the cap before reading', async () => {
+    const { body, seen } = streamOf([new Uint8Array(10)]);
+    const resp = new Response(body, { headers: { 'content-length': '5000' } });
+    await expect(readBodyCapped(resp, 1000)).rejects.toThrow(BundleBodyError);
+    expect(seen.pulled).toBe(0);
+  });
+
+  test('refuses a body that is not UTF-8', async () => {
+    await expect(
+      readBodyCapped(new Response(new Uint8Array([0x7b, 0xff, 0x7d])), 100)
+    ).rejects.toThrow(/not valid UTF-8/);
+  });
+});
+
+describe('startPolicyPull byte cap (#383)', () => {
+  const config = {
+    url: 'https://collector.example.com/api/v1/policy/effective',
+    apiKey: 'ps-ik-policy',
+    intervalMs: 3_600_000,
+  };
+
+  test('an oversized bundle is refused mid-stream and not downloaded again', async () => {
+    const good = JSON.stringify(
+      bundle({ route: { version: 1, policy: ROUTE } })
+    );
+    let cancels = 0;
+    let pulledBytes = 0;
+    const huge = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulledBytes += 1024 * 1024;
+            controller.enqueue(new Uint8Array(1024 * 1024).fill(0x20));
+          },
+          cancel() {
+            cancels++;
+          },
+        }),
+        { status: 200, headers: { etag: '"huge"' } }
+      );
+    const responses = [
+      () => new Response(good, { status: 200, headers: { etag: '"v1"' } }),
+      huge,
+      huge,
+    ];
+    const fetch = jest.fn(async () => responses.shift()!());
+    const l = { log: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const puller = await startPolicyPull(config, { fetch, log: l });
+    try {
+      const first = centralPolicy();
+      expect(first?.etag).toBe('"v1"');
+      expect(await puller.pull()).toBe('rejected');
+      expect(pulledBytes).toBeLessThanOrEqual(
+        MAX_BUNDLE_BYTES + 2 * 1024 * 1024
+      );
+      expect(cancels).toBe(1);
+      expect(l.error.mock.calls.at(-1)[0]).toContain(
+        `larger than ${MAX_BUNDLE_BYTES} bytes`
+      );
+      const read = pulledBytes;
+      // Same ETag again: cancelled without reading the body.
+      expect(await puller.pull()).toBe('rejected');
+      expect(pulledBytes - read).toBeLessThanOrEqual(1024 * 1024);
+      expect(cancels).toBe(2);
+      expect(centralPolicy()).toBe(first);
+      expect(l.error).toHaveBeenCalledTimes(1);
     } finally {
       puller.stop();
     }
