@@ -3239,10 +3239,12 @@ components:
         `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
         the gateway's PS_OIDC_POLICY format), `rate_limits` v1
         (`{"version": 1, "on_store_error": "open"|"closed", "rules": [...]}`,
-        the gateway's PS_RATE_LIMITS format) and `prices` v1 (negotiated
-        model prices, tenant-scope policies only; see `PriceSection`).
-        Reserved for later: `guardrails`, `pseudonymisation`, `budgets`.
-        See docs/guides/central-policy.mdx and docs/guides/negotiated-prices.mdx.
+        the gateway's PS_RATE_LIMITS format), `guardrails` v1
+        (`{"version": 1, "rules": [...], "stream_window_chars": N}`, see
+        docs/guides/guardrails.mdx) and `prices` v1 (negotiated model
+        prices, tenant-scope policies only; see `PriceSection`). Reserved
+        for later: `pseudonymisation`, `budgets`. See
+        docs/guides/central-policy.mdx and docs/guides/negotiated-prices.mdx.
       properties:
         schema:
           type: string

@@ -21,16 +21,24 @@
  *     telemetry cost and ps_gateway_cost_usd_total.
  *   - `rate_limits` v1 (#344): request and token rate limits; replaces
  *     PS_RATE_LIMITS / PS_RATE_LIMITS_FILE (../psRateLimit).
+ *   - `guardrails` v1 (#349): checks the gateway runs on every model call
+ *     (../psGuardrails).
  * A section the central policy does not have falls back to the local
  * setting. Team and project entries are validated (so a bad one never
- * becomes active later). Only their `rate_limits` sections are applied, to
- * calls that name the team or project in X-PS-Team / X-PS-Project, and only
- * on top of the tenant's (a header can add limits, never remove one): the
- * gateway does not otherwise know a caller's team.
+ * becomes active later). Only their `rate_limits` and `guardrails`
+ * sections are applied, to calls that name the team or project in
+ * X-PS-Team / X-PS-Project, and only on top of the tenant's (a header can
+ * add limits or guardrails, never remove one): the gateway does not
+ * otherwise know a caller's team.
  */
 import { parsePolicy, OidcPolicy } from '../psOidc/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
 import { RoutePolicy } from '../router/types';
+import {
+  combineSections,
+  GuardrailsSection,
+  parseGuardrailsSection,
+} from '../psGuardrails/config';
 import { PriceBook, parsePricesSection } from './prices';
 import { parseRateLimitSection, RateLimitConfig } from '../psRateLimit/config';
 
@@ -40,6 +48,7 @@ export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
+  guardrails: [1],
   prices: [1],
   rate_limits: [1],
 };
@@ -75,6 +84,12 @@ export interface CentralPolicy {
   etag?: string;
   route?: RoutePolicy;
   access?: OidcPolicy;
+  /** The tenant-wide guardrails (#349). */
+  guardrails?: GuardrailsSection;
+  /** Team guardrails (the tenant's included) by team id and by team name. */
+  teamGuardrails?: Map<string, GuardrailsSection>;
+  /** Project guardrails (its team's included) by project id and name. */
+  projectGuardrails?: Map<string, GuardrailsSection>;
   prices?: PriceBook;
   /** `rate_limits` of the tenant, its teams and projects. */
   rateLimits?: CentralRateLimits;
@@ -90,6 +105,7 @@ const isObject = (v: unknown): v is Record<string, any> =>
 interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
+  guardrails?: GuardrailsSection;
   prices?: PriceBook;
   rateLimits?: RateLimitLayer;
   ignored: string[];
@@ -134,6 +150,8 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
       } else if (name === 'access') {
         const { version: _v, ...rest } = body;
         out.access = parsePolicy(rest);
+      } else if (name === 'guardrails') {
+        out.guardrails = parseGuardrailsSection(body, version ?? undefined);
       } else if (name === 'prices') {
         out.prices = parsePricesSection(body);
       } else if (name === 'rate_limits') {
@@ -156,6 +174,8 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
   const tenant = parseEffective('$.tenant', raw.tenant);
   let teams = 0;
   let projects = 0;
+  const teamGuardrails = new Map<string, GuardrailsSection>();
+  const projectGuardrails = new Map<string, GuardrailsSection>();
   const rateLimits: CentralRateLimits = {
     ...(tenant.rateLimits ? { tenant: tenant.rateLimits } : {}),
     teams: {},
@@ -183,6 +203,18 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
           ...layer,
         };
       }
+      if (parsed.guardrails) {
+        const index = label === 'team' ? teamGuardrails : projectGuardrails;
+        const name = (eff as any).name;
+        for (const ref of typeof name === 'string' && name ? [id, name] : [id])
+          index.set(
+            ref,
+            combineSections([
+              index.get(ref),
+              parsed.guardrails,
+            ]) as GuardrailsSection
+          );
+      }
     }
   }
   return {
@@ -192,6 +224,9 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     access: tenant.access,
     prices: tenant.prices,
     rateLimits,
+    guardrails: tenant.guardrails,
+    teamGuardrails: teamGuardrails.size ? teamGuardrails : undefined,
+    projectGuardrails: projectGuardrails.size ? projectGuardrails : undefined,
     ignored: tenant.ignored,
     teams,
     projects,
@@ -217,6 +252,31 @@ export function centralAccessPolicy(): OidcPolicy | undefined {
 /** The negotiated prices from the central `prices` section, if any. */
 export function centralPriceBook(): PriceBook | undefined {
   return active?.prices;
+}
+
+/**
+ * The guardrails for a call (#349): the tenant's, plus those of the team
+ * and project it names (by id or exact name), added up. Undefined when
+ * none apply.
+ */
+export function centralGuardrails(
+  team?: string,
+  project?: string
+): GuardrailsSection | undefined {
+  if (!active) return undefined;
+  return combineSections([
+    active.guardrails,
+    team ? active.teamGuardrails?.get(team) : undefined,
+    project ? active.projectGuardrails?.get(project) : undefined,
+  ]);
+}
+
+/** Whether the active central policy has guardrails at any level. */
+export function hasCentralGuardrails(): boolean {
+  return !!(
+    active &&
+    (active.guardrails || active.teamGuardrails || active.projectGuardrails)
+  );
 }
 
 /**

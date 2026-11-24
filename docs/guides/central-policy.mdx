@@ -17,7 +17,9 @@ This is the first part of #340. The collector stores team and project
 policies and compiles them, and gateways validate them, but gateways apply
 only the tenant-wide policy today: they do not yet know which team a caller
 is in. Per-group rules work now through the `access` section's
-identity-provider groups.
+identity-provider groups. The `guardrails` section is the exception: its
+team and project rules are added to the tenant's for calls that name the
+team or project.
 </Note>
 
 ## The policy document
@@ -59,10 +61,11 @@ section has its own format version:
 | `route` | 1 | `policy`: a [`route-policy.v1`](/guides/routing) document, the same as `PS_ROUTE_POLICY_FILE` | The gateway router: model groups, sensitivity levels and the fail-closed data policy |
 | `access` | 1 | `default` and `groups`, the [`PS_OIDC_POLICY`](/guides/gateway-oidc) format: providers, models, MCP servers and tools, and rate limits per identity-provider group | Gateway OIDC authentication (needs `PS_OIDC_ENABLED=true`) |
 | `rate_limits` | 1 | `on_store_error` and `rules`, the [`PS_RATE_LIMITS`](/guides/gateway-rate-limits) format: requests, tokens, daily tokens and concurrency per tenant, virtual key, team, project or user | The gateway's rate limiter. A team's or project's `rate_limits` apply on top of the tenant's, never instead of them |
+| `guardrails` | 1 | `rules`: PII, secret and prompt-injection checks on input and output with `deny`, `redact` or `log`; see [Policy Guardrails](/guides/guardrails). Added up across tenant, team and project rather than replaced | The gateway on every model call, whatever guardrails the caller sends |
 | `prices` | 1 | `currency`, `usd_per_unit` and `overrides`: [negotiated prices](/guides/negotiated-prices) per provider and model, effective-dated. Tenant-scope policies only | The gateway's telemetry cost and cost metric, and the collector at ingest |
 
 Sections planned by other work items are reserved and refused until they ship:
-`guardrails`, `pseudonymisation`, `budgets`. Unknown
+`pseudonymisation`, `budgets`. Unknown
 sections are refused too, so nothing is stored that nothing enforces.
 
 **Extending it.** A section changes incompatibly only by adding a new version
@@ -217,8 +220,8 @@ loopback or private address must be listed in `TRUSTED_CUSTOM_HOSTS`.
 
 - Gateways apply team and project policies: this needs the caller's team
   (from SSO/SCIM group mapping or virtual keys).
-- Sections for guardrails and pseudonymisation
-  (#349, #350).
+- Sections for pseudonymisation (#350). Guardrails (#349) are a section
+  now; gateways apply the guardrails of the team and project a call names.
 - A gateway that starts while the collector is down uses its local settings
   until the first successful pull; the last good policy is not persisted
   across restarts.
