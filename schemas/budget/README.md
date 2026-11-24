@@ -1,8 +1,9 @@
 # Spend budgets (budget.v1)
 
 One budget document and one counter format, shared by every enforcement
-point: the SDK (`ShieldsRouter`, the plain clients) and the gateway's shared
-store (#28). An enforcement point that follows this page reads and writes
+point: the SDK (`ShieldsRouter`, the plain clients, #29), the gateway's shared
+store (#28) and the central policy's `budgets` section (#340), whose
+`budgets` list holds the same budget objects. An enforcement point that follows this page reads and writes
 the same counters as the others, so a Redis shared by the SDK and the
 gateway gives one spend total per subject.
 
@@ -27,10 +28,11 @@ gateway gives one spend total per subject.
 
 | Field | Meaning |
 |---|---|
-| `scope` | `business_unit` (`X-PS-Business-Unit`), `use_case` (`X-PS-Use-Case`), `owner` (`X-PS-Owner`; team budgets), or `global` (every call, no `subject`). |
+| `scope` | `business_unit` (`X-PS-Business-Unit`), `use_case` (`X-PS-Use-Case`), `owner` (`X-PS-Owner`), `team` (`X-PS-Team`; SDK `ps_metadata.team`), `project` (`X-PS-Project`; SDK `ps_metadata.project`), `user` (a hashed user id: the gateway's verified OIDC subject hash, the SDK's `hash_user_id(ps_metadata.user_id)`; never the raw id), `service` (`X-PS-Service`; SDK `calling_service`), `model` (the model the caller requested), or `global` (every call, no `subject`; with one `namespace` per tenant, the tenant's budget). |
 | `subject` | The attribute value, compared exactly. `*` gives every value its own counter. A call without the attribute never matches a non-global budget. |
 | `window` | `day` (00:00 UTC), `week` (ISO week, Monday 00:00 UTC), `month` (calendar month, UTC). |
-| `mode` | `warn`, `downgrade` or `block` (below). |
+| `limit_usd` / `limit_tokens` | Exactly one. `limit_tokens` counts input plus output tokens as the provider reports them; a token budget's mode is `warn` or `block`. |
+| `mode` | `warn`, `downgrade` (USD budgets) or `block` (below). |
 | `warn_at` | Fraction of `limit_usd` from which the state is `warn` (default 0.8). |
 | `downgrade_model` | Only for plain SDK clients, which do not route: the model used once a downgrade budget is exhausted, when the client opts in with `allow_budget_downgrade=True` (the switch is not checked against any data policy). Routers ignore it. |
 | `on_store_error` | `open` (default) or `closed` (below). |
@@ -39,12 +41,15 @@ gateway gives one spend total per subject.
 
 ```
 ps:budget:v1:{namespace}:{scope}:{subject}:{window}:{period}
+ps:budget:v1:{namespace}:{scope}:{subject}:{window}:{period}:tokens
 ```
 
 - `ps:budget:v1` is fixed; `v1` is the key format's version.
 - `namespace`: the document's `namespace` (default `default`). Use one per
   tenant in a shared Redis.
-- `scope`: `global`, `business_unit`, `use_case` or `owner`.
+- `scope`: one of the scopes above.
+- `:tokens` is appended to a token budget's counter; a USD counter has no
+  suffix (see the `token-counter-suffix` vector).
 - `subject`: the call's attribute value, or `_` for `global`.
 - `window`: `day`, `week` or `month`.
 - `period`: the UTC window containing the call: `YYYY-MM-DD`, `YYYY-Www`
@@ -54,8 +59,8 @@ ps:budget:v1:{namespace}:{scope}:{subject}:{window}:{period}
   JavaScript's `encodeURIComponent`, which leaves `!'()*` alone; see the
   `subject-percent-encoded` vector.
 
-The key holds the subject's spend in USD for that window, as a Redis string
-written with `INCRBYFLOAT`. It does not name a budget, so budgets with the
+The key holds the subject's spend in USD (or tokens) for that window, as a
+Redis string written with `INCRBYFLOAT`. It does not name a budget, so budgets with the
 same scope, subject and window (in any document, or with different limits)
 share one counter: the counter is the spend, a budget is a limit on it. A
 call's cost is added once to each distinct key among its matching budgets.
@@ -77,6 +82,18 @@ return v
 ```
 
 Reads are `MGET` of the matching keys; a missing key is 0.
+
+**Reservations.** Enforcement points that reserve (the gateway and the SDK's
+built-in stores) hold each call's pre-call estimate in a sorted set at
+`{<counter key>}:res` (the braces make the counter key the Redis Cluster hash
+tag), one member `<call id>|<amount>` scored by its expiry in epoch ms. A
+read is the counter plus the live reservations (expired members dropped). A
+block budget's reservation is refused, atomically, when counter plus
+reservations already reach its limit. After the call one script drops the
+member and adds the actual amount with the increment above, and returns the
+counter's new value; a failed call drops it and adds nothing. The scripts are
+in `gateway/src/middlewares/psBudget/store.ts` and
+`packages/sdk/prompt_shields/budgets.py`.
 
 ## Decision
 
@@ -109,9 +126,21 @@ Before a call, read the counter of every matching budget.
   data-policy enforcement is unaffected and stays fail-closed. Choose
   `closed` when overspend is worse than an outage.
 
-After the call, add its cost to each distinct key. A failed write never
-fails the call. Calls in flight at once do not see each other's cost, so a
-limit can be overshot by the calls running when it is reached.
+Before sending, reserve the call's estimate on each distinct key (USD on USD
+keys, tokens on token keys); a refused block reservation refuses the call
+like an exhausted budget. After the call, settle each key with the call's
+actual cost or tokens (the estimate when unknown). A failed write never
+fails the call. A limit can be overshot by the difference between the
+admitted calls' estimates and their actual usage (or, on a store without
+reservations, by the calls running when it is reached).
+
+**Threshold notifications.** When a write moves a counter from `before` to
+`after` across `warn_at` x limit or the limit (`before < threshold <=
+after`), the writer reports it once: the gateway as
+`ps_gateway_budget_threshold_crossings_total`, a `ps.budget` log line and an
+optional signed webhook; the SDK through `BudgetEnforcer(on_threshold=...)`
+and a log warning. The write is atomic, so only one writer sees each
+crossing.
 
 ## Telemetry
 

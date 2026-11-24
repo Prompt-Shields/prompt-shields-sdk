@@ -201,13 +201,16 @@ function describe(policy: CentralPolicy): string {
   ];
   if (policy.route) parts.push('route policy');
   if (policy.access) parts.push('access policy');
+  if (policy.budgets) parts.push(`${policy.budgets.budgets.length} budget(s)`);
   if (policy.rateLimits?.tenant)
     parts.push(
       `${policy.rateLimits.tenant.config.rules.length} rate-limit rule(s)`
     );
+  if (policy.guardrails)
+    parts.push(`${policy.guardrails.rules.length} guardrail rules`);
   if (policy.teams || policy.projects)
     parts.push(
-      `${policy.teams} team / ${policy.projects} project policies (validated; only their rate limits apply)`
+      `${policy.teams} team / ${policy.projects} project policies (validated; only their rate limits and guardrails apply)`
     );
   if (policy.ignored.length)
     parts.push(`not enforced here: ${policy.ignored.join(', ')}`);
