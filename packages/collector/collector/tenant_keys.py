@@ -29,7 +29,10 @@ upgrade; holding them is what makes a key "full". ``policy:read`` is never
 granted implicitly (not by migration, not to a legacy key): the compiled
 policy names the tenant's teams, projects and identity-provider groups, and
 ingest keys also live in SDK clients, so the gateway's key is issued with it
-explicitly. A key issued since holds
+explicitly. ``virtual-keys:resolve`` (#343, POST
+/api/v1/virtual-keys/resolve) returns decrypted inference keys to the
+gateway; like ``policy:read`` it is never granted implicitly and is meant
+for the gateway's key only. A key issued since holds
 ``ingest:write`` unless more are asked for. Only a key holding every scope
 can act on the tenant admin API (collector.admin_auth), because that is
 what an ingest key could do before scopes existed.
@@ -66,6 +69,7 @@ INGEST_WRITE = "ingest:write"
 REGISTRY_READ = "registry:read"
 REGISTRY_ATTEST = "registry:attest"
 POLICY_READ = "policy:read"
+VIRTUAL_KEYS_RESOLVE = "virtual-keys:resolve"
 # credential_creators.credential_type for ingest keys (#396).
 CREDENTIAL_TYPE = "tenant_api_key"
 
@@ -77,6 +81,10 @@ KEY_SCOPES: dict[str, str] = {
         "Read the tenant's compiled governance policy (GET /api/v1/policy/effective); "
         "the gateway's policy pull credential"
     ),
+    VIRTUAL_KEYS_RESOLVE: (
+        "Resolve gateway virtual keys to their binding and decrypted credential "
+        "pool (POST /api/v1/virtual-keys/resolve); the gateway's credential only"
+    ),
 }
 # The scopes every key held before scopes existed (#341). A key holding
 # all of them is a "full" key: it may reach the tenant admin API while
@@ -84,7 +92,8 @@ KEY_SCOPES: dict[str, str] = {
 # scopes added later (policy:read, #340) do not change what "full" means.
 ALL_KEY_SCOPES: frozenset[str] = frozenset({INGEST_WRITE, REGISTRY_READ, REGISTRY_ATTEST})
 # What a legacy tenant-row key holds: the scopes from before #340, not
-# policy:read (issued explicitly, to the gateway's key only).
+# policy:read or virtual-keys:resolve (issued explicitly, to the gateway's
+# key only).
 LEGACY_KEY_SCOPES: frozenset[str] = ALL_KEY_SCOPES
 # What a newly issued key holds unless more are asked for.
 DEFAULT_KEY_SCOPES: tuple[str, ...] = (INGEST_WRITE,)

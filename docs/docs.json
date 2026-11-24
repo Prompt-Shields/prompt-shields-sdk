@@ -78,6 +78,7 @@
         "guides/agent-traces",
         "guides/alert-runbooks",
         "guides/gateway-oidc",
+        "guides/gateway-virtual-keys",
         "guides/central-policy",
         "guides/guardrails",
         "guides/gateway-rate-limits",

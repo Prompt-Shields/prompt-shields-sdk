@@ -22,6 +22,7 @@ import { PSTelemetrySender } from './psTelemetrySender';
 import { isMcpProxyPath } from '../mcp/paths';
 import { stripPSInternalHeaders } from '../utils/psInternalHeaders';
 import { oidcTelemetryFields } from './psOidc/telemetry';
+import { virtualKeyTelemetryFields } from './psVirtualKeys';
 import {
   CALL_ID_HEADER,
   callIdOf,
@@ -155,7 +156,8 @@ interface TelemetryEvent {
   usage_source?: string;
   // Stable fingerprint of the upstream credential's identity (#76), only
   // with PS_TELEMETRY_CREDENTIAL_FINGERPRINT=true; see
-  // utils/credentialFingerprint.ts. Never a key or token.
+  // utils/credentialFingerprint.ts. Never a key or token. A call made with a
+  // virtual key (#343) always carries its serving pool credential's.
   api_key_fingerprint?: string;
   // OIDC (PS_OIDC_ENABLED): the caller's pseudonymous subject and the name
   // of the gateway policy group that applied. See psOidc/telemetry.ts.
@@ -673,6 +675,7 @@ export function budgetBlockedEvent(
     api_surface: apiSurfaceOf(path),
     modality: modalityOf(path),
     ...extractPSHeaders(headers),
+    ...virtualKeyTelemetryFields(c),
     ...oidcTelemetryFields(c.get(OIDC_IDENTITY_KEY)),
     call_id: callIdOf(c),
     budget_state: opts.state,
@@ -912,6 +915,7 @@ export function psTelemetry() {
         ...usageUnits(path, responseBody, requestBody),
         latency_ms: Date.now() - startTime,
         ...psHeaders,
+        ...virtualKeyTelemetryFields(c),
         ...oidcTelemetryFields(c.get(OIDC_IDENTITY_KEY)),
         call_id: callId,
       };

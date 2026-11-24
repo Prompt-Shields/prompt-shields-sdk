@@ -33,16 +33,20 @@
  * headers of the same name).
  *
  * Scopes: `global` (every call), `user` (the verified OIDC subject; needs
- * PS_OIDC_ENABLED), `virtual_key` (x-portkey-virtual-key, else a SHA-256
+ * PS_OIDC_ENABLED), `virtual_key` (the id of the Prompt Shields virtual key
+ * the call was resolved with, #343; else x-portkey-virtual-key, else a SHA-256
  * fingerprint of the caller's provider key: Authorization bearer, x-api-key
  * or api-key), `team` / `project` (X-PS-Team / X-PS-Project). Like budgets,
  * the X-PS-* headers are declared by the caller, not authenticated: a rule
  * on them is attribution, and a caller that omits the header is not counted
- * by it. Subjects are hashed before they reach the store.
+ * by it, except on a call made with a Prompt Shields virtual key, whose
+ * binding sets them (psVirtualKeys). Subjects are hashed before they reach
+ * the store.
  */
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
 import { isMcpProxyPath } from '../../mcp/paths';
+import { virtualKeyOfContext } from '../psVirtualKeys';
 import { RESPONSE_HEADER_KEYS } from '../../globals';
 import { oidcIdentityOf } from '../psOidc/identity';
 import { providerFromHeaders, usageTokens } from '../ps-telemetry';
@@ -360,7 +364,12 @@ export function psRateLimit(options: PsRateLimitOptions = {}) {
     } catch {
       user = undefined;
     }
-    const virtualKey = await keySubject(headers);
+    // PS fork (#343): a resolved Prompt Shields virtual key is the subject
+    // (by id), from the context psVirtualKeys set, never from a header.
+    const resolvedKey = virtualKeyOfContext(c)?.virtualKey.id;
+    const virtualKey = resolvedKey
+      ? `vk:${resolvedKey}`
+      : await keySubject(headers);
     const route = c.get('psRoute');
     const call: CallAttributes = {
       model:

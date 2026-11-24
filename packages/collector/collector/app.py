@@ -215,6 +215,15 @@ from collector.credential_vault_api import router as credential_vault_router
 
 app.include_router(credential_vault_router)
 
+# Gateway virtual keys and credential pools (#343): admin CRUD
+# (admin:virtual-keys) and gateway resolution (/api/v1/virtual-keys/resolve,
+# ingest key virtual-keys:resolve)
+from collector.virtual_keys_api import gateway_router as virtual_keys_gateway_router
+from collector.virtual_keys_api import router as virtual_keys_admin_router
+
+app.include_router(virtual_keys_admin_router)
+app.include_router(virtual_keys_gateway_router)
+
 # Platform signal: cloud AI inventory (admin trigger)
 from collector.cloud_inventory import router as cloud_inventory_router
 from collector.cloud_inventory_import import router as cloud_inventory_import_router

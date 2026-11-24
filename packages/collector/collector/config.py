@@ -167,6 +167,13 @@ class Settings(BaseSettings):
     # `credential_vault rewrap` moves to a new vault. Unwrap is otherwise
     # pinned to PS_AZURE_KEYVAULT_KEY_ID's vault and key name.
     azure_keyvault_unwrap_key_ids: str = ""
+    # Virtual keys (#343): how long a credential decrypted for
+    # POST /api/v1/virtual-keys/resolve stays in this process's memory, so
+    # gateways re-resolving every 30 s do not unwrap (and audit) each key
+    # every time. Keyed to the row's ciphertext and data key, so a rotation
+    # or rewrap is picked up at once; status (disabled, expired) is checked
+    # on every resolve. 0 disables the cache.
+    virtual_key_credential_cache_seconds: int = 300
     # Dev/test only: allow http:// targets; private destinations (RFC 1918,
     # ULA, CGNAT; never loopback, link-local or cloud metadata); loopback
     # destinations (127.0.0.0/8, ::1) for a receiver on the same host.

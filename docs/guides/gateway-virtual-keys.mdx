@@ -1,0 +1,145 @@
+---
+title: Virtual Keys
+description: Give callers a revocable gateway key instead of provider keys; the gateway uses a pool of vaulted credentials and fails over between them
+---
+
+# Virtual Keys
+
+A **virtual key** (`ps-vk-...`) is what a team, project or service account
+holds instead of a provider key. The gateway resolves it with the
+collector, sends the provider a key from the virtual key's **credential
+pool** (keys stored in the [inference credential vault](/api-reference)),
+and attributes the call to the key's team, project and principal. The
+provider key never leaves the gateway's memory: it is not in responses,
+errors, logs or telemetry.
+
+<Note>
+First slice of #343. Shipped: issuing and revoking keys, binding,
+per-key model allowlists, pools with `round_robin` and
+`least_recently_limited`, 429/401/403 failover between a provider's
+credentials, telemetry attribution and the serving credential's
+fingerprint. Not yet: per-key limits and budgets set on the key itself (use
+the central policy's `rate_limits` with `scope: virtual_key` and the key id,
+or team/project budgets, which now hold because the key sets the team),
+`/v1/realtime` and configs (`x-portkey-config`) with virtual keys, and
+pool state shared between replicas.
+</Note>
+
+## 1. Store provider keys in the vault
+
+```bash
+curl -X POST "$COLLECTOR/api/v1/admin/inference-credentials" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"provider": "openai", "label": "prod-1", "api_key": "sk-..."}'
+```
+
+Store several per provider (different labels, ideally different provider
+projects or organisations) to have something to fail over to.
+
+## 2. Issue a virtual key
+
+Needs an admin token with `admin:virtual-keys` (the owner and admin roles
+hold it; ingest keys never reach it).
+
+```bash
+curl -X POST "$COLLECTOR/api/v1/admin/virtual-keys" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{
+    "name": "checkout-service",
+    "project_id": "0190...",
+    "principal_id": "0190...",
+    "credential_ids": ["<openai prod-1>", "<openai prod-2>", "<anthropic prod-1>"],
+    "allowed_models": ["gpt-4o*", "claude-sonnet-*"],
+    "strategy": "round_robin",
+    "expires_at": "2027-06-30T00:00:00Z"
+  }'
+```
+
+The response holds the key (`"key": "ps-vk-..."`) once; the collector keeps
+only its SHA-256. Fields:
+
+| Field | Meaning |
+|---|---|
+| `team_id`, `project_id` | Where calls are attributed. A project carries its team (its current team, if it moves). Fixed at issue: issue a new key to change them. |
+| `principal_id` | The person or service account the key belongs to. While the principal is disabled the key does not resolve; deleting the principal revokes the key. Calls without an OIDC subject report `user_id` = `principal:<id>` (hashed by the collector like any user id). |
+| `credential_ids` | The pool, in order (1-20 credentials of the tenant). |
+| `allowed_models` | Model names or globs (`*`, `?`, `[...]`); `null` or omitted: any model. Checked on the model each target is actually sent, after routing and `override_params`. |
+| `strategy` | `round_robin` (rotate the first credential per call) or `least_recently_limited` (credentials that never got 429 first, then the one limited longest ago). |
+
+`PATCH /virtual-keys/{id}` changes the name, pool, models, strategy and
+expiry; `POST /virtual-keys/{id}/revoke` revokes; `DELETE` deletes. A team
+or project cannot be deleted while a virtual key is bound to it. Disabling
+or deleting a principal also revokes the virtual keys its tokens issued.
+Every change is on the audit trail (`virtual_key.*`).
+
+## 3. Turn it on in the gateway
+
+Issue the gateway an ingest key with `virtual-keys:resolve` (never granted
+implicitly; it returns decrypted provider keys, so give it to the gateway
+only):
+
+```bash
+curl -X POST "$COLLECTOR/api/v1/admin/api-keys" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"name": "gateway-resolver", "scopes": ["virtual-keys:resolve"]}'
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PS_VIRTUAL_KEYS_ENABLED` | `false` | Resolve `ps-vk-...` keys |
+| `PS_VIRTUAL_KEYS_API_KEY` | `PS_API_KEY` | The ingest key holding `virtual-keys:resolve` |
+| `PS_COLLECTOR_URL` | | The collector. https, or plain http to loopback or an in-cluster name only |
+| `PS_VIRTUAL_KEYS_ALLOW_HTTP` | `false` | Allow plain http to other hosts (development) |
+| `PS_VIRTUAL_KEYS_CACHE_SECONDS` | `30` | How long a replica caches an answer, active or not (0-30) |
+
+Collector: `PS_VIRTUAL_KEY_CREDENTIAL_CACHE_SECONDS` (default 300) is how
+long a decrypted credential stays in the collector's memory. Each decrypt
+writes an `inference_credential.use` audit row (purpose
+`virtual_key:<id>`), so gateways re-resolving every 30 seconds do not flood
+the audit trail. The cache is keyed to the credential's ciphertext, so a
+rotation is served at once, and a credential's status (disabled, expired)
+is read on every resolve.
+
+## 4. Call with the virtual key
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://gateway.example.com/v1", api_key="ps-vk-...")
+client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+```
+
+The key goes in `Authorization: Bearer ps-vk-...`, `x-api-key` (Anthropic
+SDKs) or `X-PS-Virtual-Key`. With [OIDC](/guides/gateway-oidc) on, the IdP
+token stays in `Authorization` and the virtual key goes in
+`X-PS-Virtual-Key`; OIDC still authenticates the user and its subject wins
+as `user_id`. `x-portkey-provider` can be left out when the pool holds one
+provider. Chat Completions, Responses, Messages and the other model
+endpoints work.
+
+## What the gateway does
+
+- **Resolution.** Answers are cached per replica for 30 seconds, keyed by
+  the key's SHA-256: revoking a key, disabling its principal or letting it
+  expire takes effect on every replica within 30 seconds. Unknown, revoked
+  or expired keys get 401 `invalid_virtual_key` and an `auth.failure`
+  security event (realm `virtual_key`). When the collector cannot answer,
+  calls get 503 (fail closed).
+- **Header mode only.** A virtual key cannot be combined with
+  `x-portkey-config`, `x-portkey-custom-host` or URL-valued `x-portkey-*`
+  headers (400), so pooled keys only go to the provider's own endpoint.
+- **Attribution.** `X-PS-Team` and `X-PS-Project` are set from the key's
+  binding and replace whatever the caller sent, so team and project rate
+  limits, budgets and guardrails, and cost attribution, hold. The
+  `virtual_key` rate-limit scope uses the key's id.
+- **Failover.** A 429 from the provider moves the call to the provider's
+  next pool credential, same model, before the router's model fallback or
+  anything else. 401 and 403 move on too and mark the credential unhealthy
+  for 5 minutes (tried last). Streamed request bodies and uploads are not
+  replayed. Pool state is per replica.
+- **Telemetry.** `api_key_fingerprint` is the serving credential's
+  fingerprint (`sha256(key)[:16]`, the vault's `key_fingerprint`), whatever
+  `PS_TELEMETRY_CREDENTIAL_FINGERPRINT` says; each attempt is in `attempts`.
+
+Calls without a virtual key are unchanged: bring-your-own-key header mode
+keeps working.

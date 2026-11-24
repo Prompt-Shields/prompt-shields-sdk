@@ -50,11 +50,13 @@ from collector import (
     tenant_limits,
     traces,
     user_erasure,
+    virtual_keys_api,
     webhook_admin,
     webhooks,
 )
 from collector import credential_vault as cv
 from collector import provider_credentials as pc
+from collector import virtual_keys as vk
 from collector.admin_auth import ADMIN_SCOPES, serialize_token
 from collector.app import app
 from fastapi.routing import APIRoute
@@ -199,6 +201,9 @@ def test_webhook_schemas_match_serializers():
         ("ActivatePolicyRequest", policies_api.ActivateBody),
         ("PutPayloadLoggingRequest", payload_logging.PayloadLoggingBody),
         ("PutLegalHoldRequest", payload_logging.LegalHoldBody),
+        ("CreateVirtualKeyRequest", virtual_keys_api.CreateVirtualKeyBody),
+        ("UpdateVirtualKeyRequest", virtual_keys_api.UpdateVirtualKeyBody),
+        ("ResolveVirtualKeyRequest", virtual_keys_api.ResolveVirtualKeyBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -346,6 +351,62 @@ def test_inference_credential_schema_matches_serializer():
         assert SCHEMAS[name]["properties"]["api_key"]["writeOnly"] is True
 
 
+def test_virtual_key_schemas_match_serializer():
+    now = datetime.now(UTC)
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="svc",
+        key_hint="abcd",
+        key_hash="0" * 64,
+        team_id=None,
+        project_id=None,
+        principal_id=None,
+        allowed_models=None,
+        strategy=vk.ROUND_ROBIN,
+        created_by="operator",
+        expires_at=None,
+        revoked_at=None,
+        created_at=now,
+        updated_at=None,
+        last_resolved_at=None,
+    )
+    cred = SimpleNamespace(
+        id=uuid.uuid4(),
+        provider="openai",
+        label="prod",
+        key_fingerprint="0" * 16,
+        expires_at=None,
+        disabled_at=None,
+    )
+    out = vk.serialize(row, [cred])
+    keys = set(out)
+    assert _props("VirtualKey") == keys == set(SCHEMAS["VirtualKey"]["required"])
+    assert "key_hash" not in keys and "key" not in keys
+    pool_item = SCHEMAS["VirtualKey"]["properties"]["credentials"]["items"]
+    assert set(pool_item["properties"]) == set(out["credentials"][0]) == set(
+        pool_item["required"]
+    )
+    assert SCHEMAS["VirtualKey"]["properties"]["status"]["enum"] == [
+        vk.ACTIVE,
+        vk.REVOKED,
+        vk.EXPIRED,
+    ]
+    assert SCHEMAS["VirtualKey"]["properties"]["strategy"]["enum"] == list(vk.STRATEGIES)
+    assert _props("VirtualKeyWithSecret") == keys | {"key", "warning"}
+    assert SCHEMAS["ResolveVirtualKeyRequest"]["properties"]["key"]["writeOnly"] is True
+    resolution = SCHEMAS["VirtualKeyResolution"]
+    assert set(resolution["properties"]) == {
+        "active",
+        "reason",
+        "cache_ttl_seconds",
+        "virtual_key",
+        "credentials",
+        "unavailable_credentials",
+    }
+    op = SPEC["paths"]["/api/v1/virtual-keys/resolve"]["post"]
+    assert op["security"] == [{"TenantApiKey": []}]
+
+
 def test_provider_credential_partner_routes_need_the_scope():
     for path, item in SPEC["paths"].items():
         if not path.startswith("/partner/v1/provider-"):
@@ -414,6 +475,7 @@ ADMIN_ROUTERS = (
     sso_admin.router,
     policies_api.router,
     payload_logging.admin_router,
+    virtual_keys_api.router,
 )
 
 

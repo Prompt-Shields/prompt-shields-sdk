@@ -56,6 +56,11 @@ import {
   maybeInjectStreamUsage,
 } from '../middlewares/psStreamUsage';
 import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
+import {
+  virtualKeyOfContext,
+  virtualKeyTargetDenied,
+  withPoolCredentials,
+} from '../middlewares/psVirtualKeys';
 import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 import {
   isSafeUpstreamURL,
@@ -369,6 +374,58 @@ export function convertHooksShorthand(
  * fallback or load-balance configs use native passthrough where available.
  */
 export async function tryPost(
+  c: Context,
+  providerOption: Options,
+  requestBody: Params | FormData | ArrayBuffer | ReadableStream,
+  requestHeaders: Record<string, string>,
+  fn: endpointStrings,
+  currentIndex: number | string,
+  method: string = 'POST'
+): Promise<Response> {
+  // PS fork (#343): a call made with a virtual key (psVirtualKeys) is sent
+  // with its pool's credentials for this target's provider, failing over to
+  // the next one on 401/403/429 before anything else changes; the key's
+  // model allowlist and provider set are checked on what this target sends.
+  if (!virtualKeyOfContext(c))
+    return tryPostOnce(
+      c,
+      providerOption,
+      requestBody,
+      requestHeaders,
+      fn,
+      currentIndex,
+      method
+    );
+  const vkDenied = virtualKeyTargetDenied(
+    c,
+    providerOption.provider,
+    targetModels(providerOption, requestBody),
+    MODEL_ENDPOINTS.has(fn)
+  );
+  if (vkDenied) return vkDenied;
+  const replayable = !(
+    requestBody instanceof ReadableStream || requestBody instanceof FormData
+  );
+  return withPoolCredentials(
+    c,
+    providerOption.provider,
+    replayable,
+    (credential) =>
+      tryPostOnce(
+        c,
+        credential
+          ? { ...providerOption, apiKey: credential.api_key }
+          : providerOption,
+        requestBody,
+        requestHeaders,
+        fn,
+        currentIndex,
+        method
+      )
+  );
+}
+
+async function tryPostOnce(
   c: Context,
   providerOption: Options,
   requestBody: Params | FormData | ArrayBuffer | ReadableStream,

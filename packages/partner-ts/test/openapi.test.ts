@@ -501,6 +501,13 @@ const UNMAPPED_SCHEMAS = new Set([
   'CreateInferenceCredentialRequest',
   'RotateInferenceCredentialRequest',
   'UpdateInferenceCredentialRequest',
+  // Virtual keys (#343): tenant admin and gateway resolution, not partner API.
+  'VirtualKey',
+  'VirtualKeyWithSecret',
+  'CreateVirtualKeyRequest',
+  'UpdateVirtualKeyRequest',
+  'ResolveVirtualKeyRequest',
+  'VirtualKeyResolution',
 ]);
 
 interface Operation {
@@ -638,6 +645,13 @@ const OPERATIONS: Record<string, Operation> = {
   'PATCH /api/v1/admin/inference-credentials/{credential_id}': NOT_WRAPPED,
   'DELETE /api/v1/admin/inference-credentials/{credential_id}': NOT_WRAPPED,
   'POST /api/v1/admin/inference-credentials/{credential_id}/rotate': NOT_WRAPPED,
+  'GET /api/v1/admin/virtual-keys': NOT_WRAPPED,
+  'POST /api/v1/admin/virtual-keys': NOT_WRAPPED,
+  'GET /api/v1/admin/virtual-keys/{key_id}': NOT_WRAPPED,
+  'PATCH /api/v1/admin/virtual-keys/{key_id}': NOT_WRAPPED,
+  'DELETE /api/v1/admin/virtual-keys/{key_id}': NOT_WRAPPED,
+  'POST /api/v1/admin/virtual-keys/{key_id}/revoke': NOT_WRAPPED,
+  'POST /api/v1/virtual-keys/resolve': NOT_WRAPPED,
   'GET /api/v1/admin/principals': NOT_WRAPPED,
   'POST /api/v1/admin/principals': NOT_WRAPPED,
   'GET /api/v1/admin/principals/{principal_id}': NOT_WRAPPED,

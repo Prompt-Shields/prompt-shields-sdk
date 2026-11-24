@@ -37,6 +37,7 @@ import { logHandler } from './middlewares/log';
 import { metricsHandler, psMetrics } from './middlewares/psMetrics';
 import { psSecurityEvents } from './middlewares/psSecurityEvents';
 import { psOidc } from './middlewares/psOidc';
+import { psVirtualKeys } from './middlewares/psVirtualKeys';
 import { psGuardrails } from './middlewares/psGuardrails';
 import { version } from '../package.json';
 import { payloadSizeValidatorMiddleware } from './middlewares/payloadSizeValidator';
@@ -149,6 +150,15 @@ app.use('*', psMetrics());
 // Mounted before anything reads the body, and it removes the IdP token from
 // the request so it can never be forwarded to a provider.
 app.use('*', psOidc());
+
+// Virtual keys (#343, opt-in via PS_VIRTUAL_KEYS_ENABLED): a `ps-vk-...` key
+// is resolved with the collector (cached 30 s) and replaced, in memory only,
+// by a credential from its pool; its team/project binding replaces the
+// caller-declared X-PS-Team / X-PS-Project. After psOidc (with OIDC on the
+// key comes in X-PS-Virtual-Key), before the router, rate limits, budgets,
+// guardrails and telemetry, which then see the key's attribution. Calls
+// without a virtual key pass through untouched.
+app.use('*', psVirtualKeys());
 
 // Reject oversized JSON bodies before anything parses them (opt-in via
 // MAX_JSON_PAYLOAD_SIZE_IN_MB). Ported from Portkey 2.0.0.

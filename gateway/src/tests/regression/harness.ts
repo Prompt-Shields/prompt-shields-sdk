@@ -52,6 +52,18 @@ let feedbackResponder:
   | ((body: any) => Response | Promise<Response>)
   | undefined;
 
+/** Requests to the collector's virtual key resolution (#343). */
+export const resolveRequests: { headers: Record<string, string>; body: any }[] =
+  [];
+let resolveResponder: ((body: any) => Response | Promise<Response>) | undefined;
+
+/** Answer /api/v1/virtual-keys/resolve with `respond` until resetHarness(). */
+export function virtualKeyCollector(
+  respond: (body: any) => Response | Promise<Response>
+) {
+  resolveResponder = respond;
+}
+
 /** Answer /ingest/feedback with `respond` until the next resetHarness(). */
 export function feedbackCollector(
   respond: (body: any) => Response | Promise<Response>
@@ -120,6 +132,18 @@ global.fetch = jest.fn(async (input: any, init: any = {}) => {
 }) as any;
 
 async function fakeFetchOnce(url: string, init: any): Promise<Response> {
+  if (url === `${COLLECTOR}/api/v1/virtual-keys/resolve`) {
+    const body = JSON.parse(init.body);
+    resolveRequests.push({ headers: headersOf(init), body });
+    if (resolveResponder) return resolveResponder(body);
+    return new Response(
+      JSON.stringify({ active: false, reason: 'not_found' }),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }
+    );
+  }
   if (url === `${COLLECTOR}/ingest/feedback`) {
     const body = JSON.parse(init.body);
     feedbackRequests.push({ headers: headersOf(init), body });
@@ -181,6 +205,8 @@ export function resetHarness() {
   collectorResponder = undefined;
   feedbackRequests.length = 0;
   feedbackResponder = undefined;
+  resolveRequests.length = 0;
+  resolveResponder = undefined;
 }
 
 export const json = (body: unknown, status = 200) =>
