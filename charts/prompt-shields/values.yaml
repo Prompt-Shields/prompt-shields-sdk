@@ -263,6 +263,9 @@ gateway:
   #   PS_OTEL_ENDPOINT: "http://otel-collector:4318/v1/traces"
   #   PS_CACHE_DEFAULT: "simple"
   #   LOG_LEVEL: "info"
+  #   PS_POLICY_PULL_ENABLED: "true"         # central policy from the collector (#340);
+  #   PS_POLICY_PULL_INTERVAL_SECONDS: "30"  # the key (policy:read) is PS_API_KEY or
+  #                                          # PS_POLICY_PULL_API_KEY in the Secret
   config:
     NODE_ENV: production
     # Hosts exempt from the gateway's SSRF checks (provider custom hosts,

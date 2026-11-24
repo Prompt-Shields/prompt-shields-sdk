@@ -68,6 +68,8 @@ from db.models import (
     OidcLoginState,
     PartnerAuditLog,
     PartnerCredential,
+    Policy,
+    PolicyVersion,
     Principal,
     Project,
     ProviderCredential,
@@ -144,6 +146,9 @@ ERASE_ORDER: tuple[type, ...] = (
     TenantOidcConfig,
     ScimToken,
     IdpGroupRole,
+    # Before the teams and projects a policy may be bound to (#340).
+    PolicyVersion,
+    Policy,
     # After the credentials that may name a principal (#338).
     Membership,
     Project,
