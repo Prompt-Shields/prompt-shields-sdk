@@ -15,6 +15,10 @@ import {
   thresholdCrossings,
   webhookUrlOf,
 } from './notify';
+import {
+  EgressRefusedError,
+  setEgressResolverForTests,
+} from '../../utils/egressGuard';
 import { defaultRegistry } from '../psMetrics/registry';
 import { OIDC_IDENTITY_KEY } from '../psOidc/identity';
 import {
@@ -106,6 +110,7 @@ afterEach(() => {
   setBudgetRuntime(undefined);
   setBudgetStore(undefined);
   setCentralPolicy(undefined);
+  setEgressResolverForTests(null);
   delete process.env.PS_BUDGET_WEBHOOK_URL;
   jest.restoreAllMocks();
 });
@@ -429,6 +434,37 @@ describe('threshold notifications', () => {
         }
       )
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('webhook egress', () => {
+  test('a webhook host resolving to the metadata service is refused without a request', async () => {
+    setEgressResolverForTests(async () => [
+      { address: '169.254.169.254', family: 4 },
+    ]);
+    const fetchSpy = jest.spyOn(globalThis, 'fetch');
+    const warn = console.warn as jest.Mock;
+    const [b] = parseBudgetConfig({
+      schema_version: 'budget.v1',
+      budgets: [budget({ id: 'z', scope: 'global', limit_usd: 1 })],
+    }).budgets;
+    const events = thresholdCrossings(
+      [{ budget: b, subject: '_', period: 'p' }],
+      'n',
+      0,
+      2,
+      NOW
+    );
+    await notifyThresholds(events, {
+      PS_BUDGET_WEBHOOK_URL: 'https://hooks.example.com/budget',
+      PS_BUDGET_WEBHOOK_SECRET: 'never-logged',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const logged = warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain(
+      new EgressRefusedError('hooks.example.com').message
+    );
+    expect(logged).not.toContain('never-logged');
   });
 });
 

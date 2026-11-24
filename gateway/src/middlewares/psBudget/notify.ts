@@ -13,13 +13,16 @@
  *   `Prompt-Shields-Event-Type: budget.threshold_crossed`. One attempt,
  *   5 s timeout, never blocking or failing the call; https only unless
  *   PS_BUDGET_WEBHOOK_ALLOW_HTTP=true, and the host must pass the gateway's
- *   egress check (private hosts need TRUSTED_CUSTOM_HOSTS).
+ *   egress check (private hosts need TRUSTED_CUSTOM_HOSTS). The POST goes
+ *   through `guardedUpstreamFetch` (#377): a name that resolves to a
+ *   link-local or cloud metadata address is refused, and the connection is
+ *   pinned to the checked addresses.
  *
  * The settle is atomic (one Lua script), so with a shared Redis exactly one
  * replica (or SDK process) sees each crossing and reports it.
  */
 import { isSafeUpstreamURL } from '../requestValidator';
-import { upstreamFetch } from '../../utils/fetch';
+import { guardedUpstreamFetch } from '../../utils/egressFetch';
 import { Budget } from './config';
 import { budgetThresholdCrossingsTotal } from './metrics';
 
@@ -153,6 +156,10 @@ export function webhookUrlOf(
 
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
+/** The default webhook fetch: resolved and checked (policy `metadata`). */
+export const webhookFetch: Fetch = (url, init) =>
+  guardedUpstreamFetch(url, init, 'metadata');
+
 async function postWebhook(
   url: string,
   event: BudgetThresholdEvent,
@@ -200,7 +207,7 @@ async function postWebhook(
 export async function notifyThresholds(
   events: BudgetThresholdEvent[],
   env: Record<string, string | undefined>,
-  doFetch: Fetch = upstreamFetch
+  doFetch: Fetch = webhookFetch
 ): Promise<void> {
   if (!events.length) return;
   const url = webhookUrlOf(env);
