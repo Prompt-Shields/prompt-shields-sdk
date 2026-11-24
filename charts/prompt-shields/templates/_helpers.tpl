@@ -281,6 +281,21 @@ lifecycle:
 {{- fail "gateway.budgets.redis.url must not hold credentials (it renders into a ConfigMap): use gateway.budgets.redis.existingSecret" -}}
 {{- end -}}
 {{- end -}}
+{{- $rl := .Values.gateway.rateLimits -}}
+{{- if and .Values.gateway.enabled $rl.enabled -}}
+{{- if not $rl.rules -}}
+{{- fail "gateway.rateLimits.enabled needs at least one entry in gateway.rateLimits.rules" -}}
+{{- end -}}
+{{- if not (has $rl.onStoreError (list "open" "closed")) -}}
+{{- fail "gateway.rateLimits.onStoreError must be open or closed" -}}
+{{- end -}}
+{{- if and $rl.redis.url $rl.redis.existingSecret -}}
+{{- fail "set one of gateway.rateLimits.redis.url and gateway.rateLimits.redis.existingSecret" -}}
+{{- end -}}
+{{- if regexMatch "://[^/]*@" (toString $rl.redis.url) -}}
+{{- fail "gateway.rateLimits.redis.url must not hold credentials (it renders into a ConfigMap): use gateway.rateLimits.redis.existingSecret" -}}
+{{- end -}}
+{{- end -}}
 {{- $c := .Values.collector -}}
 {{- if and $c.enabled $c.probes.readiness.enabled (le (float64 $c.probes.readiness.timeoutSeconds) (float64 $c.readyzTimeoutSeconds)) -}}
 {{- fail "collector.probes.readiness.timeoutSeconds must be above collector.readyzTimeoutSeconds" -}}

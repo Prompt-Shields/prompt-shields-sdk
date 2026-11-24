@@ -37,6 +37,15 @@ info:
     is exhausted, 503 while the IdP's signing keys cannot be fetched. The
     MCP proxy then takes the IdP token in place of `PS_MCP_TOKEN`.
 
+    **Rate limits.** With rate-limit rules (the central policy's
+    `rate_limits` section, or `PS_RATE_LIMITS`), model endpoints answer 429
+    `rate_limit_exceeded` with the rule id and `Retry-After` when a rule's
+    requests, tokens, daily tokens or concurrency are used up (503
+    `rate_limit_store_unavailable` when the shared store is down and the
+    section's `on_store_error` is `closed`), and responses carry
+    `x-ratelimit-limit-*`, `x-ratelimit-remaining-*` and
+    `x-ratelimit-reset-*` for requests and tokens.
+
     **Headers that are not documented on purpose.** Provider credential
     headers (`x-portkey-aws-secret-access-key`, `x-portkey-aws-session-token`,
     `x-portkey-azure-ad-token`, `x-portkey-azure-entra-client-secret`,
@@ -247,6 +256,8 @@ paths:
           $ref: '#/components/responses/RequestTimeout'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -318,6 +329,8 @@ paths:
           $ref: '#/components/responses/RequestTimeout'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -392,6 +405,8 @@ paths:
           $ref: '#/components/responses/RequestTimeout'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -651,6 +666,8 @@ paths:
           $ref: '#/components/responses/RequestTimeout'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -776,6 +793,8 @@ paths:
           $ref: '#/components/responses/RequestTimeout'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -836,6 +855,8 @@ paths:
           $ref: '#/components/responses/RequestTimeout'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
@@ -890,6 +911,8 @@ paths:
           $ref: '#/components/responses/PolicyDenied'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -944,6 +967,8 @@ paths:
           $ref: '#/components/responses/LengthRequired'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -995,6 +1020,8 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/PolicyDenied'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1049,6 +1076,8 @@ paths:
           $ref: '#/components/responses/LengthRequired'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1103,6 +1132,8 @@ paths:
           $ref: '#/components/responses/LengthRequired'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1155,6 +1186,8 @@ paths:
           $ref: '#/components/responses/PolicyDenied'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '502':
           $ref: '#/components/responses/UpstreamRedirect'
         default:
@@ -1891,6 +1924,8 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/PolicyDenied'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -2063,6 +2098,8 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/PolicyDenied'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -2137,6 +2174,8 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/PolicyDenied'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '446':
           $ref: '#/components/responses/GuardrailDenied'
         '500':
@@ -2572,6 +2611,30 @@ components:
         UUID. Name the call by it in `POST /v1/feedback`.
       schema:
         type: string
+    XRateLimitLimitRequests:
+      description: Requests per minute of the tightest rpm rule that applied. Set when a rate-limit policy rule applied to the call (#344); replaces a provider header of the same name.
+      schema:
+        type: string
+    XRateLimitRemainingRequests:
+      description: Requests left in the rolling minute under that rule.
+      schema:
+        type: string
+    XRateLimitResetRequests:
+      description: Time until that rule's request counter is back to full, e.g. `1.5s`, `1m59s`.
+      schema:
+        type: string
+    XRateLimitLimitTokens:
+      description: Tokens (input + output) per minute of the tightest tpm rule that applied. Set when a rate-limit policy rule applied to the call (#344); replaces a provider header of the same name.
+      schema:
+        type: string
+    XRateLimitRemainingTokens:
+      description: Tokens left in the rolling minute under that rule.
+      schema:
+        type: string
+    XRateLimitResetTokens:
+      description: Time until that rule's token counter is back to full.
+      schema:
+        type: string
 
   requestBodies:
     ProxyBody:
@@ -2695,6 +2758,44 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/GatewayFailure'
+    RateLimited:
+      description: |
+        A rate-limit policy rule refused the call (the central policy's
+        `rate_limits` section, or `PS_RATE_LIMITS`): `error.code` is
+        `rate_limit_exceeded` with the rule's `rule_id`, `scope` and `limit`
+        (`rpm`, `tpm`, `tpd` or `concurrency`). No `Retry-After` when the
+        request's estimated tokens exceed the limit on their own. Also an
+        OIDC group's rate limit, or a provider's own 429 passed through.
+      headers:
+        Retry-After:
+          description: Seconds until the call would fit
+          schema:
+            type: string
+        x-ratelimit-limit-requests:
+          $ref: '#/components/headers/XRateLimitLimitRequests'
+        x-ratelimit-remaining-requests:
+          $ref: '#/components/headers/XRateLimitRemainingRequests'
+        x-ratelimit-reset-requests:
+          $ref: '#/components/headers/XRateLimitResetRequests'
+        x-ratelimit-limit-tokens:
+          $ref: '#/components/headers/XRateLimitLimitTokens'
+        x-ratelimit-remaining-tokens:
+          $ref: '#/components/headers/XRateLimitRemainingTokens'
+        x-ratelimit-reset-tokens:
+          $ref: '#/components/headers/XRateLimitResetTokens'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: Rate limit "per-team" (600 requests per minute, scope team) exceeded. Retry in 1.5s.
+              type: rate_limit_error
+              param: null
+              code: rate_limit_exceeded
+              rule_id: per-team
+              scope: team
+              limit: rpm
     Unauthenticated:
       description: |
         `PS_OIDC_ENABLED` is on and the request has no valid identity-provider
@@ -2842,6 +2943,23 @@ components:
           type: string
           description: Gateway package version
           example: 1.15.2
+        rate_limits:
+          type: object
+          description: |
+            Present when rate-limit rules are configured (#344): where they
+            come from (`central` policy or `local` PS_RATE_LIMITS), how many
+            rules, and the store (`redis`: shared by every replica;
+            `memory`: each replica counts on its own).
+          required: [source, rules, store]
+          properties:
+            source:
+              type: string
+              enum: [central, local]
+            rules:
+              type: integer
+            store:
+              type: string
+              enum: [redis, memory]
 
     GatewayFailure:
       type: object
