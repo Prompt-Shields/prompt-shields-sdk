@@ -13,7 +13,7 @@ writes three generated files:
   tables the gateway prices telemetry events with (psPricing.ts), built
   exactly as the SDK's ``catalog.py`` builds ``pricing.DEFAULT_PRICING``,
   ``LONG_CONTEXT_PRICING``, ``AUDIO_PRICING``, ``SERVICE_TIER_PRICING``,
-  ``UNIT_PRICING`` and ``IMAGE_PRICING``.
+  ``UNIT_PRICING``, ``IMAGE_PRICING`` and ``REGIONAL_ENDPOINT_PREMIUM``.
 
 Usage::
 
@@ -108,8 +108,13 @@ CAPABILITY_FIELDS = (
 )
 LIMIT_FIELDS = ("max_input_tokens", "max_output_tokens")
 OTHER_FIELDS = ("mode", "deprecation_date", "litellm_key", "currency", "source", "comment", "aliases")
+# The fraction cloud platforms (Vertex AI, Amazon Bedrock) charge above their
+# global endpoint on a regional one for the model, e.g. 0.1 for 10%. Not a
+# LiteLLM field.
+REGIONAL_PREMIUM_FIELD = "regional_endpoint_premium"
 MODEL_FIELDS = (
     *OTHER_FIELDS,
+    REGIONAL_PREMIUM_FIELD,
     *LIMIT_FIELDS,
     *CAPABILITY_FIELDS,
     *PRICE_FIELDS,
@@ -259,6 +264,12 @@ def validate(source: dict) -> None:
         for field in (*PRICE_FIELDS, *UNIT_PRICE_FIELDS):
             if field in entry and not (_is_number(entry[field]) and entry[field] >= 0):
                 errors.append(f"{where}: {field} must be a number >= 0")
+        if REGIONAL_PREMIUM_FIELD in entry and not (
+            _is_number(entry[REGIONAL_PREMIUM_FIELD]) and 0 <= entry[REGIONAL_PREMIUM_FIELD] < 1
+        ):
+            errors.append(f"{where}: {REGIONAL_PREMIUM_FIELD} must be a number in [0, 1)")
+        if REGIONAL_PREMIUM_FIELD in entry and "input_cost_per_token" not in entry:
+            errors.append(f"{where}: {REGIONAL_PREMIUM_FIELD} needs input_cost_per_token")
         if IMAGE_PRICE_FIELD in entry and not _is_image_prices(entry[IMAGE_PRICE_FIELD]):
             errors.append(f"{where}: {IMAGE_PRICE_FIELD} must map quality to {{size: number >= 0}}")
         for field in LIMIT_FIELDS:
@@ -374,9 +385,10 @@ def build_gateway_pricing(source: dict) -> dict:
     """USD token rates per 1k tokens and unit rates per unit, keyed
     "<provider>/<model id>", as the SDK's catalog.py builds them
     (pricing_table, long_context_pricing, audio_pricing,
-    service_tier_pricing, unit_pricing, image_pricing). Non-USD and unpriced
+    service_tier_pricing, unit_pricing, image_pricing,
+    regional_endpoint_premium). Non-USD and unpriced
     entries are left out."""
-    tokens, long_context, audio, tiers, units, images = {}, {}, {}, {}, {}, {}
+    tokens, long_context, audio, tiers, units, images, regional = {}, {}, {}, {}, {}, {}, {}
     for key, entry in source["models"].items():
         if entry.get("currency", "USD") != "USD":
             continue
@@ -390,6 +402,8 @@ def build_gateway_pricing(source: dict) -> dict:
         rates = _rate_list(entry, PRICE_CHAINS[0])
         if rates is not None:
             tokens[key] = rates
+        if REGIONAL_PREMIUM_FIELD in entry:
+            regional[key] = entry[REGIONAL_PREMIUM_FIELD]
         band = _rate_list(entry, PRICE_CHAINS[1])
         if band is not None:
             long_context[key] = {"threshold": LONG_CONTEXT_THRESHOLD, "rates": band}
@@ -414,6 +428,7 @@ def build_gateway_pricing(source: dict) -> dict:
         "serviceTierPricing": tiers,
         "unitPricing": units,
         "imagePricing": images,
+        "regionalEndpointPremium": regional,
     }
 
 

@@ -201,6 +201,40 @@ describe('psTelemetry (Hono adapter)', () => {
     await flush();
     expect(sent.events[0].vendor).toBe('azure-openai');
   });
+  test('Claude on vertex-ai is priced with its region (#388)', async () => {
+    const app = makeApp((c) =>
+      c.json({
+        model: 'claude-sonnet-4-5-20250929',
+        usage: { prompt_tokens: 1000, completion_tokens: 2000 },
+      })
+    );
+    const body = {
+      model: 'anthropic.claude-sonnet-4-5@20250929',
+      messages: [],
+    };
+    await post(app, body, {
+      'x-portkey-provider': 'vertex-ai',
+      'x-portkey-vertex-region': 'global',
+    });
+    await flush();
+    expect(sent.events[0]).toMatchObject({
+      vendor: 'vertex-ai',
+      region: 'global',
+      cost: 0.033,
+      cost_source: 'pricing_table',
+    });
+
+    await post(app, body, {
+      'x-portkey-config': JSON.stringify({
+        provider: 'vertex-ai',
+        vertex_region: 'europe-west1',
+      }),
+    });
+    await flush();
+    expect(sent.events[0].region).toBe('europe-west1');
+    // The regional endpoint premium: (1000 x $3 + 2000 x $15) x 1.1.
+    expect(sent.events[0].cost).toBeCloseTo(0.0363, 9);
+  });
   test('Messages/Responses usage and the API surface are recorded', async () => {
     const app = new Hono();
     app.use('*', psTelemetry());

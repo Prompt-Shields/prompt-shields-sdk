@@ -172,6 +172,7 @@ startup. It patches whichever of these SDKs are installed, sync and async:
 | `openai` | `chat.completions.create`, `responses.create` | yes |
 | `azure_openai` | the same, on `AzureOpenAI` / `AsyncAzureOpenAI` clients | yes |
 | `anthropic` | `messages.create`, `beta.messages.create` | yes |
+| `google-vertex-ai` / `aws-bedrock` | the same, on `AnthropicVertex` / `AnthropicBedrock` / `AnthropicBedrockMantle` clients (and async) | yes |
 | `google` | google-genai `models.generate_content` | not yet |
 | `mistral` | mistralai `chat.complete`, `chat.complete_async` | not yet |
 | `cohere` | `Client.chat` (v1), `ClientV2.chat` (v2), and async clients | not yet |
@@ -207,6 +208,59 @@ instrument Azure without plain OpenAI.
 - Calls made through `ShieldsClient` are not counted twice. To skip other calls, wrap them in `with prompt_shields.suppress_instrumentation():`.
 - `.with_raw_response` calls, and positional-argument calls, are not instrumented.
 - MCP tools the provider calls for you (OpenAI Responses `mcp` tool, Anthropic MCP connector) appear in `tool_calls_used` as `{"name": ..., "type": "mcp", "server": ...}`. Tool arguments, results and server URLs are never recorded.
+
+### Claude on Vertex AI and Amazon Bedrock
+
+Calls through the Anthropic SDK's `AnthropicVertex`, `AnthropicBedrock` and
+`AnthropicBedrockMantle` clients (sync, async and streaming) are reported as
+vendor `google-vertex-ai` or `aws-bedrock`, with `model_family: "anthropic"`,
+the client's `region`, a `served_jurisdiction` derived from it (a Bedrock
+`eu.` / `us.` / `jp.` ... inference profile wins over the client region;
+`global` gives none) and the Vertex `cloud_project` (or the AWS
+`cloud_account` of an inference profile ARN). `vendors=("anthropic",)`
+covers them. boto3 `bedrock-runtime` calls keep vendor `bedrock` and get the
+same region and jurisdiction fields.
+
+They are priced as the gateway prices them: platform model ids
+(`claude-sonnet-4-5@20250929`, `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+inference profile ARNs) are normalised to Anthropic's, Claude is billed at
+Anthropic list prices on the platform's global endpoint, and a regional
+endpoint (a Vertex region other than `global`, a Bedrock id without the
+`global.` profile) adds the model's `regional_endpoint_premium` from the model
+catalog. The event's `endpoint_scope` says which applied. A Claude id with no
+price is sent with `cost: null` and `model_unpriced: true` (and one warning
+per model), never a zero cost.
+
+Without `instrument()`, use the wrappers, which build the platform client for
+you (`pip install "anthropic[vertex]"` or `"anthropic[bedrock]"`):
+
+```python
+from prompt_shields import AsyncShieldsAnthropicVertex, ShieldsAnthropicBedrock
+
+vertex = AsyncShieldsAnthropicVertex(ps_api_key="ps-...", project_id="my-project", region="global")
+bedrock = ShieldsAnthropicBedrock(ps_api_key="ps-...", aws_region="eu-central-1")
+```
+
+`ShieldsAnthropicVertex` and `AsyncShieldsAnthropicBedrock` complete the set;
+`ShieldsClient(vendor="google-vertex-ai" | "aws-bedrock", ...)` is the generic
+form.
+
+### LangChain and LangGraph
+
+`PromptShieldsCallbackHandler` (`prompt_shields.integrations.langchain`)
+reports each LangChain model run. Inside a LangGraph graph each event also
+carries the cost tag `langgraph_node` (the node that made the call), so the
+collector breaks usage down per node: raw events keep it, and
+`group_by=tag:langgraph_node` on the usage series and showback works once the
+tenant lists `langgraph_node` in its `cost_tag_keys` (see
+[cost attribution](/guides/cost-attribution)). Tags your code sets on the call
+win. `demo/demo_langgraph.py` is a two-node example.
+
+```python
+from prompt_shields.integrations.langchain import PromptShieldsCallbackHandler
+
+graph.invoke(inputs, config={"callbacks": [PromptShieldsCallbackHandler()]})
+```
 
 ### MCP tool calls your code makes
 
