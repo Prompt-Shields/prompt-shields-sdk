@@ -286,6 +286,17 @@ export async function withPoolCredentials(
     ctx.credentials
   );
   const candidates = replayable ? order : order.slice(0, 1);
+  // virtualKeyTargetDenied refuses a provider without credentials first;
+  // never send the request with whatever key it carries.
+  if (!candidates.length)
+    return c.json(
+      errorBody(
+        `This virtual key has no credential for provider "${provider ?? ''}"`,
+        'permission_error',
+        'virtual_key_provider_not_allowed'
+      ),
+      403
+    );
   let response: Response | undefined;
   for (let i = 0; i < candidates.length; i++) {
     const cred = candidates[i];
