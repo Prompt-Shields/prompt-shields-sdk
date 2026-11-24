@@ -21,12 +21,15 @@
  *     calls; replaces PS_PSEUDONYMISE* (psPseudonymise/config.ts).
  *   - `rate_limits` v1 (#344): request and token rate limits; replaces
  *     PS_RATE_LIMITS / PS_RATE_LIMITS_FILE (../psRateLimit).
+ *   - `guardrails` v1 (#349): checks the gateway runs on every model call
+ *     (../psGuardrails).
  * A section the central policy does not have falls back to the local
  * setting. Team and project entries are validated (so a bad one never
- * becomes active later). Only their `rate_limits` sections are applied, to
- * calls that name the team or project in X-PS-Team / X-PS-Project, and only
- * on top of the tenant's (a header can add limits, never remove one): the
- * gateway does not otherwise know a caller's team.
+ * becomes active later). Only their `rate_limits` and `guardrails`
+ * sections are applied, to calls that name the team or project in
+ * X-PS-Team / X-PS-Project, and only on top of the tenant's (a header can
+ * add limits or guardrails, never remove one): the gateway does not
+ * otherwise know a caller's team.
  */
 import { parsePolicy, OidcPolicy } from '../psOidc/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
@@ -35,6 +38,11 @@ import {
   parsePseudonymisationSection,
   PseudonymisationSettings,
 } from '../psPseudonymise/config';
+import {
+  combineSections,
+  GuardrailsSection,
+  parseGuardrailsSection,
+} from '../psGuardrails/config';
 import { parseRateLimitSection, RateLimitConfig } from '../psRateLimit/config';
 
 export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
@@ -44,6 +52,7 @@ export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
   pseudonymisation: [1],
+  guardrails: [1],
   rate_limits: [1],
 };
 
@@ -79,6 +88,12 @@ export interface CentralPolicy {
   route?: RoutePolicy;
   access?: OidcPolicy;
   pseudonymisation?: PseudonymisationSettings;
+  /** The tenant-wide guardrails (#349). */
+  guardrails?: GuardrailsSection;
+  /** Team guardrails (the tenant's included) by team id and by team name. */
+  teamGuardrails?: Map<string, GuardrailsSection>;
+  /** Project guardrails (its team's included) by project id and name. */
+  projectGuardrails?: Map<string, GuardrailsSection>;
   /** `rate_limits` of the tenant, its teams and projects. */
   rateLimits?: CentralRateLimits;
   /** Sections present but not enforced by this gateway. */
@@ -94,6 +109,7 @@ interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
   pseudonymisation?: PseudonymisationSettings;
+  guardrails?: GuardrailsSection;
   rateLimits?: RateLimitLayer;
   ignored: string[];
 }
@@ -157,6 +173,8 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
         out.access = parsePolicy(rest);
       } else if (name === 'pseudonymisation') {
         out.pseudonymisation = parsePseudonymisationSection(body);
+      } else if (name === 'guardrails') {
+        out.guardrails = parseGuardrailsSection(body, version ?? undefined);
       } else if (name === 'rate_limits') {
         out.rateLimits = {
           config: parseRateLimitSection(body),
@@ -177,6 +195,8 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
   const tenant = parseEffective('$.tenant', raw.tenant);
   let teams = 0;
   let projects = 0;
+  const teamGuardrails = new Map<string, GuardrailsSection>();
+  const projectGuardrails = new Map<string, GuardrailsSection>();
   const rateLimits: CentralRateLimits = {
     ...(tenant.rateLimits ? { tenant: tenant.rateLimits } : {}),
     teams: {},
@@ -204,6 +224,18 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
           ...layer,
         };
       }
+      if (parsed.guardrails) {
+        const index = label === 'team' ? teamGuardrails : projectGuardrails;
+        const name = (eff as any).name;
+        for (const ref of typeof name === 'string' && name ? [id, name] : [id])
+          index.set(
+            ref,
+            combineSections([
+              index.get(ref),
+              parsed.guardrails,
+            ]) as GuardrailsSection
+          );
+      }
     }
   }
   return {
@@ -213,6 +245,9 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     access: tenant.access,
     pseudonymisation: tenant.pseudonymisation,
     rateLimits,
+    guardrails: tenant.guardrails,
+    teamGuardrails: teamGuardrails.size ? teamGuardrails : undefined,
+    projectGuardrails: projectGuardrails.size ? projectGuardrails : undefined,
     ignored: tenant.ignored,
     teams,
     projects,
@@ -240,6 +275,31 @@ export function centralPseudonymisation():
   | PseudonymisationSettings
   | undefined {
   return active?.pseudonymisation;
+}
+
+/**
+ * The guardrails for a call (#349): the tenant's, plus those of the team
+ * and project it names (by id or exact name), added up. Undefined when
+ * none apply.
+ */
+export function centralGuardrails(
+  team?: string,
+  project?: string
+): GuardrailsSection | undefined {
+  if (!active) return undefined;
+  return combineSections([
+    active.guardrails,
+    team ? active.teamGuardrails?.get(team) : undefined,
+    project ? active.projectGuardrails?.get(project) : undefined,
+  ]);
+}
+
+/** Whether the active central policy has guardrails at any level. */
+export function hasCentralGuardrails(): boolean {
+  return !!(
+    active &&
+    (active.guardrails || active.teamGuardrails || active.projectGuardrails)
+  );
 }
 
 /**

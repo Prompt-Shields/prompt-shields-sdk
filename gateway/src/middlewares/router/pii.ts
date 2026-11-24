@@ -418,6 +418,17 @@ export function detectPiiCategories(text: string | undefined | null): string[] {
   return [...found].sort();
 }
 
+/** detectPiiCategories' keyword categories (context, no value) in `text`. */
+export function detectKeywordCategories(
+  text: string | undefined | null
+): string[] {
+  if (!text) return [];
+  const lower = text.toLowerCase();
+  return KEYWORD_CATEGORIES.filter(([, keywords]) =>
+    keywords.some((kw) => lower.includes(kw))
+  ).map(([category]) => category);
+}
+
 // --- Span finding, for redaction (#337) -------------------------------------
 
 /** A PII match: text[start, end) is of `category` (a detectPiiCategories name). */
@@ -687,6 +698,64 @@ export function requestText(body: unknown): string {
   };
   walk(body, '', false, 0);
   return out.join(' ');
+}
+
+/**
+ * Calls `fn` on every request-text string of `body` (the strings
+ * requestText joins) and stores what it returns in their place, in place.
+ * Returns the number of strings changed. PS fork (#349): input guardrails.
+ */
+export function mapRequestText(
+  body: unknown,
+  fn: (text: string) => string
+): number {
+  let changed = 0;
+  const walk = (node: unknown, key: string, all: boolean, depth: number) => {
+    if (depth > 64 || node == null || typeof node !== 'object') return;
+    const isArray = Array.isArray(node);
+    const entries: [string | number, unknown][] = isArray
+      ? (node as unknown[]).map((v, i) => [i, v])
+      : Object.entries(node as Record<string, unknown>);
+    for (const [k, v] of entries) {
+      const childKey = isArray ? key : (k as string);
+      // An Anthropic document given as plain text (`source: {type: "text",
+      // data}`) is request text, though `source` is otherwise binary.
+      if (
+        !isArray &&
+        childKey === 'source' &&
+        v &&
+        typeof v === 'object' &&
+        (v as any).type === 'text' &&
+        typeof (v as any).data === 'string'
+      ) {
+        const next = fn((v as any).data);
+        if (next !== (v as any).data) {
+          (v as any).data = next;
+          changed++;
+        }
+        continue;
+      }
+      if (!isArray && SKIP_KEYS.has(childKey)) continue;
+      if (typeof v === 'string') {
+        if (all || TEXT_KEYS.has(childKey)) {
+          const next = fn(v);
+          if (next !== v) {
+            (node as any)[k] = next;
+            changed++;
+          }
+        }
+      } else {
+        const args =
+          !isArray &&
+          ARG_KEYS.has(childKey) &&
+          typeof v === 'object' &&
+          !Array.isArray(v);
+        walk(v, childKey, all || args, depth + 1);
+      }
+    }
+  };
+  walk(body, '', false, 0);
+  return changed;
 }
 
 /** PII categories in any JSON request body (see requestText). */

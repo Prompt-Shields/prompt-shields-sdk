@@ -199,6 +199,12 @@ in brackets):
   before telemetry, OpenTelemetry, guardrail hooks and the response cache, so
   they see placeholders only, in the request and in the answer. Cached answers
   hold placeholders and are restored for each caller.
+- **With [policy guardrails](/guides/guardrails):** the central-policy
+  guardrails run outside pseudonymisation. Their input checks see the
+  original prompt (a `redact` happens before placeholders are minted, so a
+  redacted value is never pseudonymised or restored); on the way out the
+  answer is restored first and the output checks then scan the restored text
+  the client gets.
 - **Mapping:** in the request's memory only, never logged or stored, and
   dropped when the response or stream ends. No key is involved because
   nothing is persisted.
@@ -209,7 +215,8 @@ in brackets):
   (`messages`, `system`, `input`, ...) through `override_params` is refused,
   since those would be merged in after pseudonymisation.
 - **The `/log/stream` admin tail** gets the answer as the provider sent it
-  (placeholders), not the restored one.
+  (placeholders), not the restored one, passed through the call's output
+  guardrails (redacted, or withheld when they deny the response).
 - **Upgrade gateways first.** The collector lists an enabled section in the
   bundle's `required`; a gateway that does not enforce it refuses the bundle
   and keeps its last good policy (so it does not pseudonymise), and logs an

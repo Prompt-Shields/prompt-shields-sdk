@@ -157,18 +157,18 @@ describe('parsePolicyBundle', () => {
     const required = (req: unknown) => {
       const b: any = bundle({
         pseudonymisation: { version: 1, enabled: true },
-        guardrails: { version: 1 },
+        budgets: { version: 1 },
       });
       b.tenant.required = req;
       return b;
     };
     expect(parsePolicyBundle(required(['pseudonymisation'])).ignored).toEqual([
-      'guardrails',
+      'budgets',
     ]);
-    for (const bad of [['guardrails'], 'pseudonymisation', [1]])
+    for (const bad of [['budgets'], 'pseudonymisation', [1]])
       expect(() => parsePolicyBundle(required(bad))).toThrow(PolicyBundleError);
-    expect(() => parsePolicyBundle(required(['guardrails']))).toThrow(
-      /does not enforce \["guardrails"\]/
+    expect(() => parsePolicyBundle(required(['budgets']))).toThrow(
+      /does not enforce \["budgets"\]/
     );
   });
 
