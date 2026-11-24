@@ -196,9 +196,12 @@ class ChatSpan:
         self._ended = False
 
     @contextlib.contextmanager
-    def activate(self) -> Iterator[ChatSpan]:
+    def activate(self, *, http: bool = True) -> Iterator[ChatSpan]:
         """Make the span current (its context is what an HTTP call or a
-        gateway sees) without ending it."""
+        gateway sees) without ending it. ``http=False``: the hook of
+        :func:`instrument_http` leaves the HTTP calls made meanwhile alone
+        (the SDK clients add the traceparent themselves, per
+        ``propagate_trace``)."""
         with contextlib.ExitStack() as stack:
             try:
                 stack.enter_context(
@@ -209,7 +212,7 @@ class ChatSpan:
                         set_status_on_exception=False,
                     )
                 )
-                stack.enter_context(_http_mode("chat", self.span))
+                stack.enter_context(_http_mode("chat" if http else None, self.span))
             except Exception:
                 logger.debug("chat span activation failed", exc_info=True)
             yield self
@@ -258,9 +261,9 @@ class ChatSpan:
             logger.debug("chat span end failed", exc_info=True)
 
 
-def activate(span: ChatSpan | None):
-    """``span.activate()``, or a no-op context without a span."""
-    return span.activate() if span is not None else contextlib.nullcontext()
+def activate(span: ChatSpan | None, *, http: bool = True):
+    """``span.activate(http=http)``, or a no-op context without a span."""
+    return span.activate(http=http) if span is not None else contextlib.nullcontext()
 
 
 def _int(value: Any) -> int | None:

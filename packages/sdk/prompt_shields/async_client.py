@@ -374,7 +374,7 @@ class _AsyncCompletionsNamespace:
 
         start = time.monotonic()
         # This client emits its own event; keep instrument() from adding one.
-        with suppress_instrumentation(), tracing.activate(span):
+        with suppress_instrumentation(), tracing.activate(span, http=False):
             try:
                 response = await self._call_upstream(
                     model=model, messages=messages, max_tokens=max_tokens, **kwargs

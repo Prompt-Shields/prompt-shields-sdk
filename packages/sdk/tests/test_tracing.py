@@ -132,6 +132,17 @@ def test_no_traceparent_to_a_provider_unless_asked(spans):
         model="gpt-4o", messages=[{"role": "user", "content": "hi"}]
     )
     assert "traceparent" not in seen[2].headers
+    # The HTTP hook does not override the client's choice either way.
+    tracing.instrument_http(propagate=True)
+    _client("http://gateway.internal/v1", seen, propagate_trace=False).chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert "traceparent" not in seen[3].headers
+    _client("https://api.openai.com/v1", seen).chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert "traceparent" not in seen[4].headers
+    assert not any(s.name == "POST" for s in spans.get_finished_spans())
 
 
 def test_a_failed_call_ends_its_span_with_error_type_only(spans):
