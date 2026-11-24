@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # /ingest/otel/v1/traces (OTLP GenAI spans): requests per minute per
     # tenant, counted apart from /ingest/events; 0 or less disables it.
     otel_traces_rate_limit_per_minute: int = 600
+    # /ingest/otel/v1/traces also keeps the spans of GenAI traces in
+    # trace_spans (#385, GET /partner/v1/traces). False stores usage
+    # events and MCP calls only, as before.
+    trace_store_enabled: bool = True
+    # Seconds a span of a trace with no GenAI span yet is held (pending,
+    # not returned by the API) in case the trace's GenAI span arrives in a
+    # later OTLP request (collector.traces); 0 drops such spans at once.
+    trace_pending_seconds: int = 300
     # Tenant key auth (collector/auth_cache.py). Seconds a key that passed
     # bcrypt is remembered (by an HMAC of the key, never the key), so its
     # next requests skip bcrypt while the stored hash is unchanged; the key

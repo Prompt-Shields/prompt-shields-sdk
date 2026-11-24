@@ -11,7 +11,8 @@
 #     ps_gateway_requests_total, ps_gateway_request_duration_seconds,
 #     ps_gateway_guardrail_verdicts_total, ps_gateway_telemetry_dropped_total,
 #     ps_gateway_rate_limited_total, ps_gateway_cost_usd_total,
-#     ps_gateway_budget_spend_usd, ps_gateway_budget_limit_usd
+#     ps_gateway_budget_spend_usd, ps_gateway_budget_limit_usd,
+#     ps_gateway_budget_spend_tokens, ps_gateway_budget_limit_tokens
 #   collector /metrics (PS_COLLECTOR_METRICS_ENABLED=true):
 #     ps_collector_requests_total, ps_collector_ingest_events_total
 #
@@ -390,11 +391,21 @@ groups:
       - alert: PromptShieldsBudgetNearLimit
         # No `for`: spend only grows within a window, and the alert should
         # reach someone before the budget starts refusing calls.
+        # USD budgets (limit_usd) and token budgets (limit_tokens, #29); budget
+        # ids are unique, so the two halves never share a series. Both
+        # `# threshold` lines take the chart's threshold override.
         expr: |
           (
             max by (budget, window) (ps_gateway_budget_spend_usd)
               /
             max by (budget, window) (ps_gateway_budget_limit_usd > 0)
+          )
+            >= 0.8  # threshold
+          or
+          (
+            max by (budget, window) (ps_gateway_budget_spend_tokens)
+              /
+            max by (budget, window) (ps_gateway_budget_limit_tokens > 0)
           )
             >= 0.8  # threshold
         labels:
@@ -413,6 +424,13 @@ groups:
             max by (budget, window) (ps_gateway_budget_spend_usd)
               /
             max by (budget, window) (ps_gateway_budget_limit_usd > 0)
+          )
+            >= 1  # threshold
+          or
+          (
+            max by (budget, window) (ps_gateway_budget_spend_tokens)
+              /
+            max by (budget, window) (ps_gateway_budget_limit_tokens > 0)
           )
             >= 1  # threshold
         labels:

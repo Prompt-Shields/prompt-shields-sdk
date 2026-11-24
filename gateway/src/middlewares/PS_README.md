@@ -65,6 +65,18 @@ params, `gen_ai.response.model`/`id`/`finish_reasons` (normalised to `stop`,
 `X-PS-Environment` to the `deployment.environment.name` resource attribute.
 An inbound `traceparent` makes the span a child of the caller's span.
 
+Trace context (`psTraceContext.ts`, #385, always on): every request gets one
+gateway span id in the caller's trace (inbound `traceparent`, else a new
+trace), the gateway's spans use it, and every response carries
+`traceparent: 00-<trace id>-<gateway span id>-<flags>`.
+
+- `PS_OTEL_PROPAGATE_UPSTREAM` — `true` also sends `traceparent` (the gateway
+  span as parent) and the caller's `tracestate` to the provider and to MCP
+  servers. Off by default: a trace id lets a provider correlate a tenant's
+  calls, and most providers do not trace. Off, the gateway adds nothing;
+  headers a caller forwards itself (`forward_headers`, the `/v1/proxy`
+  pass-through) behave as before.
+
 - `PS_OTEL_ENDPOINT` — full traces URL, e.g. `http://collector:8000/ingest/otel/v1/traces`
 - `PS_OTEL_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` — `k=v,k2=v2`; when the endpoint comes from `PS_OTEL_ENDPOINT`, `PS_API_KEY` is sent as a bearer token unless an `Authorization` header is given. It is never added for an endpoint taken from `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
 - `OTEL_SERVICE_NAME` — default `prompt-shields-gateway`
@@ -368,15 +380,22 @@ rate counts each event with a `cache_status` once: released gateways (up to
 sdk v0.4.0) sent the cache-only event per lookup and no `cache_status` on the
 call's event, so that count is right for them too.
 
-## psBudget/ (spend budgets, #28)
+## psBudget/ (spend budgets, #28, #29)
 
 A `budget.v1` document (`schemas/budget/`, shared with the SDK: same
 document, Redis counter keys, TTL rule and decision rules, checked against
 `schemas/budget/vectors/`) inline in `PS_BUDGETS` or in a file named by
-`PS_BUDGETS_FILE`; an invalid document stops the gateway at startup. Budgets
-are per business unit (`X-PS-Business-Unit`), use case (`X-PS-Use-Case`),
-owner (`X-PS-Owner`, for team budgets) or the whole deployment, by UTC day,
-ISO week or month.
+`PS_BUDGETS_FILE`, or the central policy's `budgets` section
+(`../policyPull/`, which then replaces the local budgets; the namespace and
+store stay these settings); an invalid document stops the gateway at
+startup. Budgets limit USD (`limit_usd`) or tokens (`limit_tokens`, input
+plus output, counted under the USD key with `:tokens` appended; mode `warn`
+or `block`) per business unit (`X-PS-Business-Unit`), use case
+(`X-PS-Use-Case`), owner (`X-PS-Owner`), team (`X-PS-Team`), project
+(`X-PS-Project`), calling service (`X-PS-Service`), user (the verified OIDC
+subject hash; no user without OIDC), requested model, or the whole
+deployment (`global`; with one namespace per tenant, the tenant's budget),
+by UTC day, ISO week or month.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -384,6 +403,9 @@ ISO week or month.
 | `PS_BUDGET_NAMESPACE` | the document's `namespace` | Overrides the counter namespace |
 | `PS_BUDGET_RESERVATION_TTL_MS` | `900000` | How long an unsettled reservation holds budget (a replica that dies mid-call) |
 | `PS_BUDGET_REDIS_TIMEOUT_MS` | `500` | Per-command Redis timeout |
+| `PS_BUDGET_WEBHOOK_URL` | unset | POST each threshold crossing here (below). https only, through the egress check |
+| `PS_BUDGET_WEBHOOK_SECRET` | unset | Signs the webhook (`Prompt-Shields-Signature: t=<unix>,v1=<HMAC-SHA256 hex of "<t>." + body>`, as the collector's webhooks) |
+| `PS_BUDGET_WEBHOOK_ALLOW_HTTP` | off | `true` allows a plain http webhook URL |
 
 Per billed call (chat, completions, messages, responses, embeddings, rerank,
 images, audio, OCR) the middleware, mounted after the router and before
@@ -411,7 +433,24 @@ the hash tag keeps it in the counter's Redis Cluster slot). Reads add live
 reservations to the counter, and a block budget's reservation is an atomic
 check in one Lua script, so calls racing on several replicas see each other
 and a limit is overrun by at most the estimate error of the calls admitted
-before it. The SDK ignores the set.
+before it. The SDK's built-in stores run the same scripts and use the same
+set, so SDK calls and gateway calls see each other's in-flight estimates.
+Token budgets reserve the estimated tokens (input estimate plus the output
+cap) the same way.
+
+**Threshold notifications** (`notify.ts`). The settle script returns the
+counter's new value; when a settle moves it across a budget's `warn_at`
+share or its limit, the gateway increments
+`ps_gateway_budget_threshold_crossings_total{budget,window,threshold}`,
+writes one JSON line (`"log.logger":"ps.budget"`, `type:
+budget.threshold_crossed`, budget, threshold, scope, subject, window,
+period, unit, limit, spend, namespace) and, with `PS_BUDGET_WEBHOOK_URL`,
+POSTs that event there (one attempt, 5 s timeout, never failing the call).
+The write is atomic, so with a shared Redis exactly one replica (or SDK
+process, through its `on_threshold` callback) reports each crossing. The
+alert rules `PromptShieldsBudgetNearLimit` and `PromptShieldsBudgetExhausted`
+(`deploy/prometheus/alerts.yaml`, also in the Helm chart) fire on the spend
+and limit gauges (USD and token budgets) at 80 % and 100 %.
 
 Responses carry `x-ps-budget-state`; telemetry events carry `budget_state`
 (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`
@@ -424,12 +463,16 @@ provider was called, so it has no usage, latency, cost or served provider;
 the collector counts it in `budget_blocked_requests`. It is still not a
 security event. Prometheus (with `PS_METRICS_ENABLED`):
 `ps_gateway_budget_decisions_total{budget,state,action}`,
-`ps_gateway_budget_spend_usd{budget,window}` (budgets with a concrete
-subject), `ps_gateway_budget_limit_usd{budget,window}` and
+`ps_gateway_budget_spend_usd{budget,window}` and
+`ps_gateway_budget_spend_tokens{budget,window}` (budgets with a concrete
+subject), `ps_gateway_budget_limit_usd{budget,window}`,
+`ps_gateway_budget_limit_tokens{budget,window}`,
+`ps_gateway_budget_threshold_crossings_total{budget,window,threshold}` and
 `ps_gateway_budget_store_errors_total{store,op}`.
 
 **Trust: the attributes are declared by the caller.** `X-PS-Business-Unit`,
-`X-PS-Use-Case` and (without OIDC) `X-PS-Owner` are not authenticated: a
+`X-PS-Use-Case`, `X-PS-Team`, `X-PS-Project`, `X-PS-Service`, the requested
+model and (without OIDC) `X-PS-Owner` are not authenticated: a
 caller can send another value, or none, to move its spend to another budget
 or out of one, so a `block` budget on those scopes caps cooperative callers,
 not adversarial ones. What callers cannot dodge:
@@ -438,7 +481,9 @@ not adversarial ones. What callers cannot dodge:
 - `owner` budgets with OIDC on (`PS_OIDC_*`): the owner is the verified
   identity's subject hash (the 32-hex `x-ps-auth-subject` value, as in
   policy-denied responses) and `X-PS-Owner` is ignored. Use `subject: "*"`
-  for one budget per user, or the hash for a single user.
+  for one budget per user, or the hash for a single user;
+- `user` budgets, which only match a verified OIDC identity (its subject
+  hash).
 
 Budget 429s count in `ps_gateway_rate_limited_total{source="budget"}` but
 write no `rate_limit.hit` security event: a refusal by a spend budget is a

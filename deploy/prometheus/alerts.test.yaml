@@ -489,6 +489,45 @@ tests:
               description: "Budget team-a has used 100% of its month limit; calls it covers are now blocked or downgraded, as the budget's action says."
               runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetexhausted
 
+  - name: token budget at 80% and 100% (#29)
+    interval: 1m
+    input_series:
+      - series: 'ps_gateway_budget_spend_tokens{budget="tok-a",window="day",instance="gw-1"}'
+        values: "500000 800000 1000000"
+      - series: 'ps_gateway_budget_limit_tokens{budget="tok-a",window="day",instance="gw-1"}'
+        values: "1000000x2"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: PromptShieldsBudgetNearLimit
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: PromptShieldsBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              budget: tok-a
+              window: day
+            exp_annotations:
+              summary: "Budget tok-a is near its limit"
+              description: "Budget tok-a has used 80% of its day limit."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetnearlimit
+      - eval_time: 1m
+        alertname: PromptShieldsBudgetExhausted
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: PromptShieldsBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: prompt-shields-gateway
+              budget: tok-a
+              window: day
+            exp_annotations:
+              summary: "Budget tok-a is exhausted"
+              description: "Budget tok-a has used 100% of its day limit; calls it covers are now blocked or downgraded, as the budget's action says."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetexhausted
+
   - name: hourly spend spike
     interval: 1m
     input_series:

@@ -61,6 +61,7 @@ from db.models import (
     TenantApiKey,
     TenantOidcConfig,
     TenantSecret,
+    TraceSpan,
     UsageRollupDaily,
     UsageRollupHourly,
     UsageRollupState,
@@ -253,6 +254,14 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     kek_ref="local:k1",
                     key_hint="****seed",
                     key_fingerprint="0" * 16,
+                ),
+                TraceSpan(
+                    tenant_id=tenant_id,
+                    trace_id="1" * 31 + name,
+                    span_id="1" * 15 + name,
+                    name="seed",
+                    status="ok",
+                    start_time=datetime(2026, 1, 1, tzinfo=UTC),
                 ),
             ]
         )
