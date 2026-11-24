@@ -4,6 +4,7 @@
  */
 import { Hono } from 'hono';
 import {
+  buildAttemptSpans,
   buildExportRequest,
   buildGenAISpan,
   contentAttributes,
@@ -268,6 +269,84 @@ describe('buildGenAISpan', () => {
 
   test('non-LLM paths produce no span', () => {
     expect(buildGenAISpan({ ...base, path: '/v1/files' })).toBeUndefined();
+  });
+
+  test('no attempt attributes or spans unless retried (#390)', () => {
+    const one = { attempt: 1, provider: 'openai', status: 200, latency_ms: 5 };
+    for (const input of [
+      { ...base, attempts: [] },
+      { ...base, attempts: [one], attemptCount: 1 },
+    ]) {
+      const built = buildGenAISpan(input)!;
+      expect(buildAttemptSpans(input, built)).toEqual([]);
+      const a = attrsOf(built.span);
+      expect(a['ps.attempt.count']).toBeUndefined();
+      expect(a['ps.fallback_chain']).toBeUndefined();
+    }
+  });
+
+  test('one child span per attempt, within the call span (#390)', () => {
+    const input = {
+      ...base,
+      attempts: [
+        {
+          attempt: 1,
+          provider: 'openai',
+          model: 'gpt-4o',
+          status: 429,
+          latency_ms: 40,
+          error_class: 'rate_limited',
+        },
+        { attempt: 2, provider: 'azure-openai', latency_ms: 9 },
+        { attempt: 3, provider: 'bedrock', status: 200, latency_ms: 100 },
+      ],
+      // First ends before the span start (clamped); second time missing.
+      attemptEndMs: [base.startMs - 5, NaN, base.startMs + 200],
+      attemptCount: 40,
+    };
+    const built = buildGenAISpan(input)!;
+    const a = attrsOf(built.span);
+    expect(a['ps.attempt.count']).toBe(40);
+    expect(a['ps.fallback_chain']).toEqual(['rate_limited']);
+    expect(built.span.events).toBeUndefined();
+
+    const children = buildAttemptSpans(input, built);
+    expect(children).toHaveLength(3);
+    for (const c of children) {
+      expect(c.environment).toBe('prod');
+      expect(c.span.traceId).toBe(built.span.traceId);
+      expect(c.span.parentSpanId).toBe(built.span.spanId);
+      expect(c.span.spanId).toMatch(/^[0-9a-f]{16}$/);
+      expect(c.span.kind).toBe(3);
+      // Never a GenAI span: a consumer billing GenAI spans sees one call.
+      expect(
+        c.span.attributes.filter((x: any) => x.key.startsWith('gen_ai.'))
+      ).toEqual([]);
+    }
+    const [first, second, third] = children.map((c) => c.span);
+    expect(first.name).toBe('attempt 1');
+    expect(first.startTimeUnixNano).toBe(built.span.startTimeUnixNano);
+    expect(first.endTimeUnixNano).toBe(built.span.startTimeUnixNano);
+    expect(first.status).toEqual({ code: 2, message: 'rate_limited' });
+    expect(attrsOf(first)).toEqual({
+      'ps.attempt.number': 1,
+      'ps.attempt.provider': 'openai',
+      'ps.attempt.model': 'gpt-4o',
+      'http.response.status_code': 429,
+      'error.type': 'rate_limited',
+      'ps.attempt.latency_ms': 40,
+    });
+    // No status (no response came back): left out, not zero.
+    expect(attrsOf(second)).toEqual({
+      'ps.attempt.number': 2,
+      'ps.attempt.provider': 'azure.ai.openai',
+      'http.request.resend_count': 1,
+      'ps.attempt.latency_ms': 9,
+    });
+    expect(second.endTimeUnixNano).toBe(built.span.endTimeUnixNano);
+    expect(third.status).toEqual({ code: 0 });
+    expect(third.startTimeUnixNano).toBe(`${base.startMs + 100}000000`);
+    expect(third.endTimeUnixNano).toBe(`${base.startMs + 200}000000`);
   });
 });
 
