@@ -391,6 +391,47 @@ describe('refusals', () => {
     expect(ok.status).toBe(200);
   });
 
+  test('allowed_models cannot be bypassed through the proxy or batches', async () => {
+    virtualKeyCollector(() =>
+      json(resolution({ virtual_key: { allowed_models: ['gpt-4o-mini'] } }))
+    );
+    upstream(CHAT, chatOk);
+    for (const path of [
+      '/v1/proxy/chat/completions',
+      '/v1/chat/completions/',
+      '/v1/batches',
+    ]) {
+      const res = await post(
+        app,
+        path,
+        path === '/v1/batches'
+          ? {
+              input_file_id: 'file-1',
+              endpoint: '/v1/chat/completions',
+              completion_window: '24h',
+            }
+          : { ...CHAT_BODY, model: 'gpt-4.1' },
+        { ...headers, 'x-portkey-provider': 'openai' }
+      );
+      expect([path, res.status]).toEqual([path, 403]);
+      expect(((await res.json()) as any).error.code).toBe(
+        'virtual_key_model_not_allowed'
+      );
+    }
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('without allowed_models the proxy still works with a pool key', async () => {
+    virtualKeyCollector(() => json(resolution()));
+    upstream(CHAT, chatOk);
+    const res = await post(app, '/v1/proxy/chat/completions', CHAT_BODY, {
+      ...headers,
+      'x-portkey-provider': 'openai',
+    });
+    expect(res.status).toBe(200);
+    expect(bearer(upstreamCalls[0])).toMatch(/^Bearer sk-proj-pool-/);
+  });
+
   test('a provider the pool has no credential for is refused', async () => {
     virtualKeyCollector(() =>
       json(resolution({ credentials: [cred('c1', 'openai', OPENAI_1)] }))

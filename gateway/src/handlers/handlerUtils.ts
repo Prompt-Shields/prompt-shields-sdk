@@ -400,7 +400,9 @@ export async function tryPost(
     c,
     providerOption.provider,
     targetModels(providerOption, requestBody),
-    MODEL_ENDPOINTS.has(fn)
+    MODEL_ENDPOINTS.has(fn),
+    fn,
+    method
   );
   if (vkDenied) return vkDenied;
   const replayable = !(

@@ -27,7 +27,8 @@
  *    header.
  * 5. Per target, in tryPost (handlers/handlerUtils.ts): the model actually
  *    sent must match the key's `allowed_models` (403
- *    `virtual_key_model_not_allowed`), the target's provider must be in the
+ *    `virtual_key_model_not_allowed`; batches and proxy writes, whose model
+ *    cannot be read, are refused for such a key), the target's provider must be in the
  *    pool (403), and the target is sent with a pool credential of its
  *    provider (./pool.ts order). On 429 the call is retried with the
  *    provider's next credential before anything else changes (no model
@@ -223,15 +224,36 @@ export function psVirtualKeys(resolver: VirtualKeyResolver = defaultResolver) {
 }
 
 /**
+ * Endpoints that can run a model the gateway cannot read before the call:
+ * a batch runs the models named inside its uploaded input file, and the
+ * pass-through proxy (`/v1/proxy/*`, the `/v1/*` catch-all) can carry the
+ * model in the provider's path (`.../models/<model>:generateContent`,
+ * `/model/<id>/invoke`) or a body shape `requestModel` does not know. A key
+ * with `allowed_models` is refused on them (GET and DELETE on the proxy
+ * run nothing and stay allowed).
+ */
+const UNCHECKABLE_MODEL_ENDPOINTS = new Set(['createBatch']);
+
+function modelUncheckable(fn: string, method: string): boolean {
+  if (UNCHECKABLE_MODEL_ENDPOINTS.has(fn)) return true;
+  return fn === 'proxy' && !['GET', 'DELETE'].includes(method.toUpperCase());
+}
+
+/**
  * tryPost's check for one target (module doc, step 5): a Response to
- * return instead of calling the provider, or undefined. Only on model
- * endpoints is the model checked; every endpoint needs a pooled provider.
+ * return instead of calling the provider, or undefined. Every endpoint
+ * needs a pooled provider. With `allowed_models`, every model the target
+ * names must match, a model endpoint must name one, and endpoints whose
+ * model cannot be checked (UNCHECKABLE_MODEL_ENDPOINTS, proxy writes) are
+ * refused.
  */
 export function virtualKeyTargetDenied(
   c: Context,
   provider: string | undefined,
   models: (string | undefined)[],
-  isModelEndpoint: boolean
+  isModelEndpoint: boolean,
+  fn: string = '',
+  method: string = 'POST'
 ): Response | undefined {
   const ctx = virtualKeyOfContext(c);
   if (!ctx) return undefined;
@@ -245,11 +267,22 @@ export function virtualKeyTargetDenied(
       ),
       403
     );
-  if (isModelEndpoint && ctx.virtualKey.allowed_models !== null) {
+  if (ctx.virtualKey.allowed_models !== null) {
+    if (modelUncheckable(fn, method))
+      return c.json(
+        errorBody(
+          "This endpoint cannot be checked against the virtual key's allowed_models",
+          'permission_error',
+          'virtual_key_model_not_allowed'
+        ),
+        403
+      );
     const named = models.filter((m): m is string => !!m);
     const denied = named.length
       ? named.find((m) => !modelAllowed(ctx.virtualKey.allowed_models, m))
-      : '(none)';
+      : isModelEndpoint
+        ? '(none)'
+        : undefined;
     if (denied !== undefined)
       return c.json(
         errorBody(
