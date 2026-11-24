@@ -9,8 +9,8 @@
  * OTLP/HTTP JSON. The collector's `/ingest/otel/v1/traces` reads the same
  * names (`packages/collector/collector/otel_mapping.py`).
  *
- * Retries and fallbacks (#390): when the gateway made upstream attempts for
- * the call (psAttempts), the span carries `ps.attempt.count` and
+ * Retries and fallbacks (#390): when the gateway made more than one upstream
+ * attempt for the call (psAttempts), the span carries `ps.attempt.count` and
  * `ps.fallback_chain`, and each recorded attempt gets a child CLIENT span
  * (`buildAttemptSpans`: attempt number, provider, model, HTTP status,
  * latency, error class; no content, no error message). The children carry
@@ -437,8 +437,19 @@ export interface SpanInput {
   trace?: { traceId: string; spanId: string; parentSpanId?: string };
 }
 
+/** Attempts made for the call, including any beyond the recorded ones. */
+const attemptTotal = (input: SpanInput): number =>
+  Math.max(input.attemptCount ?? 0, input.attempts?.length ?? 0);
+
 /**
- * One child span per upstream attempt of the call (#390), under its GenAI
+ * Whether the call was retried or fell back. A call served by its first
+ * attempt (nearly all calls) stays exactly one span, as before #390.
+ */
+const retried = (input: SpanInput): boolean =>
+  !!input.attempts?.length && attemptTotal(input) > 1;
+
+/**
+ * One child span per upstream attempt of a retried or failed-over call (#390), under its GenAI
  * span: the OTel HTTP convention of one client span per (re)sent request,
  * with `http.request.resend_count` for retries. They carry no `gen_ai.*`
  * attribute on purpose: an OTLP consumer that bills GenAI spans (the
@@ -451,6 +462,7 @@ export function buildAttemptSpans(
   input: SpanInput,
   parent: BuiltSpan
 ): BuiltSpan[] {
+  if (!retried(input)) return [];
   const attempts = input.attempts || [];
   const startMs = input.startMs;
   const endMs = Math.max(input.endMs, input.startMs);
@@ -563,12 +575,11 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     'ps.stream.truncated': input.stream?.truncated || undefined,
     'ps.stream.cancelled': input.stream?.cancelled || undefined,
     // Retries and fallbacks (#390), as the telemetry event's fields.
-    'ps.attempt.count': input.attempts?.length
-      ? Math.max(input.attemptCount ?? 0, input.attempts.length)
-      : undefined,
-    'ps.fallback_chain': input.attempts?.length
-      ? input.attempts
-          .map((a) => a.error_class)
+    // Only set when the call was retried or fell back (attemptTotal > 1).
+    'ps.attempt.count': retried(input) ? attemptTotal(input) : undefined,
+    'ps.fallback_chain': retried(input)
+      ? input
+          .attempts!.map((a) => a.error_class)
           .filter((e): e is string => typeof e === 'string')
       : undefined,
   };

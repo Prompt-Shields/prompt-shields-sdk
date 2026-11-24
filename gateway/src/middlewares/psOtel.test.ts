@@ -271,13 +271,18 @@ describe('buildGenAISpan', () => {
     expect(buildGenAISpan({ ...base, path: '/v1/files' })).toBeUndefined();
   });
 
-  test('no attempt attributes or spans without attempts (#390)', () => {
-    const input = { ...base, attempts: [] };
-    const built = buildGenAISpan(input)!;
-    expect(buildAttemptSpans(input, built)).toEqual([]);
-    const a = attrsOf(built.span);
-    expect(a['ps.attempt.count']).toBeUndefined();
-    expect(a['ps.fallback_chain']).toBeUndefined();
+  test('no attempt attributes or spans unless retried (#390)', () => {
+    const one = { attempt: 1, provider: 'openai', status: 200, latency_ms: 5 };
+    for (const input of [
+      { ...base, attempts: [] },
+      { ...base, attempts: [one], attemptCount: 1 },
+    ]) {
+      const built = buildGenAISpan(input)!;
+      expect(buildAttemptSpans(input, built)).toEqual([]);
+      const a = attrsOf(built.span);
+      expect(a['ps.attempt.count']).toBeUndefined();
+      expect(a['ps.fallback_chain']).toBeUndefined();
+    }
   });
 
   test('one child span per attempt, within the call span (#390)', () => {

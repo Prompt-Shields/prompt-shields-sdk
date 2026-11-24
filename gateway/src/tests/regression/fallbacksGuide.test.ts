@@ -254,8 +254,10 @@ describe('fallback.json', () => {
     const ev = await telemetryEvent();
     expect(ev.retry_count).toBe(0);
     expect(ev.attempts).toHaveLength(1);
-    const { call, attempts } = await callSpans(2);
-    expect(attempts).toHaveLength(1);
+    // Not retried: exactly one span, no attempt spans or attributes.
+    const { call, attempts } = await callSpans(1);
+    expect(attempts).toHaveLength(0);
+    expect(attrsOf(call.attributes)['ps.attempt.count']).toBeUndefined();
     expect(attrsOf(call.attributes)['ps.fallback_chain']).toBeUndefined();
   });
 

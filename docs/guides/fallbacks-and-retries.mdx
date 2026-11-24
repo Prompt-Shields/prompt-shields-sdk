@@ -204,8 +204,9 @@ response content, error messages or headers.
 **Spans.** With `PS_OTEL_ENDPOINT` set (see [Observability](/guides/observability)
 and [Agent Traces](/guides/agent-traces)), the gateway exports one GenAI CLIENT
 span per request, in the caller's trace when it sends a W3C `traceparent`
-(the response's `traceparent` names that span). A request that made upstream
-attempts carries:
+(the response's `traceparent` names that span). A request that was retried
+or fell back (more than one upstream attempt) also carries the following. A
+request served by its first attempt stays one span:
 
 | Where | What |
 |---|---|

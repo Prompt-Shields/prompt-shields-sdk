@@ -64,7 +64,7 @@ params, `gen_ai.response.model`/`id`/`finish_reasons` (normalised to `stop`,
 `error.type`. `X-PS-*` business context goes to `ps.*` span attributes and
 `X-PS-Environment` to the `deployment.environment.name` resource attribute.
 An inbound `traceparent` makes the span a child of the caller's span.
-When the call made upstream attempts (retries, fallbacks; psAttempts), the
+When the call made more than one upstream attempt (retries, fallbacks; psAttempts), the
 span has `ps.attempt.count` and `ps.fallback_chain`, and each attempt gets a
 child CLIENT span `attempt <n>` (`ps.attempt.number`/`provider`/`model`,
 `http.request.resend_count`, status, latency, `error.type`). The children have
