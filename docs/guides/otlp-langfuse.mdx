@@ -88,6 +88,8 @@ private address needs its host in `TRUSTED_CUSTOM_HOSTS`. On Kubernetes, put
 | User | `langfuse.user.id`, `user.id` (a SHA-256 hash, never the raw id) |
 | Environment | `langfuse.environment` (`environment=` / `X-PS-Environment`) |
 | Trace name | `langfuse.trace.name` (`chat <model>`) |
+| Where it ran (SDK, Claude on Vertex AI / Bedrock) | `cloud.region`, `cloud.provider`, `ps.served_jurisdiction`, `ps.endpoint_scope`, `ps.cloud_project` / `cloud.account.id` (metadata) |
+| Cost tags (SDK) | `ps.tag.<key>`, e.g. `ps.tag.langgraph_node` (metadata) |
 
 An SDK span joins the app's active OpenTelemetry span when
 `opentelemetry-api` is installed, so a call inside your own trace shows up

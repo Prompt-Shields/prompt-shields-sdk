@@ -127,12 +127,23 @@ PROVIDER_NAMES = {
     "anthropic": "anthropic",
     "azure_openai": "azure.ai.openai",
     "bedrock": "aws.bedrock",
+    # Claude on Vertex AI / Bedrock through the Anthropic SDK (#388).
+    "google-vertex-ai": "gcp.vertex_ai",
+    "aws-bedrock": "aws.bedrock",
     "google": "gcp.gemini",
     "vertex": "gcp.vertex_ai",
     "cohere": "cohere",
     "mistral": "mistral_ai",
     "groq": "groq",
     "deepseek": "deepseek",
+}
+
+# Vendors whose region names a cloud: cloud.provider (semconv values).
+_CLOUD_PROVIDERS = {
+    "google-vertex-ai": "gcp",
+    "vertex": "gcp",
+    "aws-bedrock": "aws",
+    "bedrock": "aws",
 }
 
 # The gateway's /log/stream placeholders (gateway/src/middlewares/router/pii.ts).
@@ -426,9 +437,27 @@ def span_attributes(event: Mapping[str, Any], messages: Iterable[Any],
         "ps.pii_categories": [c for c in event.get("detected_pii_types") or []
                               if isinstance(c, str)] or None,
     }
+    # Where the call ran (Claude on Vertex AI / Bedrock, #388).
+    region = event.get("region")
+    if isinstance(region, str) and region:
+        attrs["cloud.region"] = region
+        attrs["cloud.provider"] = _CLOUD_PROVIDERS.get(str(vendor or "").lower())
+    for key, name in (("served_jurisdiction", "ps.served_jurisdiction"),
+                      ("model_family", "ps.model_family"),
+                      ("endpoint_scope", "ps.endpoint_scope"),
+                      ("cloud_project", "ps.cloud_project"),
+                      ("cloud_account", "cloud.account.id")):
+        value = event.get(key)
+        if isinstance(value, str) and value:
+            attrs[name] = value
     tags = event.get("tags")
     if isinstance(tags, (list, tuple)):
         attrs["ps.tags"] = [t for t in tags if isinstance(t, str)] or None
+    elif isinstance(tags, dict):
+        # Cost tags, e.g. langgraph_node (#388): ps.tag.<key>.
+        for key, value in tags.items():
+            if isinstance(key, str) and key and isinstance(value, str) and value:
+                attrs[f"ps.tag.{key}"] = value
     input_messages = None
     if config.capture_content:
         input_messages = json.dumps(_content_messages(messages), ensure_ascii=False)

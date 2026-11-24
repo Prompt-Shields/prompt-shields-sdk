@@ -234,6 +234,30 @@ def test_span_carries_model_tokens_cost_session_and_user_hash():
     assert "gen_ai.input.messages" not in attrs
 
 
+def test_cloud_platform_region_vendor_and_cost_tags():
+    """Claude on Vertex AI / Bedrock (#388): the provider, where the call ran
+    and dict cost tags (langgraph_node) are on the span."""
+    vertex = {**EVENT, "vendor": "google-vertex-ai", "region": "europe-west1",
+              "served_jurisdiction": "EEA", "model_family": "anthropic",
+              "endpoint_scope": "regional", "cloud_project": "proj-1",
+              "tags": {"langgraph_node": "planner", "bad": 3}}
+    a = _attrs(build_span(vertex, [], _cfg()))
+    assert a["gen_ai.provider.name"] == "gcp.vertex_ai"
+    assert (a["cloud.region"], a["cloud.provider"]) == ("europe-west1", "gcp")
+    assert a["ps.served_jurisdiction"] == "EEA"
+    assert a["ps.model_family"] == "anthropic"
+    assert a["ps.endpoint_scope"] == "regional"
+    assert a["ps.cloud_project"] == "proj-1"
+    assert a["ps.tag.langgraph_node"] == "planner"
+    assert "ps.tag.bad" not in a
+    bedrock = {**EVENT, "vendor": "aws-bedrock", "region": "us-east-1",
+               "cloud_account": "123456789012"}
+    b = _attrs(build_span(bedrock, [], _cfg()))
+    assert b["gen_ai.provider.name"] == "aws.bedrock"
+    assert (b["cloud.provider"], b["cloud.account.id"]) == ("aws", "123456789012")
+    assert "cloud.region" not in _attrs(build_span(EVENT, [], _cfg()))
+
+
 def test_user_hash_salt_is_hmac():
     assert user_hash("u", "salt") != user_hash("u")
     span = build_span(EVENT, [], _cfg(user_hash_salt="s3"))

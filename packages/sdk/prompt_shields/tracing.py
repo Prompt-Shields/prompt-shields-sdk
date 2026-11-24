@@ -72,6 +72,9 @@ PROVIDER_NAMES = {
     "anthropic": "anthropic",
     "azure_openai": "azure.ai.openai",
     "bedrock": "aws.bedrock",
+    # Claude on Vertex AI / Bedrock through the Anthropic SDK (#388).
+    "google-vertex-ai": "gcp.vertex_ai",
+    "aws-bedrock": "aws.bedrock",
     "google": "gcp.gemini",
     "vertex": "gcp.vertex_ai",
     "cohere": "cohere",
