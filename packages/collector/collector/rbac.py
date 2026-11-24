@@ -116,10 +116,16 @@ ROLES: dict[str, tuple[str, frozenset[str]]] = {
     "billing": (
         (
             "Read usage and cost, export FOCUS cost data, read and acknowledge "
-            "spend alerts"
+            "spend alerts, run the monthly cost reconciliation"
         ),
         frozenset(
-            {"usage:read", "usage:export", "spend-alerts:read", "spend-alerts:acknowledge"}
+            {
+                "usage:read",
+                "usage:export",
+                "usage:reconcile",
+                "spend-alerts:read",
+                "spend-alerts:acknowledge",
+            }
         ),
     ),
 }

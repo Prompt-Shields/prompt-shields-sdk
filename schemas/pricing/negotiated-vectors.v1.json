@@ -1,0 +1,251 @@
+{
+  "_comment": "Shared negotiated-price cases (#348): the SDK list price (list_cost), and the cost after the prices section (cost, cost_source), checked by packages/sdk/tests/test_negotiated_prices_fixture.py (list_cost), packages/collector/tests/test_prices.py and gateway/src/middlewares/policyPull/prices.test.ts. The expected values are a contract: change them only on purpose.",
+  "section": {
+    "version": 1,
+    "currency": "EUR",
+    "usd_per_unit": 1.08,
+    "overrides": [
+      {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "valid_from": "2026-11-01",
+        "valid_to": "2027-01-01",
+        "input_per_1k": 0.002,
+        "output_per_1k": 0.008,
+        "cached_input_per_1k": 0.001
+      },
+      {
+        "provider": "openai",
+        "model": "*",
+        "valid_from": "2026-11-01",
+        "multiplier": 0.9
+      },
+      {
+        "provider": "anthropic",
+        "model": "*",
+        "valid_from": "2026-11-01T00:00:00+01:00",
+        "multiplier": 0.85
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "valid_from": "2026-11-01",
+        "input_per_1k": 0.0025,
+        "output_per_1k": 0.012
+      },
+      {
+        "provider": "bedrock",
+        "model": "anthropic.claude-sonnet-4-20250514-v1:0",
+        "valid_from": "2026-11-01",
+        "input_per_1k": 0.0025,
+        "output_per_1k": 0.0125
+      },
+      {
+        "provider": "azure_openai",
+        "model": "gpt-4o-mini",
+        "valid_from": "2026-11-01",
+        "input_per_1k": 0.0001,
+        "output_per_1k": 0.0005
+      },
+      {
+        "provider": "openai",
+        "model": "my-finetune",
+        "valid_from": "2026-11-01",
+        "input_per_1k": 0.003,
+        "output_per_1k": 0.006
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "rates, served snapshot without date suffix",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "served_model": "gpt-4o-2024-08-06",
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 12345,
+        "tokens_out": 6789,
+        "tokens_cached": 2000
+      },
+      "list_cost": 0.096252,
+      "list_cost_source": "pricing_table",
+      "cost": 0.083162,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "rates, batch tier",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 1000,
+        "service_tier": "batch"
+      },
+      "list_cost": 0.00625,
+      "list_cost_source": "pricing_table",
+      "cost": 0.0054,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "rates, unknown tier stays at list",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 1000,
+        "service_tier": "priority"
+      },
+      "list_cost": 0.02125,
+      "list_cost_source": "pricing_table",
+      "cost": 0.02125,
+      "cost_source": "pricing_table"
+    },
+    {
+      "name": "rates window ended: wildcard multiplier",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "served_model": null,
+      "at": "2027-01-01T00:00:00Z",
+      "usage": {
+        "tokens_in": 777,
+        "tokens_out": 333
+      },
+      "list_cost": 0.005273,
+      "list_cost_source": "pricing_table",
+      "cost": 0.004746,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "wildcard multiplier",
+      "vendor": "openai",
+      "model": "gpt-4o-mini",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 98765,
+        "tokens_out": 4321,
+        "tokens_cached": 50000
+      },
+      "list_cost": 0.013657,
+      "list_cost_source": "pricing_table",
+      "cost": 0.012291,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "before valid_from: list",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "served_model": null,
+      "at": "2026-10-31T23:59:59Z",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 1000
+      },
+      "list_cost": 0.0125,
+      "list_cost_source": "pricing_table",
+      "cost": 0.0125,
+      "cost_source": "pricing_table"
+    },
+    {
+      "name": "anthropic multiplier from offset date-time",
+      "vendor": "anthropic",
+      "model": "claude-opus-4-5",
+      "served_model": null,
+      "at": "2026-10-31T23:30:00Z",
+      "usage": {
+        "tokens_in": 4000,
+        "tokens_out": 900,
+        "tokens_cache_write": 1000,
+        "tokens_cache_write_1h": 200
+      },
+      "list_cost": 0.0445,
+      "list_cost_source": "pricing_table",
+      "cost": 0.037825,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "anthropic exact rates beat wildcard, cache ratios",
+      "vendor": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 10000,
+        "tokens_out": 2000,
+        "tokens_cached": 3000,
+        "tokens_cache_write": 1000,
+        "tokens_cache_write_1h": 400
+      },
+      "list_cost": 0.05355,
+      "list_cost_source": "pricing_table",
+      "cost": 0.047115,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "bedrock profile matches base model",
+      "vendor": "bedrock",
+      "model": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 2000,
+        "tokens_out": 500
+      },
+      "list_cost": null,
+      "list_cost_source": null,
+      "cost": 0.01215,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "azure vendor spelling",
+      "vendor": "azure-openai",
+      "model": "gpt-4o-mini",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 3000,
+        "tokens_out": 1000
+      },
+      "list_cost": 0.00105,
+      "list_cost_source": "pricing_table",
+      "cost": 0.000864,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "rates price a model with no list price",
+      "vendor": "openai",
+      "model": "my-finetune",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 1500,
+        "tokens_out": 500
+      },
+      "list_cost": null,
+      "list_cost_source": null,
+      "cost": 0.0081,
+      "cost_source": "negotiated"
+    },
+    {
+      "name": "provider-reported cost is kept",
+      "vendor": "openai",
+      "model": "gpt-4o",
+      "served_model": null,
+      "at": "2026-11-15T12:00:00Z",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 1000,
+        "provider_cost": 0.0042
+      },
+      "list_cost": 0.0042,
+      "list_cost_source": "provider_reported",
+      "cost": 0.0042,
+      "cost_source": "provider_reported"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import hashlib
 import math
 import re
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from db.models import AIUsageEvent
@@ -11,6 +12,7 @@ from collector import (
     cost_attribution,
     loss_accounting,
     metrics,
+    prices,
     tenant_keys,
     tenant_limits,
     user_identity,
@@ -808,6 +810,13 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
         if any(e.team or e.project for e in events)
         else {}
     )
+    # Negotiated prices (#348): read only when an event's cost could change.
+    price_book = (
+        await prices.load_price_book(db, tenant_id)
+        if any(e.cost_source not in prices.KEPT_COST_SOURCES for e in events)
+        else prices.PriceBook()
+    )
+    priced_at = datetime.now(UTC)
     await lock_asset_keys(
         db,
         tenant_id,
@@ -817,6 +826,8 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
         ),
     )
     for event in events:
+        if price_book:
+            prices.reprice(price_book, event, event.vendor, event.model, priced_at)
         asset, is_new = await find_or_create_asset(
             db=db,
             tenant_id=tenant_id,

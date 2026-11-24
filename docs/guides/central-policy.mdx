@@ -64,10 +64,10 @@ section has its own format version:
 | `rate_limits` | 1 | `on_store_error` and `rules`, the [`PS_RATE_LIMITS`](/guides/gateway-rate-limits) format: requests, tokens, daily tokens and concurrency per tenant, virtual key, team, project or user | The gateway's rate limiter. A team's or project's `rate_limits` apply on top of the tenant's, never instead of them |
 | `budgets` | 1 | `budgets`: [`budget.v1`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/schemas/budget/README.md) budgets (USD or token limits per tenant, team, project, user, service, model or attribution, per day, week or month, mode `warn`, `downgrade` or `block`), and optional `on_store_error` | Gateway spend budgets: replaces the budgets of `PS_BUDGETS` / `PS_BUDGETS_FILE`; the counter namespace and store stay the gateway's (`PS_BUDGET_NAMESPACE`, `PS_BUDGET_REDIS_URL`). An empty `budgets` list turns budgets off |
 | `guardrails` | 1 | `rules`: PII, secret and prompt-injection checks on input and output with `deny`, `redact` or `log`; see [Policy Guardrails](/guides/guardrails). Added up across tenant, team and project rather than replaced | The gateway on every model call, whatever guardrails the caller sends |
+| `prices` | 1 | `currency`, `usd_per_unit` and `overrides`: [negotiated prices](/guides/negotiated-prices) per provider and model, effective-dated. Tenant-scope policies only | The gateway's telemetry cost and cost metric, and the collector at ingest |
 
-Sections planned by other work items are reserved and refused until they ship:
-`prices`. Unknown
-sections are refused too, so nothing is stored that nothing enforces.
+No section is reserved at the moment. Unknown sections are refused, so
+nothing is stored that nothing enforces.
 
 **Extending it.** A section changes incompatibly only by adding a new version
 (`route` v2), never by changing what v1 means. A gateway that does not know
@@ -222,17 +222,17 @@ loopback or private address must be listed in `TRUSTED_CUSTOM_HOSTS`.
 
 - Gateways apply team and project policies: this needs the caller's team
   (from SSO/SCIM group mapping or virtual keys).
-- Sections for prices (#348). Rate limits (#344), guardrails (#349),
-  pseudonymisation (#350) and budgets (#29) are sections now; gateways apply
+- Rate limits (#344), guardrails (#349), pseudonymisation (#350), budgets
+  (#29) and prices (#348) are sections now; gateways apply
   the rate limits and guardrails of the team and project a call names.
 - Upgrade gateways before you enable `pseudonymisation`. An enabled section
   is listed in the effective policy's `required`, and a gateway that does not
   enforce a required section refuses the whole bundle (logged as an error)
   and keeps its last good policy: it does not pseudonymise, and it stops
-  taking policy changes until it is upgraded. A `pseudonymisation` section is
-  accepted in the tenant policy only (422 in a team or project policy), since
-  gateways apply team and project policies only for `rate_limits` and
-  `guardrails`.
+  taking policy changes until it is upgraded. A `pseudonymisation` section (like
+  `prices`) is accepted in the tenant policy only (422 in a team or project
+  policy), since gateways apply team and project policies only for
+  `rate_limits` and `guardrails`.
 - A gateway that starts while the collector is down uses its local settings
   until the first successful pull; the last good policy is not persisted
   across restarts.

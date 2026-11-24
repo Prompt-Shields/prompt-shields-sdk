@@ -158,6 +158,7 @@ components:
             members:read: List the tenant's teams and projects (never granted by default)
             spend-alerts:acknowledge: Acknowledge spend anomaly alerts (never granted by default)
             usage:export: Bulk export AI usage cost in the FinOps FOCUS format and the usage time series (never granted by default)
+            usage:reconcile: Run the monthly cost reconciliation against the provider usage pull (never granted by default)
             registry:read: Legacy Phase 1 scope; equals the six read scopes above
 
     PartnerApiKey:
@@ -3978,10 +3979,12 @@ components:
         (`{"version": 1, "enabled": bool, "categories": [...],
         "on_unsupported": "refuse"|"passthrough"}`), `guardrails` v1
         (`{"version": 1, "rules": [...], "stream_window_chars": N}`, see
-        docs/guides/guardrails.mdx) and `budgets` v1 (`{"version": 1,
-        "budgets": [<budget.v1>, ...], "on_store_error": "open"|"closed"}`).
-        Reserved for later: `prices`.
-        See docs/guides/central-policy.mdx.
+        docs/guides/guardrails.mdx), `budgets` v1 (`{"version": 1,
+        "budgets": [<budget.v1>, ...], "on_store_error": "open"|"closed"}`)
+        and `prices` v1 (negotiated model prices; see `PriceSection`).
+        `pseudonymisation` and `prices` are accepted in tenant-scope
+        policies only. No section is reserved. See
+        docs/guides/central-policy.mdx and docs/guides/negotiated-prices.mdx.
       properties:
         schema:
           type: string
@@ -3997,6 +4000,135 @@ components:
                 type: integer
             required: [version]
       required: [schema, sections]
+
+    PriceSection:
+      type: object
+      description: |
+        The `prices` v1 section of a tenant-scope `ps-policy.v1` document:
+        the tenant's negotiated model prices (#348). Applied by the gateway
+        (telemetry cost and `ps_gateway_cost_usd_total`) and by the
+        collector at ingest to calls made on or after `valid_from` and
+        before `valid_to`; events already stored keep their cost (see
+        docs/guides/negotiated-prices.mdx for re-pricing). Overlapping
+        windows for one provider and model are refused.
+      additionalProperties: false
+      properties:
+        version:
+          type: integer
+          const: 1
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          default: USD
+          description: ISO 4217 currency of the per-1k rates
+        usd_per_unit:
+          type: number
+          exclusiveMinimum: 0
+          description: USD per 1 unit of `currency` (the contract's fixed rate); required unless USD
+        overrides:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/PriceOverride'
+      required: [version, overrides]
+
+    PriceOverride:
+      type: object
+      description: >-
+        One negotiated price: either `multiplier` (times the catalog list
+        price) or per-1k token rates (`input_per_1k` and `output_per_1k`,
+        optionally the cache rates; cache rates left out follow the
+        provider's list ratios).
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'
+        model:
+          type: string
+          maxLength: 200
+          description: A model id, or `*` for every model of the provider (an exact model wins)
+        valid_from:
+          type: string
+          description: YYYY-MM-DD (midnight UTC) or an ISO 8601 date-time with an offset
+        valid_to:
+          type: string
+          description: Exclusive end, same format; open-ended when left out
+        multiplier:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 10
+        input_per_1k:
+          type: number
+          minimum: 0
+        output_per_1k:
+          type: number
+          minimum: 0
+        cached_input_per_1k:
+          type: number
+          minimum: 0
+        cache_write_per_1k:
+          type: number
+          minimum: 0
+      required: [provider, model, valid_from]
+
+    CostReconciliation:
+      type: object
+      description: >-
+        One month's comparison, for one provider and model, of the usage the
+        SDK and gateway reported with the usage the provider's usage API
+        reports, both valued at the same prices (`basis: price`: the
+        negotiated price in force each day, else the catalog list price;
+        standard input and output rates) or, with no price, in tokens
+        (`basis: tokens`). Numbers only.
+      properties:
+        id:
+          type: string
+          format: uuid
+        month:
+          type: string
+          pattern: '^\d{4}-\d{2}$'
+        provider:
+          type: string
+          enum: [openai, anthropic]
+        model:
+          type: string
+          description: Model id without a `-latest` or date suffix
+        estimated_tokens_in:
+          type: integer
+        estimated_tokens_out:
+          type: integer
+        estimated_cost_usd:
+          type: [number, 'null']
+          description: The cost the SDK and gateway events reported (negotiated or list), for reference
+        provider_tokens_in:
+          type: integer
+        provider_tokens_out:
+          type: integer
+        basis:
+          type: string
+          enum: [price, tokens]
+        estimated_value:
+          type: number
+          description: Reported usage valued per `basis` (USD, or tokens)
+        provider_value:
+          type: number
+          description: Provider-reported usage valued per `basis` (USD, or tokens)
+        variance_pct:
+          type: [number, 'null']
+          description: (estimated - provider) / provider x 100; null when the provider side is 0
+        threshold_pct:
+          type: number
+        flagged:
+          type: boolean
+          description: The gap is over the threshold (and the row over the tenant's minimum)
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, month, provider, model, estimated_tokens_in, estimated_tokens_out,
+                 estimated_cost_usd, provider_tokens_in, provider_tokens_out, basis,
+                 estimated_value, provider_value, variance_pct, threshold_pct, flagged,
+                 updated_at]
 
     PolicyVersionSummary:
       type: object
@@ -6373,6 +6505,119 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SavingsReport'
+
+  /partner/v1/cost-reconciliations:
+    get:
+      operationId: listCostReconciliations
+      tags: [Assets]
+      summary: List monthly cost reconciliations
+      description: |
+        Stored monthly cost reconciliation rows (newest month first), one per
+        provider and model, written by the monthly job
+        (`python -m collector.cost_reconciliation`) or by
+        `POST /partner/v1/cost-reconciliations/run`. `flagged` rows are the
+        alerts. Requires `usage:read`.
+      parameters:
+        - name: month
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+        - name: provider
+          in: query
+          schema:
+            type: string
+            maxLength: 64
+        - name: flagged
+          in: query
+          schema:
+            type: boolean
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 500
+            minimum: 1
+            maximum: 1000
+      security:
+        - OAuth2: [usage:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: Reconciliation rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CostReconciliation'
+                  meta:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                    required: [total]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/cost-reconciliations/run:
+    post:
+      operationId: runCostReconciliation
+      tags: [Assets]
+      summary: Run the cost reconciliation for a month
+      description: |
+        Recomputes the month (UTC) from the stored usage events, replacing
+        its rows, and returns them. Run the provider usage pull for the
+        month first. A provider with no pulled usage that month is
+        `no_provider_data` and gets no rows. The current month can be run
+        and is partial until it ends. Requires `usage:reconcile`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                month:
+                  type: string
+                  pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+              required: [month]
+      security:
+        - OAuth2: [usage:reconcile]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The month's rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  month:
+                    type: string
+                  providers:
+                    type: object
+                    additionalProperties:
+                      type: string
+                      enum: [ok, no_provider_data]
+                  skipped:
+                    type: [string, 'null']
+                    description: "`disabled` when the tenant turned reconciliation off"
+                  flagged:
+                    type: integer
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CostReconciliation'
+                required: [month, providers, skipped, flagged, data]
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          description: Invalid or future month
 
   /partner/v1/spend-alerts:
     get:

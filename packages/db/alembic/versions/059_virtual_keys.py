@@ -16,10 +16,10 @@ admin scope from every token and the ingest scope from every key, and drops
 both tables.
 
 Revision ID: 059
-Revises: 058
+Revises: 051
 Create Date: 2026-11-24
 
-Chained from main's head (058); re-chain at merge if another migration
+Chained from main's head (051); re-chain at merge if another migration
 lands first.
 """
 
@@ -30,7 +30,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "059"
-down_revision: str | None = "058"
+down_revision: str | None = "051"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

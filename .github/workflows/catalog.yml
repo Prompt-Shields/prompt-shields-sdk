@@ -18,6 +18,7 @@ on:
       - 'gateway/src/middlewares/router/defaultPolicy.json'
       - 'gateway/src/middlewares/router/policy.ts'
       - 'gateway/src/middlewares/psPricingTables.json'
+      - 'packages/collector/collector/list_prices.json'
       - '.github/workflows/catalog.yml'
   push:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - 'gateway/src/middlewares/router/defaultPolicy.json'
       - 'gateway/src/middlewares/router/policy.ts'
       - 'gateway/src/middlewares/psPricingTables.json'
+      - 'packages/collector/collector/list_prices.json'
       - '.github/workflows/catalog.yml'
 
 permissions:

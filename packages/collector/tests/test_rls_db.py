@@ -17,7 +17,14 @@ from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
-from collector import audit_trail, learner, rls, spend_anomalies, usage_rollups
+from collector import (
+    audit_trail,
+    cost_reconciliation,
+    learner,
+    rls,
+    spend_anomalies,
+    usage_rollups,
+)
 from collector.app import app
 from collector.config import settings
 from collector.partner_auth import hash_secret
@@ -33,6 +40,7 @@ from db.models import (
     Base,
     CallFeedback,
     CallPayload,
+    CostReconciliation,
     CredentialCreator,
     DataFlow,
     GatewaySecurityEvent,
@@ -200,6 +208,16 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     call_id=f"seed-call-{name}",
                     score=1.0,
                     source="sdk",
+                ),
+                CostReconciliation(
+                    tenant_id=tenant_id,
+                    month=date(2026, 1, 1),
+                    provider="openai",
+                    model=f"seed-{name}",
+                    basis="tokens",
+                    estimated_value=1,
+                    provider_value=1,
+                    threshold_pct=5.0,
                 ),
                 SpendAlert(
                     tenant_id=tenant_id,
@@ -1080,6 +1098,51 @@ async def test_spend_anomaly_job_and_partner_api_under_rls(rls_db, caplog):
         assert acked.status_code == 200, acked.text
         cross = await c.post(f"/partner/v1/spend-alerts/{alert_b}/acknowledge", headers=head)
         assert cross.status_code == 404
+
+
+async def test_cost_reconciliation_job_and_partner_api_under_rls(rls_db, caplog):
+    a, b = rls_db["a"], rls_db["b"]
+    async with rls_db["admin"]() as s:
+        for tenant_id, extra in ((a, 100_000), (b, 0)):
+            sdk = AIAsset(tenant_id=tenant_id, vendor="openai", model="gpt-4o",
+                          discovery_source=["sdk"])
+            pull = AIAsset(tenant_id=tenant_id, vendor="openai", model="gpt-4o",
+                           discovery_source=["platform_signal"])
+            s.add_all([sdk, pull])
+            await s.flush()
+            ts = datetime(2026, 10, 5, tzinfo=UTC)
+            s.add_all([
+                AIUsageEvent(tenant_id=tenant_id, asset_id=sdk.id, source="sdk", timestamp=ts,
+                             tokens_in=1_000_000 + extra, tokens_out=100_000),
+                AIUsageEvent(tenant_id=tenant_id, asset_id=pull.id, source="platform_signal",
+                             timestamp=ts, tokens_in=1_000_000, tokens_out=100_000),
+            ])
+        await s.commit()
+
+    with caplog.at_level(logging.INFO, logger="collector.rls"):
+        summary = await cost_reconciliation.run_all_tenants(
+            rls_db["plain"], month=date(2026, 10, 1), now=datetime(2026, 11, 2, tzinfo=UTC))
+    assert "rls bypass granted reason=cost-reconciliation-job" in caplog.text
+    assert summary["tenants"][str(a)]["flagged"] == 1
+    assert summary["tenants"][str(b)]["flagged"] == 0
+
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        rows = (await s.execute(text(
+            "SELECT tenant_id, flagged FROM cost_reconciliations WHERE month = '2026-10-01'"
+        ))).all()
+        assert [(r.tenant_id, r.flagged) for r in rows] == [(a, True)]
+        s.add(CostReconciliation(tenant_id=b, month=date(2026, 9, 1), provider="openai",
+                                 model="evil", basis="tokens", estimated_value=0,
+                                 provider_value=0, threshold_pct=5))
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await s.flush()
+
+    head = {"Authorization": f"Bearer {PARTNER_KEY_A}"}  # registry:read covers usage:read
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        listed = await c.get("/partner/v1/cost-reconciliations?month=2026-10", headers=head)
+        assert listed.status_code == 200, listed.text
+        assert [x["flagged"] for x in listed.json()["data"]] == [True]
 
 
 async def test_usage_rollup_job_and_series_under_rls(rls_db, caplog):

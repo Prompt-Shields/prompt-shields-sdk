@@ -22,6 +22,8 @@
  *   - `budgets` v1: spend budgets (budget.v1 budgets, #29); replace the
  *     budgets and on_store_error of PS_BUDGETS / PS_BUDGETS_FILE (the
  *     namespace and store stay the gateway's, ../psBudget/runtime.ts).
+ *   - `prices` v1 (#348): negotiated model prices (./prices.ts), applied to
+ *     telemetry cost and ps_gateway_cost_usd_total.
  *   - `rate_limits` v1 (#344): request and token rate limits; replaces
  *     PS_RATE_LIMITS / PS_RATE_LIMITS_FILE (../psRateLimit).
  *   - `guardrails` v1 (#349): checks the gateway runs on every model call
@@ -47,6 +49,7 @@ import {
   GuardrailsSection,
   parseGuardrailsSection,
 } from '../psGuardrails/config';
+import { PriceBook, parsePricesSection } from './prices';
 import { parseRateLimitSection, RateLimitConfig } from '../psRateLimit/config';
 
 export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
@@ -58,6 +61,7 @@ export const ENFORCED_SECTIONS: Record<string, number[]> = {
   pseudonymisation: [1],
   budgets: [1],
   guardrails: [1],
+  prices: [1],
   rate_limits: [1],
 };
 
@@ -100,6 +104,7 @@ export interface CentralPolicy {
   teamGuardrails?: Map<string, GuardrailsSection>;
   /** Project guardrails (its team's included) by project id and name. */
   projectGuardrails?: Map<string, GuardrailsSection>;
+  prices?: PriceBook;
   /** `rate_limits` of the tenant, its teams and projects. */
   rateLimits?: CentralRateLimits;
   /** Sections present but not enforced by this gateway. */
@@ -117,6 +122,7 @@ interface ParsedSections {
   pseudonymisation?: PseudonymisationSettings;
   budgets?: CentralBudgets;
   guardrails?: GuardrailsSection;
+  prices?: PriceBook;
   rateLimits?: RateLimitLayer;
   ignored: string[];
 }
@@ -184,6 +190,8 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
         out.budgets = parseBudgetsSection(body);
       } else if (name === 'guardrails') {
         out.guardrails = parseGuardrailsSection(body, version ?? undefined);
+      } else if (name === 'prices') {
+        out.prices = parsePricesSection(body);
       } else if (name === 'rate_limits') {
         out.rateLimits = {
           config: parseRateLimitSection(body),
@@ -254,6 +262,7 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     access: tenant.access,
     pseudonymisation: tenant.pseudonymisation,
     ...(tenant.budgets ? { budgets: tenant.budgets } : {}),
+    prices: tenant.prices,
     rateLimits,
     guardrails: tenant.guardrails,
     teamGuardrails: teamGuardrails.size ? teamGuardrails : undefined,
@@ -283,6 +292,11 @@ export function centralBudgets(): CentralBudgets | undefined {
 /** The OIDC group policy from the central `access` section, if any. */
 export function centralAccessPolicy(): OidcPolicy | undefined {
   return active?.access;
+}
+
+/** The negotiated prices from the central `prices` section, if any. */
+export function centralPriceBook(): PriceBook | undefined {
+  return active?.prices;
 }
 
 /** Pseudonymisation settings from the central `pseudonymisation` section. */

@@ -82,6 +82,7 @@
         "guides/central-policy",
         "guides/guardrails",
         "guides/gateway-rate-limits",
+        "guides/negotiated-prices",
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",
