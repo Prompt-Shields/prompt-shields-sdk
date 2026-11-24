@@ -1,0 +1,154 @@
+---
+title: Policy Guardrails
+description: PII, secret and prompt-injection checks the gateway enforces on every model call from the central policy, on input and on JSON and streamed output
+---
+
+# Policy Guardrails
+
+Portkey-style guardrails run only when the caller sends them (`x-portkey-config`,
+`input_guardrails`). Policy guardrails are different: they come from the
+`guardrails` section of the [central policy](/guides/central-policy) and the
+gateway runs them on every model call, whatever the caller sends. A caller
+cannot remove or weaken them; guardrails the caller adds still run on top.
+
+They need the policy pull (`PS_POLICY_PULL_ENABLED=true`). Without a
+`guardrails` section the gateway behaves exactly as before: it does not read
+the request body or touch the response for them.
+
+## The section
+
+```json
+{
+  "version": 1,
+  "stream_window_chars": 256,
+  "rules": [
+    {"id": "no-keys", "check": "secrets", "action": "deny", "stages": ["input"]},
+    {"id": "redact-email", "check": "pii", "categories": ["email"], "action": "redact"},
+    {"id": "cards-out", "check": "pii", "categories": ["credit_card"], "stages": ["output"], "action": "redact"},
+    {"id": "injection", "check": "injection", "stages": ["input"], "action": "log", "models": ["gpt-4o*"]}
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | 1-64 characters of `[a-z0-9_.-]`, unique in the section. Security events name it. |
+| `check` | `pii`, `secrets` or `injection` (below). |
+| `action` | `deny`, `redact` or `log` (`injection`: `deny` or `log`). |
+| `stages` | `input`, `output` or both (default both). |
+| `categories` | Which findings of the check the rule covers (default: every value category). |
+| `models` | Glob patterns (`gpt-4o*`, case-insensitive); default every model. |
+| `stream_window_chars` | 64-4096, default 256: how far streamed output is held back (below). |
+
+When several rules match one finding the strictest wins: `deny` over
+`redact` over `log`.
+
+### Checks
+
+- **`pii`**: the gateway's PII detector (the one used for sensitivity
+  routing). Value categories: `credit_card` (Luhn checked), `email`, `iban`
+  (mod-97 checked), `ip_address`, `national_id` (Nordic, checksum checked),
+  `phone`, `ssn`. Context categories `health_data` and `financial_data`
+  are keyword matches with no value to redact: name them explicitly, with
+  `deny` or `log`.
+- **`secrets`**: `openai_key`, `anthropic_key`, `aws_access_key`,
+  `github_token`, `slack_token`, `google_api_key`, `stripe_key`,
+  `private_key`, `jwt`, by their published prefixes and shapes.
+- **`injection`**: well-known prompt-injection phrasings ("ignore all
+  previous instructions", "you are now in developer mode", "reveal your
+  system prompt") and chat-template control tokens. A marker list for
+  copy-pasted attacks, not a classifier.
+
+Every detector runs in linear time in the text length (tested on
+adversarial input).
+
+### Actions
+
+| | Input | Output (JSON) | Output (streamed) |
+|---|---|---|---|
+| `deny` | 446 `ps_guardrail_denied`, no upstream call | 446 `ps_guardrail_denied` | the stream ends with an SSE error event (`ps_guardrail_denied`); held-back text is not sent |
+| `redact` | the finding is replaced by `[EMAIL]`, `[OPENAI_KEY]`, ... in the body the provider (and the router, telemetry, OTel and cache) see | replaced in the response | replaced in the events that carry it |
+| `log` | security event only | security event only | security event only |
+
+Input text is what the router's PII detection reads: messages, prompts,
+instructions, tool arguments and outputs, embeddings and rerank input, and
+Anthropic plain-text documents. A request body is read as JSON whatever its
+`Content-Type` says (the handlers parse it that way), so leaving the header
+out does not skip the input checks.
+Output text is the model's: message content, Anthropic/Gemini `text`,
+Responses `output_text` and deltas, tool-call arguments, refusals and
+reasoning text. Output rules also apply to responses read back later with
+GET (a stored or background Responses object, stored chat completions,
+conversation items).
+
+What the gateway keeps or exports of a response follows the output rules
+too: the response cache stores the redacted response (a denied one is not
+stored), OTel content capture records the redacted output (none for a
+denied one), and `/log/stream` entries show the provider response redacted
+(withheld when denied).
+
+## Which rules apply
+
+Guardrails add up across levels, unlike the other sections: a call gets the
+tenant's rules, plus the rules of the team and project it names in
+`X-PS-Team` / `X-PS-Project` (an id or the exact name, as for
+[cost attribution](/guides/cost-attribution)). A team or project can add
+rules but never drop the tenant's, so naming another team, or none, never
+weakens what applies. Put rules that must hold for everyone in the tenant
+policy.
+
+`models` patterns are matched against the body's `model`, every model in an
+`x-portkey-config` (`override_params.model`, Azure deployments) and the
+router's chosen model. A call whose model cannot be told gets the scoped
+rule anyway.
+
+## Streaming
+
+A finding can be split across SSE events (a card number over three
+deltas), so the gateway holds streamed text back: an event is forwarded once
+`stream_window_chars` more characters of the same choice or content block
+have arrived after it, once the provider marks that text complete
+(Anthropic `content_block_stop`, a Responses `*.done` event, a chat choice's
+`finish_reason`), or when the stream ends. Events without model text (role,
+usage, tool-call starts) keep their place in the stream. Expect about that many
+characters (256 is about 60 tokens) of extra delay before text appears; the
+rest arrives at the end of the stream. Memory is about twice the window per
+choice; past 64 windows (at least 256 KB) of held-back text the oldest
+events are forwarded anyway.
+
+Limits: a finding longer than the window that started in text already
+forwarded (a private key block, a very long e-mail address) is redacted only
+from where the window still holds it; set a larger window or use `deny` for
+those.
+
+## Security events and telemetry
+
+Each rule that found something writes one `guardrail.verdict` security
+event per category (plus `pii.detected` or `injection.detected`) with
+`ps.guardrail.hook_id: ps.policy`, the rule id (`ps.guardrail.rule_id`, also
+the `signature`), `ps.guardrail.action`, `ps.guardrail.category`,
+`ps.guardrail.count` and `ps.policy_version`. Never the matched text. The
+input's PII categories are sent with the call's telemetry as
+`detected_pii_types`.
+
+## Not inspected
+
+Request bodies that are not JSON (multipart uploads such as audio
+transcriptions, raw audio), responses that are neither JSON nor SSE (audio,
+images, JSONL), error responses, JSON responses over 16 MB, realtime
+WebSockets, and the MCP proxy, files, batches (batch input files and batch
+outputs, including Anthropic message batches) and fine-tuning routes: a
+caller who can use those routes can reach a model without these checks, so
+restrict them where that matters. Base64 attachments (PDFs, images, OpenAI
+`file_data`) are not decoded. PII split across separate strings of a
+request (two messages) is not joined. When a `models` rule depends on the
+router changing the model, input rules are chosen from the requested model;
+output rules also see the routed one.
+
+## Not done yet
+
+- A team taken from the caller's credentials (virtual keys, SSO group
+  mapping) rather than the `X-PS-Team` header, so a team's own rules apply
+  even when the header is left out.
+- `pseudonymise` as an action (#350) and data-policy/sensitivity stages.
+- Output scanning for detected PII types in telemetry (input only today).

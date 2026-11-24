@@ -103,7 +103,7 @@ def test_key_vector(vector):
     now = datetime.fromisoformat(i["now"])
     period, _ = window_period(i["window"], now)
     assert counter_key(i["namespace"], i["scope"], i["subject"], i["window"],
-                       period) == vector["expected"]["key"]
+                       period, i.get("unit", "usd")) == vector["expected"]["key"]
     assert counter_ttl(i["window"], now) == vector["expected"]["ttl_seconds"]
 
 
@@ -168,7 +168,7 @@ def test_documents_match_the_json_schema():
     [
         ({"budgets": []}, "schema_version"),
         (_doc(_budget(mode="throttle")), "mode"),
-        (_doc(_budget(scope="team", subject="x")), "scope"),
+        (_doc(_budget(scope="department", subject="x")), "scope"),
         (_doc(_budget(subject="x")), "no subject"),
         (_doc(_budget(scope="use_case")), "needs a subject"),
         (_doc(_budget(limit_usd=-1)), "limit_usd"),

@@ -33,3 +33,29 @@ export const budgetStoreErrorsTotal = defaultRegistry.register(
     ['store', 'op']
   )
 );
+export const budgetSpendTokens = defaultRegistry.register(
+  new Gauge(
+    'ps_gateway_budget_spend_tokens',
+    'Tokens counted against a token budget in its current window (settled plus in-flight reservations), as last seen by this replica.',
+    ['budget', 'window']
+  )
+);
+export const budgetLimitTokens = defaultRegistry.register(
+  new Gauge(
+    'ps_gateway_budget_limit_tokens',
+    'Configured token budget limit.',
+    ['budget', 'window']
+  )
+);
+/**
+ * A settle that moved a counter across a budget's warn share
+ * (threshold="warn") or its limit (threshold="exceeded"). The write is
+ * atomic, so with a shared Redis exactly one replica counts each crossing.
+ */
+export const budgetThresholdCrossingsTotal = defaultRegistry.register(
+  new Counter(
+    'ps_gateway_budget_threshold_crossings_total',
+    "Budget counters that crossed a budget's warn share or its limit, by budget, window and threshold (warn, exceeded).",
+    ['budget', 'window', 'threshold']
+  )
+);

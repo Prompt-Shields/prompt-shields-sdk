@@ -490,6 +490,131 @@ export function recordHookResults(
 }
 
 // ---------------------------------------------------------------------------
+// Central-policy guardrails (#349)
+
+/** One rule's findings of one category, as psGuardrails tallies them. */
+export interface PolicyGuardrailFinding {
+  stage: GuardrailStage;
+  ruleId: string;
+  check: 'pii' | 'secrets' | 'injection';
+  category: string;
+  action: 'deny' | 'redact' | 'log';
+  count: number;
+  policyVersion?: string;
+}
+
+export const POLICY_GUARDRAIL_HOOK_ID = 'ps.policy';
+
+/**
+ * Records the findings of the central policy's guardrails on one request:
+ * a guardrail.verdict event per rule and category (plus pii.detected or
+ * injection.detected) and the guardrail metrics. Rule ids, categories and
+ * counts only, never content. Never throws.
+ */
+export function recordPolicyGuardrailFindings(
+  c: Context,
+  findings: PolicyGuardrailFinding[],
+  fields: { provider?: string; model?: string } = {}
+): void {
+  try {
+    if (!findings.length) return;
+    const target = sinksOf(c);
+    const metrics = isMetricsEnabled(c);
+    if (!target && !metrics) return;
+    const genAi = {
+      ...(fields.provider
+        ? { 'gen_ai.provider.name': safeId(fields.provider) }
+        : {}),
+      ...(fields.model
+        ? { 'gen_ai.request.model': safeId(fields.model, MODEL_RE) }
+        : {}),
+    };
+    for (const f of findings) {
+      const checkId = `ps.${f.check}`;
+      const blocked = f.action === 'deny';
+      const verdict: GuardrailVerdict = blocked ? 'deny' : 'flag';
+      const category = safeId(f.category, CATEGORY_RE);
+      const count = Math.max(1, Math.floor(f.count));
+      if (metrics) {
+        guardrailVerdictsTotal.inc({
+          hook: POLICY_GUARDRAIL_HOOK_ID,
+          check: checkId,
+          verdict,
+          stage: f.stage,
+        });
+        if (f.check === 'pii')
+          piiDetectionsTotal.inc({ category: piiLabel(category) }, count);
+      }
+      if (!target) continue;
+      const guardrail: GuardrailFields = {
+        'ps.guardrail.hook_id': POLICY_GUARDRAIL_HOOK_ID,
+        'ps.guardrail.hook_type': 'guardrail',
+        'ps.guardrail.check_id': checkId,
+        'ps.guardrail.stage': f.stage,
+        'ps.guardrail.verdict': verdict,
+        'ps.guardrail.rule_id': safeId(f.ruleId),
+        'ps.guardrail.action': f.action,
+        'ps.guardrail.category': category,
+        'ps.guardrail.count': count,
+        ...(f.policyVersion
+          ? { 'ps.policy_version': f.policyVersion.slice(0, 256) }
+          : {}),
+      };
+      const action = blocked ? 'blocked' : 'allowed';
+      const outcome = blocked ? ('failure' as const) : ('success' as const);
+      const signature = safeId(f.ruleId);
+      enqueue(target, {
+        ...base(c, 'guardrail.verdict', {
+          'event.kind': 'alert',
+          'event.category': ['intrusion_detection'],
+          'event.outcome': outcome,
+          severity: blocked ? 'high' : 'medium',
+          action,
+          signature,
+        }),
+        ...genAi,
+        ...guardrail,
+        'event.name': 'guardrail.verdict',
+        'ps.guardrail.deny': blocked,
+      });
+      if (f.check === 'pii') {
+        enqueue(target, {
+          ...base(c, 'pii.detected', {
+            'event.kind': 'alert',
+            'event.category': ['intrusion_detection'],
+            'event.outcome': outcome,
+            severity: blocked ? 'high' : 'medium',
+            action,
+            signature: category,
+          }),
+          ...genAi,
+          ...guardrail,
+          'event.name': 'pii.detected',
+          'ps.pii.category': category,
+          'ps.pii.count': count,
+        });
+      } else if (f.check === 'injection') {
+        enqueue(target, {
+          ...base(c, 'injection.detected', {
+            'event.kind': 'alert',
+            'event.category': ['intrusion_detection'],
+            'event.outcome': outcome,
+            severity: 'high',
+            action,
+            signature,
+          }),
+          ...genAi,
+          ...guardrail,
+          'event.name': 'injection.detected',
+        });
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Gateway refusals
 
 /** A gateway credential check failed (admin console/log stream, /metrics, the MCP proxy or OIDC). */
