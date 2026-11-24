@@ -48,7 +48,8 @@ Sections today:
 
         {"id": "team-chat",                 # [A-Za-z0-9_.:-]{1,64}, unique
          "scope": "global"|"virtual_key"|"team"|"project"|"user",
-         "subjects": ["team-a"],            # optional, not with global
+         "subjects": ["team-a"],            # optional, not with global; user: OIDC
+                                            # sub, virtual_key: the virtual-key id
          "match": {"model": "gpt-4o*", "provider": [...], "route": [...]},
          "rpm": 600, "tpm": 200000, "tpd": 5000000, "concurrency": 20}
 

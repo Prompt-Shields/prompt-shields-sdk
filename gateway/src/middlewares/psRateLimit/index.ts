@@ -8,8 +8,9 @@
  * format). With no rules the middleware does nothing: no body parsing, no
  * headers, no store calls.
  *
- * Per model call (the billed endpoints; mounted after psOidc for the user
- * and after the router for the routed model, before budgets):
+ * Per model call (the model endpoints, prompt completions and the POSTs the
+ * /v1 proxy catch-alls forward; see isRateLimitedPath. Mounted after psOidc
+ * for the user and after the router for the routed model, before budgets):
  *
  * 1. Every rule whose `match` fits the call and whose scope has a value for
  *    it applies; each of its limits (rpm, tpm, tpd, concurrency) is a
@@ -98,6 +99,33 @@ export const RATE_LIMITED_PATHS = new Set([
   '/v1/ocr',
 ]);
 
+/**
+ * POST /v1 routes that make no model call (or not one billed per call):
+ * feedback, token counts, cancels, files, batches and fine-tuning jobs. The
+ * MCP proxy is skipped through isMcpProxyPath.
+ */
+const NOT_MODEL_CALLS = [
+  /^\/v1\/feedback$/,
+  /^\/v1\/messages\/count_tokens$/,
+  /^\/v1\/responses\/input_tokens$/,
+  /^\/v1\/responses\/[^/]+\/cancel$/,
+  /^\/v1\/files(\/|$)/,
+  /^\/v1\/batches(\/|$)/,
+  /^\/v1\/fine_tuning(\/|$)/,
+];
+
+/**
+ * Whether a POST is a model call the rules apply to: the model endpoints,
+ * plus prompt completions (/v1/prompts/...) and every other POST under /v1
+ * that the proxy catch-alls (/v1/proxy/*, /v1/*) forward to the provider,
+ * so a caller cannot step around the limits through a passthrough path.
+ */
+export function isRateLimitedPath(path: string): boolean {
+  if (RATE_LIMITED_PATHS.has(path)) return true;
+  if (!path.startsWith('/v1/') || isMcpProxyPath(path)) return false;
+  return !NOT_MODEL_CALLS.some((re) => re.test(path));
+}
+
 /** Endpoints whose output is tokens (max_tokens counts in the estimate). */
 const GENERATIVE_PATHS = new Set([
   '/v1/chat/completions',
@@ -105,6 +133,8 @@ const GENERATIVE_PATHS = new Set([
   '/v1/messages',
   '/v1/responses',
 ]);
+const isGenerative = (path: string) =>
+  GENERATIVE_PATHS.has(path) || path.startsWith('/v1/prompts/');
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
@@ -217,7 +247,7 @@ export function estimateTokens(path: string, body: any): number {
   const input = Array.isArray(body.messages)
     ? estimateInputTokens(body.messages) + chars(body.system)
     : chars(body.input ?? body.prompt);
-  if (!GENERATIVE_PATHS.has(path)) return input;
+  if (!isGenerative(path)) return input;
   const out = [
     body.max_tokens,
     body.max_completion_tokens,
@@ -304,7 +334,7 @@ export function psRateLimit(options: PsRateLimitOptions = {}) {
   return async (c: Context, next: Next) => {
     if (c.req.method !== 'POST') return next();
     const path = c.req.path;
-    if (isMcpProxyPath(path) || !RATE_LIMITED_PATHS.has(path)) return next();
+    if (!isRateLimitedPath(path)) return next();
     const vars = env<Record<string, string | undefined>>(c);
     const headers = Object.fromEntries(c.req.raw.headers) as Record<
       string,
@@ -322,11 +352,15 @@ export function psRateLimit(options: PsRateLimitOptions = {}) {
       }
     }
     let user: string | undefined;
+    let userSub: string | undefined;
     try {
-      user = oidcIdentityOf(c)?.subjectHash;
+      const identity = oidcIdentityOf(c);
+      user = identity?.subjectHash;
+      userSub = identity?.subject || undefined;
     } catch {
       user = undefined;
     }
+    const virtualKey = await keySubject(headers);
     const route = c.get('psRoute');
     const call: CallAttributes = {
       model:
@@ -338,7 +372,13 @@ export function psRateLimit(options: PsRateLimitOptions = {}) {
         user,
         team,
         project,
-        virtual_key: await keySubject(headers),
+        virtual_key: virtualKey,
+      },
+      // What a rule's `subjects` may list: the OIDC sub and the virtual-key
+      // id as the operator knows them (only compared here, never stored).
+      subjectNames: {
+        user: userSub ? [userSub] : [],
+        virtual_key: virtualKey?.startsWith('vk:') ? [virtualKey.slice(3)] : [],
       },
     };
     const estimate = estimateTokens(path, body);

@@ -12,7 +12,9 @@
  *       {
  *         "id": "team-chat",               // [A-Za-z0-9_.:-]{1,64}, unique
  *         "scope": "team",                 // global | virtual_key | team | project | user
- *         "subjects": ["team-a"],          // optional: only these values
+ *         "subjects": ["team-a"],          // optional: only these values (user: the
+ *                                          // OIDC sub or its hash; virtual_key: the id,
+ *                                          // or key:<fingerprint> for a provider key)
  *         "match": {                       // optional; all given keys must match
  *           "model": ["gpt-4o*"],          // string or array; `*` is a wildcard
  *           "provider": "openai",
@@ -210,8 +212,15 @@ export interface CallAttributes {
   model?: string;
   provider?: string;
   route: string;
-  /** Subject per non-global scope; absent when the call has none. */
+  /** Subject per non-global scope (the counter key); absent when none. */
   subjects: Partial<Record<Exclude<RateLimitScope, 'global'>, string>>;
+  /**
+   * Other values a rule's `subjects` may name for a scope, when they differ
+   * from the counter subject: the OIDC `sub` claim for `user` (the subject is
+   * its hash), the virtual-key id for `virtual_key` (the subject is
+   * `vk:<id>` or `key:<fingerprint>`).
+   */
+  subjectNames?: Partial<Record<Exclude<RateLimitScope, 'global'>, string[]>>;
 }
 
 /** The subject the rule counts this call under, or undefined if it does not apply. */
@@ -228,6 +237,9 @@ export function ruleSubject(
   if (rule.scope === 'global') return '_';
   const subject = call.subjects[rule.scope];
   if (!subject) return undefined;
-  if (rule.subjects && !rule.subjects.includes(subject)) return undefined;
+  if (rule.subjects) {
+    const names = [subject, ...(call.subjectNames?.[rule.scope] ?? [])];
+    if (!names.some((n) => rule.subjects!.includes(n))) return undefined;
+  }
   return subject;
 }

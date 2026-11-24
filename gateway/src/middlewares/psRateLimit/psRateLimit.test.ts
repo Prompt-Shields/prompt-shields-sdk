@@ -14,6 +14,7 @@ import {
 import {
   estimateTokens,
   formatDuration,
+  isRateLimitedPath,
   psRateLimit,
   rateLimitHealth,
 } from './index';
@@ -367,6 +368,82 @@ describe('psRateLimit middleware', () => {
     expect((await chat(app)).status).toBe(200); // no team: not counted
   });
 
+  test('subjects name users by OIDC sub and keys by virtual-key id', async () => {
+    setLocalRateLimits(
+      parseRateLimitSection(
+        section([
+          {
+            id: 'alice',
+            scope: 'user',
+            subjects: ['alice@example.com'],
+            rpm: 1,
+          },
+          { id: 'vk', scope: 'virtual_key', subjects: ['vk-prod'], rpm: 1 },
+        ])
+      )
+    );
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      const sub = c.req.header('x-test-sub');
+      if (sub)
+        c.set('psOidcIdentity' as any, {
+          subject: sub,
+          subjectHash: `hash-of-${sub}`,
+        });
+      await next();
+    });
+    app.use('*', psRateLimit({ now: () => T0 + 1000 }));
+    app.post('/v1/chat/completions', (c) => c.json({ choices: [] }));
+    const alice = { 'x-test-sub': 'alice@example.com' };
+    expect((await chat(app, {}, alice)).status).toBe(200);
+    expect((await chat(app, {}, alice)).status).toBe(429);
+    const bob = { 'x-test-sub': 'bob@example.com' };
+    expect((await chat(app, {}, bob)).status).toBe(200);
+    expect((await chat(app, {}, bob)).status).toBe(200);
+    const vk = { 'x-portkey-virtual-key': 'vk-prod' };
+    expect((await chat(app, {}, vk)).status).toBe(200);
+    expect((await chat(app, {}, vk)).status).toBe(429);
+  });
+
+  test('passthrough and prompt routes are limited; files, batches and feedback are not', async () => {
+    for (const p of [
+      '/v1/chat/completions',
+      '/v1/embeddings',
+      '/v1/proxy/chat/completions',
+      '/v1/models/gemini-2.5-pro:generateContent',
+      '/v1/prompts/pp-123/completions',
+    ])
+      expect([p, isRateLimitedPath(p)]).toEqual([p, true]);
+    for (const p of [
+      '/v1/feedback',
+      '/v1/messages/count_tokens',
+      '/v1/responses/input_tokens',
+      '/v1/responses/resp_1/cancel',
+      '/v1/files',
+      '/v1/batches',
+      '/v1/batches/b1/cancel',
+      '/v1/fine_tuning/jobs',
+      '/v1/mcp/github',
+      '/health',
+    ])
+      expect([p, isRateLimitedPath(p)]).toEqual([p, false]);
+
+    setLocalRateLimits(
+      parseRateLimitSection(section([{ id: 'all', scope: 'global', rpm: 1 }]))
+    );
+    const app = makeApp();
+    app.post('/v1/proxy/*', (c) => c.json({ ok: true }));
+    const proxy = () =>
+      app.request('/v1/proxy/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-4o', messages: [] }),
+      });
+    expect((await chat(app)).status).toBe(200);
+    // The passthrough path shares the global counter: no way around it.
+    expect((await proxy()).status).toBe(429);
+  });
+
   test('tpm blocks the request that would exceed it and settles to real usage', async () => {
     setLocalRateLimits(
       parseRateLimitSection(section([{ id: 'tok', scope: 'global', tpm: 100 }]))
@@ -454,6 +531,40 @@ describe('psRateLimit middleware', () => {
     const next = await chat(app);
     expect(next.status).toBe(200);
     expect(next.headers.get('x-ratelimit-remaining-tokens')).toBe('888');
+  });
+
+  test('a stream the client abandons releases its lease, keeping the estimate', async () => {
+    const spy = spyStore();
+    setRateLimitStores({ primaryFactory: () => spy.store });
+    setLocalRateLimits(
+      parseRateLimitSection(
+        section([{ id: 'c', scope: 'global', tpm: 1000, concurrency: 1 }])
+      )
+    );
+    const enc = new TextEncoder();
+    const app = makeApp({
+      upstream: () =>
+        new Response(
+          new ReadableStream({
+            pull(ctrl) {
+              // Never ends on its own.
+              ctrl.enqueue(enc.encode('data: {"choices":[]}\n\n'));
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } }
+        ),
+    });
+    const res = await chat(app, { stream: true });
+    const reader = res.body!.getReader();
+    await reader.read();
+    expect((await chat(app)).status).toBe(429);
+    await reader.cancel();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(spy.calls.settle).toHaveLength(1);
+    const [adjustments, leaseKeys] = spy.calls.settle[0];
+    expect(adjustments).toEqual([]); // no reported usage: the estimate stays
+    expect(leaseKeys).toHaveLength(1);
+    expect((await chat(app, { stream: false })).status).toBe(200);
   });
 
   test('concurrency leases are released when the handler throws', async () => {

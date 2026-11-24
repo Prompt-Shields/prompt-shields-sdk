@@ -7,10 +7,14 @@ description: Requests, tokens and concurrency per tenant, key, team, project or 
 
 The gateway can limit requests per minute (`rpm`), tokens per minute
 (`tpm`, input plus output), tokens per UTC day (`tpd`) and calls in flight
-(`concurrency`) on its model endpoints (`/v1/chat/completions`,
+(`concurrency`) on its model calls: `/v1/chat/completions`,
 `/v1/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`,
-`/v1/rerank`, images, audio and OCR). Without rules nothing changes: no
-headers, no Redis calls.
+`/v1/rerank`, images, audio and OCR, prompt completions (`/v1/prompts/...`)
+and every other POST the `/v1` proxy forwards to the provider (`/v1/proxy/*`,
+`/v1/*`), so a passthrough path does not step around them. Feedback, token
+counts, cancels, files, batches, fine-tuning jobs, the MCP proxy and GET
+requests are not counted. Without rules nothing changes: no headers, no
+Redis calls.
 
 ## Where the rules come from
 
@@ -40,7 +44,7 @@ headers, no Redis calls.
 |---|---|
 | `id` | 1-64 characters of `[A-Za-z0-9_.:-]`, unique in the section. Named in 429s, metrics and security events |
 | `scope` | What the rule counts per: `global` (all calls together), `virtual_key` (`x-portkey-virtual-key`, else a SHA-256 fingerprint of the caller's provider key), `team` / `project` (`X-PS-Team` / `X-PS-Project`), `user` (the verified OIDC subject; needs `PS_OIDC_ENABLED`) |
-| `subjects` | Optional: only these scope values (not with `global`) |
+| `subjects` | Optional: only these scope values (not with `global`). For `user`, the OIDC `sub` claim; for `virtual_key`, the `x-portkey-virtual-key` id (a provider key is `key:` plus the first 16 hex characters of its SHA-256) |
 | `match` | Optional `model`, `provider` and `route`, each a string or array, `*` as a wildcard. The model is the routed model when the router changed it |
 | `rpm`, `tpm`, `tpd`, `concurrency` | At least one, positive integers |
 | `on_store_error` | `open` (default) or `closed`, see below |
