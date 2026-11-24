@@ -85,7 +85,9 @@ section is always taken whole, never merged field by field, so a team's
 `access` section is exactly what the team gets.
 
 A team or project with a policy cannot be deleted (409); delete its policy
-first.
+first. A policy create and a delete of its team or project are serialised:
+when the create commits first, the delete answers 409; when the delete
+commits first, the create answers 404 (the team or project is gone).
 
 ## Managing policies
 

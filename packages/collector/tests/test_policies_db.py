@@ -450,6 +450,17 @@ async def test_delete_keeps_the_version_history(env):
         assert (await s.execute(select(func.count()).select_from(PolicyVersion))).scalar() == 3
     got = (await c.get(f"{A}/policies/{p['id']}", headers=H(boot))).json()
     assert got["scope"] == "team" and got["team_id"] is None
+    # A NULLed reference never widens the policy to the tenant: it stays out
+    # of the bundle, and a live team policy cannot lose its team.
+    bundle = (await c.get("/api/v1/policy/effective", headers=H(key))).json()
+    assert bundle["tenant"]["sections"] == {} and bundle["teams"] == {}
+    assert (await c.get(A + "/policies?scope=tenant", headers=H(boot))).json()["data"] == []
+    async with _admin(engine)() as s:
+        with pytest.raises(DBAPIError, match="ck_policies_scope_binding"):
+            await s.execute(
+                text("UPDATE policies SET deleted_at = NULL WHERE id = :p"), {"p": p["id"]}
+            )
+        await s.rollback()
 
     # Tenant erasure removes them.
     async with _admin(engine)() as s:

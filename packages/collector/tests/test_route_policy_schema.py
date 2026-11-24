@@ -101,3 +101,15 @@ def test_javascript_semantics():
     assert v({}, {"enum": [1]}, 1.0) == []
     # One astral character is two UTF-16 code units, as JavaScript counts.
     assert v({}, {"minLength": 2}, "\U0001f600") == []
+    # A lone surrogate (valid JSON) is one code unit, not an exception.
+    assert v({}, {"minLength": 1}, "\ud800") == []
+
+
+def test_access_match_trims_as_javascript_does():
+    def ok(match: str) -> bool:
+        return _accepts(_doc(access={"version": 1, "groups": [{"name": "g", "match": [match]}]}))
+
+    # String.prototype.trim removes U+FEFF and keeps U+001C-U+001F / U+0085.
+    assert not ok("﻿ 　")
+    assert ok("\x1c")
+    assert ok("\x85")

@@ -119,9 +119,21 @@ def _is_obj(v: Any) -> bool:
     return isinstance(v, dict)
 
 
+# What JavaScript's String.prototype.trim removes (WhiteSpace and
+# LineTerminator), which differs from str.strip(): it removes U+FEFF and
+# keeps U+001C-U+001F and U+0085.
+JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
 def _strings(at: str, v: Any, problems: list[str]) -> None:
+    # psOidc/config.ts stringList: `s.trim()` must leave something.
     if not (
-        isinstance(v, list) and v and all(isinstance(s, str) and s.strip() for s in v)
+        isinstance(v, list)
+        and v
+        and all(isinstance(s, str) and s.strip(JS_WHITESPACE) for s in v)
     ):
         problems.append(f"{at} must be a non-empty array of strings")
 

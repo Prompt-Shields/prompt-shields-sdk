@@ -107,7 +107,8 @@ def _dump(v: Any) -> str:
 
 
 def _utf16_len(s: str) -> int:
-    return len(s.encode("utf-16-le")) // 2
+    # surrogatepass: a lone surrogate (valid JSON) is one code unit, not an error.
+    return len(s.encode("utf-16-le", "surrogatepass")) // 2
 
 
 @lru_cache(maxsize=64)

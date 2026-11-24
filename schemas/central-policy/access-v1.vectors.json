@@ -231,6 +231,34 @@
       "valid": false
     },
     {
+      "name": "match only a byte order mark (JavaScript trim removes it)",
+      "access": {
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "\ufeff"
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "match only a unit separator (JavaScript trim keeps it)",
+      "access": {
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "\u001f"
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
       "name": "providers not strings",
       "access": {
         "default": "deny",
