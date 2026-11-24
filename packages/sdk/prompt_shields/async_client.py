@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from prompt_shields import cloud_platforms
+from prompt_shields import cloud_platforms, tracing
 from prompt_shields.budgets import (
     BudgetStore,
     budget_attributes,
@@ -96,6 +96,8 @@ class AsyncShieldsClient:
         # the SDK detects with placeholders before each call and restore the
         # answer (prompt_shields.pseudonymise). Not for calls to the gateway.
         pseudonymise: bool = False,
+        # OpenTelemetry chat spans and traceparent (#385); as ShieldsClient.
+        propagate_trace: bool | None = None,
         **provider_kwargs,
     ):
         self._vendor = vendor
@@ -140,6 +142,9 @@ class AsyncShieldsClient:
         self._upstream = self._make_upstream(api_key, **provider_kwargs)
         # Claude on Vertex AI / Bedrock (#388): region, jurisdiction, pricing.
         self._platform = cloud_platforms.detect(self._upstream)
+        self._propagate_trace = tracing.propagates_to(
+            getattr(self._upstream, "base_url", None), propagate_trace
+        )
         self.chat = _AsyncChatNamespace(self)
 
     def _make_upstream(self, api_key: str, **provider_kwargs) -> Any:
@@ -378,17 +383,32 @@ class _AsyncCompletionsNamespace:
             self._parent._metadata.get("use_case"),
         )
 
+        # OpenTelemetry chat span (#385): current while the provider call
+        # runs; its traceparent goes to a gateway.
+        span = tracing.start_chat_span(
+            self._parent._vendor, model,
+            session_id=(ps_metadata or {}).get("session_id"),
+        )
+        if span is not None and self._parent._propagate_trace:
+            trace_headers = span.inject({})
+            if trace_headers:
+                kwargs["extra_headers"] = {**(kwargs.get("extra_headers") or {}),
+                                           **trace_headers}
+
         start = time.monotonic()
         # This client emits its own event; keep instrument() from adding one.
-        with suppress_instrumentation():
+        with suppress_instrumentation(), tracing.activate(span, http=False):
             try:
                 response = await self._call_upstream(
                     model=model, messages=messages, max_tokens=max_tokens, **kwargs
                 )
-            except Exception:
+            except Exception as exc:
                 record_failure(model, messages, (ps_metadata or {}).get("session_id"))
                 if budgets is not None:
                     await budgets.arelease(check)
+                if span is not None:
+                    span.fail(exc)
+                    span.finish()
                 raise
 
         if streaming:
@@ -396,7 +416,7 @@ class _AsyncCompletionsNamespace:
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
                 hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
-                call_id=call_id, lazy_start=_stream_lazy_start,
+                call_id=call_id, lazy_start=_stream_lazy_start, span=span,
             ), call_id)
             if pseudo is not None:
                 stream = attach_call_id(pseudo.stream(stream), call_id)
@@ -410,6 +430,8 @@ class _AsyncCompletionsNamespace:
         )
         if _event_hook is not None:
             _event_hook(event)
+        if span is not None:
+            span.finish(event)
         attach_outcome_signals(event, model=model, messages=messages,
                                response=response, request=kwargs)
         await self._send(event, messages)
@@ -436,7 +458,8 @@ class _AsyncCompletionsNamespace:
                      hide_usage_chunk: bool,
                      event_hook: Callable[[dict], None] | None = None,
                      call_id: str | None = None,
-                     lazy_start: bool = False) -> Any:
+                     lazy_start: bool = False,
+                     span: tracing.ChatSpan | None = None) -> Any:
         """Wrap a stream so one event is emitted when it ends. Fail-open.
 
         ``lazy_start`` (ShieldsRouter): an error before the first chunk is a
@@ -447,6 +470,8 @@ class _AsyncCompletionsNamespace:
         if lazy_start:
             def failed_start() -> None:
                 record_failure(model, messages, (ps_metadata or {}).get("session_id"))
+                if span is not None:
+                    span.finish()
 
         def stream_event(adapter_fields: dict, stream_fields: dict,
                          latency_ms: int) -> dict:
@@ -460,6 +485,8 @@ class _AsyncCompletionsNamespace:
                 event["tokens_estimated"] = True
             if event_hook is not None:
                 event_hook(event)
+            if span is not None:
+                span.finish({**event, "finish_reasons": adapter_fields.get("finish_reasons")})
             attach_outcome_signals(
                 event, model=model, messages=messages,
                 reasons=adapter_fields.get("finish_reasons") or [])
@@ -484,6 +511,8 @@ class _AsyncCompletionsNamespace:
                                                        messages),
             )
         except Exception:  # noqa: BLE001 - fail-open: return the raw stream
+            if span is not None:
+                span.finish()
             return response
 
     async def _call_upstream(self, *, model: str, messages: list,

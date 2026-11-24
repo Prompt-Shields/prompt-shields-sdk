@@ -18,6 +18,14 @@ Inside a LangGraph graph, each event also carries the cost tag
 `langgraph_node` (the node that made the call), so the collector can break
 usage down per node (see `langgraph_tags`).
 
+With the `opentelemetry` extra installed, the handler also creates spans
+(prompt_shields.tracing): `invoke_agent` for the outermost chain or agent
+run, `chat` per model run and `execute_tool` per tool run, parented by the
+run tree and joined to the active context. Call
+`prompt_shields.tracing.instrument_http()` once so a model's request to the
+gateway carries its `traceparent` and HTTP calls inside tools become child
+spans.
+
 To attach a handler to every run without passing `callbacks`, call
 `register()` (once, after `instrument()`); `unregister()` detaches it. Runs
 that already have a `PromptShieldsCallbackHandler` keep only their own.
@@ -46,6 +54,7 @@ from prompt_shields.integrations._common import (
     text_of,
 )
 from prompt_shields.providers import _int, openai_usage_fields
+from prompt_shields.tracing import RunSpans
 
 logger = logging.getLogger("prompt_shields.integrations.langchain")
 
@@ -73,6 +82,7 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
         self._use_case = use_case
         self._roots: dict[UUID, str | None] = {}  # run -> outermost chain name
         self._runs: dict[UUID, _Run] = {}
+        self._spans = RunSpans()  # OpenTelemetry spans (#385)
 
     # --- chains, agents and tools: track the outermost name -----------------
 
@@ -93,24 +103,43 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
             logger.debug(f"LangChain handler error: {e}")
 
     def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None,
-                       **kwargs):
+                       metadata=None, **kwargs):
         self._enter(serialized, run_id, parent_run_id, kwargs)
+        try:
+            if parent_run_id is None:
+                # The outermost run is the agent turn: one span for it.
+                self._spans.start(
+                    run_id, None, "agent", kwargs.get("name") or _name(serialized),
+                    session_id=_session(metadata),
+                )
+            else:
+                self._spans.track(run_id, parent_run_id)
+        except Exception as e:  # noqa: BLE001 - fail-open
+            logger.debug(f"LangChain handler error: {e}")
 
     def on_chain_end(self, outputs, *, run_id, **kwargs):
         self._exit(run_id)
+        self._spans.end(run_id)
 
     def on_chain_error(self, error, *, run_id, **kwargs):
         self._exit(run_id)
+        self._spans.end(run_id, error=error)
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None,
-                      **kwargs):
+                      metadata=None, **kwargs):
         self._enter(serialized, run_id, parent_run_id, kwargs)
+        self._spans.start(
+            run_id, parent_run_id, "tool", kwargs.get("name") or _name(serialized),
+            session_id=_session(metadata),
+        )
 
     def on_tool_end(self, output, *, run_id, **kwargs):
         self._exit(run_id)
+        self._spans.end(run_id)
 
     def on_tool_error(self, error, *, run_id, **kwargs):
         self._exit(run_id)
+        self._spans.end(run_id, error=error)
 
     # --- model runs ---------------------------------------------------------
 
@@ -158,9 +187,12 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
                      or invocation.get("model_name"))
             vendor = normalize_vendor(metadata.get("ls_provider")
                                       or invocation.get("_type"))
-            self._runs[run_id] = _Run(
+            run = self._runs[run_id] = _Run(
                 fc, platform_vendor(vendor, model), model, messages,
             )
+            self._spans.start(run_id, parent_run_id, "chat", None,
+                              vendor=run.vendor, model=run.model,
+                              session_id=_session(metadata))
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LangChain handler error: {e}")
 
@@ -183,18 +215,21 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
     def on_llm_end(self, response, *, run_id, **kwargs):
         try:
             run = self._finish(run_id)
+            fields = _extract(response) if run is not None else None
+            self._spans.end(run_id, fields=fields)
             if run is None or run.fc.captured:
                 return
             latency_ms = int((time.monotonic() - run.start) * 1000)
             emit(run.fc, vendor=run.vendor, model=run.model,
                  messages=run.messages, latency_ms=latency_ms,
-                 adapter_fields=_extract(response))
+                 adapter_fields=fields)
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LangChain handler error: {e}")
 
     def on_llm_error(self, error, *, run_id, **kwargs):
         try:
             self._finish(run_id)
+            self._spans.end(run_id, error=error)
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LangChain handler error: {e}")
 
@@ -209,6 +244,14 @@ def _meaningful(name: Any) -> str | None:
             or name.startswith("Runnable"):
         return None
     return name
+
+
+def _session(metadata: Any) -> str | None:
+    """`ps_session_id` (or LangGraph's `thread_id`) from run metadata."""
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get("ps_session_id") or metadata.get("thread_id")
+    return value if isinstance(value, str) else None
 
 
 def _name(serialized: Any) -> str | None:
