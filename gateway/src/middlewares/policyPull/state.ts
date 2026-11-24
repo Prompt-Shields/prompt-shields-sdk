@@ -17,6 +17,8 @@
  *   - `route` v1: the router's route policy; replaces PS_ROUTE_POLICY_FILE.
  *   - `access` v1: the OIDC group policy; replaces PS_OIDC_POLICY (needs
  *     PS_OIDC_ENABLED).
+ *   - `prices` v1 (#348): negotiated model prices (./prices.ts), applied to
+ *     telemetry cost and ps_gateway_cost_usd_total.
  * A section the central policy does not have falls back to the local
  * setting. Team and project entries are validated (so a bad one never
  * becomes active later) but not applied yet: the gateway does not know a
@@ -25,6 +27,7 @@
 import { parsePolicy, OidcPolicy } from '../psOidc/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
 import { RoutePolicy } from '../router/types';
+import { PriceBook, parsePricesSection } from './prices';
 
 export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 
@@ -32,6 +35,7 @@ export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
+  prices: [1],
 };
 
 export class PolicyBundleError extends Error {
@@ -48,6 +52,7 @@ export interface CentralPolicy {
   etag?: string;
   route?: RoutePolicy;
   access?: OidcPolicy;
+  prices?: PriceBook;
   /** Sections present but not enforced by this gateway. */
   ignored: string[];
   teams: number;
@@ -60,6 +65,7 @@ const isObject = (v: unknown): v is Record<string, any> =>
 interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
+  prices?: PriceBook;
   ignored: string[];
 }
 
@@ -91,6 +97,8 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
       } else if (name === 'access') {
         const { version: _v, ...rest } = body;
         out.access = parsePolicy(rest);
+      } else if (name === 'prices') {
+        out.prices = parsePricesSection(body);
       }
     } catch (err) {
       throw new PolicyBundleError(`${where}: ${(err as Error).message}`);
@@ -124,6 +132,7 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     etag,
     route: tenant.route,
     access: tenant.access,
+    prices: tenant.prices,
     ignored: tenant.ignored,
     teams,
     projects,
@@ -144,6 +153,11 @@ export function centralPolicy(): CentralPolicy | undefined {
 /** The OIDC group policy from the central `access` section, if any. */
 export function centralAccessPolicy(): OidcPolicy | undefined {
   return active?.access;
+}
+
+/** The negotiated prices from the central `prices` section, if any. */
+export function centralPriceBook(): PriceBook | undefined {
+  return active?.prices;
 }
 
 /**

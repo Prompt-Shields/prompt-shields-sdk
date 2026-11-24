@@ -1,0 +1,120 @@
+---
+title: Negotiated Prices and Cost Reconciliation
+description: Per-tenant contract prices applied by the gateway and collector, and a monthly check of reported usage against the provider's own usage reports
+---
+
+# Negotiated Prices and Cost Reconciliation
+
+By default every cost Prompt Shields reports is a **list price** from the model
+catalog. If you have a contract with a provider (a discount, or your own
+per-token rates), put it in the `prices` section of your tenant's
+[central policy](/guides/central-policy). The gateway and the collector then
+report your negotiated cost, and a monthly reconciliation compares what the
+SDK and gateway reported with what the provider says you used.
+
+## The `prices` section
+
+Only a **tenant-scope** policy may carry `prices` (a team or project policy
+with it is refused with 422): a contract belongs to the tenant.
+
+```json
+{
+  "schema": "ps-policy.v1",
+  "sections": {
+    "prices": {
+      "version": 1,
+      "currency": "USD",
+      "overrides": [
+        {"provider": "openai", "model": "gpt-4o",
+         "valid_from": "2026-11-01", "valid_to": "2027-11-01",
+         "input_per_1k": 0.002, "output_per_1k": 0.008,
+         "cached_input_per_1k": 0.001},
+        {"provider": "anthropic", "model": "*",
+         "valid_from": "2026-11-01", "multiplier": 0.85}
+      ]
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `currency` | ISO 4217 code of the rates (default `USD`). |
+| `usd_per_unit` | Required for a non-USD currency: USD per 1 unit of it, the contract's fixed rate. Every cost is stored in USD. |
+| `provider` | The vendor as events report it (`openai`, `anthropic`, `azure_openai`, ...; `-` and `_` are the same). |
+| `model` | A model id, or `*` for every model of the provider. An exact model wins over `*`. Matched against the served model, the served model without an OpenAI date suffix, the requested model, then the asset's model. |
+| `valid_from` / `valid_to` | `YYYY-MM-DD` (midnight UTC) or an ISO 8601 date-time with an offset. `valid_to` is exclusive and optional. Windows for one provider and model may not overlap. |
+| `multiplier` | The list price times this (above 0, at most 10). Discounts every list-priced call, per-unit ones included. |
+| `input_per_1k`, `output_per_1k` | Your token rates. Optional `cached_input_per_1k` and `cache_write_per_1k`; left out, cache tokens follow the provider's list ratios (OpenAI cache reads 0.5x input, Anthropic 0.1x, Google 0.25x; Anthropic writes 1.25x, 1-hour writes 2x). Batch and flex tiers get the provider's tier discount; other tiers and per-unit calls stay at list. Web search fees are not included. Rates also price models with no list price. |
+
+Give either `multiplier` or rates, not both.
+
+## Where it applies
+
+- **Gateway**: with the [policy pull](/guides/central-policy) on, telemetry
+  events and `ps_gateway_cost_usd_total` use the negotiated cost, with
+  `cost_source: negotiated`.
+- **Collector ingest**: an event whose cost is a list price
+  (`cost_source` `pricing_table…`, or none) or that has no cost is priced at
+  the override in force when it is stored and marked `negotiated`. So SDK
+  events (whose `pricing_table=` is per process) and events from a gateway
+  that has not pulled the latest policy yet end up at the negotiated price
+  too. Provider-reported, cache and already negotiated costs are kept.
+- **Rollups, showback, FOCUS and spend alerts** read the stored cost, so they
+  follow. FOCUS `ListCost` and `ContractedCost` equal `BilledCost` (the list
+  price of a negotiated event is not stored).
+
+### History
+
+Overrides apply **going forward**, when events are stored. Events stored
+before you activated the policy keep their cost. For a contract that starts
+in the past, re-price the stored events and rebuild the rollups:
+
+```bash
+python -m collector.prices reprice --tenant <uuid> --since 2026-10-01 [--until 2026-11-01]
+```
+
+It re-prices list-priced (or unpriced) raw events in the window that an
+override covers, then rebuilds the tenant's rollups for the buckets still in
+raw retention. Events already `negotiated` are not re-priced, and events
+already purged from raw retention cannot be.
+
+## Monthly reconciliation
+
+Run the [provider usage pull](/guides/discovery-sources) for the month, then:
+
+```bash
+python -m collector.cost_reconciliation --all-tenants              # last month
+python -m collector.cost_reconciliation --tenant <uuid> --month 2026-10
+```
+
+or `POST /partner/v1/cost-reconciliations/run` with `{"month": "2026-10"}`
+(scope `usage:reconcile`; the `billing` role has it). Results are listed by
+`GET /partner/v1/cost-reconciliations` (`usage:read`).
+
+For each provider (OpenAI, Anthropic) and model, it compares the tokens the
+SDK and gateway reported with the provider's usage report, both valued at the
+**same** prices day by day: your negotiated price that day, else the catalog
+list price; standard input and output rates on both sides, because the
+provider report folds cache tokens into input. A model with no price is
+compared in tokens. `variance_pct` is (reported - provider) / provider x 100:
+
+- positive: you reported more than the provider bills (calls through a key of
+  another organisation, or duplicate telemetry);
+- negative: the provider bills usage nobody reported (an uninstrumented
+  caller, a leaked key).
+
+A row whose gap is over the threshold is `flagged` (the alert), and logged as
+a warning. Settings, in `tenants.settings["cost_reconciliation"]`:
+`threshold_pct` (default 5), `min_usd` (1; smaller rows are never flagged),
+`min_tokens` (100000, for token-basis rows), `enabled` (true). A provider
+with no pulled usage that month is `no_provider_data` and gets no rows.
+Re-running a month replaces its rows. It reads raw events, so run it before
+the month leaves raw retention.
+
+## Not done yet
+
+- Reconciliation against provider **cost** (invoice) reports rather than
+  usage reports, and a `cost.reconciliation_gap` webhook event.
+- Storing the list price next to the negotiated cost (FOCUS `ListCost`).
+- Budget pre-checks in the gateway still estimate at list price.

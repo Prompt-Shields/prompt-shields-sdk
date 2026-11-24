@@ -45,12 +45,15 @@ import {
   servedTargetOf,
 } from './psServedTarget';
 import { RoutePolicy } from './router/types';
-import { activePolicyVersion } from './policyPull/state';
+import { activePolicyVersion, centralPriceBook } from './policyPull/state';
+import { COST_SOURCE_NEGOTIATED, negotiatedCost } from './policyPull/prices';
 import {
   COST_SOURCE_CACHE,
   COST_SOURCE_PROVIDER_REPORTED,
   costFields,
+  pricingCandidates,
   PricingUsage,
+  withBedrockBaseModels,
 } from './psPricing';
 
 // Set by psOidc (./psOidc/index.ts OIDC_IDENTITY_KEY).
@@ -401,10 +404,21 @@ export function withCost(
     usage_unit_type: event.usage_unit_type,
   };
   const model = event.model === 'unknown' ? undefined : event.model;
-  return {
-    ...event,
-    ...costFields(event.vendor, model, servedModel, usage),
-  };
+  const fields = costFields(event.vendor, model, servedModel, usage);
+  // Negotiated prices from the central policy (#348).
+  const negotiated = negotiatedCost(
+    centralPriceBook(),
+    event.vendor,
+    withBedrockBaseModels(event.vendor, pricingCandidates(model, servedModel)),
+    usage,
+    fields.cost,
+    fields.cost_source
+  );
+  if (negotiated !== null) {
+    fields.cost = negotiated;
+    fields.cost_source = COST_SOURCE_NEGOTIATED;
+  }
+  return { ...event, ...fields };
 }
 
 /**

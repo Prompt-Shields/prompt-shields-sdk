@@ -84,8 +84,8 @@ describe('parsePolicyBundle', () => {
   });
 
   test('sections this gateway does not enforce are ignored', () => {
-    const p = parsePolicyBundle(bundle({ prices: { version: 1, x: 1 } }));
-    expect(p.ignored).toEqual(['prices']);
+    const p = parsePolicyBundle(bundle({ guardrails: { version: 1, x: 1 } }));
+    expect(p.ignored).toEqual(['guardrails']);
   });
 
   test.each([

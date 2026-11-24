@@ -156,9 +156,9 @@ async def _version(
     ).scalar_one_or_none()
 
 
-def _validated(document: dict) -> dict:
+def _validated(document: dict, scope: str) -> dict:
     try:
-        return policy_doc.validate_document(document)
+        return policy_doc.validate_document(document, scope)
     except policy_doc.PolicyDocumentError as e:
         raise _problem(422, "Unprocessable Entity", e.problems) from None
 
@@ -273,7 +273,7 @@ async def create_policy(
 ) -> dict:
     db = request.state.db
     tid = principal.tenant_id
-    document = _validated(body.document) if body.document is not None else None
+    document = _validated(body.document, body.scope) if body.document is not None else None
     if body.team_id is not None:
         team = (
             await db.execute(select(Team.id).where(Team.id == body.team_id, Team.tenant_id == tid))
@@ -476,9 +476,9 @@ async def create_version(
     principal: AdminPrincipal = _POLICIES,
 ) -> dict:
     db = request.state.db
-    document = _validated(body.document)
     # The row lock numbers concurrent versions one after another.
     row = await _policy(db, principal.tenant_id, policy_id, lock=True)
+    document = _validated(body.document, row.scope)
     version = await _add_version(request, db, principal, row, document, body.comment)
     if body.activate:
         await _activate(request, db, principal, row, version, 201)

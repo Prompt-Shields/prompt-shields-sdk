@@ -2,7 +2,7 @@
 """Build the model catalog and the gateway's default route policy.
 
 Reads the hand-maintained source, ``schemas/catalog/source.v1.json``, and
-writes three generated files:
+writes four generated files:
 
 - ``packages/sdk/prompt_shields/catalog.json``: the SDK catalog (catalog v1).
   Model entries use LiteLLM ``model_prices_and_context_window.json`` field
@@ -14,6 +14,10 @@ writes three generated files:
   exactly as the SDK's ``catalog.py`` builds ``pricing.DEFAULT_PRICING``,
   ``LONG_CONTEXT_PRICING``, ``AUDIO_PRICING``, ``SERVICE_TIER_PRICING``,
   ``UNIT_PRICING`` and ``IMAGE_PRICING``.
+- ``packages/collector/collector/list_prices.json``: standard input and
+  output list rates per 1k tokens, which the collector's monthly cost
+  reconciliation values provider-reported usage at (the collector image
+  does not ship the SDK).
 
 Usage::
 
@@ -39,6 +43,7 @@ SOURCE = ROOT / "schemas" / "catalog" / "source.v1.json"
 SDK_CATALOG = ROOT / "packages" / "sdk" / "prompt_shields" / "catalog.json"
 GATEWAY_POLICY = ROOT / "gateway" / "src" / "middlewares" / "router" / "defaultPolicy.json"
 GATEWAY_PRICING = ROOT / "gateway" / "src" / "middlewares" / "psPricingTables.json"
+COLLECTOR_PRICES = ROOT / "packages" / "collector" / "collector" / "list_prices.json"
 
 SCHEMA_VERSION = 1
 CURRENCIES = ("USD", "EUR")
@@ -417,6 +422,17 @@ def build_gateway_pricing(source: dict) -> dict:
     }
 
 
+def build_collector_prices(source: dict) -> dict:
+    """``"<provider>/<model id>": [input, output]`` USD per 1k tokens, the
+    standard rates of every USD token-priced entry."""
+    rates = build_gateway_pricing(source)["tokenPricing"]
+    return {
+        "_generated": SDK_HEADER,
+        "catalogVersion": source["catalog_version"],
+        "tokenPricing": {k: v[:2] for k, v in rates.items()},
+    }
+
+
 def render(data: dict) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
@@ -427,6 +443,7 @@ def outputs(source: dict) -> dict[Path, str]:
         SDK_CATALOG: render(build_sdk_catalog(source)),
         GATEWAY_POLICY: render(build_gateway_policy(source)),
         GATEWAY_PRICING: render(build_gateway_pricing(source)),
+        COLLECTOR_PRICES: render(build_collector_prices(source)),
     }
 
 

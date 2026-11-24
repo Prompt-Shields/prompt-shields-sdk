@@ -760,3 +760,47 @@ def test_otel_traces_ingest_documents_its_rate_limit():
     assert "Retry-After" in op["responses"]["429"]["headers"]
     limits = SCHEMAS["IngestRateLimitSettings"]["properties"]
     assert set(limits) == set(tenant_limits.ENV_DEFAULTS)
+
+
+def test_cost_reconciliation_schema_matches_serializer():
+    from collector import cost_reconciliation
+
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        month=datetime(2026, 10, 1).date(),
+        provider="openai",
+        model="gpt-4o",
+        estimated_tokens_in=1,
+        estimated_tokens_out=1,
+        estimated_cost=None,
+        provider_tokens_in=1,
+        provider_tokens_out=1,
+        basis="price",
+        estimated_value=1,
+        provider_value=1,
+        variance_pct=None,
+        threshold_pct=5.0,
+        flagged=False,
+        updated_at=datetime.now(UTC),
+    )
+    keys = set(cost_reconciliation.serialize(row))
+    assert _props("CostReconciliation") == keys == set(SCHEMAS["CostReconciliation"]["required"])
+
+
+def test_price_section_schema_matches_the_validator():
+    doc = policies_api.policy_doc
+    assert _props("PriceOverride") == set(doc.PRICE_OVERRIDE_KEYS)
+    assert _props("PriceSection") == {"version", "currency", "usd_per_unit", "overrides"}
+    assert SCHEMAS["PriceSection"]["properties"]["overrides"]["maxItems"] == doc.MAX_PRICE_OVERRIDES
+
+
+def test_cost_reconciliation_routes_need_their_scopes():
+    from collector import cost_reconciliation
+
+    paths = SPEC["paths"]
+    assert paths["/partner/v1/cost-reconciliations"]["get"]["security"][0] == {
+        "OAuth2": [cost_reconciliation.READ_SCOPE]
+    }
+    assert paths["/partner/v1/cost-reconciliations/run"]["post"]["security"][0] == {
+        "OAuth2": [cost_reconciliation.RUN_SCOPE]
+    }
