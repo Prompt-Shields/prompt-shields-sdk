@@ -21,6 +21,7 @@ Public surface:
         InProcessBudgetStore — default store; per-process counters
         RedisBudgetStore     — shared counters (pip install 'prompt-shields[optimizer-redis]')
         BudgetExceeded       — raised when a block budget is exhausted
+        BudgetThreshold      — passed to on_threshold when a budget crosses warn / its limit
 
     Types:
         PSMetadata           — per-request metadata TypedDict
@@ -64,6 +65,7 @@ from prompt_shields.budgets import (
     BudgetError,
     BudgetExceeded,
     BudgetStore,
+    BudgetThreshold,
     InProcessBudgetStore,
     RedisBudgetStore,
 )
@@ -122,6 +124,7 @@ __all__ = [
     "BudgetError",
     "BudgetExceeded",
     "BudgetStore",
+    "BudgetThreshold",
     "DataClassification",
     "DiscoverySource",
     "FeedbackError",
