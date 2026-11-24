@@ -75,7 +75,10 @@ class _RedactedValidationRoute(BoundedJsonRoute):
     ``hide_input_in_errors`` does not reach it), so a key sent with the
     wrong type or under a misspelt field name would come back in the
     response. Keep type, location and message; drop ``input`` and ``ctx``.
+    Subclasses widen ``safe_loc`` with their own field names.
     """
+
+    safe_loc: frozenset[str] = _SAFE_LOC
 
     def get_route_handler(self):
         handler = super().get_route_handler()
@@ -88,7 +91,7 @@ class _RedactedValidationRoute(BoundedJsonRoute):
                     {
                         "type": err.get("type"),
                         "loc": [
-                            part if part in _SAFE_LOC or isinstance(part, int) else "*"
+                            part if part in self.safe_loc or isinstance(part, int) else "*"
                             for part in err.get("loc", ())
                         ],
                         "msg": err.get("msg"),
