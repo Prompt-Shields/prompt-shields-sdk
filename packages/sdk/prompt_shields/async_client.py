@@ -432,6 +432,8 @@ class _AsyncCompletionsNamespace:
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):
                 event["tokens_estimated"] = True
+            if adapter_fields.get("usage_source"):
+                event["usage_source"] = adapter_fields["usage_source"]
             if event_hook is not None:
                 event_hook(event)
             attach_outcome_signals(
@@ -445,7 +447,7 @@ class _AsyncCompletionsNamespace:
         try:
             return AsyncShieldsStream(
                 response,
-                StreamAccumulator(self._parent._vendor, messages),
+                StreamAccumulator(self._parent._vendor, messages, model),
                 on_finish,
                 start,
                 hide_usage_chunk=hide_usage_chunk,

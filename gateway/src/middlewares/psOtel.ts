@@ -479,6 +479,8 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     'ps.stream': input.stream ? true : undefined,
     'ps.stream.truncated': input.stream?.truncated || undefined,
     'ps.stream.cancelled': input.stream?.cancelled || undefined,
+    // #389: whether the token counts are the provider's or estimated.
+    'ps.usage_source': input.stream?.usageSource,
   };
   // Numeric attributes only take finite numbers (clients send anything).
   for (const k of Object.keys(attrs)) {

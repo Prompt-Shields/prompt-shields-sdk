@@ -51,6 +51,10 @@ import { RequestContext } from './services/requestContext';
 import { ResponseService } from './services/responseService';
 import { recordAttempt } from '../middlewares/psAttempts';
 import { recordServedTarget } from '../middlewares/psServedTarget';
+import {
+  applyStreamUsageStrip,
+  maybeInjectStreamUsage,
+} from '../middlewares/psStreamUsage';
 import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
 import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 import {
@@ -639,6 +643,19 @@ async function tryPostToProvider(
 
   // Attach the body of the request
   attachRequestBody(providerContext, requestContext);
+  // PS fork (#389): ask allowlisted OpenAI-style providers for stream usage;
+  // what that adds is stripped from the client stream below.
+  maybeInjectStreamUsage(
+    c,
+    env(c),
+    requestContext.endpoint,
+    requestContext.provider,
+    requestContext.customHost,
+    providerContext.hasRequestHandler(requestContext)
+      ? undefined
+      : requestContext.transformedRequestBody,
+    providerOption.apiVersion
+  );
 
   // Construct the base object for the request
   const fetchOptions: RequestInit = await constructRequest(
@@ -678,7 +695,7 @@ async function tryPostToProvider(
       .addResponse(response, originalResponseJson)
       .log();
 
-    return response;
+    return applyStreamUsageStrip(c, response);
   }
 
   // Prerequest validator (For virtual key budgets)
@@ -748,7 +765,7 @@ async function tryPostToProvider(
     .addResponse(response, mappedOriginalResponseJson)
     .log();
 
-  return response;
+  return applyStreamUsageStrip(c, response);
 }
 
 export async function tryTargetsRecursively(
