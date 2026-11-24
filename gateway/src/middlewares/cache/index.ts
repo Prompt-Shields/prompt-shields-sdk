@@ -4,6 +4,7 @@ import { isSensitiveKey } from '../../utils/redact';
 import { canonicalJSON, sha256Hex } from './hash';
 import { semanticStore } from './semantic';
 import { cacheWritesTotal } from '../psMetrics/cache';
+import { scrubOutput } from '../psGuardrails/scrub';
 
 const store = new InMemoryLruStore({
   maxEntries: parseInt(process.env.PS_CACHE_MAX_ENTRIES || '1000', 10),
@@ -382,6 +383,13 @@ export const memoryCache = () => {
       }
       if (isRefusalResponse(parsed)) {
         cacheWritesTotal.inc({ mode, outcome: 'refusal' });
+        return;
+      }
+      // PS fork (#349): the cache keeps the response as the client gets it,
+      // with the central policy's output guardrails applied; one they
+      // denied is not kept.
+      if (scrubOutput(c, parsed) === 'denied') {
+        cacheWritesTotal.inc({ mode, outcome: 'guardrail_denied' });
         return;
       }
       if (mode === 'semantic') {
