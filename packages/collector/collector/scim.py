@@ -39,13 +39,17 @@ token or ingest key does not reach /scim/v2.
 What a SCIM token can never do: grant ``owner`` (SCIM carries no roles; a
 group's roles are set by an admin and never owner); re-identify
 (``externalId``), re-enable or delete a principal that holds the owner role
-(an owner does that through the admin API); disable the tenant's last
-enabled owner (409); touch service accounts (they are invisible here).
+(an owner does that through the admin API), or a user created through the
+admin API rather than by SCIM (``principals.provisioned_by``, #396; an
+admin does that); disable the tenant's last enabled owner (409); touch
+service accounts (they are invisible here). It may still deactivate an
+admin-created user, and change its userName, displayName and email.
 
 Deactivation (``active=false`` or ``PATCH`` / ``PUT``) disables the
 principal, which makes every admin token and partner credential issued for
-it fail on the next request, and revokes its SSO sessions and every token
-they created (collector/idp_sync.py). Effect is immediate (well within the
+it fail on the next request, and revokes its SSO sessions and every admin
+token, ingest key, SCIM token and partner credential its tokens created
+(collector/idp_sync.py ``revoke_created_credentials``). Effect is immediate (well within the
 60 s the issue asks for).
 
 Audit: every change is a hash-chained audit trail row in the same
@@ -318,6 +322,10 @@ _GROUPS = Depends(require_scim("scim:groups"))
 # ──────────────────────────────────────────────────────────────────────
 # Shared helpers
 # ──────────────────────────────────────────────────────────────────────
+
+
+# principals.provisioned_by for users SCIM created (#396).
+SCIM_PROVISIONED = "scim"
 
 
 def _now() -> datetime:
@@ -611,7 +619,7 @@ async def _check_unique_user(
 
 async def _deactivate(
     db: AsyncSession, caller: ScimCaller, row: Principal, now: datetime
-) -> list[AdminToken]:
+) -> idp_sync.Revoked:
     if await _is_owner(db, row.id) and not await _other_enabled_owners(
         db, caller.tenant_id, row.id
     ):
@@ -621,7 +629,7 @@ async def _deactivate(
             "mutability",
         )
     row.disabled_at = now
-    return await idp_sync.revoke_principal_sessions(db, caller.tenant_id, row.id, now)
+    return await idp_sync.revoke_created_credentials(db, caller.tenant_id, row.id, now)
 
 
 async def _apply_user(
@@ -641,6 +649,18 @@ async def _apply_user(
             "that through the admin API",
             "mutability",
         )
+    if row.provisioned_by != SCIM_PROVISIONED and (
+        "external_id" in changed or (toggles and fields["active"])
+    ):
+        # The externalId is the SSO subject (collector/sso.py): changing it
+        # would let another identity provider user sign in as a principal
+        # an admin created, and re-enabling would undo an admin's disable.
+        raise ScimError(
+            403,
+            "A SCIM token cannot re-identify or re-enable a user created through "
+            "the admin API; an admin does that through the admin API",
+            "mutability",
+        )
     await _check_unique_user(
         db,
         caller.tenant_id,
@@ -650,7 +670,7 @@ async def _apply_user(
     )
     for f in changed:
         setattr(row, f, fields[f])
-    revoked: list[AdminToken] = []
+    revoked = idp_sync.Revoked()
     action = "principal.update"
     if toggles:
         if fields["active"]:
@@ -667,7 +687,7 @@ async def _apply_user(
             "principal",
             row.id,
             fields=changed,
-            revoked_token_ids=[str(t.id) for t in revoked],
+            **revoked.audit_details(),
         )
     out = user_resource(request, row, await _user_groups(db, row.id))
     await db.commit()
@@ -689,6 +709,7 @@ async def create_user(
         external_id=fields["external_id"],
         display_name=fields["display_name"],
         email=fields["email"],
+        provisioned_by=SCIM_PROVISIONED,
         created_at=now,
         disabled_at=None if fields.get("active", True) else now,
     )
@@ -850,8 +871,15 @@ async def delete_user(user_id: str, request: Request, caller: ScimCaller = _USER
             "have an owner delete it through the admin API",
             "mutability",
         )
+    if row.provisioned_by != SCIM_PROVISIONED:
+        raise ScimError(
+            403,
+            "A SCIM token cannot delete a user created through the admin API; "
+            "deactivate it (active=false) or have an admin delete it",
+            "mutability",
+        )
     now = _now()
-    revoked = await idp_sync.revoke_principal_sessions(db, caller.tenant_id, row.id, now)
+    revoked = await idp_sync.revoke_created_credentials(db, caller.tenant_id, row.id, now)
     tokens = (
         (await db.execute(select(AdminToken).where(AdminToken.principal_id == row.id)))
         .scalars()
@@ -883,8 +911,13 @@ async def delete_user(user_id: str, request: Request, caller: ScimCaller = _USER
         "principal",
         row.id,
         memberships_removed=[str(m.id) for m in memberships],
-        revoked_token_ids=sorted({str(t.id) for t in [*tokens, *revoked]}),
-        partner_credentials_revoked=[str(c.id) for c in creds],
+        **{
+            **revoked.audit_details(),
+            "revoked_token_ids": sorted({str(t.id) for t in [*tokens, *revoked.tokens]}),
+            "partner_credentials_revoked": sorted(
+                {str(c.id) for c in [*creds, *revoked.partner_credentials]}
+            ),
+        },
     )
     await db.commit()
     return Response(status_code=204)
