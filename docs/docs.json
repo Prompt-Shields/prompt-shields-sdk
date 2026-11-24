@@ -83,6 +83,7 @@
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",
+        "guides/fallbacks-and-retries",
         "guides/routing-learner",
         "guides/pseudonymisation",
         "guides/spend-anomaly-alerts",

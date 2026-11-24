@@ -6,6 +6,11 @@
  * ps-telemetry folds the list into the request's event. An attempt holds only
  * metadata: provider, model, HTTP status, latency and a coarse error class.
  * It never holds request or response content, error messages or headers.
+ *
+ * psOtel also puts each attempt on the request's GenAI span as a `ps.attempt`
+ * span event (#390), timed at the moment the attempt's response (or error)
+ * came in. That time is kept beside the list, not in the record, so the
+ * telemetry event's `attempts` shape is unchanged.
  */
 
 export interface AttemptStatus {
@@ -25,6 +30,7 @@ export interface AttemptRecord extends AttemptStatus {
 
 const CONTEXT_KEY = 'psAttempts';
 const COUNT_KEY = 'psAttemptCount';
+const TIMES_KEY = 'psAttemptTimes';
 
 /** At most this many attempt records are kept per request; later ones are only counted. */
 export const MAX_ATTEMPT_RECORDS = 32;
@@ -80,6 +86,12 @@ export function recordAttempt(
     if (result.status !== undefined) record.status = result.status;
     if (result.error_class) record.error_class = result.error_class;
     list.push(record);
+    let times: number[] | undefined = c.get(TIMES_KEY);
+    if (!Array.isArray(times)) {
+      times = [];
+      c.set(TIMES_KEY, times);
+    }
+    times[list.length - 1] = Date.now();
   } catch {
     /* fail-open */
   }
@@ -99,6 +111,19 @@ export function attemptsOf(c: any): AttemptRecord[] {
   try {
     const list = c.get(CONTEXT_KEY);
     return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * When each recorded attempt ended (epoch ms), index-aligned with attemptsOf.
+ * An entry is missing only if the context lost it; callers fall back.
+ */
+export function attemptEndTimesOf(c: any): number[] {
+  try {
+    const times = c.get(TIMES_KEY);
+    return Array.isArray(times) ? times : [];
   } catch {
     return [];
   }
