@@ -1031,6 +1031,10 @@ class TraceSpan(Base):
     tokens_out = Column(Integer)
     session_id = Column(Text)
     user_id_hash = Column(Text)
+    # Set while the span's trace has no GenAI span yet (collector.traces):
+    # never returned by the API, deleted after this time unless the trace
+    # gains one.
+    pending_until = Column(TIMESTAMP(timezone=True))
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "trace_id", "span_id", name="ux_trace_spans_span"),
@@ -1046,6 +1050,12 @@ class TraceSpan(Base):
             "tenant_id",
             "session_id",
             postgresql_where=text("session_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_trace_spans_pending",
+            "tenant_id",
+            "pending_until",
+            postgresql_where=text("pending_until IS NOT NULL"),
         ),
     )
 

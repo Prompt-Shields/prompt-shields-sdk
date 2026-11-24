@@ -156,13 +156,17 @@ GATEWAY_SPANS = [
 ]
 
 
-async def _rows(factory, tenant) -> list[TraceSpan]:
+async def _rows(factory, tenant, *, pending=False) -> list[TraceSpan]:
+    """The tenant's kept spans (with ``pending``: its pending spans)."""
+    held = TraceSpan.pending_until.is_not(None) if pending else TraceSpan.pending_until.is_(None)
     async with factory() as s:
         await rls.set_tenant(s, tenant)
         return list(
             (
                 await s.execute(
-                    select(TraceSpan).where(TraceSpan.name != "seed").order_by(TraceSpan.span_id)
+                    select(TraceSpan)
+                    .where(TraceSpan.name != "seed", held)
+                    .order_by(TraceSpan.span_id)
                 )
             ).scalars()
         )
@@ -258,6 +262,101 @@ async def test_resent_and_late_spans(rls_db):  # noqa: F811
     rows = await _rows(rls_db["plain"], a)
     assert len(rows) == 11
     assert "e000000000000009" in {r.span_id for r in rows}
+
+
+async def test_spans_that_arrive_before_the_genai_span_are_kept(rls_db):  # noqa: F811
+    """Exporters batch independently and a child span ends before its
+    parent: the HTTP span made inside a tool, and the app's root span, can
+    arrive before any GenAI span of their trace. They are held as pending
+    (invisible to the API) and join the trace when a GenAI span arrives;
+    pending spans of a trace that never gains one are deleted after the
+    window."""
+    a = rls_db["a"]
+    http = SDK_SPANS[5]
+    assert http["spanId"] == "e000000000000001"
+    root = _span("f00000000000000a", "POST /chat", {"http.request.method": "POST"},
+                 start=-5, ms=2100, kind=2)
+    root.pop("parentSpanId", None)
+    noise = _span("f000000000000001", "GET /health", {"http.request.method": "GET"},
+                  trace=OTHER_TRACE)
+    await _grant(rls_db)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(URL, json=_payload([http, root, noise], "support-agent"),
+                         headers=_head(KEY_A))
+        assert r.status_code == 200 and r.json() == {}, r.text
+        assert await _rows(rls_db["plain"], a) == []
+        held = await _rows(rls_db["plain"], a, pending=True)
+        assert {r.span_id for r in held} == {"e000000000000001", "f00000000000000a",
+                                             "f000000000000001"}
+        h = _head(PARTNER_KEY_A)
+        r = await c.get(f"/partner/v1/traces/{TRACE}", headers=h)
+        assert r.status_code == 404  # pending spans are never returned
+        assert (await c.get("/partner/v1/traces", headers=h)).json()["data"] == []
+
+        # The SDK's GenAI spans and the gateway's arrive later.
+        rest = [s for s in SDK_SPANS if s is not http]
+        r = await c.post(URL, json=_payload(rest, "support-agent"), headers=_head(KEY_A))
+        assert r.status_code == 200
+        r = await c.post(URL, json=_payload(GATEWAY_SPANS, "prompt-shields-gateway"),
+                         headers=_head(KEY_A))
+        assert r.status_code == 200
+
+        kept = {r.span_id: r for r in await _rows(rls_db["plain"], a)}
+        assert len(kept) == 11  # the turn's 10 spans and the app's root span
+        assert kept["e000000000000001"].parent_span_id == "b000000000000002"
+        trace = (await c.get(f"/partner/v1/traces/{TRACE}", headers=h)).json()
+        assert trace["span_count"] == 11
+        assert trace["root_name"] == "POST /chat"
+        # The trace with no GenAI span is still only held.
+        held = await _rows(rls_db["plain"], a, pending=True)
+        assert [r.span_id for r in held] == ["f000000000000001"]
+
+        # Once its window has passed it is deleted at the next ingest.
+        async with rls_db["admin"]() as s:
+            await s.execute(
+                update(TraceSpan)
+                .where(TraceSpan.pending_until.is_not(None))
+                .values(pending_until=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await s.commit()
+        r = await c.post(URL, json=_payload([], "support-agent"), headers=_head(KEY_A))
+        assert r.status_code == 200
+    assert await _rows(rls_db["plain"], a, pending=True) == []
+    assert len(await _rows(rls_db["plain"], a)) == 11
+
+
+async def test_pending_spans_bounded_and_switchable(rls_db, monkeypatch):  # noqa: F811
+    a = rls_db["a"]
+    monkeypatch.setattr(tr, "MAX_PENDING_PER_REQUEST", 3)
+    many = [
+        _span(f"f00000000000010{i}", "GET", {"http.request.method": "GET"},
+              trace=OTHER_TRACE, start=i)
+        for i in range(5)
+    ]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        await c.post(URL, json=_payload(many, "web"), headers=_head(KEY_A))
+        assert len(await _rows(rls_db["plain"], a, pending=True)) == 3
+        monkeypatch.setattr(settings, "trace_pending_seconds", 0)
+        late = _span("f000000000000201", "GET", {"http.request.method": "GET"},
+                     trace="11111111111111111111111111111111")
+        await c.post(URL, json=_payload([late], "web"), headers=_head(KEY_A))
+    assert len(await _rows(rls_db["plain"], a, pending=True)) == 3
+
+
+async def test_retention_purges_expired_pending_spans(rls_db):  # noqa: F811
+    a = rls_db["a"]
+    noise = _span("f000000000000001", "GET /health", {"http.request.method": "GET"},
+                  trace=OTHER_TRACE)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        await c.post(URL, json=_payload([noise], "web"), headers=_head(KEY_A))
+    async with rls_db["plain"]() as s:
+        await rls.set_tenant(s, a)
+        assert (await retention.purge_tenant_events(s, a)).trace_spans_deleted == 0
+        later = datetime.now(UTC) + timedelta(hours=1)
+        result = await retention.purge_tenant_events(s, a, now=later)
+        await s.commit()
+    assert result.trace_spans_deleted == 1
+    assert await _rows(rls_db["plain"], a, pending=True) == []
 
 
 async def test_protobuf_ids_are_stored_as_hex(rls_db):  # noqa: F811

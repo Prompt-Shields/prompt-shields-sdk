@@ -4,7 +4,8 @@ Adds ``trace_spans``: one row per span the OTLP trace receiver
 (``POST /ingest/otel/v1/traces``) keeps for a trace, with its trace, span
 and parent span ids, name, kind, status, timings and a GenAI metadata
 allowlist (operation, provider, models, tool name, token counts, session
-id and the salted user id hash). No content. Read through
+id and the salted user id hash) and ``pending_until`` (a span held until
+its trace gains a GenAI span). No content. Read through
 ``GET /partner/v1/traces`` and ``GET /partner/v1/traces/{trace_id}``;
 purged with the tenant's usage events, removed by tenant erasure, and user
 erasure clears ``user_id_hash`` and ``session_id``.
@@ -73,6 +74,7 @@ def upgrade() -> None:
         sa.Column("tokens_out", sa.Integer),
         sa.Column("session_id", sa.Text),
         sa.Column("user_id_hash", sa.Text),
+        sa.Column("pending_until", sa.TIMESTAMP(timezone=True)),
         sa.UniqueConstraint("tenant_id", "trace_id", "span_id", name="ux_trace_spans_span"),
     )
     op.create_index("ix_trace_spans_tenant_start", TABLE, ["tenant_id", "start_time"])
@@ -87,6 +89,12 @@ def upgrade() -> None:
         TABLE,
         ["tenant_id", "session_id"],
         postgresql_where=sa.text("session_id IS NOT NULL"),
+    )
+    op.create_index(
+        "ix_trace_spans_pending",
+        TABLE,
+        ["tenant_id", "pending_until"],
+        postgresql_where=sa.text("pending_until IS NOT NULL"),
     )
 
     op.execute(
@@ -104,6 +112,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_trace_spans_pending", table_name=TABLE)
     op.drop_index("ix_trace_spans_tenant_session", table_name=TABLE)
     op.drop_index("ix_trace_spans_tenant_user", table_name=TABLE)
     op.drop_index("ix_trace_spans_tenant_start", table_name=TABLE)

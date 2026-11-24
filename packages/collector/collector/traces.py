@@ -13,11 +13,22 @@ Storing
     * every other span of the same request whose trace has such a span
       (an HTTP call made inside a tool, the app's own root span);
     * every other span whose trace is already stored for the tenant (spans
-      exported in a later batch than the trace's first GenAI span).
+      exported in a later batch than the trace's first GenAI span);
+    * every other span whose trace gains a GenAI span within
+      ``PS_TRACE_PENDING_SECONDS`` (default 300) of its arrival. Exporters
+      batch independently and a child span ends (and is exported) before
+      its parent, so an HTTP span made inside a tool, or the SDK's spans and
+      the gateway's, can arrive before the trace's first GenAI span. Such a
+      span is stored as *pending* (``pending_until`` set, never returned by
+      the API) and becomes part of the trace when a GenAI span of the trace
+      arrives; pending spans of traces that never gain one are deleted once
+      the window has passed (at the tenant's next ingest, and by the
+      retention purge). At most ``MAX_PENDING_PER_REQUEST`` pending spans
+      are kept per request; 0 seconds turns pending spans off.
 
-    Spans of traces with no GenAI span are not stored: pointing a service's
-    whole OTel export here does not fill the database with its HTTP spans.
-    A span whose GenAI parent arrives only in a *later* batch is not kept.
+    Spans of traces with no GenAI span are not kept: pointing a service's
+    whole OTel export here does not fill the database with its HTTP spans
+    (they are held for the pending window only).
 
     Stored per span: trace id, span id, parent span id (lowercase hex; the
     protobuf encoding's base64 ids are converted), name, kind, status,
@@ -67,7 +78,7 @@ from uuid import UUID
 
 from db.models import TraceSpan, uuid7
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,6 +106,10 @@ MAX_LABEL_LENGTH = 256
 # A start time further ahead of receipt than this is not a real span.
 MAX_CLOCK_SKEW = timedelta(hours=1)
 INSERT_CHUNK = 500
+# Pending spans (traces with no GenAI span yet) kept from one request, and
+# expired pending spans deleted per ingest request.
+MAX_PENDING_PER_REQUEST = 500
+PENDING_GC_BATCH = 5000
 
 USER_ID_ATTRIBUTES = ("ps.user.hash", "user.id", "enduser.id")
 
@@ -229,29 +244,69 @@ def collect_spans(payload: dict, now: datetime) -> tuple[list[dict], set[str]]:
     return list(rows.values()), genai_traces
 
 
+def _pending_window() -> timedelta:
+    from collector.config import settings
+
+    return timedelta(seconds=max(0, settings.trace_pending_seconds))
+
+
 async def store_trace_spans(
     db: AsyncSession, tenant_id: UUID, payload: dict, *, now: datetime | None = None
 ) -> int:
-    """Keep the spans of the request's GenAI traces (module docstring).
-    Commits; returns the number of new rows."""
+    """Keep the spans of the request's GenAI traces, hold the others as
+    pending (module docstring). Commits; returns the number of new rows,
+    pending ones included."""
     now = now or datetime.now(UTC)
-    candidates, keep = collect_spans(payload, now)
+    t = TraceSpan
+    window = _pending_window()
+    if window:
+        await _delete_expired_pending(db, tenant_id, now)
+    candidates, genai = collect_spans(payload, now)
     if not candidates:
+        if window:
+            await db.commit()
         return 0
+    keep = set(genai)
     others = {r["trace_id"] for r in candidates} - keep
     if others:
-        t = TraceSpan
         keep |= set(
             (
                 await db.execute(
                     select(t.trace_id)
-                    .where(t.tenant_id == tenant_id, t.trace_id.in_(others))
+                    .where(
+                        t.tenant_id == tenant_id,
+                        t.trace_id.in_(others),
+                        t.pending_until.is_(None),
+                    )
                     .distinct()
                 )
             ).scalars()
         )
-    rows = [r for r in candidates if r["trace_id"] in keep]
+    rows = []
+    pending = 0
+    for r in candidates:
+        if r["trace_id"] in keep:
+            r["pending_until"] = None
+        elif window and pending < MAX_PENDING_PER_REQUEST:
+            r["pending_until"] = now + window
+            pending += 1
+        else:
+            continue
+        rows.append(r)
+    if genai and window:
+        # Spans held for these traces become part of them.
+        await db.execute(
+            update(t)
+            .where(
+                t.tenant_id == tenant_id,
+                t.trace_id.in_(genai),
+                t.pending_until.is_not(None),
+            )
+            .values(pending_until=None)
+            .execution_options(synchronize_session=False)
+        )
     if not rows:
+        await db.commit()
         return 0
     salt = None
     if any(r["user_id"] for r in rows):
@@ -279,6 +334,26 @@ async def store_trace_spans(
         inserted += len((await db.execute(stmt)).all())
     await db.commit()
     return inserted
+
+
+async def _delete_expired_pending(db: AsyncSession, tenant_id: UUID, now: datetime) -> None:
+    """Delete (a bounded batch of) the tenant's pending spans whose window
+    has passed: their trace never gained a GenAI span."""
+    t = TraceSpan
+    expired = (
+        select(t.id)
+        .where(
+            t.tenant_id == tenant_id,
+            t.pending_until.is_not(None),
+            t.pending_until < now,
+        )
+        .limit(PENDING_GC_BATCH)
+    )
+    await db.execute(
+        delete(t)
+        .where(t.id.in_(expired))
+        .execution_options(synchronize_session=False)
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -329,7 +404,11 @@ async def load_trace(db: AsyncSession, tenant_id: UUID, trace_id: str) -> list[T
         (
             await db.execute(
                 select(t)
-                .where(t.tenant_id == tenant_id, t.trace_id == trace_id)
+                .where(
+                    t.tenant_id == tenant_id,
+                    t.trace_id == trace_id,
+                    t.pending_until.is_(None),
+                )
                 .order_by(t.start_time, t.span_id)
             )
         ).scalars()
@@ -429,7 +508,12 @@ async def list_trace_ids(
     in ``[since, until)`` that matches the filters, newest first, after the
     cursor. ``status`` looks at every stored span of the trace."""
     t = TraceSpan
-    conds = [t.tenant_id == tenant_id, t.start_time >= since, t.start_time < until]
+    conds = [
+        t.tenant_id == tenant_id,
+        t.start_time >= since,
+        t.start_time < until,
+        t.pending_until.is_(None),
+    ]
     if session_id is not None:
         conds.append(t.session_id == session_id)
     if user_id_hash is not None:
@@ -440,7 +524,11 @@ async def list_trace_ids(
     errors = func.sum(case((t.status == "error", 1), else_=0))
     stmt = (
         select(t.trace_id, start.label("start"))
-        .where(t.tenant_id == tenant_id, t.trace_id.in_(candidates))
+        .where(
+            t.tenant_id == tenant_id,
+            t.trace_id.in_(candidates),
+            t.pending_until.is_(None),
+        )
         .group_by(t.trace_id)
     )
     having = []
@@ -467,7 +555,11 @@ async def load_traces(
     rows = (
         await db.execute(
             select(t)
-            .where(t.tenant_id == tenant_id, t.trace_id.in_(trace_ids))
+            .where(
+                t.tenant_id == tenant_id,
+                t.trace_id.in_(trace_ids),
+                t.pending_until.is_(None),
+            )
             .order_by(t.start_time, t.span_id)
         )
     ).scalars()

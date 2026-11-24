@@ -436,9 +436,14 @@ async def purge_tenant_events(
     ts = TraceSpan.__table__
     # Agent trace spans (#385) follow the usage events. start_time is the
     # sender's clock; received_at also catches spans sent with an old one.
+    # Pending spans whose trace never gained a GenAI span go too.
     ts_conditions = [
         ts.c.tenant_id == tenant_id,
-        or_(ts.c.start_time < cutoff, ts.c.received_at < cutoff),
+        or_(
+            ts.c.start_time < cutoff,
+            ts.c.received_at < cutoff,
+            ts.c.pending_until < (now or _utcnow()),
+        ),
     ]
     # Usage rollups (#346) have their own, longer retention.
     r_cutoff = rollup_cutoff(tenant_settings, now)
