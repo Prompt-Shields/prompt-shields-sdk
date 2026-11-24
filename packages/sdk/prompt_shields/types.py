@@ -94,6 +94,8 @@ Vendor = Literal[
     "microsoft",
     "azure_openai",
     "bedrock",
+    "aws-bedrock",
+    "google-vertex-ai",
     "meta",
     "cohere",
     "mistral",

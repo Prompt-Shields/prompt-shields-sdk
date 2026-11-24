@@ -452,6 +452,25 @@ def test_bedrock_converse(aws):
     assert event["api_key_fingerprint"] is None
 
 
+def test_bedrock_converse_claude_region_and_price(aws):
+    # #388: a Claude profile id is priced at Anthropic list prices plus the
+    # regional endpoint premium; the client region and profile feed the
+    # jurisdiction.
+    prompt_shields.instrument(ps_api_key="ps_key")
+    body = {**CONVERSE_BODY, "usage": {"inputTokens": 1000, "outputTokens": 2000,
+                                       "totalTokens": 3000}}
+    client = _boto_client("bedrock-runtime", 200, json.dumps(body).encode())
+    client.converse(modelId="eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                    messages=[{"role": "user", "content": [{"text": "hi"}]}])
+    event = _events()[0]
+    assert event["vendor"] == "bedrock"
+    assert event["model_family"] == "anthropic"
+    assert event["region"] == "us-east-1"
+    assert event["served_jurisdiction"] == "EEA"  # the eu. profile wins
+    assert event["endpoint_scope"] == "regional"
+    assert event["cost"] == pytest.approx(0.0363)
+
+
 def test_bedrock_invoke_model_reads_headers_never_the_body(aws):
     prompt_shields.instrument(ps_api_key="ps_key")
     raws = []

@@ -14,6 +14,10 @@ outermost named chain or agent the run belongs to (LangChain's default names,
 such as `RunnableSequence` or `AgentExecutor`, are skipped). See
 `prompt_shields.integrations` for delivery and double-counting rules.
 
+Inside a LangGraph graph, each event also carries the cost tag
+`langgraph_node` (the node that made the call), so the collector can break
+usage down per node (see `langgraph_tags`).
+
 To attach a handler to every run without passing `callbacks`, call
 `register()` (once, after `instrument()`); `unregister()` detaches it. Runs
 that already have a `PromptShieldsCallbackHandler` keep only their own.
@@ -36,7 +40,9 @@ from prompt_shields.instrumentation import (
 from prompt_shields.integrations._common import (
     claim_outer_call,
     emit,
+    langgraph_tags,
     normalize_vendor,
+    platform_vendor,
     text_of,
 )
 from prompt_shields.providers import _int, openai_usage_fields
@@ -144,16 +150,16 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
             if outer is not None and not hint:
                 hint = outer.use_case_hint
             fc = FrameworkCall("langchain", hint,
-                               previous=current_framework_call())
+                               previous=current_framework_call(),
+                               tags=langgraph_tags(metadata))
             _FRAMEWORK_CALL.set(fc)
+            model = (metadata.get("ls_model_name")
+                     or invocation.get("model")
+                     or invocation.get("model_name"))
+            vendor = normalize_vendor(metadata.get("ls_provider")
+                                      or invocation.get("_type"))
             self._runs[run_id] = _Run(
-                fc,
-                normalize_vendor(metadata.get("ls_provider")
-                                 or invocation.get("_type")),
-                metadata.get("ls_model_name")
-                or invocation.get("model")
-                or invocation.get("model_name"),
-                messages,
+                fc, platform_vendor(vendor, model), model, messages,
             )
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LangChain handler error: {e}")

@@ -1,8 +1,10 @@
 """ShieldsClient — drop-in wrappers around LLM provider SDKs.
 
 Two surfaces:
-  - ShieldsClient(vendor="openai" | "anthropic", ...)  — generic
-  - ShieldsOpenAI(...) / ShieldsAnthropic(...)         — typed convenience
+  - ShieldsClient(vendor="openai" | "anthropic" | "google-vertex-ai" |
+    "aws-bedrock", ...)                                  — generic
+  - ShieldsOpenAI(...) / ShieldsAnthropic(...) / ShieldsAnthropicVertex(...)
+    / ShieldsAnthropicBedrock(...)                       — typed convenience
 
 Both produce identical telemetry events. The generic form is useful when
 the vendor is configured at runtime; the typed forms make IDE completion
@@ -19,6 +21,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from prompt_shields import cloud_platforms
 from prompt_shields.budgets import (
     BudgetStore,
     budget_event_hook,
@@ -188,6 +191,8 @@ class ShieldsClient:
 
         # Lazy provider client construction — only import what we need
         self._upstream = self._make_upstream(api_key, **provider_kwargs)
+        # Claude on Vertex AI / Bedrock (#388): region, jurisdiction, pricing.
+        self._platform = cloud_platforms.detect(self._upstream)
         self.chat = _ChatNamespace(self)
 
     # --- provider construction --------------------------------------------
@@ -199,6 +204,10 @@ class ShieldsClient:
         if self._vendor == "anthropic":
             from anthropic import Anthropic
             return Anthropic(api_key=api_key, **provider_kwargs)
+        if self._vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS:
+            return cloud_platforms.make_client(
+                self._vendor, api_key, is_async=False, **provider_kwargs
+            )
         raise ValueError(f"No upstream factory for vendor {self._vendor!r}")
 
     # --- event construction -----------------------------------------------
@@ -216,6 +225,12 @@ class ShieldsClient:
         # Streams pass fields accumulated from their chunks instead.
         if adapter_fields is None:
             adapter_fields = self._adapter.extract(response)
+        # Claude on Vertex AI / Bedrock: where it ran prices it (#388). The
+        # requested id carries a Bedrock profile prefix the served one lacks.
+        platform = getattr(self, "_platform", None)
+        adapter_fields = cloud_platforms.with_endpoint_scope(
+            adapter_fields, platform, model
+        )
         tokens_in = adapter_fields.get("tokens_in")
         tokens_out = adapter_fields.get("tokens_out")
 
@@ -281,6 +296,7 @@ class ShieldsClient:
             if categories:
                 event["detected_pii_types"] = categories
 
+        cloud_platforms.apply_platform(event, platform, model)
         return event
 
     # --- feedback -------------------------------------------------------------
@@ -334,6 +350,30 @@ class ShieldsAnthropic(ShieldsClient):
 
     def __init__(self, **kwargs):
         kwargs.setdefault("vendor", "anthropic")
+        super().__init__(**kwargs)
+
+
+class ShieldsAnthropicVertex(ShieldsClient):
+    """Claude on Google Vertex AI (#388): ShieldsAnthropicVertex(
+    ps_api_key=..., project_id=..., region="global"). Wraps
+    `anthropic.AnthropicVertex` (Google credentials; no API key); events
+    report vendor "google-vertex-ai" with the region and project."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("vendor", cloud_platforms.VERTEX_VENDOR)
+        kwargs.setdefault("api_key", None)
+        super().__init__(**kwargs)
+
+
+class ShieldsAnthropicBedrock(ShieldsClient):
+    """Claude on Amazon Bedrock (#388): ShieldsAnthropicBedrock(
+    ps_api_key=..., aws_region=...). Wraps `anthropic.AnthropicBedrock`
+    (AWS credentials, or a Bedrock API key as `api_key`); events report
+    vendor "aws-bedrock" with the region."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("vendor", cloud_platforms.BEDROCK_VENDOR)
+        kwargs.setdefault("api_key", None)
         super().__init__(**kwargs)
 
 
@@ -542,7 +582,9 @@ class _CompletionsNamespace:
         try:
             return ShieldsStream(
                 response,
-                StreamAccumulator(self._parent._vendor, messages),
+                StreamAccumulator(
+                    cloud_platforms.stream_vendor(self._parent._vendor), messages
+                ),
                 on_finish,
                 start,
                 hide_usage_chunk=hide_usage_chunk,
@@ -565,7 +607,7 @@ class _CompletionsNamespace:
             return upstream.chat.completions.create(
                 model=model, messages=messages, **kwargs
             )
-        if vendor == "anthropic":
+        if vendor == "anthropic" or vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS:
             # Anthropic requires max_tokens; default to 1024 if not provided
             return upstream.messages.create(
                 model=model,

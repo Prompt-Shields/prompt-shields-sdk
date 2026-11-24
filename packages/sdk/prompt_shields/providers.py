@@ -13,7 +13,7 @@ model or the equivalent raw JSON dict.
 import re
 from typing import Any
 
-from prompt_shields.pricing import resolve_pricing_model
+from prompt_shields.pricing import claude_pricing_candidates, resolve_pricing_model
 
 # OpenAI (and Azure) served models carry a version date, e.g.
 # "gpt-4o-2024-08-06"; the pricing table keys the base name.
@@ -320,6 +320,25 @@ class AnthropicAdapter(ProviderAdapter):
         }
 
 
+class ClaudePlatformAdapter(AnthropicAdapter):
+    """Claude through the Anthropic SDK's cloud platform clients:
+    `AnthropicVertex` (vendor "google-vertex-ai") and `AnthropicBedrock` /
+    `AnthropicBedrockMantle` ("aws-bedrock"). Responses are Anthropic
+    Messages; model ids are the platform's (`claude-sonnet-4-5@20250929`,
+    `us.anthropic.claude-sonnet-4-5-20250929-v1:0`), so pricing also tries
+    them normalised to Anthropic's (`claude_pricing_candidates`)."""
+
+    def __init__(self, vendor: str):
+        self.vendor = vendor
+
+    def pricing_candidates(
+        self, model: str | None, served_model: str | None
+    ) -> list[str]:
+        return claude_pricing_candidates(
+            super().pricing_candidates(model, served_model)
+        )
+
+
 class GeminiAdapter(ProviderAdapter):
     """Gemini `generateContent` responses (google-genai SDK or raw JSON)."""
 
@@ -524,10 +543,10 @@ class BedrockAdapter(ProviderAdapter):
     def pricing_candidates(
         self, model: str | None, served_model: str | None
     ) -> list[str]:
-        return _unique([
+        return claude_pricing_candidates(_unique([
             _BEDROCK_PROFILE_PREFIX.sub("", name) if isinstance(name, str) else None
             for name in (served_model, model)
-        ])
+        ]))
 
 
 def _first_count(obj: Any, *names: str) -> int | None:
@@ -563,6 +582,8 @@ ADAPTERS: dict[str, ProviderAdapter] = {
     "google": GeminiAdapter(),
     "azure_openai": AzureOpenAIAdapter(),
     "bedrock": BedrockAdapter(),
+    "google-vertex-ai": ClaudePlatformAdapter("google-vertex-ai"),
+    "aws-bedrock": ClaudePlatformAdapter("aws-bedrock"),
     "mistral": MistralAdapter(),
     "cohere": CohereAdapter(),
 }
