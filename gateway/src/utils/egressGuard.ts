@@ -289,13 +289,14 @@ function isNode(): boolean {
 
 /** The guarded dispatcher for `policy`, or undefined when fetch's default
  * dispatcher is not the plain undici Agent (not yet created, or replaced by
- * a proxy agent). */
+ * a proxy agent). Checked on every call, so a proxy dispatcher installed
+ * later is respected (the request is then checked, not pinned). */
 function dispatcherFor(policy: EgressPolicy): unknown {
-  const cached = dispatchers.get(policy);
-  if (cached) return cached;
   const global = (globalThis as any)[GLOBAL_DISPATCHER];
   const Agent = global?.constructor;
   if (typeof Agent !== 'function' || Agent.name !== 'Agent') return undefined;
+  const cached = dispatchers.get(policy) as any;
+  if (cached && cached.constructor === Agent) return cached;
   try {
     const agent = new Agent({ connect: { lookup: checkedLookup(policy) } });
     dispatchers.set(policy, agent);
@@ -303,6 +304,27 @@ function dispatcherFor(policy: EgressPolicy): unknown {
   } catch {
     return undefined;
   }
+}
+
+let warnedUnpinned = false;
+
+/** Log once per process that egress is checked but not pinned. */
+function warnUnpinnedOnce(): void {
+  if (warnedUnpinned) return;
+  warnedUnpinned = true;
+  const global = (globalThis as any)[GLOBAL_DISPATCHER];
+  const kind = global
+    ? `a ${global.constructor?.name ?? 'custom'} dispatcher`
+    : 'not available';
+  console.warn(
+    `[egress] fetch's default dispatcher is ${kind}: egress hosts are resolved and checked before each request but the connection is not pinned to the checked address (#377)`
+  );
+}
+
+/** Tests only: forget the cached dispatchers and the one-time warning. */
+export function resetEgressDispatchersForTests(): void {
+  dispatchers.clear();
+  warnedUnpinned = false;
 }
 
 /**
@@ -343,6 +365,7 @@ export async function withEgressGuard(
   }
   const dispatcher = dispatcherFor(policy);
   if (dispatcher) return { ...init, dispatcher } as RequestInit;
+  warnUnpinnedOnce();
   // No pinning possible: check what the name resolves to now. A failed
   // lookup is left to fetch (behind a proxy the name may not resolve here).
   try {

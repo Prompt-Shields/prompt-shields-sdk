@@ -11,6 +11,7 @@ import {
   checkedLookup,
   resolveChecked,
   resolveCached,
+  resetEgressDispatchersForTests,
   setEgressResolverForTests,
   withEgressGuard,
 } from './egressGuard';
@@ -221,6 +222,83 @@ describe('withEgressGuard', () => {
     await expect(
       withEgressGuard('https://nx.invalid/', { method: 'GET' }, 'metadata')
     ).resolves.toEqual({ method: 'GET' });
+  });
+
+  describe("fetch's default dispatcher", () => {
+    const SYM = Symbol.for('undici.globalDispatcher.1');
+    let saved: unknown;
+    let warn: jest.SpyInstance;
+    beforeEach(() => {
+      saved = (globalThis as any)[SYM];
+      resetEgressDispatchersForTests();
+      warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      (globalThis as any)[SYM] = saved;
+      resetEgressDispatchersForTests();
+      warn.mockRestore();
+    });
+
+    test('a plain Agent gets a pinning dispatcher of the same class', async () => {
+      class Agent {
+        constructor(readonly opts?: any) {}
+      }
+      (globalThis as any)[SYM] = new Agent();
+      setEgressResolverForTests(resolveTo('169.254.169.254'));
+      const init: any = await withEgressGuard(
+        'https://meta.invalid/',
+        { method: 'GET' },
+        'metadata'
+      );
+      expect(init.method).toBe('GET');
+      expect(init.dispatcher).toBeInstanceOf(Agent);
+      // The refusal then happens in the connection's lookup.
+      const err = await new Promise((resolve) =>
+        init.dispatcher.opts.connect.lookup('meta.invalid', {}, resolve)
+      );
+      expect(isEgressRefused(err)).toBe(true);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    test('absent or proxy dispatcher: checked, not pinned, warned once', async () => {
+      class ProxyAgent {}
+      for (const global of [undefined, new ProxyAgent()]) {
+        (globalThis as any)[SYM] = global;
+        setEgressResolverForTests(resolveTo('203.0.113.9'));
+        for (let i = 0; i < 2; i++) {
+          await expect(
+            withEgressGuard('https://ok.invalid/', {}, 'metadata')
+          ).resolves.toEqual({});
+        }
+        setEgressResolverForTests(resolveTo('169.254.169.254'));
+        await expect(
+          withEgressGuard('https://meta.invalid/', {}, 'metadata')
+        ).rejects.toBeInstanceOf(EgressRefusedError);
+        expect(warn).toHaveBeenCalledTimes(1);
+        resetEgressDispatchersForTests();
+        warn.mockClear();
+      }
+    });
+
+    test('a proxy dispatcher installed later is respected', async () => {
+      class Agent {}
+      class ProxyAgent {}
+      (globalThis as any)[SYM] = new Agent();
+      setEgressResolverForTests(resolveTo('203.0.113.9'));
+      const first: any = await withEgressGuard(
+        'https://a.invalid/',
+        {},
+        'local'
+      );
+      expect(first.dispatcher).toBeInstanceOf(Agent);
+      (globalThis as any)[SYM] = new ProxyAgent();
+      const second: any = await withEgressGuard(
+        'https://a.invalid/',
+        {},
+        'local'
+      );
+      expect(second.dispatcher).toBeUndefined();
+    });
   });
 
   test('pins Node fetch to the checked address (real runtime)', () => {
