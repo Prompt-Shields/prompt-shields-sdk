@@ -12,7 +12,8 @@ Prompt Shields exposes four kinds of telemetry. All are off by default.
 | Prometheus metrics | gateway `GET /metrics` | `PS_METRICS_ENABLED=true` (`PS_METRICS_TOKEN` for a bearer token) | Prometheus, an OTel Collector `prometheus` receiver |
 | Prometheus metrics | collector `GET /metrics` | `PS_COLLECTOR_METRICS_ENABLED=true` (`PS_COLLECTOR_METRICS_TOKEN`) | same |
 | Security events | gateway | `PS_SECURITY_EVENTS_LOG=true` (JSON lines on stdout) and/or `PS_SECURITY_EVENTS_OTLP=true` (OTLP log records) | a log shipper, an OTel Collector, your SIEM |
-| GenAI spans | gateway | `PS_OTEL_ENDPOINT` | an OTel Collector, the Prompt Shields collector |
+| GenAI spans | gateway | `PS_OTEL_ENDPOINT` (or `PS_OTEL_LANGFUSE`) | an OTel Collector, the Prompt Shields collector, Langfuse |
+| GenAI spans | SDK | `prompt_shields.configure_otlp()` / `configure_langfuse()`, or `PS_OTLP_EXPORT` / `PS_LANGFUSE_EXPORT` | any OTLP/HTTP backend, Langfuse ([OTLP export and Langfuse](/guides/otlp-langfuse)) |
 
 The event schema, privacy contract and OTLP log mapping are on [Security Events](/guides/security-events).
 

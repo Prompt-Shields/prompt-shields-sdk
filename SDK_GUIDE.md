@@ -829,6 +829,19 @@ response = client.chat.completions.create(
 
 The trade-off: gateway mode gives less control over event shape (no `ps_metadata`, no Python-level PII scanning), but requires zero code changes.
 
+### Pattern 4: Spans to Langfuse or any OTLP backend
+
+Every call can also go out as an OpenTelemetry GenAI span (model, tokens, cost from the price table, session, user hash; no prompt text) next to the collector events:
+
+```python
+import prompt_shields
+
+prompt_shields.configure_langfuse()  # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
+prompt_shields.configure_otlp()      # OTEL_EXPORTER_OTLP_* (Tempo, Honeycomb, an OTel Collector, ...)
+```
+
+or `PS_LANGFUSE_EXPORT=true` / `PS_OTLP_EXPORT=true` without code. Export is batched from a background thread, bounded (`OTEL_BSP_MAX_QUEUE_SIZE`) and fail-open. See [OTLP export and Langfuse](docs/guides/otlp-langfuse.mdx).
+
 ---
 
 ## 15. Common questions

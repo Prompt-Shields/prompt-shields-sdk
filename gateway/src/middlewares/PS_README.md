@@ -70,6 +70,7 @@ An inbound `traceparent` makes the span a child of the caller's span.
 - `OTEL_SERVICE_NAME` — default `prompt-shields-gateway`
 - `PS_OTEL_CAPTURE_CONTENT` / `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` — `true` adds `gen_ai.input.messages`, `gen_ai.output.messages` and `gen_ai.system_instructions` (non-streamed calls only). Off by default.
 - `PS_OTEL_MAX_BATCH` (64), `PS_OTEL_FLUSH_MS` (5000), `PS_OTEL_MAX_QUEUE` (2048) — batching on Node. On Workers each request flushes the queue under `waitUntil`.
+- `PS_OTEL_LANGFUSE` — `true` adds the `langfuse.*` attributes (#386); with no endpoint set, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_HOST` (default `https://cloud.langfuse.com`) give the endpoint (`/api/public/otel/v1/traces`) and Basic auth. Every span carries `gen_ai.usage.cost` (shared price table), `X-PS-Session-Id` as `session.id` / `gen_ai.conversation.id`, and a user hash (`user.id`: OIDC subject hash, else SHA-256 of `X-PS-User-Id`). Captured content is PII-redacted as in `/log/stream`. See `docs/guides/otlp-langfuse.mdx`.
 
 Export never blocks or fails a request; failed batches are dropped.
 The endpoint must pass `isSafeUpstreamURL` (list a private or loopback host in

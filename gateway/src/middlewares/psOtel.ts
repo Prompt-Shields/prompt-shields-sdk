@@ -25,6 +25,16 @@
  * refuses a name resolving to a link-local or metadata address, pinning the
  * connection to the checked address (#377). Spans for a refused endpoint are dropped
  * and counted (`reason="unsafe_endpoint"`); nothing is sent.
+ *
+ * Langfuse and other OTLP backends (#386): each span also carries the call's
+ * cost from the shared price table (`gen_ai.usage.cost`, `ps.cost.usd`), the
+ * caller's `X-PS-Session-Id` (`gen_ai.conversation.id`, `session.id`) and a
+ * SHA-256 hash of the user (`ps.user.hash`, `user.id`: the OIDC subject hash,
+ * else the hash of `X-PS-User-Id`; the raw id is never sent). With
+ * `PS_OTEL_LANGFUSE=true` the `langfuse.*` attributes Langfuse maps are added,
+ * and the endpoint and Basic auth can come from `LANGFUSE_PUBLIC_KEY`,
+ * `LANGFUSE_SECRET_KEY` and `LANGFUSE_HOST`. Captured content (opt-in) goes
+ * through the `/log/stream` PII redaction (`redactPiiDeep`) first.
  */
 
 import {
@@ -40,6 +50,10 @@ import {
   StreamSummary,
 } from './psStreamObserver';
 import { telemetryDroppedTotal } from './psMetrics/security';
+import { costFields } from './psPricing';
+import { detectVendor } from './ps-telemetry';
+import { usageDetailsOf } from './psStreamObserver';
+import { redactPiiDeep } from './log';
 import { isSafeUpstreamURL } from './requestValidator';
 import { guardedUpstreamFetch } from '../utils/egressFetch';
 
@@ -51,6 +65,8 @@ export interface OtelConfig {
   maxBatch: number;
   flushMs: number;
   maxQueue: number;
+  /** Add the `langfuse.*` attributes (PS_OTEL_LANGFUSE=true). */
+  langfuse?: boolean;
 }
 
 const truthy = (v?: string) => /^(1|true|yes|on)$/i.test((v || '').trim());
@@ -84,12 +100,34 @@ export function otelConfig(
   env: Record<string, string | undefined> = process.env
 ): OtelConfig | null {
   const psEndpoint = (env.PS_OTEL_ENDPOINT || '').trim();
-  const endpoint =
+  const langfuse = truthy(env.PS_OTEL_LANGFUSE);
+  const langfuseKeys =
+    langfuse && env.LANGFUSE_PUBLIC_KEY && env.LANGFUSE_SECRET_KEY;
+  let endpoint =
     psEndpoint || (env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT || '').trim();
+  // Langfuse preset (#386): with no endpoint of its own, the project's
+  // OTel endpoint, authenticated with its public and secret keys.
+  const useLangfuseKeys = !endpoint && langfuseKeys;
+  if (useLangfuseKeys) {
+    const host = (
+      env.LANGFUSE_HOST ||
+      env.LANGFUSE_BASE_URL ||
+      'https://cloud.langfuse.com'
+    )
+      .trim()
+      .replace(/\/+$/, '');
+    endpoint = `${host}/api/public/otel/v1/traces`;
+  }
   if (!endpoint) return null;
-  const headers = parseHeaderList(
-    env.PS_OTEL_HEADERS || env.OTEL_EXPORTER_OTLP_TRACES_HEADERS
-  );
+  const headers = useLangfuseKeys
+    ? {
+        Authorization: `Basic ${btoa(
+          `${env.LANGFUSE_PUBLIC_KEY}:${env.LANGFUSE_SECRET_KEY}`
+        )}`,
+      }
+    : parseHeaderList(
+        env.PS_OTEL_HEADERS || env.OTEL_EXPORTER_OTLP_TRACES_HEADERS
+      );
   // Sending to the PS collector: reuse the gateway's tenant ingest key. Only
   // for the PS-specific PS_OTEL_ENDPOINT: the generic OTEL_* endpoint is often
   // set platform-wide for a third-party backend, which must never receive it.
@@ -110,6 +148,7 @@ export function otelConfig(
     maxBatch: posInt(env.PS_OTEL_MAX_BATCH, 64),
     flushMs: posInt(env.PS_OTEL_FLUSH_MS, 5000),
     maxQueue: posInt(env.PS_OTEL_MAX_QUEUE, 2048),
+    langfuse,
   };
 }
 
@@ -405,6 +444,10 @@ export interface SpanInput {
     sensitivitySource?: string;
   };
   captureContent?: boolean;
+  /** `X-PS-Session-Id` is read from `headers`; this is the user's hash. */
+  userHash?: string;
+  /** Add the `langfuse.*` attributes. */
+  langfuse?: boolean;
 }
 
 export interface BuiltSpan {
@@ -434,6 +477,18 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     errorTypeOf(input.status, res) ??
     (input.stream?.truncated ? 'stream_truncated' : undefined);
   const ps = extractPSHeaders(input.headers);
+  const responseModel =
+    input.stream?.model ??
+    (typeof res?.model === 'string' ? res.model : undefined);
+  const details = input.stream ? input.stream.details : usageDetailsOf(usage);
+  // The collector event's cost (#71), from the same price table.
+  const { cost } = costFields(
+    detectVendor('', providerFromHeaders(input.headers)),
+    requestModel,
+    responseModel,
+    { tokens_in: tokensIn, tokens_out: tokensOut, ...(details || {}) }
+  );
+  const session = sessionIdOf(input.headers);
 
   const attrs: Record<string, AttrValue | undefined> = {
     'gen_ai.operation.name': operation,
@@ -451,9 +506,7 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     'gen_ai.request.seed': req?.seed,
     'gen_ai.request.choice.count':
       typeof req?.n === 'number' && req.n !== 1 ? req.n : undefined,
-    'gen_ai.response.model':
-      input.stream?.model ??
-      (typeof res?.model === 'string' ? res.model : undefined),
+    'gen_ai.response.model': responseModel,
     'gen_ai.response.id': typeof res?.id === 'string' ? res.id : undefined,
     'gen_ai.response.finish_reasons': finishReasonsOf(res),
     'gen_ai.usage.input_tokens': tokensIn,
@@ -464,6 +517,12 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
       usage?.input_tokens_details?.cached_tokens,
     'gen_ai.usage.cache_creation.input_tokens':
       usage?.cache_creation_input_tokens,
+    'gen_ai.usage.cost': cost,
+    'gen_ai.conversation.id': session,
+    'session.id': session,
+    'ps.user.hash': input.userHash,
+    'user.id': input.userHash,
+    'ps.cost.usd': cost,
     'http.response.status_code': input.status,
     'error.type': errorType,
     // Prompt Shields business context (X-PS-* headers) and routing.
@@ -489,8 +548,28 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     if (numeric && !(typeof v === 'number' && Number.isFinite(v)))
       attrs[k] = undefined;
   }
+  let content: Record<string, string> = {};
   if (input.captureContent && !input.stream) {
-    Object.assign(attrs, contentAttributes(req, res));
+    // The /log/stream redaction (#337) applies first.
+    content = contentAttributes(redactPiiDeep(req), redactPiiDeep(res));
+    Object.assign(attrs, content);
+  }
+  if (input.langfuse) {
+    Object.assign(
+      attrs,
+      langfuseAttributes({
+        model: responseModel ?? requestModel,
+        name: requestModel ? `${operation} ${requestModel}` : operation,
+        tokensIn: attrs['gen_ai.usage.input_tokens'] as number | undefined,
+        tokensOut: attrs['gen_ai.usage.output_tokens'] as number | undefined,
+        cost,
+        session,
+        userHash: input.userHash,
+        environment: ps.environment,
+        input: content['gen_ai.input.messages'],
+        output: content['gen_ai.output.messages'],
+      })
+    );
   }
 
   const parent = parseTraceparent(input.headers['traceparent']);
@@ -506,6 +585,78 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
   };
   if (parent) span.parentSpanId = parent.parentSpanId;
   return { span, environment: ps.environment };
+}
+
+/** `X-PS-Session-Id`, when it is a plausible id (1-256 printable chars). */
+export function sessionIdOf(
+  headers: Record<string, string | undefined>
+): string | undefined {
+  const v = (headers['x-ps-session-id'] || '').trim();
+  return v && v.length <= 256 && /^[\x21-\x7e]+$/.test(v) ? v : undefined;
+}
+
+/** Hex SHA-256 of a user id (never sent itself). */
+export async function userIdHash(id: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(id)
+  );
+  return Array.from(new Uint8Array(digest), (b) =>
+    b.toString(16).padStart(2, '0')
+  ).join('');
+}
+
+/**
+ * The span's user hash: the OIDC subject hash (unless
+ * PS_OIDC_TELEMETRY_SUBJECT=off), else the SHA-256 of `X-PS-User-Id`.
+ */
+export async function userHashOf(
+  headers: Record<string, string | undefined>,
+  oidcIdentity?: {
+    subjectHash?: string;
+    config?: { telemetrySubject?: string };
+  }
+): Promise<string | undefined> {
+  if (oidcIdentity?.subjectHash) {
+    return oidcIdentity.config?.telemetrySubject === 'off'
+      ? undefined
+      : oidcIdentity.subjectHash;
+  }
+  const raw = (headers['x-ps-user-id'] || '').trim();
+  return raw ? userIdHash(raw) : undefined;
+}
+
+/** The `langfuse.*` span attributes Langfuse's OTel ingestion maps. */
+export function langfuseAttributes(a: {
+  model?: string;
+  name: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  cost?: number;
+  session?: string;
+  userHash?: string;
+  environment?: string;
+  input?: string;
+  output?: string;
+}): Record<string, AttrValue | undefined> {
+  const usage: Record<string, number> = {};
+  if (a.tokensIn !== undefined) usage.input = a.tokensIn;
+  if (a.tokensOut !== undefined) usage.output = a.tokensOut;
+  return {
+    'langfuse.observation.type': 'generation',
+    'langfuse.observation.model.name': a.model,
+    'langfuse.observation.usage_details': Object.keys(usage).length
+      ? JSON.stringify(usage)
+      : undefined,
+    'langfuse.observation.cost_details':
+      a.cost !== undefined ? JSON.stringify({ total: a.cost }) : undefined,
+    'langfuse.session.id': a.session,
+    'langfuse.user.id': a.userHash,
+    'langfuse.environment': a.environment,
+    'langfuse.trace.name': a.name,
+    'langfuse.observation.input': a.input,
+    'langfuse.observation.output': a.output,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +867,12 @@ export function psOtel(
         /* no execution context on Node */
       }
 
+      let userHash: string | undefined;
+      try {
+        userHash = await userHashOf(headers, c.get('psOidcIdentity'));
+      } catch {
+        userHash = undefined;
+      }
       const base: SpanInput = {
         path: url.pathname,
         headers,
@@ -726,6 +883,8 @@ export function psOtel(
         responseBody,
         route: c.get('psRoute'),
         captureContent: config.captureContent,
+        userHash,
+        langfuse: config.langfuse,
       };
       const emit = (input: SpanInput) => {
         const built = buildGenAISpan(input);

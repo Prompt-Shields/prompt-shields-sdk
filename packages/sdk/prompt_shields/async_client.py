@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from prompt_shields import otlp
 from prompt_shields.budgets import (
     BudgetStore,
     budget_event_hook,
@@ -402,6 +403,8 @@ class _AsyncCompletionsNamespace:
 
     def _enqueue(self, event: dict, messages: list) -> None:
         self._parent._telemetry.enqueue(event)
+        # OTLP export (#386): queued only, sent from its own thread.
+        otlp.export_event(event, messages)
         if self._parent._atlas is not None:
             self._parent._atlas.enqueue(build_atlas_event(event, messages))
 

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-from prompt_shields import instrumentation
+from prompt_shields import instrumentation, otlp
 from prompt_shields.instrumentation import FrameworkCall, apply_framework_fields
 from prompt_shields.telemetry import build_atlas_event
 
@@ -101,6 +101,7 @@ def emit(fc: FrameworkCall, *, vendor: str, model: Any, messages: list,
         event["cost_source"] = fc.framework
     apply_framework_fields(event, fc)
     state.telemetry.enqueue(event)
+    otlp.export_event(event, messages)
     if state.atlas is not None:
         state.atlas.enqueue(build_atlas_event(event, messages))
     _flush(state)

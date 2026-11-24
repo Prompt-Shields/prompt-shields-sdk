@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from prompt_shields import otlp
 from prompt_shields.budgets import (
     BudgetStore,
     budget_event_hook,
@@ -497,6 +498,8 @@ class _CompletionsNamespace:
 
     def _send(self, event: dict, messages: list, flush: bool = True) -> None:
         self._parent._telemetry.enqueue(event)
+        # OTLP export (#386): queued only, sent from its own thread.
+        otlp.export_event(event, messages)
         if flush:
             self._parent._telemetry.flush_sync()
 

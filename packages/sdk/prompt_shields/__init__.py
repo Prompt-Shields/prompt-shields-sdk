@@ -35,6 +35,11 @@ Public surface:
         prompt_shields.integrations.litellm    — LiteLLM custom logger
         prompt_shields.integrations.llamaindex — LlamaIndex instrumentation handlers
 
+    OTLP export (#386; see prompt_shields.otlp):
+        configure_otlp       — also send every call as a GenAI span to an OTLP backend
+        configure_langfuse   — the same, preset for Langfuse's OTel endpoint
+        otlp_stats / shutdown_otlp
+
     Feedback (#43):
         send_feedback / send_feedback_async — feedback on one call by its call_id
         last_call_id         — call_id of the latest call in this thread or task
@@ -83,6 +88,12 @@ from prompt_shields.instrumentation import (
     instrument,
     suppress_instrumentation,
     uninstrument,
+)
+from prompt_shields.otlp import (
+    configure_langfuse,
+    configure_otlp,
+    otlp_stats,
+    shutdown_otlp,
 )
 from prompt_shields.pii import detect_pii_categories, scan_messages
 from prompt_shields.pii_extended import detect_pii_categories_extended
@@ -141,6 +152,8 @@ __all__ = [
     "ShieldsOpenAI",
     "ShieldsRouter",
     "Vendor",
+    "configure_langfuse",
+    "configure_otlp",
     "detect_pii_categories",
     "detect_pii_categories_extended",
     "estimate_cost",
@@ -149,10 +162,12 @@ __all__ = [
     "instrument",
     "last_call_id",
     "load_baseline",
+    "otlp_stats",
     "pseudonymise",
     "scan_messages",
     "send_feedback",
     "send_feedback_async",
+    "shutdown_otlp",
     "suppress_instrumentation",
     "uninstrument",
 ]
