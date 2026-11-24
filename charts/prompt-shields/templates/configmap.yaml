@@ -43,6 +43,14 @@ data:
   PS_BUDGET_REDIS_URL: {{ . | quote }}
   {{- end }}
   {{- end }}
+  {{- $rateLimits := .Values.gateway.rateLimits }}
+  {{- if $rateLimits.enabled }}
+  PS_RATE_LIMITS: {{ toJson (dict "version" 1 "on_store_error" $rateLimits.onStoreError "rules" $rateLimits.rules) | quote }}
+  PS_RATELIMIT_NAMESPACE: {{ $rateLimits.namespace | quote }}
+  {{- with $rateLimits.redis.url }}
+  PS_RATELIMIT_REDIS_URL: {{ . | quote }}
+  {{- end }}
+  {{- end }}
   {{- if .Values.gateway.routePolicy }}
   PS_ROUTE_POLICY_FILE: /etc/prompt-shields/route-policy/route-policy.json
   PS_ROUTE_POLICY_RELOAD_SECONDS: {{ toString (int64 .Values.gateway.routePolicyReloadSeconds) | quote }}

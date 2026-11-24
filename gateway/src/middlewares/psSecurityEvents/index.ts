@@ -1,3 +1,4 @@
+import type { RateLimitHit } from '../psRateLimit';
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
 import type {
@@ -606,7 +607,9 @@ export function reportPayloadRejected(
 
 /**
  * Middleware: records responses with status 429 (metric and rate_limit.hit
- * event). `upstream` when a provider attempt was made, else `gateway`. A
+ * event). `upstream` when a provider attempt was made, else `gateway`
+ * (with the rule id, scope and limit when a rate-limit policy rule refused
+ * the call, #344). A
  * spend budget refusal (psBudget, #28) only counts in the metric, as
  * `budget`: it is a cost decision, not a security signal, so it writes no
  * security event.
@@ -627,6 +630,8 @@ export function psSecurityEvents() {
       if (metrics) rateLimitedTotal.inc({ source });
       if (!target || source === 'budget') return;
       const provider = providerFromHeaders(headersOf(c));
+      // A rate-limit policy rule (psRateLimit, #344) names itself.
+      const hit = c.get('psRateLimitHit' as any) as RateLimitHit | undefined;
       enqueue(target, {
         ...base(c, 'rate_limit.hit', {
           'event.kind': 'event',
@@ -639,6 +644,13 @@ export function psSecurityEvents() {
         ...(provider ? { 'gen_ai.provider.name': safeId(provider) } : {}),
         'event.name': 'rate_limit.hit',
         'ps.rate_limit.source': source,
+        ...(hit && source === 'gateway'
+          ? {
+              'ps.rate_limit.rule': hit.rule,
+              'ps.rate_limit.scope': hit.scope,
+              'ps.rate_limit.limit': hit.limit,
+            }
+          : {}),
         'http.response.status_code': 429,
       });
     } catch {
