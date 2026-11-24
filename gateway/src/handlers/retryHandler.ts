@@ -7,6 +7,7 @@ import {
   rejectUpstreamRedirect,
   UPSTREAM_REDIRECT_MODE,
 } from '../utils/fetch';
+import { isEgressRefused } from '../utils/egressGuard';
 
 async function fetchWithTimeout(
   url: string,
@@ -209,7 +210,9 @@ export const retryRequest = async (
           lastResponse = response;
         } catch (error: any) {
           report(error?.status, error?.name);
-          if (attempt >= retryCount + 1) {
+          // PS fork (security, #377): a refused address is not retried.
+          if (attempt >= retryCount + 1 || isEgressRefused(error)) {
+            if (isEgressRefused(error)) retrySkipped = true;
             bail(error);
             return;
           }
@@ -225,7 +228,21 @@ export const retryRequest = async (
       }
     );
   } catch (error: any) {
-    if (
+    if (isEgressRefused(error)) {
+      // PS fork (security, #377): the upstream host resolved to a refused
+      // (loopback, link-local or metadata) address; nothing was sent.
+      lastResponse = new Response(
+        JSON.stringify({
+          error: {
+            message: 'Invalid upstream URL',
+            type: 'upstream_address_refused',
+            param: null,
+            code: null,
+          },
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    } else if (
       error instanceof TypeError &&
       error.cause instanceof Error &&
       error.cause?.name === 'ConnectTimeoutError'
