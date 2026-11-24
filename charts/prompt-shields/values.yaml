@@ -62,6 +62,7 @@ secrets:
     # Keys: PS_DATABASE_URL (required; the *application* role, see
     # README "Database roles"), PS_PARTNER_JWT_SECRET (required),
     # PS_ADMIN_TOKEN, PS_WEBHOOK_SECRET_KEYS, PS_WEBHOOK_SECRET_KEY,
+    # PS_CREDENTIAL_KEK_KEYS (local credential vault KEK, development only),
     # PS_PROVIDER_ADMIN_KEYS, PS_LEANIX, PS_SERVICENOW, PS_SENTINEL_EXPORT,
     # PS_SIEM_EXPORT, PS_CLOUD_INVENTORY, OPENAI_API_KEY, PS_COLLECTOR_REDIS_URL (when it
     # holds a password).

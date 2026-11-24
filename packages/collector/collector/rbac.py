@@ -52,6 +52,7 @@ _ALL_ADMIN = (
     "admin:registry",
     "admin:privacy",
     "admin:members",
+    "admin:inference-credentials",
     "admin:policies",
 )
 
