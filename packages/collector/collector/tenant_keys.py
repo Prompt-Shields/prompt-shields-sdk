@@ -49,7 +49,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from db.api_keys import api_key_lookup_prefix, hash_api_key
-from db.models import Tenant, TenantApiKey
+from db.models import CredentialCreator, Tenant, TenantApiKey
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,9 @@ INGEST_WRITE = "ingest:write"
 REGISTRY_READ = "registry:read"
 REGISTRY_ATTEST = "registry:attest"
 POLICY_READ = "policy:read"
+# credential_creators.credential_type for ingest keys (#396).
+CREDENTIAL_TYPE = "tenant_api_key"
+
 KEY_SCOPES: dict[str, str] = {
     INGEST_WRITE: "Send usage, OTLP, Kong, MCP, learner and feedback events",
     REGISTRY_READ: "Read the tenant registry (/api/v1/registry) and /telemetry/loss",
@@ -212,8 +215,12 @@ async def issue_key(
     *,
     expires_at: datetime | None = None,
     scopes=DEFAULT_KEY_SCOPES,
+    created_by: str | None = None,
 ) -> tuple[TenantApiKey, str]:
     """Create a key holding ``scopes`` (``ingest:write`` by default).
+    ``created_by`` is who issued it (admin_auth.created_by), recorded in
+    ``credential_creators`` so disabling a principal can revoke the keys
+    its tokens made (#396).
     Returns (row, plaintext). Flushes; the caller commits."""
     bad = unknown_key_scopes(scopes)
     if bad or not scopes:
@@ -234,6 +241,17 @@ async def issue_key(
     )
     db.add(row)
     await db.flush()
+    if created_by is not None:
+        db.add(
+            CredentialCreator(
+                tenant_id=tenant_id,
+                credential_type=CREDENTIAL_TYPE,
+                credential_id=row.id,
+                created_by=created_by,
+                created_at=row.created_at,
+            )
+        )
+        await db.flush()
     return row, plaintext
 
 

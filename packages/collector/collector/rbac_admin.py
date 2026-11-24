@@ -40,6 +40,14 @@ granting each of its roles would; issuing an owner-capable admin token, or
 an admin token or partner credential for an owner, needs an owner
 (collector/admin_api.py, collector/partner_admin.py; #379).
 
+Disabling or deleting a principal also revokes its SSO sessions and every
+admin token, ingest key, SCIM token and partner credential its tokens
+created, directly or not (collector/idp_sync.py, #396). A caller that
+cannot manage owners leaves owner-bound and owner-capable ones live (with
+what they created) and the audit row lists them (``cascade_skipped``,
+``partner_credentials_skipped``). Re-enabling restores only the principal's
+own credentials.
+
 Every change writes a hash-chained audit trail row in the same transaction
 (``principal.*``, ``team.*``, ``project.*``, ``membership.add``,
 ``membership.remove``, ``role.change``): ids, kinds, roles and team/project
@@ -67,7 +75,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import policies_api, rbac
+from collector import idp_sync, policies_api, rbac
 from collector.admin_auth import (
     ADMIN_SCOPES,
     AdminPrincipal,
@@ -466,10 +474,20 @@ async def update_principal(
             setattr(row, field, getattr(body, field))
             changed.append(field)
     action = "principal.update"
+    revoked: dict = {}
     if toggles:
+        now = _now()
         if body.disabled:
             await _keep_an_owner(db, principal.tenant_id, row.id)
-        row.disabled_at = _now() if body.disabled else None
+            # What its tokens created goes for good, subject to the owner
+            # rules (collector/idp_sync.py); its own credentials are only
+            # suspended, and work again if it is re-enabled.
+            revoked = (
+                await idp_sync.revoke_created_credentials(
+                    db, principal.tenant_id, row.id, now, caller=principal
+                )
+            ).audit_details()
+        row.disabled_at = now if body.disabled else None
         action = "principal.disable" if body.disabled else "principal.enable"
     elif not changed:
         return serialize_principal(row)
@@ -484,6 +502,7 @@ async def update_principal(
         target_type="principal",
         target_id=row.id,
         fields=changed,
+        **revoked,
     )
     out = serialize_principal(row)
     await db.commit()
@@ -497,7 +516,9 @@ async def delete_principal(
     principal_id: UUID, request: Request, principal: AdminPrincipal = _MEMBERS
 ) -> Response:
     """Removes its memberships, revokes the admin tokens and partner
-    credentials issued for it (rows kept, unlinked), then deletes it."""
+    credentials issued for it (rows kept, unlinked) and what its tokens
+    created (``idp_sync.revoke_created_credentials``, owner rules apply),
+    then deletes it."""
     db = request.state.db
     await lock_owners(db, principal.tenant_id)
     row = await _get(db, Principal, principal.tenant_id, principal_id, "Principal")
@@ -510,6 +531,9 @@ async def delete_principal(
         _check_can_touch(principal, m)
     await _keep_an_owner(db, principal.tenant_id, row.id)
     now = _now()
+    revoked = await idp_sync.revoke_created_credentials(
+        db, principal.tenant_id, row.id, now, caller=principal
+    )
     tokens = (
         (await db.execute(select(AdminToken).where(AdminToken.principal_id == row.id)))
         .scalars()
@@ -545,10 +569,15 @@ async def delete_principal(
         target_type="principal",
         target_id=principal_id,
         memberships_removed=[str(m.id) for m in memberships],
-        # Not "admin_tokens_revoked": audit details redact keys naming a
-        # token unless they end in _ids (db.audit_chain.sanitize_details).
-        revoked_token_ids=[str(t.id) for t in tokens],
-        partner_credentials_revoked=[str(c.id) for c in creds],
+        **{
+            **revoked.audit_details(),
+            # Not "admin_tokens_revoked": audit details redact keys naming a
+            # token unless they end in _ids (db.audit_chain.sanitize_details).
+            "revoked_token_ids": sorted({str(t.id) for t in [*tokens, *revoked.tokens]}),
+            "partner_credentials_revoked": sorted(
+                {str(c.id) for c in [*creds, *revoked.partner_credentials]}
+            ),
+        },
     )
     await db.commit()
     return Response(status_code=204)
