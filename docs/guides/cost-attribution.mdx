@@ -1,0 +1,88 @@
+---
+title: Cost Attribution
+description: Attribute AI spend to teams, projects, calling services and cost tags, and read it back as a monthly showback, a time series or FOCUS sub-accounts
+---
+
+# Cost Attribution
+
+Every usage event can carry a **team**, a **project**, the **calling service** and up to 20 **cost tags**. The collector stores them on the event and in the usage rollups, so spend can be split by them in the usage time series, read as a monthly **showback**, and exported as FOCUS `SubAccount*` columns and `Tags`.
+
+Teams and projects are the tenant's own, managed with `/api/v1/admin/teams` and `/api/v1/admin/projects` (scope `admin:members`). A project belongs to one team: org > team > project.
+
+## Sending attribution
+
+**Through the gateway**, set request headers (never sent upstream):
+
+| Header | Value |
+| --- | --- |
+| `X-PS-Team` | A team id or its exact name |
+| `X-PS-Project` | A project id or its exact name |
+| `X-PS-Service` | The calling service |
+| `X-PS-Tags` | `key=value` pairs separated by commas, e.g. `env=prod,cost-center=42` |
+
+**Through the Python SDK**, pass them per request in `ps_metadata`:
+
+```python
+client.chat.completions.create(
+    model="gpt-4o",
+    messages=[...],
+    ps_metadata={"team": "payments", "project": "checkout", "tags": {"env": "prod"}},
+)
+```
+
+`calling_service` is set on the client or with `PS_CALLING_SERVICE`, as before.
+
+### How the collector resolves it
+
+- `team` and `project` are looked up among the tenant's own teams and projects, by id or exact name. An unknown reference (or another tenant's) leaves the event **unattributed**; it is never stored as sent.
+- A known project sets the event's team to the project's own team, whatever team was declared.
+- The ids are stamped on the event at ingest. Moving a project to another team (`PATCH /api/v1/admin/projects/{id}` with `team_id`) re-attributes **future** spend only; spend already recorded keeps its team. Renaming a team or project changes the names in reports, not the attribution.
+- Tags: at most 20 per event (the first ones sent). Keys are lower-case letters, digits and `_ . : / -` (up to 63 characters) and may not start with `ps:` (reserved for Prompt Shields' own FOCUS tags). Values are up to 128 printable characters without `,` or `=`. Invalid tags are dropped one by one; the rest of the event is kept.
+- Credentials do not carry a team yet. When virtual keys ship, a key's team, project and default tags will win over the declared headers.
+
+## Bounded tag cardinality
+
+Raw events keep every valid tag until the raw retention purge. The usage rollups, kept about 25 months, keep only the tag keys the operator lists for the tenant in `settings.cost_tag_keys` (at most 10 keys; none by default):
+
+```bash
+curl -X PATCH "$COLLECTOR/api/v1/operator/tenants/$TENANT" \
+  -H "Authorization: Bearer $PS_ADMIN_TOKEN" \
+  -d '{"settings": {"cost_tag_keys": ["env", "cost-center"]}}'
+```
+
+So a tag with an unbounded set of values (a request id) never multiplies the rollups. `group_by=tag:<key>` needs the key in that list. A changed list applies to buckets recomputed after the change; run `python -m collector.usage_rollups rebuild --all-tenants` to apply it to every bucket still in raw retention.
+
+## Monthly showback
+
+`GET /partner/v1/cost/showback?group_by=team&period=2026-11` (scope `usage:read`) returns one UTC month of cost and usage per group, from the daily rollups:
+
+- `group_by`: `team` (default), `project` (with each project's current team), `user` (the salted user id hash), `service`, or `tag:<key>`.
+- `data`: one entry per group, most expensive first, with `key`, `name` (team or project), `cost_usd` (exact, 6 decimals), `cost_cents`, request and token counts.
+- `unallocated`: spend no group claims (no team, project, service, user or tag). It is reported, never dropped.
+- `total`: the tenant's total for the month.
+
+`cost_cents` are allocated with the largest-remainder method, so **the groups plus `unallocated` equal `total.cost_cents` to the cent**. `meta.partial` is true when the month starts before rollup retention.
+
+## Usage time series
+
+`GET /partner/v1/usage/series` accepts `group_by=team`, `project`, `service` and `tag:<key>` alongside the existing dimensions; points for teams and projects carry their `name`. `group_by=use_case` is the asset's use case (what `project` meant before projects existed).
+
+## FOCUS export
+
+`GET /partner/v1/usage/focus-export` fills:
+
+- `SubAccountId` / `SubAccountName`: the team, `SubAccountType` `Team` (all null for unattributed spend);
+- `Tags`: the calls' cost tags plus `ps:project_id` and `ps:project`, next to the registry tags (`ps:business_unit`, `ps:use_case`, `ps:environment`);
+- `x_ProjectId`, `x_ProjectName`, `x_CallingService`.
+
+## Gateway metric
+
+`ps_gateway_cost_usd_total{provider,model,team}` labels cost with the declared `X-PS-Team`. The gateway cannot resolve teams, so the label is the header as sent, bounded: the first 100 distinct values per process get their own series, later ones count as `other`.
+
+## Privacy
+
+Team, project and calling service are not personal data. Cost tags are free-form and might name a person, so erasing an end user (`/api/v1/admin/users/erase`) also clears the `tags` of their events and of their rollup rows; team and project attribution, and the totals, stay.
+
+## Not yet
+
+Shared-cost allocation rules (FOCUS `Allocated*`), team and project budgets in the SDK and gateway, monthly showback webhooks to team owners, and anomaly grouping by team or project are planned.

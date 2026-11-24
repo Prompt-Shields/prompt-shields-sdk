@@ -2,7 +2,13 @@ process.env.PS_API_KEY = 'ps-test';
 process.env.PS_TELEMETRY_MAX_ATTEMPTS = '1';
 
 import { Hono } from 'hono';
-import { costTotal, recordCost } from './cost';
+import {
+  MAX_TEAM_LABELS,
+  costTotal,
+  recordCost,
+  resetTeamLabels,
+  teamLabel,
+} from './cost';
 import { psTelemetry } from '../ps-telemetry';
 
 const sample = (labels: string) =>
@@ -64,5 +70,61 @@ describe('ps_gateway_cost_usd_total', () => {
     } finally {
       global.fetch = origFetch;
     }
+  });
+
+  test('labels the cost with the declared X-PS-Team', async () => {
+    const origFetch = global.fetch;
+    const sent: any[] = [];
+    global.fetch = jest.fn(async (_url: any, init: any) => {
+      sent.push(JSON.parse(init.body));
+      return { ok: true } as any;
+    }) as any;
+    try {
+      const app = new Hono();
+      app.use('/v1/chat/completions', psTelemetry());
+      app.post('/v1/chat/completions', (c) =>
+        c.json({
+          model: 'gpt-4o-mini',
+          usage: { prompt_tokens: 1000000, completion_tokens: 0 },
+        })
+      );
+      const labels = 'provider="openai",model="gpt-4o-mini",team="payments"';
+      const before = value(labels);
+      await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-portkey-provider': 'openai',
+          'x-ps-team': 'payments',
+          'x-ps-project': 'checkout',
+          'x-ps-service': 'billing-api',
+          'x-ps-tags': 'env=prod,cost-center=42',
+        },
+        body: JSON.stringify({ model: 'gpt-4o-mini', messages: [] }),
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(value(labels)).toBeGreaterThan(before);
+      const event = sent.flatMap((b) => b.events ?? [])[0];
+      expect(event).toMatchObject({
+        team: 'payments',
+        project: 'checkout',
+        calling_service: 'billing-api',
+        tags: 'env=prod,cost-center=42',
+      });
+    } finally {
+      global.fetch = origFetch;
+    }
+  });
+
+  test('the team label is bounded', () => {
+    resetTeamLabels();
+    expect(teamLabel(undefined)).toBe('none');
+    expect(teamLabel('bad\nvalue')).toBe('other');
+    for (let i = 0; i < MAX_TEAM_LABELS; i++) {
+      expect(teamLabel(`team-${i}`)).toBe(`team-${i}`);
+    }
+    expect(teamLabel('one-too-many')).toBe('other');
+    expect(teamLabel('team-0')).toBe('team-0');
+    resetTeamLabels();
   });
 });

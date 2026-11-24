@@ -9,7 +9,7 @@ Raw usage events (`ai_usage_events`) can include session ids and prompt hashes, 
 
 MCP tool usage (`mcp_tool_usage`: per server and tool call counts, first and last seen) follows the same retention period: the purge deletes rows not seen since the cutoff, since they only summarise calls older than it. The purge result reports them as `mcp_tool_usage_deleted`.
 
-Gateway security events stored by the collector (`gateway_security_events`, see [SIEM export](/integrations/siem#gateway-security-events-in-the-collector)) follow it too: events that happened before the cutoff are deleted and reported as `security_events_deleted`.
+Gateway security events stored by the collector (`gateway_security_events`, see [SIEM export](/integrations/siem#gateway-security-events-in-the-collector)) follow it too: events that happened or arrived before the cutoff are deleted and reported as `security_events_deleted`. An event whose `@timestamp` is more than 5 minutes ahead of its arrival is stored with arrival time + 5 minutes (the sent value kept as `ps.original_timestamp`), so a sender's wrong clock cannot keep it past retention.
 
 ## Retention period
 
@@ -94,8 +94,8 @@ Send the raw id in the POST body, not in a URL, so it never lands in an access l
 
 What changes, in the caller's tenant only:
 
-- **Usage events** of the user (matched by `user_id_hash`; an event with `user_id_raw` always has the hash too): `user_id_hash`, `user_id_raw`, `session_id` and `prompt_hash` (a SHA-256 of the prompt text) are set to null. Model, tokens, cost and routing metadata stay, so spend reports do not change; the rows no longer say whose they were.
-- **Usage rollups** (hourly and daily, kept beyond raw retention) with the user's hash: `user_id_hash` is set to null, counted as `usage_rollups`. The totals stay.
+- **Usage events** of the user (matched by `user_id_hash`; an event with `user_id_raw` always has the hash too): `user_id_hash`, `user_id_raw`, `session_id`, `prompt_hash` (a SHA-256 of the prompt text) and the free-form cost `tags` are set to null. Model, tokens, cost, team, project and routing metadata stay, so spend reports do not change; the rows no longer say whose they were.
+- **Usage rollups** (hourly and daily, kept beyond raw retention) with the user's hash: `user_id_hash` and the cost `tags` are set to null, counted as `usage_rollups`. The totals stay.
 - **Call feedback** with `user_id` equal to the id as sent: `user_id` is set to null. The score stays.
 - **MCP tool usage** rows for the id: merged into the row for the same tool with no user, so the counts stay.
 - **Gateway security events** whose `user.hash` is the id as sent, or whose salted hash of it (stored at ingest, never returned) is the user's `user_id_hash`: both are set to null; the event stays. Both forms reach them.

@@ -7,16 +7,16 @@ The table gets the tenant_isolation policy (same SQL as 015) and, if RLS is
 already enforced on ai_assets, enforcement too (same as 020).
 
 The new admin scope ``admin:inference-credentials`` is granted to every
-admin token that holds all nine admin scopes that existed before it (as
+admin token that holds all ten admin scopes that existed before it (as
 038 and 039 did): those tokens were full admin and stay full admin.
 Narrower tokens are unchanged. Downgrade removes the scope from every
 token and drops the table.
 
 Revision ID: 044
-Revises: 039
+Revises: 043
 Create Date: 2026-11-07
 
-Chained from main's head when written (039); re-chain at merge if another
+Chained from main's head when written (043); re-chain at merge if another
 migration lands first.
 """
 
@@ -27,7 +27,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "044"
-down_revision: str | None = "039"
+down_revision: str | None = "043"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -45,6 +45,7 @@ PREVIOUS_SCOPES = (
     "admin:registry",
     "admin:privacy",
     "admin:members",
+    "admin:policies",
 )
 
 _EXPR = (

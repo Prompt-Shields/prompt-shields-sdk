@@ -13,9 +13,10 @@ take ``admin:read``.
                                            and partner credentials
   POST   /teams | GET /teams               create | list
   GET | PATCH | DELETE /teams/{id}         read | rename | delete (409 while
-                                           it has projects)
+                                           it has projects or a policy, #340)
   POST   /projects | GET /projects         create | list (?team_id=)
-  GET | PATCH | DELETE /projects/{id}      read | rename | delete
+  GET | PATCH | DELETE /projects/{id}      read | rename or move | delete (409
+                                           while it has a policy, #340)
   POST   /memberships | GET /memberships   grant a role | list (?principal_id=,
                                            ?team_id=, ?project_id=)
   GET | PATCH | DELETE /memberships/{id}   read | change role | remove
@@ -34,8 +35,10 @@ membership, disable or delete a principal) takes a per-tenant transaction
 advisory lock (``lock_owners``) before it reads anything, and holds it
 through the write and commit, so two concurrent demotions of two different
 owners cannot both pass the check (#372). Disabling, enabling,
-re-identifying (``external_id``) or deleting a principal needs what granting each of its roles would; issuing
-an owner-capable admin token needs an owner (collector/admin_api.py).
+re-identifying (``external_id``) or deleting a principal needs what
+granting each of its roles would; issuing an owner-capable admin token, or
+an admin token or partner credential for an owner, needs an owner
+(collector/admin_api.py, collector/partner_admin.py; #379).
 
 Every change writes a hash-chained audit trail row in the same transaction
 (``principal.*``, ``team.*``, ``project.*``, ``membership.add``,
@@ -53,6 +56,7 @@ from db.models import (
     AdminToken,
     Membership,
     PartnerCredential,
+    Policy,
     Principal,
     Project,
     Team,
@@ -168,6 +172,13 @@ async def _get(db: AsyncSession, model, tenant_id: UUID, row_id: UUID, what: str
     if row is None:
         raise _problem(404, "Not Found", f"{what} not found")
     return row
+
+
+async def _no_policy(db: AsyncSession, bound, what: str) -> None:
+    """409 while a governance policy (#340) is bound to the team or project:
+    deleting it would drop that policy without its own audited delete."""
+    if (await db.execute(select(Policy.name).where(bound))).first() is not None:
+        raise _problem(409, "Conflict", f"Delete the {what}'s policy first (DELETE /policies/{{id}})")
 
 
 def _check_can_grant(principal: AdminPrincipal, role: str) -> None:
@@ -660,6 +671,7 @@ async def delete_team(
     ).first()
     if has_projects is not None:
         raise _problem(409, "Conflict", "Delete or move the team's projects first")
+    await _no_policy(db, Policy.team_id == row.id, "team")
     memberships = (
         (await db.execute(select(Membership).where(Membership.team_id == row.id)))
         .scalars()
@@ -700,7 +712,12 @@ class CreateProjectBody(BaseModel):
 
 
 class UpdateProjectBody(UpdateTeamBody):
-    """Fields left out are unchanged. A project stays in its team."""
+    """Fields left out are unchanged. ``team_id`` moves the project to
+    another team of the tenant: its memberships move with it, and spend
+    attributed to it from then on counts for the new team (spend already
+    recorded keeps the team it was attributed to, #347)."""
+
+    team_id: UUID | None = None
 
 
 @router.post("/projects", status_code=201, summary="Create a project in a team")
@@ -761,7 +778,7 @@ async def get_project(
     )
 
 
-@router.patch("/projects/{project_id}", summary="Rename or describe a project")
+@router.patch("/projects/{project_id}", summary="Rename, describe or move a project")
 async def update_project(
     project_id: UUID,
     body: UpdateProjectBody,
@@ -771,9 +788,29 @@ async def update_project(
     db = request.state.db
     row = await _get(db, Project, principal.tenant_id, project_id, "Project")
     before = row.name
+    previous_team = row.team_id
     changed = await _apply_name_description(
         db, Project, principal.tenant_id, row, body, "project"
     )
+    moved = (
+        "team_id" in body.model_fields_set
+        and body.team_id is not None
+        and body.team_id != row.team_id
+    )
+    if moved:
+        team = await _get(db, Team, principal.tenant_id, body.team_id, "Team")
+        memberships = (
+            (await db.execute(select(Membership).where(Membership.project_id == row.id)))
+            .scalars()
+            .all()
+        )
+        for m in memberships:
+            _check_can_touch(principal, m)
+            m.team_id = team.id
+            m.updated_at = _now()
+        row.team_id = team.id
+        row.updated_at = _now()
+        changed.append("team_id")
     if not changed:
         return serialize_project(row)
     await add_audit(
@@ -788,6 +825,11 @@ async def update_project(
         name=row.name,
         previous_name=before,
         fields=changed,
+        **(
+            {"team_id": str(row.team_id), "previous_team_id": str(previous_team)}
+            if moved
+            else {}
+        ),
     )
     out = serialize_project(row)
     await db.commit()
@@ -801,6 +843,7 @@ async def delete_project(
     """Its memberships go with it."""
     db = request.state.db
     row = await _get(db, Project, principal.tenant_id, project_id, "Project")
+    await _no_policy(db, Policy.project_id == row.id, "project")
     memberships = (
         (await db.execute(select(Membership).where(Membership.project_id == row.id)))
         .scalars()

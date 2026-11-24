@@ -6,7 +6,8 @@ the aggregates instead, for PS_USAGE_ROLLUP_RETENTION_DAYS (default 760,
 about 25 months), separately from the raw events:
 
 * ``usage_rollup_hourly``: one row per (tenant, UTC hour, asset, model,
-  provider, API surface, user id hash) with request, token, cost, cache and
+  provider, API surface, user id hash, team, project, calling service,
+  cost tags) with request, token, cost, cache and
   error counts, computed from the raw events of that hour.
 * ``usage_rollup_daily``: the same per UTC day, the sum of the day's hourly
   rows.
@@ -41,8 +42,14 @@ PS_USAGE_ROLLUP_INTERVAL_SECONDS (default 30; 0 turns it off, then run
 ``python -m collector.usage_rollups refresh --all-tenants`` from cron).
 
 Group by user uses ``user_id_hash`` only: the rollups never hold a raw user
-id, and the tenant's salt never leaves ``tenant_secrets``. Group by team is
-not available yet: it needs principals (#338).
+id, and the tenant's salt never leaves ``tenant_secrets``.
+
+Cost attribution (#347, collector/cost_attribution.py): the rollups also
+group by the events' team, project and calling service, and by their cost
+tags cut down to the tenant's ``settings.cost_tag_keys``, so the series can
+be split by ``team``, ``project`` (the tenant's projects; ``use_case`` is
+the asset's use case), ``service`` and ``tag:<key>``. Erasing an end user
+nulls the cost tags of their rollup rows as well as the hash.
 """
 
 from __future__ import annotations
@@ -56,7 +63,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 from db.models import (
@@ -70,7 +77,7 @@ from sqlalchemy import Text, bindparam, delete, func, literal, select, text
 from sqlalchemy.dialects.postgresql import ARRAY, TIMESTAMP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import rls
+from collector import cost_attribution, rls
 from collector.ingest import CACHE_HIT_STATUSES
 from collector.retention import retention_cutoff, rollup_cutoff
 
@@ -93,7 +100,23 @@ BATCH_DAYS = 7
 # Key of the rollup rows in a user erasure's rows_erased.
 ROWS_KEY = "usage_rollups"
 
-GroupBy = Literal["none", "user", "project", "model", "provider", "api_surface", "asset"]
+# Fixed group_by values; ``tag:<key>`` (collector/cost_attribution.py) is
+# accepted too, for a key in the tenant's settings.cost_tag_keys.
+GroupBy = Literal[
+    "none",
+    "user",
+    "team",
+    "project",
+    "use_case",
+    "service",
+    "model",
+    "provider",
+    "api_surface",
+    "asset",
+]
+GROUP_BY_VALUES: tuple[str, ...] = get_args(GroupBy)
+# group_by values whose keys are ids with a name (the point's ``name``).
+NAMED_GROUPS = ("team", "project")
 Granularity = Literal["hour", "day", "week"]
 ExportFormat = Literal["csv", "jsonl"]
 
@@ -117,7 +140,17 @@ COUNT_COLUMNS = (
     "error_requests",
 )
 SUM_COLUMNS = (*COUNT_COLUMNS, "cost", "cache_saved_cost")
-DIMENSIONS = ("asset_id", "model", "provider", "api_surface", "user_id_hash")
+DIMENSIONS = (
+    "asset_id",
+    "model",
+    "provider",
+    "api_surface",
+    "user_id_hash",
+    "team_id",
+    "project_id",
+    "calling_service",
+    "tags",
+)
 
 
 def _ceil_hour(moment: datetime) -> datetime:
@@ -144,12 +177,12 @@ _COUNTS_SQL = ", ".join(SUM_COLUMNS)
 # Every raw event of the given hours, aggregated. The error side counts
 # events whose last attempt reported an HTTP status of 400 or more; the
 # jsonb_typeof guards keep a malformed value from failing the statement.
+# Tags are cut down to the tenant's settings.cost_tag_keys (:tag_keys; NULL
+# when the event has none of them), so tag cardinality stays bounded (#347).
 _HOURLY_INSERT = text(
     f"""
     INSERT INTO usage_rollup_hourly (tenant_id, bucket_start, {_DIMS_SQL}, {_COUNTS_SQL})
-    SELECT e.tenant_id, h.bucket, e.asset_id,
-           coalesce(e.served_model, e.requested_model), e.served_provider,
-           e.api_surface, e.user_id_hash,
+    SELECT e.tenant_id, e.bucket, {", ".join("e." + c for c in DIMENSIONS)},
            count(*),
            coalesce(sum(e.tokens_in), 0),
            coalesce(sum(e.tokens_out), 0),
@@ -169,17 +202,30 @@ _HOURLY_INSERT = text(
            ),
            coalesce(sum(e.cost), 0),
            coalesce(sum(e.cache_saved_cost), 0)
-    FROM unnest(:buckets) AS h(bucket)
-    JOIN ai_usage_events e
-      ON e.tenant_id = :tenant
-     AND e.timestamp >= h.bucket AND e.timestamp < h.bucket + interval '1 hour'
-    GROUP BY e.tenant_id, h.bucket, e.asset_id,
-             coalesce(e.served_model, e.requested_model), e.served_provider,
-             e.api_surface, e.user_id_hash
+    FROM (
+        SELECT ev.tenant_id, h.bucket, ev.asset_id,
+               coalesce(ev.served_model, ev.requested_model) AS model,
+               ev.served_provider AS provider, ev.api_surface, ev.user_id_hash,
+               ev.team_id, ev.project_id, ev.calling_service,
+               CASE WHEN jsonb_typeof(ev.tags) = 'object' THEN (
+                   SELECT jsonb_object_agg(t.key, t.value)
+                   FROM jsonb_each(ev.tags) AS t
+                   WHERE t.key = ANY(:tag_keys)
+               ) END AS tags,
+               ev.tokens_in, ev.tokens_out, ev.tokens_cached, ev.tokens_cache_write,
+               ev.tokens_reasoning, ev.cost, ev.cache_status, ev.attempts,
+               ev.cache_saved_cost
+        FROM unnest(:buckets) AS h(bucket)
+        JOIN ai_usage_events ev
+          ON ev.tenant_id = :tenant
+         AND ev.timestamp >= h.bucket AND ev.timestamp < h.bucket + interval '1 hour'
+    ) AS e
+    GROUP BY e.tenant_id, e.bucket, {", ".join("e." + c for c in DIMENSIONS)}
     """
 ).bindparams(
     bindparam("buckets", type_=ARRAY(TIMESTAMP(timezone=True))),
     bindparam("hits", type_=ARRAY(Text)),
+    bindparam("tag_keys", type_=ARRAY(Text)),
 )
 
 _DAILY_INSERT = text(
@@ -232,10 +278,11 @@ async def lock_tenant(db: AsyncSession, tenant_id: UUID) -> None:
 async def erase_user_hash(
     db: AsyncSession, tenant_id: UUID, user_id_hash: str, batch_size: int
 ) -> int:
-    """Set ``user_id_hash`` to NULL on the tenant's hourly and daily rollup
-    rows of one user (erasure by end user, #353), in batches, each under
-    the tenant's rollup lock; commits. The totals stay; the rows no longer
-    say whose they were. Call it after the user's raw events are erased."""
+    """Set ``user_id_hash`` (and the cost ``tags``, which may name the user,
+    #347) to NULL on the tenant's hourly and daily rollup rows of one user
+    (erasure by end user, #353), in batches, each under the tenant's rollup
+    lock; commits. The totals stay; the rows no longer say whose they were.
+    Call it after the user's raw events are erased."""
     total = 0
     for model in (UsageRollupHourly, UsageRollupDaily):
         t = model.__table__
@@ -244,7 +291,9 @@ async def erase_user_hash(
             await lock_tenant(db, tenant_id)
             ids = select(t.c.id).where(*match).limit(batch_size)
             changed = (
-                await db.execute(t.update().where(t.c.id.in_(ids)).values(user_id_hash=None))
+                await db.execute(
+                    t.update().where(t.c.id.in_(ids)).values(user_id_hash=None, tags=None)
+                )
             ).rowcount or 0
             await db.commit()
             total += changed
@@ -281,10 +330,15 @@ def _day_batches(hours: Sequence[datetime]) -> list[list[datetime]]:
 
 
 async def recompute(
-    db: AsyncSession, tenant_id: UUID, hours: Sequence[datetime], extra_days: Iterable[datetime] = ()
+    db: AsyncSession,
+    tenant_id: UUID,
+    hours: Sequence[datetime],
+    extra_days: Iterable[datetime] = (),
+    tag_keys: Sequence[str] = (),
 ) -> tuple[int, int]:
     """Recompute the hourly rows of `hours` from raw events, then the daily
-    rows of their days (and `extra_days`) from the hourly rows."""
+    rows of their days (and `extra_days`) from the hourly rows. The rollup
+    rows keep only the cost tags whose keys are in `tag_keys`."""
     hours = sorted(set(hours))
     hourly = UsageRollupHourly.__table__
     daily = UsageRollupDaily.__table__
@@ -294,7 +348,12 @@ async def recompute(
         )
         await db.execute(
             _HOURLY_INSERT,
-            {"tenant": tenant_id, "buckets": chunk, "hits": list(CACHE_HIT_STATUSES)},
+            {
+                "tenant": tenant_id,
+                "buckets": chunk,
+                "hits": list(CACHE_HIT_STATUSES),
+                "tag_keys": list(tag_keys),
+            },
         )
     days = sorted({_day_of(h) for h in hours} | {_day_of(d) for d in extra_days})
     for chunk in _chunks(days):
@@ -363,7 +422,9 @@ async def refresh_tenant(db: AsyncSession, tenant_id: UUID) -> RefreshResult:
                 await db.rollback()
                 result.skipped = True
                 return result
-        h, d = await recompute(db, tenant_id, batch)
+        h, d = await recompute(
+            db, tenant_id, batch, tag_keys=cost_attribution.rollup_tag_keys(tenant_settings)
+        )
         result.hours += h
         result.days += d
     await _save_watermark(db, tenant_id, now)
@@ -395,7 +456,13 @@ async def rebuild_tenant(db: AsyncSession, tenant_id: UUID) -> RefreshResult:
         )
     ).scalars().all()
     hours = await _touched_hours(db, tenant_id, None, floor)
-    result.hours, result.days = await recompute(db, tenant_id, hours, extra_days=dropped)
+    result.hours, result.days = await recompute(
+        db,
+        tenant_id,
+        hours,
+        extra_days=dropped,
+        tag_keys=cost_attribution.rollup_tag_keys(tenant_settings),
+    )
     await _save_watermark(db, tenant_id, now)
     await db.commit()
     result.watermark = now.isoformat()
@@ -483,9 +550,15 @@ def ceil_bucket(moment: datetime, granularity: str) -> datetime:
 
 
 def series_query(
-    tenant_id: UUID, group_by: str, granularity: str, start: datetime, end: datetime
+    tenant_id: UUID,
+    group_by: str,
+    granularity: str,
+    start: datetime,
+    end: datetime,
+    tag_key: str | None = None,
 ):
-    """Aggregate rollup rows into (bucket_start, key) buckets."""
+    """Aggregate rollup rows into (bucket_start, key) buckets. ``group_by``
+    is a GroupBy value or "tag" (with ``tag_key``)."""
     model = UsageRollupHourly if granularity == "hour" else UsageRollupDaily
     t = model.__table__
     if granularity == "week":
@@ -493,12 +566,18 @@ def series_query(
     else:
         bucket = t.c.bucket_start
     joins = t
-    if group_by == "project":
+    if group_by == "use_case":
         a = AIAsset.__table__
         joins = t.outerjoin(a, (a.c.id == t.c.asset_id) & (a.c.tenant_id == t.c.tenant_id))
         key = a.c.use_case_name
     elif group_by == "user":
         key = t.c.user_id_hash
+    elif group_by in ("team", "project"):
+        key = t.c[f"{group_by}_id"].cast(Text)
+    elif group_by == "service":
+        key = t.c.calling_service
+    elif group_by == "tag":
+        key = t.c.tags[tag_key].astext
     elif group_by == "asset":
         key = t.c.asset_id.cast(Text)
     elif group_by in ("model", "provider", "api_surface"):
@@ -520,14 +599,17 @@ def _ratio(num: int, den: int) -> float | None:
     return round(num / den, 4) if den else None
 
 
-def series_point(row: Any) -> dict:
+def series_point(row: Any, names: dict[str, str] | None = None) -> dict:
     """One time-series bucket. Cost is null when no event in it reported a
     cost; cache_saved_usd and cache_hit_rate when none reported a cache
-    lookup; error_rate when none reported per-attempt metadata."""
+    lookup; error_rate when none reported per-attempt metadata. ``name`` is
+    the team or project name for group_by team or project (from `names`),
+    else null."""
     count = {c: int(row[c] or 0) for c in COUNT_COLUMNS}
     return {
         "bucket_start": row["bucket_start"].astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "key": row["key"],
+        "name": (names or {}).get(row["key"]) if row["key"] is not None else None,
         "requests": count["requests"],
         "tokens_in": count["tokens_in"],
         "tokens_out": count["tokens_out"],
@@ -546,6 +628,7 @@ def series_point(row: Any) -> dict:
 SERIES_COLUMNS = (
     "bucket_start",
     "key",
+    "name",
     "requests",
     "tokens_in",
     "tokens_out",
@@ -596,6 +679,24 @@ async def watermark(db: AsyncSession, tenant_id: UUID) -> datetime | None:
     ).scalar_one_or_none()
 
 
+def _series_stmt(tenant_id: UUID, group_by: str, granularity: str, window: Window):
+    """`series_query` for a group_by value as the API takes it (a GroupBy
+    value or ``tag:<key>``, already checked by the caller)."""
+    if group_by.startswith(cost_attribution.TAG_GROUP_PREFIX):
+        tag_key = group_by[len(cost_attribution.TAG_GROUP_PREFIX) :]
+        return series_query(tenant_id, "tag", granularity, window.start, window.end, tag_key)
+    return series_query(tenant_id, group_by, granularity, window.start, window.end)
+
+
+async def _points(db: AsyncSession, tenant_id: UUID, group_by: str, rows: Sequence[Any]) -> list[dict]:
+    names = (
+        await cost_attribution.names_for(db, tenant_id, group_by, (r["key"] for r in rows))
+        if group_by in NAMED_GROUPS
+        else None
+    )
+    return [series_point(r, names) for r in rows]
+
+
 async def series_page(
     db: AsyncSession,
     tenant_id: UUID,
@@ -606,10 +707,11 @@ async def series_page(
     limit: int,
     offset: int,
 ) -> dict:
-    stmt = series_query(tenant_id, group_by, granularity, window.start, window.end)
-    rows = (await db.execute(stmt.limit(limit + 1).offset(offset))).mappings().all()
+    rows = (
+        await db.execute(_series_stmt(tenant_id, group_by, granularity, window).limit(limit + 1).offset(offset))
+    ).mappings().all()
     has_more = len(rows) > limit
-    data = [series_point(r) for r in rows[:limit]]
+    data = await _points(db, tenant_id, group_by, rows[:limit])
     mark = await watermark(db, tenant_id)
     return {
         "data": data,
@@ -630,11 +732,11 @@ async def series_rows(
 ) -> list[dict] | None:
     """Every bucket of the window for an export; None when there are more
     than EXPORT_MAX_ROWS."""
-    stmt = series_query(tenant_id, group_by, granularity, window.start, window.end)
+    stmt = _series_stmt(tenant_id, group_by, granularity, window)
     rows = (await db.execute(stmt.limit(EXPORT_MAX_ROWS + 1))).mappings().all()
     if len(rows) > EXPORT_MAX_ROWS:
         return None
-    return [series_point(r) for r in rows]
+    return await _points(db, tenant_id, group_by, rows)
 
 
 def serialize(rows: list[dict], fmt: str) -> str:

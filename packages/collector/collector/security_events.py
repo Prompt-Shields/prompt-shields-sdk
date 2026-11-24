@@ -49,8 +49,12 @@ Pages in arrival order (``received_at``, then id) so a reader can tail the
 feed with ``meta.next_cursor``; ``since`` / ``until`` filter on the event's
 own time, ``name``, ``severity`` and ``action`` on exact values.
 
-Retention: rows older than the tenant's retention period are purged with
-its usage events (collector.retention); a tenant erasure deletes them; the
+An ``@timestamp`` more than 5 minutes ahead of receipt is stored as
+receipt time + 5 minutes (the sent value kept in ``attributes
+["ps.original_timestamp"]``).
+
+Retention: rows that happened or arrived before the tenant's retention
+period are purged with its usage events (collector.retention); a tenant erasure deletes them; the
 end-user erasure (by id as sent or by the stored hash) clears
 ``user_hash`` and its salted ``user_id_hash`` (collector.user_erasure).
 """
@@ -63,7 +67,7 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -89,6 +93,11 @@ MAX_EVENTS = 5000
 MAX_STRING = 256
 MAX_ATTRIBUTES = 64
 MAX_ERRORS = 20
+# An @timestamp further ahead of receipt than this (a sender clock off, or
+# a forged time) is stored as receipt time + the skew, the original kept in
+# attributes["ps.original_timestamp"], so no row sits in the future past
+# retention or ahead of a reader's ``since``.
+MAX_CLOCK_SKEW = timedelta(minutes=5)
 NDJSON = "application/x-ndjson"
 
 _EVENT_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -162,8 +171,9 @@ def _scalar(value: Any) -> Any:
     return _string(value)
 
 
-def parse_event(event: Any) -> dict:
-    """A v1 event -> column values for ``GatewaySecurityEvent``.
+def parse_event(event: Any, now: datetime | None = None) -> dict:
+    """A v1 event -> column values for ``GatewaySecurityEvent``. ``occurred_at``
+    is at most ``now`` (receipt time) + MAX_CLOCK_SKEW.
 
     Raises InvalidEvent when it is not a storable security event."""
     if not isinstance(event, dict):
@@ -176,10 +186,13 @@ def parse_event(event: Any) -> dict:
     name = event.get("event.name")
     if not isinstance(name, str) or not _EVENT_NAME.match(name):
         raise InvalidEvent("event.name must be a dotted event name")
+    occurred_at = _parse_time(event.get("@timestamp"))
+    latest = (now or datetime.now(UTC)) + MAX_CLOCK_SKEW
+    clamped = occurred_at > latest
     row: dict[str, Any] = {
         "event_id": event_id,
         "name": name,
-        "occurred_at": _parse_time(event.get("@timestamp")),
+        "occurred_at": latest if clamped else occurred_at,
     }
     for key, column in STRING_COLUMNS.items():
         row[column] = _string(event.get(key))
@@ -203,6 +216,8 @@ def parse_event(event: Any) -> dict:
         value = _scalar(event[key])
         if value is not None:
             attributes[key] = value
+    if clamped:
+        attributes["ps.original_timestamp"] = occurred_at.isoformat()
     row["attributes"] = attributes
     return row
 
@@ -235,9 +250,10 @@ async def store_events(
     committed). Duplicates of stored events (same ``event.id``) are skipped."""
     result = IngestResult()
     rows: dict[str, dict] = {}
+    now = datetime.now(UTC)
     for index, event in enumerate(events):
         try:
-            row = parse_event(event)
+            row = parse_event(event, now)
         except InvalidEvent as exc:
             result.reject(index, str(exc))
             continue
@@ -258,7 +274,6 @@ async def store_events(
                 else None
             )
         table = GatewaySecurityEvent.__table__
-        now = datetime.now(UTC)
         stmt = (
             pg_insert(table)
             .values(

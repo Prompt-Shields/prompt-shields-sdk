@@ -16,11 +16,12 @@ from collector.partner_rate_limit import (
     get_ingest_rate_limiter,
     get_kong_rate_limiter,
     get_mcp_rate_limiter,
+    get_otel_traces_rate_limiter,
 )
 from db.api_keys import api_key_lookup_prefix, hash_api_key
-from db.models import Tenant
+from db.models import AIUsageEvent, Tenant
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 KEY_A = "ps-test-key-12345"  # the seeded_db tenant
@@ -32,6 +33,7 @@ GETTERS = (
     get_kong_rate_limiter,
     get_mcp_rate_limiter,
     get_feedback_rate_limiter,
+    get_otel_traces_rate_limiter,
 )
 
 
@@ -47,6 +49,7 @@ def _env(monkeypatch):
     monkeypatch.setattr(settings, "admin_require_scoped_tokens", False)
     monkeypatch.setattr(settings, "rate_limit_per_minute", 3)
     monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 3)
+    monkeypatch.setattr(settings, "otel_traces_rate_limit_per_minute", 2)
     monkeypatch.setattr(
         partner_rate_limit, "time", SimpleNamespace(time=lambda: 1_800_000_030.0)
     )
@@ -80,7 +83,7 @@ async def tenants(seeded_db):
         await s.commit()
     async with seeded_db.begin() as conn:
         await rls.enable(conn)
-    return {"a": a, "b": b.id}
+    return {"a": a, "b": b.id, "admin": admin}
 
 
 def _client():
@@ -182,3 +185,91 @@ async def test_overrides_are_cached_and_dropped_on_change(tenants, monkeypatch):
         resp = await _ingest(c, KEY_A)
     assert len(calls) == 2
     assert resp.headers["X-RateLimit-Limit"] == "10"
+
+
+def _otlp_span(model: str) -> dict:
+    attrs = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": model,
+        "gen_ai.usage.input_tokens": 10,
+        "gen_ai.usage.output_tokens": 20,
+    }
+    return {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": "otlp-limited"}}
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {"name": "x"},
+                        "spans": [
+                            {
+                                "traceId": "5b8efff798038103d269b633813fc60c",
+                                "spanId": "eee19b7ec3c1b174",
+                                "name": "chat",
+                                "kind": 3,
+                                "startTimeUnixNano": "1700000000000000000",
+                                "endTimeUnixNano": "1700000000450000000",
+                                "attributes": [
+                                    {"key": k, "value": {"intValue": str(v)}}
+                                    if isinstance(v, int)
+                                    else {"key": k, "value": {"stringValue": v}}
+                                    for k, v in attrs.items()
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+async def _traces(c, key, model="gpt-4o"):
+    return await c.post(
+        "/ingest/otel/v1/traces",
+        headers={"Authorization": f"Bearer {key}"},
+        json=_otlp_span(model),
+    )
+
+
+async def _usage_rows(tenants) -> dict:
+    async with tenants["admin"]() as s:
+        rows = await s.execute(
+            select(AIUsageEvent.tenant_id, func.count())
+            .where(AIUsageEvent.source == "otel")
+            .group_by(AIUsageEvent.tenant_id)
+        )
+        return dict(rows.all())
+
+
+async def test_otel_traces_have_their_own_tenant_limit(tenants, monkeypatch):
+    """/ingest/otel/v1/traces is limited per tenant by
+    PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE (429 with Retry-After past it; a
+    blocked request stores nothing), apart from /ingest/events; the
+    tenant override ingest_rate_limits.otel_traces applies; 0 turns it off."""
+    async with _client() as c:
+        assert (await _set(c, tenants["b"], {"otel_traces": 1})).status_code == 200
+        a = [await _traces(c, KEY_A) for _ in range(3)]
+        b = [await _traces(c, KEY_B) for _ in range(2)]
+        events = await _ingest(c, KEY_A)
+
+        assert [r.status_code for r in a] == [200, 200, 429], a[-1].text
+        assert a[0].headers["X-RateLimit-Limit"] == "2"
+        assert int(a[-1].headers["Retry-After"]) > 0
+        assert "Rate limit exceeded" in a[-1].text
+        assert [r.status_code for r in b] == [200, 429]
+        assert b[0].headers["X-RateLimit-Limit"] == "1"
+        # /ingest/events counts in its own bucket.
+        assert events.status_code == 200
+        assert events.headers["X-RateLimit-Limit"] == "3"
+        assert await _usage_rows(tenants) == {tenants["a"]: 2, tenants["b"]: 1}
+
+        monkeypatch.setattr(settings, "otel_traces_rate_limit_per_minute", 0)
+        more = [await _traces(c, KEY_A) for _ in range(3)]
+    assert [r.status_code for r in more] == [200] * 3
+    assert "X-RateLimit-Limit" not in more[0].headers

@@ -118,6 +118,10 @@ PS_ROUTE_POLICY_FILE=/etc/prompt-shields/route-policy.json \
   it is also polled every N seconds. A reload that fails (bad JSON, schema
   error, file missing) is logged and the last good policy stays active.
 - Without the variable the gateway behaves as before.
+- The same document can come from the collector instead, versioned and
+  audited, as the `route` section of the [central policy](/guides/central-policy)
+  (`PS_POLICY_PULL_ENABLED=true`). While a central `route` section is active
+  it replaces the file.
 
 With the Helm chart, put the document under `gateway.routePolicy` (YAML);
 the chart mounts it from a ConfigMap and sets the variable

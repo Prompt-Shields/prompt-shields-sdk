@@ -142,6 +142,20 @@ def test_build_event_wires_ps_metadata():
     assert event["session_id"] == "session-xyz"
 
 
+def test_build_event_wires_cost_attribution():
+    client = ShieldsClient(api_key="sk-test", ps_api_key="ps-test")
+    event = client._build_event(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "hi"}],
+        response=_mock_openai_response(),
+        latency_ms=10,
+        ps_metadata={"team": "payments", "project": "checkout", "tags": {"env": "prod"}},
+    )
+    assert event["team"] == "payments"
+    assert event["project"] == "checkout"
+    assert event["tags"] == {"env": "prod"}
+
+
 def test_build_event_pii_detection_default_on():
     client = ShieldsClient(api_key="sk-test", ps_api_key="ps-test")
     event = client._build_event(

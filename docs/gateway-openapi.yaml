@@ -186,6 +186,10 @@ paths:
       - $ref: '#/components/parameters/XPsCache'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -269,6 +273,10 @@ paths:
       - $ref: '#/components/parameters/XPsCache'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -336,6 +344,10 @@ paths:
       - $ref: '#/components/parameters/XPsCache'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -588,6 +600,10 @@ paths:
       - $ref: '#/components/parameters/XPsCache'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -718,6 +734,10 @@ paths:
       - $ref: '#/components/parameters/XPsCache'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -775,6 +795,10 @@ paths:
       - $ref: '#/components/parameters/XPortkeyTraceId'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -828,6 +852,10 @@ paths:
       - $ref: '#/components/parameters/XPortkeyRequestTimeout'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -876,6 +904,10 @@ paths:
       - $ref: '#/components/parameters/XPortkeyRequestTimeout'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -926,6 +958,10 @@ paths:
       - $ref: '#/components/parameters/XPortkeyRequestTimeout'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -973,6 +1009,10 @@ paths:
       - $ref: '#/components/parameters/XPortkeyRequestTimeout'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -1023,6 +1063,10 @@ paths:
       - $ref: '#/components/parameters/XPortkeyRequestTimeout'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -1073,6 +1117,10 @@ paths:
       - $ref: '#/components/parameters/XPortkeyRequestTimeout'
       - $ref: '#/components/parameters/XPsBusinessUnit'
       - $ref: '#/components/parameters/XPsUseCase'
+      - $ref: '#/components/parameters/XPsTeam'
+      - $ref: '#/components/parameters/XPsProject'
+      - $ref: '#/components/parameters/XPsService'
+      - $ref: '#/components/parameters/XPsTags'
       - $ref: '#/components/parameters/XPsOwner'
       - $ref: '#/components/parameters/XPsDataClassification'
       - $ref: '#/components/parameters/XPsEnvironment'
@@ -2262,6 +2310,52 @@ components:
       schema:
         type: string
       example: interview-screening
+      x-ps-sent-upstream: never
+    XPsTeam:
+      name: x-ps-team
+      in: header
+      required: false
+      description: |
+        Team the call's cost is attributed to (#347): a team id or exact name
+        of the tenant's teams. The collector resolves it (an unknown team
+        leaves the call unattributed); also the `team` label of
+        `ps_gateway_cost_usd_total` (bounded: the first 100 distinct values
+        per process, then `other`). Never sent upstream.
+      schema:
+        type: string
+      example: payments
+      x-ps-sent-upstream: never
+    XPsProject:
+      name: x-ps-project
+      in: header
+      required: false
+      description: |
+        Project the call's cost is attributed to: a project id or exact name.
+        A known project also sets the team (its own). Never sent upstream.
+      schema:
+        type: string
+      example: checkout
+      x-ps-sent-upstream: never
+    XPsService:
+      name: x-ps-service
+      in: header
+      required: false
+      description: Calling service for telemetry and cost showback. Never sent upstream.
+      schema:
+        type: string
+      example: billing-api
+      x-ps-sent-upstream: never
+    XPsTags:
+      name: x-ps-tags
+      in: header
+      required: false
+      description: |
+        Cost tags, `key=value` pairs separated by commas (at most 20; keys
+        lower-case, not starting with `ps:`; values without `,` or `=`).
+        Invalid tags are dropped by the collector. Never sent upstream.
+      schema:
+        type: string
+      example: env=prod,cost-center=42
       x-ps-sent-upstream: never
     XPsOwner:
       name: x-ps-owner

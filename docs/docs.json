@@ -73,12 +73,14 @@
         "guides/security-events",
         "guides/observability",
         "guides/gateway-oidc",
+        "guides/central-policy",
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",
         "guides/routing-learner",
         "guides/pseudonymisation",
-        "guides/spend-anomaly-alerts"
+        "guides/spend-anomaly-alerts",
+        "guides/cost-attribution"
       ]
     },
     {

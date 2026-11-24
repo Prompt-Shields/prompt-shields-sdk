@@ -9,6 +9,7 @@ const client = (fetch: ReturnType<typeof mockFetch>['fetch']) =>
 const POINT_WIRE = {
   bucket_start: '2026-10-01T00:00:00Z',
   key: 'h-3f2a',
+  name: null,
   requests: 120,
   tokens_in: 48000,
   tokens_out: 9000,
@@ -24,6 +25,7 @@ const POINT_WIRE = {
 const POINT = {
   bucketStart: '2026-10-01T00:00:00Z',
   key: 'h-3f2a',
+  name: null,
   requests: 120,
   tokensIn: 48000,
   tokensOut: 9000,
@@ -114,5 +116,41 @@ describe('client.usage.seriesExport', () => {
     expect(exp.format).toBe('csv');
     expect(m.calls[0].headers.Accept).toBe('text/csv');
     await expect(exp.rows().next()).rejects.toBeInstanceOf(PartnerError);
+  });
+});
+
+describe('client.usage.showback', () => {
+  it('sends the query and camelCases the report', async () => {
+    const amounts = {
+      cost_usd: '1.003999',
+      cost_cents: 100,
+      requests: 5,
+      cost_requests: 4,
+      tokens_in: 10,
+      tokens_out: 2,
+    };
+    const m = mockFetch(
+      json({
+        data: [{ key: 't-1', name: 'payments', team_id: null, team_name: null, ...amounts }],
+        unallocated: { ...amounts, cost_cents: 0 },
+        total: amounts,
+        meta: {
+          group_by: 'team',
+          period: '2026-11',
+          from: '2026-11-01T00:00:00Z',
+          to: '2026-12-01T00:00:00Z',
+          currency: 'USD',
+          rolled_up_at: null,
+          partial: false,
+        },
+      }),
+    );
+    const report = await client(m.fetch).usage.showback({ groupBy: 'tag:env', period: '2026-11' });
+    const url = new URL(m.calls[0].url);
+    expect(url.pathname).toBe('/partner/v1/cost/showback');
+    expect(Object.fromEntries(url.searchParams)).toEqual({ group_by: 'tag:env', period: '2026-11' });
+    expect(report.data[0]).toMatchObject({ key: 't-1', name: 'payments', teamId: null, costCents: 100 });
+    expect(report.unallocated.costCents).toBe(0);
+    expect(report.meta.rolledUpAt).toBeNull();
   });
 });

@@ -7,24 +7,29 @@ accepted: JSON (``application/json``) and protobuf (``application/x-protobuf``,
 the default of OpenLLMetry and most OTel SDKs; collector/otlp_protobuf.py).
 The response uses the request's encoding. Compressed bodies
 (``Content-Encoding: gzip``) are not supported.
+
+Limited per tenant (``PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE``, default 600
+requests/minute, or the tenant's ``ingest_rate_limits.otel_traces``; 429 with
+``Retry-After``), counted apart from ``/ingest/events``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-from typing import NoReturn
+from typing import Annotated, NoReturn
 from uuid import UUID
 
 from db.models import AIUsageEvent
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import metrics, tenant_keys
+from collector import metrics, tenant_keys, tenant_limits
 from collector.auth import resolve_tenant
 from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
+from collector.ingest import _enforce_rate_limit
 from collector.loss_accounting import OtelCounts, otel_client_id, record_otel
 from collector.mcp_usage import McpCall, record_calls, register_assets
 from collector.otel_mapping import (
@@ -45,6 +50,7 @@ from collector.otlp_protobuf import (
     decode_traces,
     encode_response,
 )
+from collector.partner_rate_limit import RateLimiter, get_otel_traces_rate_limiter
 from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
 from collector.webhooks import AssetChanges
 
@@ -183,8 +189,21 @@ async def _reject_too_many_spans(
 
 
 @router.post("/ingest/otel/v1/traces")
-async def ingest_otel_traces(request: Request):
+async def ingest_otel_traces(
+    request: Request,
+    response: Response,
+    limiter: Annotated[RateLimiter, Depends(get_otel_traces_rate_limiter)],
+):
     tenant_id = await resolve_tenant(request, tenant_keys.INGEST_WRITE)
+    # Per-tenant request limit (PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE or the
+    # tenant's ingest_rate_limits.otel_traces), counted apart from
+    # /ingest/events; 429 with Retry-After, which OTLP exporters retry.
+    await _enforce_rate_limit(
+        limiter,
+        tenant_id,
+        response,
+        await tenant_limits.limit_for(request.state.db, tenant_id, "otel_traces"),
+    )
 
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
     is_protobuf = content_type in PROTOBUF_CONTENT_TYPES
@@ -265,6 +284,9 @@ async def ingest_otel_traces(request: Request):
         return Response(
             content=encode_response(rejected, error_message),
             media_type=PROTOBUF_MEDIA_TYPE,
+            headers={
+                k: v for k, v in response.headers.items() if k.startswith("x-ratelimit-")
+            },
         )
     if rejected:
         return {

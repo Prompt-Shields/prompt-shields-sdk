@@ -14,9 +14,13 @@ expose them. Scopes and rate-limit tiers come from `collector.partner_scopes`.
 
 DELETE revokes, like admin tokens and tenant keys: 204, the row is kept
 (``status: revoked``, still readable by id and listed unless filtered out)
-and a repeated DELETE is 204 too. Revoking a credential issued for a
+and a repeated DELETE is 204 too.
+
+Issuing (``principal_id``), changing or revoking a credential issued for a
 tenant-wide owner needs a caller that can manage owners
-(admin_auth.can_manage_owner); otherwise 403, audited (#372).
+(admin_auth.can_manage_owner); otherwise 403, audited with outcome
+``failure`` and reason ``owner_required`` (#372, #379), also when the
+caller's token is itself issued for that owner.
 
 This is the dashboard's hook for the "Partners > Add Integration" UX.
 
@@ -220,6 +224,41 @@ async def _get_credential(
     return row
 
 
+async def _require_owner_manager(
+    request: Request,
+    principal: AdminPrincipal,
+    owner_principal_id: UUID | None,
+    *,
+    action: str,
+    target_id: UUID | None,
+    detail: str,
+    details: dict | None = None,
+) -> None:
+    """403, audited as ``action`` with outcome ``failure`` and reason
+    ``owner_required``, when ``owner_principal_id`` is a tenant-wide owner
+    and the caller cannot manage owners (admin_auth.can_manage_owner;
+    #372, #379)."""
+    if can_manage_owner(principal) or not await rbac.is_tenant_owner(
+        request.state.db, principal.tenant_id, owner_principal_id
+    ):
+        return
+    await audit_trail.record_committed(
+        request.state.db,
+        tenant_id=principal.tenant_id,
+        action=action,
+        outcome=audit_trail.FAILURE,
+        actor=admin_actor(request, principal),
+        target_type="partner_credential",
+        target_id=target_id,
+        status_code=403,
+        details={**(details or {}), "reason": "owner_required"},
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={"type": "about:blank", "title": "Forbidden", "status": 403, "detail": detail},
+    )
+
+
 @router.get("/partner-scopes", summary="List partner scopes and rate-limit tiers")
 async def list_partner_scopes(principal: AdminPrincipal = _PARTNERS):
     return {
@@ -247,6 +286,22 @@ async def issue_partner_credential(
 
     scopes = _validated_scopes(body.scopes)
     if body.principal_id is not None:
+        # For an owner only from a caller that can manage owners (#379),
+        # also when the caller's token is issued for that owner (it may be
+        # held by a non-owner): a credential acts, and is audited, as its
+        # principal, and only an owner can change or revoke it.
+        await _require_owner_manager(
+            request,
+            principal,
+            body.principal_id,
+            action="partner_credential.create",
+            target_id=None,
+            detail="Only an owner can issue a partner credential for an owner",
+            details={
+                "partner_name": body.partner_name,
+                "principal_id": str(body.principal_id),
+            },
+        )
         scopes = await _principal_scopes(
             request,
             tenant_id,
@@ -366,6 +421,17 @@ async def update_partner_credential(
     """Takes effect on the partner's next request, including requests made
     with access tokens issued before the change."""
     row = await _get_credential(request, principal.tenant_id, credential_id)
+    # Like revoking: a credential issued for an owner only by a caller that
+    # can manage owners, or an ``admin:partners`` holder could strip its
+    # scopes and cut the owner off (#379).
+    await _require_owner_manager(
+        request,
+        principal,
+        row.principal_id,
+        action="partner_credential.update",
+        target_id=row.id,
+        detail="Only an owner can change a partner credential issued for an owner",
+    )
     tenant_id = row.tenant_id
     before_scopes = list(row.scopes or [])
     before_limit = (row.rate_limit_tier, row.rate_limit)
@@ -430,29 +496,14 @@ async def revoke_partner_credential(
     # A credential issued for an owner only by a caller that can manage
     # owners, as for admin tokens (#372): otherwise an ``admin:partners``
     # holder could cut the owner off.
-    if not can_manage_owner(principal) and await rbac.is_tenant_owner(
-        request.state.db, principal.tenant_id, row.principal_id
-    ):
-        await audit_trail.record_committed(
-            request.state.db,
-            tenant_id=principal.tenant_id,
-            action="partner_credential.revoke",
-            outcome=audit_trail.FAILURE,
-            actor=admin_actor(request, principal),
-            target_type="partner_credential",
-            target_id=row.id,
-            status_code=403,
-            details={"reason": "owner_required"},
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "type": "about:blank",
-                "title": "Forbidden",
-                "status": 403,
-                "detail": "Only an owner can revoke a partner credential issued for an owner",
-            },
-        )
+    await _require_owner_manager(
+        request,
+        principal,
+        row.principal_id,
+        action="partner_credential.revoke",
+        target_id=row.id,
+        detail="Only an owner can revoke a partner credential issued for an owner",
+    )
     if row.is_active == "false":
         return
     row.is_active = "false"

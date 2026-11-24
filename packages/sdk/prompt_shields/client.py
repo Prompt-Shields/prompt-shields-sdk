@@ -264,7 +264,7 @@ class ShieldsClient:
         # Per-request ps_metadata — wired through to event
         if ps_metadata:
             for key in ("data_sources", "output_destination", "risk_tags",
-                        "session_id", "user_id"):
+                        "session_id", "user_id", "team", "project", "tags"):
                 if key in ps_metadata:
                     event[key] = ps_metadata[key]
 

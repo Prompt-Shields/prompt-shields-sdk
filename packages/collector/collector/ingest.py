@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, PrivateAttr, field_validator, model_validator
 
 from collector import (
+    cost_attribution,
     loss_accounting,
     metrics,
     tenant_keys,
@@ -115,6 +116,12 @@ class IngestEvent(BaseModel):
     attempts: list[dict] | None = None
     stream_truncated: bool | None = None
     stream_cancelled: bool | None = None
+    # Cost attribution (#347; collector/cost_attribution.py): the tenant's
+    # team and project (id or exact name, resolved at ingest; unknown ones
+    # are dropped) and up to 20 cost tags. Lenient like the route fields.
+    team: str | None = None
+    project: str | None = None
+    tags: dict[str, str] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -184,6 +191,16 @@ class IngestEvent(BaseModel):
         # The gateway sends the operator-chosen name of its policy group.
         value = _lenient_str(value, MAX_LABEL_LENGTH)
         return value if value is not None and USER_GROUP_RE.fullmatch(value) else None
+
+    @field_validator("team", "project", mode="before")
+    @classmethod
+    def _attribution_ref(cls, value: Any) -> str | None:
+        return cost_attribution.parse_ref(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _tags(cls, value: Any) -> dict[str, str] | None:
+        return cost_attribution.parse_tags(value)
 
     @field_validator("trace_id", mode="before")
     @classmethod
@@ -365,6 +382,7 @@ class IngestEvent(BaseModel):
 # Longer or out-of-range values are dropped (stored as null), not truncated:
 # half a model name is wrong data.
 MAX_MODEL_NAME_LENGTH = 256
+MAX_SERVICE_NAME_LENGTH = 256  # the event's calling_service (#347)
 MAX_LABEL_LENGTH = 64
 MAX_TOKEN_COUNT = 2**31 - 1  # Integer column
 MAX_USAGE_UNITS = 1e12  # fits Numeric(20, 6)
@@ -483,6 +501,10 @@ IDENTITY_TRACE_FIELDS = (
 )
 STORED_AS_SENT_IDENTITY_FIELDS = tuple(f for f in IDENTITY_TRACE_FIELDS if f != "user_id")
 
+# Cost attribution fields (#347): team and project are resolved to ids at
+# ingest, tags stored once validated.
+ATTRIBUTION_FIELDS = ("team", "project", "tags")
+
 # Other names emitters use for a field: the gateway sends its effective
 # sensitivity as route_sensitivity_level / route_sensitivity_source. The
 # canonical name wins when an event carries both.
@@ -527,7 +549,13 @@ LENIENT_FIELDS = (
     "call_id",
     "outcome_signals",
     "outcome_signals_version",
-) + ROUTE_FIELDS + BUDGET_CACHE_FIELDS + LEARNER_FIELDS + IDENTITY_TRACE_FIELDS
+) + (
+    ROUTE_FIELDS
+    + BUDGET_CACHE_FIELDS
+    + LEARNER_FIELDS
+    + IDENTITY_TRACE_FIELDS
+    + ATTRIBUTION_FIELDS
+)
 
 
 def _lenient_str(value: Any, max_length: int) -> str | None:
@@ -756,6 +784,13 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
         if any(e.user_id is not None for e in events)
         else None
     )
+    attribution = (
+        await cost_attribution.resolve_refs(
+            db, tenant_id, ((e.team, e.project) for e in events)
+        )
+        if any(e.team or e.project for e in events)
+        else {}
+    )
     await lock_asset_keys(
         db,
         tenant_id,
@@ -805,6 +840,9 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
                 event.prompt_text.encode("utf-8", "surrogatepass")
             ).hexdigest()
 
+        attributed = attribution.get(
+            (event.team, event.project), cost_attribution.Attribution()
+        )
         usage_event = AIUsageEvent(
             tenant_id=tenant_id,
             asset_id=asset.id,
@@ -840,6 +878,12 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
                 + STORED_AS_SENT_IDENTITY_FIELDS
             },
             **(user_ids.columns(event.user_id) if user_ids else {}),
+            team_id=attributed.team_id,
+            project_id=attributed.project_id,
+            # A rollup and showback dimension: bounded like a model name
+            # (longer is dropped, not truncated; the asset keeps it as sent).
+            calling_service=_lenient_str(event.calling_service, MAX_SERVICE_NAME_LENGTH),
+            tags=event.tags,
         )
         db.add(usage_event)
         await record_event_flows(

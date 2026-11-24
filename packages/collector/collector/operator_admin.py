@@ -74,6 +74,7 @@ from sqlalchemy import func, select
 from collector import (
     audit_trail,
     auth_cache,
+    cost_attribution,
     retention,
     rls,
     spend_anomalies,
@@ -303,6 +304,10 @@ def _check_settings(values: dict) -> None:
             raise _problem(400, "Bad Request", "; ".join(errors))
     if tenant_limits.SETTINGS_KEY in values:
         errors = tenant_limits.settings_errors(values[tenant_limits.SETTINGS_KEY])
+        if errors:
+            raise _problem(400, "Bad Request", "; ".join(errors))
+    if cost_attribution.SETTINGS_KEY in values:
+        errors = cost_attribution.settings_errors(values[cost_attribution.SETTINGS_KEY])
         if errors:
             raise _problem(400, "Bad Request", "; ".join(errors))
 
