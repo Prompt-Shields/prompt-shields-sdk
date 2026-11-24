@@ -54,6 +54,7 @@ import { recordServedTarget } from '../middlewares/psServedTarget';
 import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
 import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
+import { upstreamTraceHeaders } from '../middlewares/psTraceContext';
 import {
   adaptResponse,
   applyAdapterRequestTransform,
@@ -112,6 +113,20 @@ function constructRequestBody(
   }
 
   return body;
+}
+
+/** Upstream trace context headers (#385); none unless propagation is on. */
+function traceHeadersFor(c: Context | undefined): Record<string, string> {
+  if (!c) return {};
+  try {
+    const vars = {
+      ...(typeof process !== 'undefined' ? process.env : {}),
+      ...((env(c) as Record<string, string | undefined>) ?? {}),
+    };
+    return upstreamTraceHeaders(c, vars);
+  } catch {
+    return {};
+  }
 }
 
 function constructRequestHeaders(
@@ -180,6 +195,9 @@ function constructRequestHeaders(
     ...headers,
     ...forwardHeadersMap,
     ...(fn === 'proxy' && proxyHeaders),
+    // PS fork (#385): W3C trace context with the gateway's span as parent,
+    // only with PS_OTEL_PROPAGATE_UPSTREAM=true (off: nothing is added).
+    ...traceHeadersFor(c),
     ...providerCredentialHeaders,
   };
 

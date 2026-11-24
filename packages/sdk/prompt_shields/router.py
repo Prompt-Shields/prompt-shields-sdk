@@ -823,6 +823,8 @@ class _RouterCore:
             }
             headers.update(gateway_headers or {})
             # The gateway forwards the bearer key to the provider.
+            # The gateway is ours: it gets the call's traceparent (#385).
+            client_kwargs.setdefault("propagate_trace", True)
             self._clients["gateway"] = self._client_cls(
                 vendor="openai",
                 api_key=gateway_api_key or "unused",

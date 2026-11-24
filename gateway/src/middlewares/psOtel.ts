@@ -40,6 +40,7 @@ import {
 import { telemetryDroppedTotal } from './psMetrics/security';
 import { isSafeUpstreamURL } from './requestValidator';
 import { upstreamFetch } from '../utils/fetch';
+import { traceContextOf } from './psTraceContext';
 
 export interface OtelConfig {
   endpoint: string;
@@ -403,6 +404,8 @@ export interface SpanInput {
     sensitivitySource?: string;
   };
   captureContent?: boolean;
+  /** The request's trace context (psTraceContext.ts); else from headers. */
+  trace?: { traceId: string; spanId: string; parentSpanId?: string };
 }
 
 export interface BuiltSpan {
@@ -491,10 +494,14 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     Object.assign(attrs, contentAttributes(req, res));
   }
 
-  const parent = parseTraceparent(input.headers['traceparent']);
+  const parent = input.trace
+    ? input.trace.parentSpanId
+      ? { traceId: input.trace.traceId, parentSpanId: input.trace.parentSpanId }
+      : undefined
+    : parseTraceparent(input.headers['traceparent']);
   const span: any = {
-    traceId: parent?.traceId ?? hex(16),
-    spanId: hex(8),
+    traceId: input.trace?.traceId ?? parent?.traceId ?? hex(16),
+    spanId: input.trace?.spanId ?? hex(8),
     name: requestModel ? `${operation} ${requestModel}` : operation,
     kind: 3, // SPAN_KIND_CLIENT
     startTimeUnixNano: nanos(input.startMs),
@@ -723,6 +730,7 @@ export function psOtel(
         responseBody,
         route: c.get('psRoute'),
         captureContent: config.captureContent,
+        trace: traceContextOf(c),
       };
       const emit = (input: SpanInput) => {
         const built = buildGenAISpan(input);

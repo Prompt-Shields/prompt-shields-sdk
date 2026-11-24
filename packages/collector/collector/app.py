@@ -241,6 +241,11 @@ app.include_router(siem_router)
 app.include_router(security_events_router)
 app.include_router(security_events_partner_router)
 
+# Agent traces (#385): spans kept by the OTLP trace receiver, Partner API
+from collector.traces import partner_router as traces_partner_router
+
+app.include_router(traces_partner_router)
+
 # Tenant admin automation credentials: scoped admin tokens and tenant
 # ingest keys (collector/admin_auth.py)
 from collector.admin_api import router as admin_api_router

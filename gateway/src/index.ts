@@ -23,6 +23,7 @@ import { budgetsRequested } from './middlewares/psBudget/config';
 import { psTelemetry } from './middlewares/ps-telemetry';
 import { psFeedbackHandler } from './middlewares/psFeedback';
 import { otelConfig, psOtel } from './middlewares/psOtel';
+import { psTraceContext } from './middlewares/psTraceContext';
 
 // Handlers
 import { proxyHandler } from './handlers/proxyHandler';
@@ -103,6 +104,11 @@ if (runtime === 'node') {
     }
   });
 }
+
+// W3C trace context (#385): one gateway span id per request, joined to the
+// caller's inbound traceparent; `traceparent` on every response. Upstream
+// propagation only with PS_OTEL_PROPAGATE_UPSTREAM=true.
+app.use('*', psTraceContext());
 
 /**
  * GET route for the root path.

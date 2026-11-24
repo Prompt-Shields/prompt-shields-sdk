@@ -8,8 +8,10 @@ Retention
     same period are purged with the events: such a row only summarises calls
     older than the cutoff. So are ``mcp_tool_usage_daily`` rows (MCP
     metering, #77) for days before the cutoff's day, ``call_feedback`` rows
-    (explicit feedback on a call, #43) last updated before the cutoff, and
-    ``spend_alerts`` (spend anomaly alerts, #30) for days before the cutoff.
+    (explicit feedback on a call, #43) last updated before the cutoff,
+    ``spend_alerts`` (spend anomaly alerts, #30) for days before the cutoff,
+    and ``trace_spans`` (agent traces, #385) that started or arrived before
+    it.
     :func:`purge_expired_events` deletes older events in batches, committing
     after each batch so no lock is held for long. Running it twice deletes
     nothing the second time.
@@ -81,6 +83,7 @@ from db.models import (
     Tenant,
     TenantApiKey,
     TenantSecret,
+    TraceSpan,
     UsageRollupDaily,
     UsageRollupHourly,
     UsageRollupState,
@@ -131,6 +134,7 @@ ERASE_ORDER: tuple[type, ...] = (
     CallFeedback,
     SpendAlert,
     GatewaySecurityEvent,
+    TraceSpan,
     TenantApiKey,
     AdminToken,
     TenantSecret,
@@ -169,6 +173,7 @@ class PurgeResult:
     spend_alerts_deleted: int = 0
     security_events_deleted: int = 0
     usage_rollups_deleted: int = 0
+    trace_spans_deleted: int = 0
 
 
 @dataclass
@@ -384,8 +389,9 @@ async def purge_tenant_events(
 ) -> PurgeResult | None:
     """Delete one tenant's usage events older than its retention cutoff,
     its MCP tool usage rows last seen before it, its call feedback last
-    updated before it, its spend alerts for days before it and its gateway
-    security events that happened or arrived before it.
+    updated before it, its spend alerts for days before it, its gateway
+    security events that happened or arrived before it and its agent trace
+    spans that started or arrived before it.
 
     Returns None if the tenant does not exist. With ``dry_run`` the matching
     rows are counted, not deleted, and nothing is audited.
@@ -427,6 +433,13 @@ async def purge_tenant_events(
         se.c.tenant_id == tenant_id,
         or_(se.c.occurred_at < cutoff, se.c.received_at < cutoff),
     ]
+    ts = TraceSpan.__table__
+    # Agent trace spans (#385) follow the usage events. start_time is the
+    # sender's clock; received_at also catches spans sent with an old one.
+    ts_conditions = [
+        ts.c.tenant_id == tenant_id,
+        or_(ts.c.start_time < cutoff, ts.c.received_at < cutoff),
+    ]
     # Usage rollups (#346) have their own, longer retention.
     r_cutoff = rollup_cutoff(tenant_settings, now)
     rollups = [
@@ -441,6 +454,7 @@ async def purge_tenant_events(
         fb_deleted = await _count(db, fb, fb_conditions)
         sa_deleted = await _count(db, sa, sa_conditions)
         se_deleted = await _count(db, se, se_conditions)
+        ts_deleted = await _count(db, ts, ts_conditions)
         rollups_deleted = sum([await _count(db, t, c) for t, c in rollups])
     else:
         deleted = await _delete_in_batches(db, table, conditions, size)
@@ -449,6 +463,7 @@ async def purge_tenant_events(
         fb_deleted = await _delete_in_batches(db, fb, fb_conditions, size)
         sa_deleted = await _delete_in_batches(db, sa, sa_conditions, size)
         se_deleted = await _delete_in_batches(db, se, se_conditions, size)
+        ts_deleted = await _delete_in_batches(db, ts, ts_conditions, size)
         rollups_deleted = sum([await _delete_in_batches(db, t, c, size) for t, c in rollups])
         if (
             deleted
@@ -457,6 +472,7 @@ async def purge_tenant_events(
             or fb_deleted
             or sa_deleted
             or se_deleted
+            or ts_deleted
             or rollups_deleted
         ):
             details = {AIUsageEvent.__tablename__: deleted}
@@ -470,6 +486,8 @@ async def purge_tenant_events(
                 details[SpendAlert.__tablename__] = sa_deleted
             if se_deleted:
                 details[GatewaySecurityEvent.__tablename__] = se_deleted
+            if ts_deleted:
+                details[TraceSpan.__tablename__] = ts_deleted
             if rollups_deleted:
                 details["usage_rollups"] = rollups_deleted
             await _audit(
@@ -500,6 +518,7 @@ async def purge_tenant_events(
         spend_alerts_deleted=sa_deleted,
         security_events_deleted=se_deleted,
         usage_rollups_deleted=rollups_deleted,
+        trace_spans_deleted=ts_deleted,
     )
 
 

@@ -40,7 +40,12 @@ pip install "prompt-shields[anthropic]"
 
 # Both
 pip install "prompt-shields[all]"
+
+# OpenTelemetry spans for agent traces (chat, execute_tool, invoke_agent)
+pip install "prompt-shields[opentelemetry]"
 ```
+
+With the `opentelemetry` extra, every client call is a `chat {model}` span in your active trace, and `prompt_shields.tracing` adds tool and agent spans and an httpx/requests hook; your `TracerProvider` decides where they go. See `docs/guides/agent-traces.mdx`.
 
 Requires Python 3.11 or later.
 

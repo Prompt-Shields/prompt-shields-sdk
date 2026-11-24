@@ -34,6 +34,7 @@
 import { Context } from 'hono';
 import { isSafeUpstreamURL } from '../middlewares/requestValidator';
 import { upstreamFetch } from '../utils/fetch';
+import { upstreamTraceHeaders } from '../middlewares/psTraceContext';
 import { checkMcpClient } from './auth';
 import { getMcpServer, McpServerConfig } from './config';
 import {
@@ -141,6 +142,9 @@ function upstreamHeaders(
   if (hasBody) out.set('content-type', JSON_TYPE);
   if (server.authHeader)
     out.set(server.authHeader.name, server.authHeader.value);
+  // W3C trace context (#385), only with PS_OTEL_PROPAGATE_UPSTREAM=true.
+  for (const [name, value] of Object.entries(upstreamTraceHeaders(c)))
+    out.set(name, value);
   return out;
 }
 
