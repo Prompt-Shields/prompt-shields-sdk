@@ -169,6 +169,59 @@ def test_tool_and_agent_spans_are_not_usage_events_or_rejections():
     assert c.rejected == {"no_vendor": 1}
 
 
+def test_gateway_fallback_is_one_usage_event_and_three_stored_spans():
+    # Gateway fallback A -> B (#390): one GenAI span, one child span per
+    # attempt. Only the GenAI span is a usage event; the store keeps all
+    # three, the attempts with their provider, model, status and error.
+    gateway = _span(
+        "b000000000000001",
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": "openai",
+            "gen_ai.request.model": "gpt-4o-mini",
+            "ps.attempt.count": 2,
+        },
+    )
+
+    def attempt(span_id, n, provider, model, status, error=None):
+        attrs = {
+            "ps.attempt.number": n,
+            "ps.attempt.provider": provider,
+            "ps.attempt.model": model,
+            "http.response.status_code": status,
+        }
+        if error:
+            attrs["error.type"] = error
+        extra = {"status": {"code": 2, "message": error}} if error else {}
+        return _span(
+            span_id, attrs, name=f"attempt {n}", parentSpanId="b000000000000001", **extra
+        )
+
+    body = _payload(
+        gateway,
+        attempt("b000000000000002", 1, "openai", "gpt-4o-mini", 503, "server_error"),
+        attempt("b000000000000003", 2, "mistral_ai", "mistral-small-latest", 200),
+    )
+    mapped, counts = classify_spans(body)
+    assert len(mapped) == 1
+    (c,) = counts.values()
+    assert c.ignored == {"span:non_genai": 2}
+
+    rows, genai = tr.collect_spans(body, NOW)
+    assert genai == {TRACE}
+    by_id = {r["span_id"]: r for r in rows}
+    first, second = by_id["b000000000000002"], by_id["b000000000000003"]
+    assert first["parent_span_id"] == second["parent_span_id"] == "b000000000000001"
+    assert (first["provider"], first["request_model"]) == ("openai", "gpt-4o-mini")
+    assert (first["status"], first["error_type"]) == ("error", "server_error")
+    assert (second["provider"], second["request_model"]) == (
+        "mistral_ai",
+        "mistral-small-latest",
+    )
+    assert second["error_type"] is None
+    assert first["operation"] is None and first["tokens_in"] is None
+
+
 def test_cursor_round_trip_and_rejects():
     start = datetime(2026, 11, 1, tzinfo=UTC)
     assert tr.decode_cursor(tr.encode_cursor(start, TRACE)) == (start, TRACE)

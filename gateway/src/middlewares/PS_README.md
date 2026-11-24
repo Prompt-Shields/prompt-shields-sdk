@@ -64,6 +64,12 @@ params, `gen_ai.response.model`/`id`/`finish_reasons` (normalised to `stop`,
 `error.type`. `X-PS-*` business context goes to `ps.*` span attributes and
 `X-PS-Environment` to the `deployment.environment.name` resource attribute.
 An inbound `traceparent` makes the span a child of the caller's span.
+When the call made more than one upstream attempt (retries, fallbacks; psAttempts), the
+span has `ps.attempt.count` and `ps.fallback_chain`, and each attempt gets a
+child CLIENT span `attempt <n>` (`ps.attempt.number`/`provider`/`model`,
+`http.request.resend_count`, status, latency, `error.type`). The children have
+no `gen_ai.*` attributes, so a request is still one billed GenAI span (#390;
+docs/guides/fallbacks-and-retries.mdx).
 
 Trace context (`psTraceContext.ts`, #385, always on): every request gets one
 gateway span id in the caller's trace (inbound `traceparent`, else a new
