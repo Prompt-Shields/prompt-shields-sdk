@@ -20,7 +20,11 @@
  *     PS_OIDC_POLICY apply, as without the pull);
  *   - a malformed bundle (./state.ts parsePolicyBundle) is never applied,
  *     in part or whole: the last good policy stays active and the problem
- *     is logged once per distinct bundle.
+ *     is logged once per distinct bundle (an ETag refused before is not
+ *     downloaded again).
+ *   - the body is streamed with a byte cap (MAX_BUNDLE_BYTES, counted in
+ *     bytes, not characters): a larger bundle is abandoned mid-stream and
+ *     refused like a malformed one.
  * A failure is logged when it starts and when it clears, not on every tick.
  */
 import { isSafeUpstreamURL } from '../requestValidator';
@@ -41,6 +45,56 @@ export const REQUEST_TIMEOUT_MS = 10_000;
 export const MAX_BUNDLE_BYTES = 8 * 1024 * 1024;
 
 export class PolicyPullConfigError extends Error {}
+
+/** The bundle is over the byte cap (or is not UTF-8): refused, not retried. */
+export class BundleBodyError extends Error {}
+
+/**
+ * The response body as UTF-8 text, read as a stream and abandoned (the
+ * stream is cancelled) as soon as more than `maxBytes` bytes have arrived,
+ * so an oversized bundle is never held in memory whole. A Content-Length
+ * over the cap is refused before reading. Throws BundleBodyError for an
+ * oversized or non-UTF-8 body; network errors propagate as they are.
+ */
+export async function readBodyCapped(
+  resp: Response,
+  maxBytes: number
+): Promise<string> {
+  const tooLarge = () =>
+    new BundleBodyError(`the bundle is larger than ${maxBytes} bytes`);
+  const declared = Number(resp.headers.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await resp.body?.cancel().catch(() => undefined);
+    throw tooLarge();
+  }
+  if (!resp.body) return '';
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.byteLength;
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(
+      bytes
+    );
+  } catch {
+    throw new BundleBodyError('the bundle is not valid UTF-8');
+  }
+}
 
 export interface PolicyPullConfig {
   url: string;
@@ -207,7 +261,9 @@ export async function startPolicyPull(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     let resp: Response;
-    let text: string;
+    let newEtag: string | undefined;
+    let text: string | undefined;
+    let bodyError: BundleBodyError | undefined;
     try {
       resp = await doFetch(config.url, {
         method: 'GET',
@@ -224,7 +280,18 @@ export async function startPolicyPull(
         clearTimeout(timer);
         return fail('unreachable', `HTTP ${resp.status}`);
       }
-      text = await resp.text();
+      newEtag = resp.headers.get('etag') ?? undefined;
+      // The bundle refused last time: not downloaded again.
+      if (newEtag && newEtag === rejectedEtag) {
+        await resp.body?.cancel().catch(() => undefined);
+        return 'rejected';
+      }
+      try {
+        text = await readBodyCapped(resp, MAX_BUNDLE_BYTES);
+      } catch (err) {
+        if (!(err instanceof BundleBodyError)) throw err;
+        bodyError = err;
+      }
     } catch (err) {
       return fail(
         'unreachable',
@@ -235,13 +302,10 @@ export async function startPolicyPull(
     } finally {
       clearTimeout(timer);
     }
-    const newEtag = resp.headers.get('etag') ?? undefined;
-    if (newEtag && newEtag === rejectedEtag) return 'rejected';
     let next: CentralPolicy;
     try {
-      if (text.length > MAX_BUNDLE_BYTES)
-        throw new Error(`the bundle is larger than ${MAX_BUNDLE_BYTES} bytes`);
-      next = parsePolicyBundle(JSON.parse(text), newEtag);
+      if (bodyError) throw bodyError;
+      next = parsePolicyBundle(JSON.parse(text ?? ''), newEtag);
     } catch (err) {
       rejectedEtag = newEtag;
       failing = undefined;

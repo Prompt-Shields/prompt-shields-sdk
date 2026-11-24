@@ -42,11 +42,13 @@ from db.models import (
     CostReconciliation,
     DataFlow,
     GatewaySecurityEvent,
+    IdpGroupRole,
     LearnerRecommendation,
     LearnerSnapshot,
     McpToolUsage,
     McpToolUsageDaily,
     Membership,
+    OidcLoginState,
     PartnerAuditLog,
     PartnerCredential,
     Policy,
@@ -58,11 +60,13 @@ from db.models import (
     RetentionAuditLog,
     RiskMapping,
     RiskMappingReview,
+    ScimToken,
     SpendAlert,
     Team,
     TelemetryClientStats,
     Tenant,
     TenantApiKey,
+    TenantOidcConfig,
     TenantSecret,
     UsageRollupDaily,
     UsageRollupHourly,
@@ -322,6 +326,37 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 role="viewer",
                 created_by="operator",
             )
+        )
+        now = datetime.now(UTC)
+        s.add_all(
+            [
+                TenantOidcConfig(
+                    tenant_id=tenant_id,
+                    issuer=f"https://idp.{name}.example",
+                    client_id="ps",
+                    redirect_uri="https://c.example/api/v1/sso/callback",
+                    algorithms=["RS256"],
+                    created_by="operator",
+                ),
+                OidcLoginState(
+                    tenant_id=tenant_id,
+                    state_hash=f"state-{name}",
+                    browser_hash="b",
+                    nonce="n",
+                    code_verifier="v",
+                    expires_at=now,
+                ),
+                ScimToken(
+                    tenant_id=tenant_id,
+                    name="idp",
+                    scopes=["scim:users"],
+                    token_prefix=f"scim-{name}",
+                    token_hash="x",
+                    token_hint="abcd",
+                    created_by="operator",
+                ),
+                IdpGroupRole(tenant_id=tenant_id, team_id=team.id, created_by="operator"),
+            ]
         )
         policy = Policy(
             tenant_id=tenant_id,

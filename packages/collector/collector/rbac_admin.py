@@ -64,9 +64,10 @@ from db.models import (
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import rbac
+from collector import policies_api, rbac
 from collector.admin_auth import (
     ADMIN_SCOPES,
     AdminPrincipal,
@@ -165,20 +166,40 @@ def serialize_membership(m: Membership) -> dict:
 # ──────────────────────────────────────────────────────────────────────
 
 
-async def _get(db: AsyncSession, model, tenant_id: UUID, row_id: UUID, what: str):
-    row = (
-        await db.execute(select(model).where(model.id == row_id, model.tenant_id == tenant_id))
-    ).scalar_one_or_none()
+async def _get(
+    db: AsyncSession, model, tenant_id: UUID, row_id: UUID, what: str, *, lock: bool = False
+):
+    stmt = select(model).where(model.id == row_id, model.tenant_id == tenant_id)
+    if lock:
+        stmt = stmt.with_for_update()
+    row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise _problem(404, "Not Found", f"{what} not found")
     return row
 
 
 async def _no_policy(db: AsyncSession, bound, what: str) -> None:
-    """409 while a governance policy (#340) is bound to the team or project:
-    deleting it would drop that policy without its own audited delete."""
-    if (await db.execute(select(Policy.name).where(bound))).first() is not None:
+    """409 while a live governance policy (#340) is bound to the team or
+    project: deleting it would drop that policy without its own audited
+    delete. A deleted policy (#383) does not block; its reference is set to
+    NULL by the foreign key. Callers hold the team/project row FOR UPDATE,
+    and policy create takes it FOR SHARE, so a policy created concurrently
+    is seen here (409) rather than failing the delete on the foreign key."""
+    stmt = select(Policy.name).where(bound, Policy.deleted_at.is_(None))
+    if (await db.execute(stmt)).first() is not None:
         raise _problem(409, "Conflict", f"Delete the {what}'s policy first (DELETE /policies/{{id}})")
+
+
+async def _flush_delete(db: AsyncSession, what: str) -> None:
+    """Flush a team/project delete; a row that started referencing it in
+    the meantime (a foreign key or binding check) is a 409, not a 500."""
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise _problem(
+            409, "Conflict", f"The {what} changed while it was being deleted; try again"
+        ) from None
 
 
 def _check_can_grant(principal: AdminPrincipal, role: str) -> None:
@@ -524,7 +545,9 @@ async def delete_principal(
         target_type="principal",
         target_id=principal_id,
         memberships_removed=[str(m.id) for m in memberships],
-        admin_tokens_revoked=[str(t.id) for t in tokens],
+        # Not "admin_tokens_revoked": audit details redact keys naming a
+        # token unless they end in _ids (db.audit_chain.sanitize_details).
+        revoked_token_ids=[str(t.id) for t in tokens],
         partner_credentials_revoked=[str(c.id) for c in creds],
     )
     await db.commit()
@@ -665,7 +688,7 @@ async def delete_team(
 ) -> Response:
     """409 while the team has projects. Its memberships go with it."""
     db = request.state.db
-    row = await _get(db, Team, principal.tenant_id, team_id, "Team")
+    row = await _get(db, Team, principal.tenant_id, team_id, "Team", lock=True)
     has_projects = (
         await db.execute(select(Project.id).where(Project.team_id == row.id))
     ).first()
@@ -682,6 +705,7 @@ async def delete_team(
         await db.delete(m)
     await db.flush()
     await db.delete(row)
+    await _flush_delete(db, "team")
     await add_audit(
         request,
         db,
@@ -786,7 +810,7 @@ async def update_project(
     principal: AdminPrincipal = _MEMBERS,
 ) -> dict:
     db = request.state.db
-    row = await _get(db, Project, principal.tenant_id, project_id, "Project")
+    row = await _get(db, Project, principal.tenant_id, project_id, "Project", lock=True)
     before = row.name
     previous_team = row.team_id
     changed = await _apply_name_description(
@@ -797,8 +821,12 @@ async def update_project(
         and body.team_id is not None
         and body.team_id != row.team_id
     )
+    effective_before = None
     if moved:
         team = await _get(db, Team, principal.tenant_id, body.team_id, "Team")
+        effective_before = await policies_api.project_effective(
+            db, principal.tenant_id, row.id, previous_team
+        )
         memberships = (
             (await db.execute(select(Membership).where(Membership.project_id == row.id)))
             .scalars()
@@ -831,6 +859,21 @@ async def update_project(
             else {}
         ),
     )
+    if moved:
+        # Its team's policy no longer applies and the new team's does (#383).
+        await policies_api.audit_project_move(
+            request,
+            db,
+            principal,
+            project_id=row.id,
+            project_name=row.name,
+            before=effective_before,
+            after=await policies_api.project_effective(
+                db, principal.tenant_id, row.id, row.team_id
+            ),
+            previous_team_id=previous_team,
+            team_id=row.team_id,
+        )
     out = serialize_project(row)
     await db.commit()
     return out
@@ -842,7 +885,7 @@ async def delete_project(
 ) -> Response:
     """Its memberships go with it."""
     db = request.state.db
-    row = await _get(db, Project, principal.tenant_id, project_id, "Project")
+    row = await _get(db, Project, principal.tenant_id, project_id, "Project", lock=True)
     await _no_policy(db, Policy.project_id == row.id, "project")
     memberships = (
         (await db.execute(select(Membership).where(Membership.project_id == row.id)))
@@ -854,6 +897,7 @@ async def delete_project(
         await db.delete(m)
     await db.flush()
     await db.delete(row)
+    await _flush_delete(db, "project")
     await add_audit(
         request,
         db,

@@ -17,6 +17,9 @@ module records *changes* and security events in ``audit_events``:
   policy.create|update|delete|version_create|activate   (governance policies,
                                                 #340: versions and SHA-256
                                                 before/after)
+  policy.effective_change                       (a project moved to another
+                                                team changed its effective
+                                                policy, #383)
   operator.access                               (named operator token, #341)
   operator.break_glass                          (PS_ADMIN_TOKEN, every use)
   operator_token.issue|rotate|revoke            (named operator tokens)
@@ -132,7 +135,7 @@ class Actor:
     """Who acted. ``id`` identifies a credential, never contains one."""
 
     # tenant_key | admin_token | partner | operator | operator_token | system
-    # | anonymous
+    # | anonymous | scim_token (collector.scim) | principal (sso.login)
     type: str
     id: str | None = None
 

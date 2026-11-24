@@ -268,6 +268,17 @@ from collector.rbac_admin import router as rbac_admin_router
 app.include_router(rbac_admin_router)
 app.include_router(rbac_partner_router)
 
+# SSO for the admin API (OIDC) and SCIM 2.0 provisioning (#339)
+from collector.scim import ScimError, scim_error_handler
+from collector.scim import router as scim_router
+from collector.sso import router as sso_router
+from collector.sso_admin import router as sso_admin_router
+
+app.include_router(sso_router)
+app.include_router(sso_admin_router)
+app.include_router(scim_router)
+app.add_exception_handler(ScimError, scim_error_handler)
+
 # Central governance policies (#340): admin CRUD/versioning (admin:policies)
 # and the gateway pull (/api/v1/policy/effective, ingest key policy:read)
 from collector.policies_api import gateway_router as policy_gateway_router

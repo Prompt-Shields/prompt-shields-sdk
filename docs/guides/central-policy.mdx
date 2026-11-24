@@ -87,7 +87,9 @@ section is always taken whole, never merged field by field, so a team's
 `access` section is exactly what the team gets.
 
 A team or project with a policy cannot be deleted (409); delete its policy
-first.
+first. A policy create and a delete of its team or project are serialised:
+when the create commits first, the delete answers 409; when the delete
+commits first, the create answers 404 (the team or project is gone).
 
 ## Managing policies
 
@@ -117,9 +119,9 @@ curl $COLLECTOR/api/v1/admin/policy/effective -H "Authorization: Bearer $ADMIN_T
 | Route | What it does |
 |---|---|
 | `POST /policies` | Create (`scope`: `tenant`, `team` with `team_id`, or `project` with `project_id`), optionally with version 1 and `activate` |
-| `GET /policies`, `GET /policies/{id}` | List (`?scope=`), read with the active document |
+| `GET /policies`, `GET /policies/{id}` | List (`?scope=`, `?include_deleted=true`), read with the active document (deleted policies too) |
 | `PATCH /policies/{id}` | Rename or describe |
-| `DELETE /policies/{id}` | Delete with every version |
+| `DELETE /policies/{id}` | Delete; the policy and its versions are kept for their history |
 | `POST /policies/{id}/versions` | Add a version (`activate: true` to make it active) |
 | `GET /policies/{id}/versions[/{version}]` | List versions, read one with its document |
 | `POST /policies/{id}/activate` | Make a version active, or `null` for none |
@@ -128,12 +130,34 @@ curl $COLLECTOR/api/v1/admin/policy/effective -H "Authorization: Bearer $ADMIN_T
 Versions are immutable: no route changes one, and the database refuses an
 update.
 
+**Deleting keeps the history.** `DELETE /policies/{id}` marks the policy
+deleted (`deleted_at`): it is inactive, gateways drop it at their next pull,
+it no longer appears in `GET /policies`, and its name and binding can be used
+again. The policy and every version stay readable by id
+(`GET /policies/{id}`, `/versions`, `/versions/{version}`) and cannot be
+changed. Only tenant erasure removes them; the database refuses any other
+delete of a policy or version. Deleting the team or project a deleted policy
+was bound to keeps the policy, with `team_id`/`project_id` set to null.
+
+**Validation.** A version is checked before it is stored the same way the
+gateway checks it before applying it: a `route` section against the
+route-policy.v1 JSON Schema (the same file the gateway bundles) and its
+cross-field rules (every group and sensitivity level referred to exists), an
+`access` section against the gateway's `PS_OIDC_POLICY` rules (including MCP
+tool names). A document the gateway would refuse is answered with 422 and
+every problem, so it can never be activated. Shared test vectors
+(`schemas/central-policy/`) keep the collector and the gateway in agreement.
+
 **Audit.** Every change is a row on the tenant's hash-chained audit trail
 (`GET /partner/v1/audit`, the SIEM connectors): `policy.create`,
 `policy.update`, `policy.delete`, `policy.version_create` and
 `policy.activate`. An activation records the version number and SHA-256 of the
 document before and after, and which sections changed; the documents
-themselves are the immutable versions the digests point to.
+themselves are the immutable versions the digests point to. Moving a project
+to another team (`PATCH /projects/{id}` with `team_id`) writes
+`policy.effective_change` when that changes the project's effective policy,
+with the effective version (`default@3+team-eu@2`) and digest before and
+after and the sections that changed.
 
 ## The gateway pull
 
@@ -174,6 +198,9 @@ What the gateway does with it:
   applied, not even in part, and is logged once; the last good policy (or
   the local settings) stays active. An invalid `route` section never turns
   routing off.
+- **Oversized bundle**: the bundle is read as a stream and abandoned once
+  it passes 8 MiB (counted in bytes); it is refused like a malformed one,
+  and the same ETag is not downloaded again.
 - **No policy at all** (nothing created, or nothing active): the bundle is
   empty and the gateway behaves exactly as it does today.
 - Telemetry events carry `policy_version`: the central policy's version, else
