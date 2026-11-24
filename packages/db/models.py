@@ -322,8 +322,6 @@ class TenantApiKey(Base):
     previous_expires_at = Column(TIMESTAMP(timezone=True))
     # 'api' (issued here) or 'legacy' (moved from tenants.api_key_*).
     origin = Column(Text, nullable=False, default="api", server_default="api")
-    # Who issued it, like AdminToken.created_by (#396); NULL before 056.
-    created_by = Column(Text)
     # ingest:write | registry:read | registry:attest | policy:read (collector/tenant_keys.py).
     # Keys from before migration 037 hold all three; a new row defaults to
     # ingest:write only.
@@ -730,6 +728,42 @@ class OidcLoginState(Base):
     __table_args__ = (
         Index("ux_oidc_login_states_state", "state_hash", unique=True),
         Index("ix_oidc_login_states_tenant", "tenant_id", "expires_at"),
+    )
+
+
+class CredentialCreator(Base):
+    """Who issued a tenant ingest key or partner credential (#396).
+
+    ``created_by`` takes the values of ``AdminToken.created_by``
+    (``operator``, ``token:<lookup prefix>``, ``key:<lookup prefix>``), so
+    disabling a principal can revoke what its tokens created
+    (collector/idp_sync.py). Kept beside the credential tables rather than
+    as a column on them, so reading a credential never depends on this
+    table. Credentials issued before migration 057 have no row.
+    """
+
+    __tablename__ = "credential_creators"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    # 'tenant_api_key' | 'partner_credential'
+    credential_type = Column(Text, nullable=False)
+    credential_id = Column(UUID(as_uuid=True), nullable=False)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "credential_type IN ('tenant_api_key', 'partner_credential')",
+            name="ck_credential_creators_type",
+        ),
+        Index(
+            "ux_credential_creators_credential",
+            "credential_type",
+            "credential_id",
+            unique=True,
+        ),
+        Index("ix_credential_creators_tenant_created_by", "tenant_id", "created_by"),
     )
 
 
@@ -1330,8 +1364,6 @@ class PartnerCredential(Base):
     principal_id = Column(
         UUID(as_uuid=True), ForeignKey("principals.id", ondelete="SET NULL")
     )
-    # Who issued it, like AdminToken.created_by (#396); NULL before 056.
-    created_by = Column(Text)
 
     __table_args__ = (
         Index("ix_partner_credentials_tenant", "tenant_id"),

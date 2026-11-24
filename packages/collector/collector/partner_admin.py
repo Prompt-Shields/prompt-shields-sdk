@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from db.models import PartnerCredential
+from db.models import CredentialCreator, PartnerCredential
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -331,9 +331,20 @@ async def issue_partner_credential(
         partner_metadata=body.metadata or {},
         expires_at=body.expires_at,
         principal_id=body.principal_id,
-        created_by=created_by(request, principal),
     )
     db.add(partner)
+    await db.flush()
+    # Who issued it, so disabling a principal can revoke what its tokens
+    # created (collector/idp_sync.py, #396).
+    db.add(
+        CredentialCreator(
+            tenant_id=tenant_id,
+            credential_type="partner_credential",
+            credential_id=partner.id,
+            created_by=created_by(request, principal),
+            created_at=datetime.now(UTC),
+        )
+    )
     await db.flush()
     await audit_trail.record(
         db,

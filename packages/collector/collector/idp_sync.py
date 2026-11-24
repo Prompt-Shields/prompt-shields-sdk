@@ -32,8 +32,9 @@ through SCIM or the admin API (collector/rbac_admin.py), calls
   - every admin token, tenant ingest key, SCIM token and partner credential
     created by a token issued for it, and everything those created in turn
     (``created_by = token:<prefix>`` or, for a full-scope ingest key while
-    PS_ADMIN_REQUIRE_SCOPED_TOKENS is off, ``key:<prefix>``), walking
-    through already revoked credentials too.
+    PS_ADMIN_REQUIRE_SCOPED_TOKENS is off, ``key:<prefix>``; the creator
+    of an ingest key or partner credential is in ``credential_creators``),
+    walking through already revoked credentials too.
 
 Through the admin API the owner rules apply (#374, #382): a caller that
 cannot manage owners leaves live an admin token that is owner-bound or
@@ -42,7 +43,7 @@ a partner credential issued for an owner; the audit row lists them
 (``cascade_skipped``, ``partner_credentials_skipped``) and an owner can
 revoke them. SCIM deactivation skips nothing (the identity provider is the
 authority on who has left). Ingest keys and partner credentials issued
-before migration 056 have no recorded creator and are not reached; nor is
+before migration 057 have no recorded creator and are not reached; nor is
 anything created by an ingest key under a lookup prefix it has since
 rotated away from.
 """
@@ -56,6 +57,7 @@ from uuid import UUID
 
 from db.models import (
     AdminToken,
+    CredentialCreator,
     IdpGroupRole,
     Membership,
     PartnerCredential,
@@ -72,6 +74,8 @@ from collector.admin_auth import ADMIN_SCOPES, AdminPrincipal, can_manage_owner
 SCIM_SOURCE = "scim"
 # AdminToken.created_by for SSO sessions.
 SSO_CREATED_BY = "sso"
+# credential_creators.credential_type for partner credentials (#396).
+PARTNER_CREDENTIAL_TYPE = "partner_credential"
 DEFAULT_MEMBER_ROLE = "viewer"
 # Highest first. owner is never a group role.
 TENANT_ROLE_RANK = ("admin", "developer", "billing", "auditor", "viewer")
@@ -246,6 +250,26 @@ async def revoke_created_credentials(
             out.tokens.append(t)
 
     def created_by_frontier(model):
+        if model in (TenantApiKey, PartnerCredential):
+            # Their creator is kept in credential_creators (migration 057).
+            kind = (
+                tenant_keys.CREDENTIAL_TYPE
+                if model is TenantApiKey
+                else PARTNER_CREDENTIAL_TYPE
+            )
+            return (
+                select(model)
+                .join(
+                    CredentialCreator,
+                    (CredentialCreator.credential_id == model.id)
+                    & (CredentialCreator.credential_type == kind),
+                )
+                .where(
+                    CredentialCreator.tenant_id == tenant_id,
+                    model.tenant_id == tenant_id,
+                    CredentialCreator.created_by.in_(sorted(frontier)),
+                )
+            )
         return select(model).where(
             model.tenant_id == tenant_id, model.created_by.in_(sorted(frontier))
         )
