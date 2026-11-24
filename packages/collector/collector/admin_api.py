@@ -538,6 +538,7 @@ async def create_api_key(
             body.name,
             expires_at=_future(body.expires_at),
             scopes=body.scopes,
+            created_by=created_by(request, principal),
         )
     except DuplicateName:
         raise _problem(

@@ -18,6 +18,7 @@ import { retryRequest } from '../handlers/retryHandler';
 import {
   MAX_ATTEMPT_RECORDS,
   attemptCountOf,
+  attemptEndTimesOf,
   attemptsOf,
   errorClassOf,
   recordAttempt,
@@ -184,6 +185,29 @@ describe('recordAttempt', () => {
     );
     expect(attemptsOf(c)[0].provider).toHaveLength(128);
     expect(attemptsOf(c)[0].model).toHaveLength(256);
+  });
+
+  test('keeps when each recorded attempt ended, beside the records (#390)', () => {
+    const c = fakeContext();
+    const before = Date.now();
+    for (let i = 0; i < MAX_ATTEMPT_RECORDS + 3; i++)
+      recordAttempt(
+        c,
+        { provider: 'openai' },
+        { status: 500, latency_ms: 1, error_class: 'server_error' }
+      );
+    const times = attemptEndTimesOf(c);
+    expect(times).toHaveLength(MAX_ATTEMPT_RECORDS);
+    expect(times.every((t) => t >= before && t <= Date.now())).toBe(true);
+    // The record shape sent to the collector is unchanged.
+    expect(Object.keys(attemptsOf(c)[0]).sort()).toEqual([
+      'attempt',
+      'error_class',
+      'latency_ms',
+      'provider',
+      'status',
+    ]);
+    expect(attemptEndTimesOf(fakeContext())).toEqual([]);
   });
 
   test('attemptsOf is empty when nothing was recorded', () => {
