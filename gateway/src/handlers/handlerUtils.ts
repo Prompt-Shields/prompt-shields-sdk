@@ -53,7 +53,11 @@ import { recordAttempt } from '../middlewares/psAttempts';
 import { recordServedTarget } from '../middlewares/psServedTarget';
 import { recordCredentialFingerprint } from '../utils/credentialFingerprint';
 import { reportPayloadRejected } from '../middlewares/psSecurityEvents';
-import { isSafeUpstreamURL } from '../middlewares/requestValidator';
+import {
+  isSafeUpstreamURL,
+  isTrustedUpstreamHost,
+} from '../middlewares/requestValidator';
+import { isEgressRefused, withEgressGuard } from '../utils/egressGuard';
 import {
   adaptResponse,
   applyAdapterRequestTransform,
@@ -1553,6 +1557,24 @@ export async function recursiveAfterRequestHookHandler(
 
   const requestHandler = providerContext.getRequestHandler(requestContext);
   const url = requestContext.requestURL;
+  // PS fork (security, #377): a custom host not listed in
+  // TRUSTED_CUSTOM_HOSTS is resolved and refused when it resolves to a
+  // loopback, link-local or cloud metadata address; on Node the connection
+  // is pinned to the checked addresses. Private addresses are allowed.
+  let fetchOptions = options;
+  if (
+    requestContext.customHost &&
+    !requestHandler &&
+    !isTrustedUpstreamHost(url, c)
+  ) {
+    try {
+      fetchOptions = await withEgressGuard(url, options, 'local');
+    } catch (err) {
+      if (isEgressRefused(err))
+        throw new GatewayError('Invalid upstream URL', 400);
+      throw err;
+    }
+  }
 
   ({
     response,
@@ -1561,7 +1583,7 @@ export async function recursiveAfterRequestHookHandler(
     skip: retrySkipped,
   } = await retryRequest(
     url,
-    options,
+    fetchOptions,
     retry.attempts,
     retry.onStatusCodes,
     requestTimeout,
