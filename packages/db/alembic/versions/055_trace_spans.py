@@ -13,10 +13,10 @@ erasure clears ``user_id_hash`` and ``session_id``.
 The new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Chained from 043 (main's head when written); it may be re-chained at merge.
+Chained from 054 (policy soft delete, #383).
 
 Revision ID: 055
-Revises: 043
+Revises: 054
 Create Date: 2026-11-24
 """
 
@@ -27,7 +27,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "055"
-down_revision: str | None = "043"
+down_revision: str | None = "054"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
