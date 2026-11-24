@@ -368,6 +368,21 @@ async def test_one_policy_per_binding_and_unique_names(env):
     assert [p["name"] for p in listed] == ["team-eng"]
 
 
+async def test_pseudonymisation_only_in_the_tenant_policy(env):
+    """#350: gateways apply the tenant-wide section only, so a team or project
+    policy cannot carry it (nothing would enforce it)."""
+    c, boot = env["c"], env["boot"]
+    doc = {"schema": "ps-policy.v1", "sections": {"pseudonymisation": {"version": 1, "enabled": True}}}
+    team = await _post(c, boot, "/teams", {"name": "eng"})
+    bad = {"name": "t", "scope": "team", "team_id": team["id"], "document": doc}
+    err = await _post(c, boot, "/policies", bad, 422)
+    assert "tenant" in str(err)
+    t = await _post(c, boot, "/policies", {"name": "t", "scope": "team", "team_id": team["id"]})
+    await _post(c, boot, f"/policies/{t['id']}/versions", {"document": doc}, 422)
+    assert (await c.get(f"{A}/policies/{t['id']}/versions", headers=H(boot))).json()["data"] == []
+    await _post(c, boot, "/policies", {"name": "all", "scope": "tenant", "document": doc, "activate": True})
+
+
 async def test_team_and_project_with_a_policy_cannot_be_deleted(env):
     c, boot = env["c"], env["boot"]
     team = await _post(c, boot, "/teams", {"name": "eng"})

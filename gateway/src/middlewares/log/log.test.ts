@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { psPseudonymise } from '../psPseudonymise';
 import { streamSSE } from 'hono/streaming';
 import {
   buildLogRequestOptions,
@@ -148,10 +149,13 @@ describe('log stream PII redaction', () => {
 
   async function streamedLog(
     stream: boolean,
-    path = '/v1/chat/completions'
+    path = '/v1/chat/completions',
+    below?: (app: Hono<any>) => void,
+    answer = `Saved ${EMAIL} and ${CARD}`
   ): Promise<string> {
     const app = new Hono<any>();
     app.use('*', logHandler());
+    below?.(app);
     app.get('/log/stream', (c) =>
       streamSSE(c, async (sse) => {
         const add: any = c.get('addLogClient');
@@ -173,7 +177,7 @@ describe('log stream PII redaction', () => {
           { 'content-type': 'text/event-stream' }
         );
       return c.json({
-        choices: [{ message: { content: `Saved ${EMAIL} and ${CARD}` } }],
+        choices: [{ message: { content: answer } }],
       });
     });
 
@@ -187,7 +191,14 @@ describe('log stream PII redaction', () => {
       if (done) break;
       text += decoder.decode(value);
     }
-    await app.request(`http://localhost:8787${path}`, { method: 'POST' });
+    await app.request(`http://localhost:8787${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'm',
+        messages: [{ role: 'user', content: `mail ${EMAIL}` }],
+      }),
+    });
     while (!text.includes('event: log')) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -203,6 +214,59 @@ describe('log stream PII redaction', () => {
     expectRedacted(text);
     expect(text).toContain('Saved [EMAIL] and [CREDIT_CARD]');
     expect(text).not.toContain('sk-live-secret');
+  });
+
+  test('with pseudonymisation on, the log gets the unrestored answer (#350)', async () => {
+    const text = await streamedLog(
+      false,
+      '/v1/chat/completions',
+      (app) =>
+        app.use(
+          '*',
+          psPseudonymise(() => ({ enabled: true, onUnsupported: 'refuse' }), {})
+        ),
+      'Saved \u27e6EMAIL_1\u27e7'
+    );
+    expect(text).toContain('event: log');
+    expectRedacted(text);
+    // The placeholder the provider sent, not the value restored for the client.
+    expect(text).toContain('Saved \u27e6EMAIL_1\u27e7');
+    expect(text).not.toContain('Saved [EMAIL]');
+  });
+
+  test('the unrestored answer goes through the output guardrails (#349, #350)', async () => {
+    const withGuardrails = (deny: boolean) => (app: Hono<any>) => {
+      // As psGuardrails (outside psPseudonymise) leaves its output scrub.
+      app.use('*', async (c, next) => {
+        c.set('psGuardrailScrub', (obj: any) => {
+          if (deny) return true;
+          obj.choices[0].message.content = 'Saved [SCRUBBED]';
+          return false;
+        });
+        await next();
+      });
+      app.use(
+        '*',
+        psPseudonymise(() => ({ enabled: true, onUnsupported: 'refuse' }), {})
+      );
+    };
+    const answer = 'Saved ⟦EMAIL_1⟧';
+    const redacted = await streamedLog(
+      false,
+      '/v1/chat/completions',
+      withGuardrails(false),
+      answer
+    );
+    expect(redacted).toContain('Saved [SCRUBBED]');
+    expect(redacted).not.toContain('Saved ⟦EMAIL_1⟧');
+    const denied = await streamedLog(
+      false,
+      '/v1/chat/completions',
+      withGuardrails(true),
+      answer
+    );
+    expect(denied).toContain('Withheld: the response was blocked');
+    expect(denied).not.toContain('Saved ⟦EMAIL_1⟧');
   });
 
   test('the SSE stream carries categories, not values (streamed call)', async () => {

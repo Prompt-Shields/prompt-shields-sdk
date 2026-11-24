@@ -198,6 +198,9 @@ async def _add_version(
     document: dict,
     comment: str | None,
 ) -> PolicyVersion:
+    problems = policy_doc.tenant_only_problems(document, policy.scope)
+    if problems:
+        raise _problem(422, "Unprocessable Entity", problems)
     current = (
         await db.execute(
             select(func.max(PolicyVersion.version)).where(PolicyVersion.policy_id == policy.id)
@@ -301,6 +304,9 @@ async def create_policy(
     db = request.state.db
     tid = principal.tenant_id
     document = _validated(body.document) if body.document is not None else None
+    problems = policy_doc.tenant_only_problems(document, body.scope)
+    if problems:
+        raise _problem(422, "Unprocessable Entity", problems)
     # FOR SHARE on the team or project: a concurrent team/project delete
     # (which takes FOR UPDATE, rbac_admin.py) waits for this policy and then
     # refuses with 409, or ran first and the team is gone here (404),

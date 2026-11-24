@@ -1,0 +1,1133 @@
+{
+ "description": "Shared vectors for reversible pseudonymisation (#36 SDK, #350 gateway). Generated from packages/sdk/prompt_shields/pseudonymise.py; the SDK (packages/sdk/tests/test_pseudonymise_vectors.py) and the gateway (gateway/src/middlewares/psPseudonymise/vectors.test.ts) must both reproduce every expected value exactly.",
+ "version": 1,
+ "pseudonymise": [
+  {
+   "name": "chat: every category, repeated values, multi-part content",
+   "surface": "chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You help Kari (kari@example.no, +47 912 34 567)."
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Card 4111 1111 1111 1111, SSN 123-45-6789, from 192.168.10.20."
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "https://example.com/a@b.co.png"
+       }
+      },
+      {
+       "type": "text",
+       "text": "IBAN GB82 WEST 1234 5698 7654 32, personnummer 19121212-1212, again kari@example.no"
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "Call 555-123-4567 or +46 70 174 06 12 or 070-174 06 12; Ref 12 4111 1111 1111 1111"
+    }
+   ],
+   "expected": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You help Kari (⟦EMAIL_1⟧, ⟦PHONE_1⟧)."
+     },
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Card ⟦CREDIT_CARD_1⟧, SSN ⟦SSN_1⟧, from ⟦IP_ADDRESS_1⟧."
+       },
+       {
+        "type": "image_url",
+        "image_url": {
+         "url": "https://example.com/a@b.co.png"
+        }
+       },
+       {
+        "type": "text",
+        "text": "IBAN ⟦IBAN_1⟧, personnummer ⟦NATIONAL_ID_1⟧, again ⟦EMAIL_1⟧"
+       }
+      ]
+     },
+     {
+      "role": "user",
+      "content": "Call ⟦PHONE_2⟧ or ⟦PHONE_3⟧ or ⟦PHONE_4⟧; Ref 12 ⟦CREDIT_CARD_1⟧"
+     }
+    ],
+    "entities": {
+     "email": 1,
+     "phone": 4,
+     "credit_card": 1,
+     "ssn": 1,
+     "ip_address": 1,
+     "iban": 1,
+     "national_id": 1
+    }
+   }
+  },
+  {
+   "name": "chat: tool-call arguments are re-serialised as the SDK does",
+   "surface": "chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Look up ola@example.com"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "{\"b\":1,\"1\":\"x\",\"email\":\"ola@example.com\",\"phone\":4791234567,\"big\":12345678901234567890,\"f\":[1.0,1e20,0.00001,-0.0,2.5E-7,1e16,123456789012345.6],\"u\":\"\\u00e5 \\ud83d\\ude00 \\u27e6x\\u27e7\",\"n\":null,\"t\":true,\"neg\":-0,\"nested\":{\"z\":{\"ola@example.com\":[\"555-123-4567\"]}}}"
+       }
+      },
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "raw",
+        "arguments": "not json: ola@example.com"
+       }
+      },
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "dup",
+        "arguments": "{\"a\": 1, \"a\": \"kari@example.no\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "function_call": {
+      "name": "legacy",
+      "arguments": "{\"to\": \"per@example.se\"}"
+     },
+     "content": null
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "refusal": "I cannot email per@example.se"
+    }
+   ],
+   "prediction": {
+    "type": "content",
+    "content": "Dear per@example.se"
+   },
+   "expected": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Look up ⟦EMAIL_1⟧"
+     },
+     {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+       {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+         "name": "lookup",
+         "arguments": "{\"b\": 1, \"1\": \"x\", \"email\": \"⟦EMAIL_1⟧\", \"phone\": \"⟦PHONE_1⟧\", \"big\": 12345678901234567890, \"f\": [1.0, 1e+20, 1e-05, -0.0, 2.5e-07, 1e+16, 123456789012345.6], \"u\": \"å 😀 ⟦x⟧\", \"n\": null, \"t\": true, \"neg\": 0, \"nested\": {\"z\": {\"⟦EMAIL_1⟧\": [\"⟦PHONE_2⟧\"]}}}"
+        }
+       },
+       {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+         "name": "raw",
+         "arguments": "not json: ⟦EMAIL_1⟧"
+        }
+       },
+       {
+        "id": "call_3",
+        "type": "function",
+        "function": {
+         "name": "dup",
+         "arguments": "{\"a\": \"⟦EMAIL_2⟧\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "assistant",
+      "function_call": {
+       "name": "legacy",
+       "arguments": "{\"to\": \"⟦EMAIL_3⟧\"}"
+      },
+      "content": null
+     },
+     {
+      "role": "assistant",
+      "content": null,
+      "refusal": "I cannot email ⟦EMAIL_3⟧"
+     }
+    ],
+    "prediction": {
+     "type": "content",
+     "content": "Dear ⟦EMAIL_3⟧"
+    },
+    "entities": {
+     "email": 3,
+     "phone": 2
+    }
+   }
+  },
+  {
+   "name": "chat: placeholders already in the prompt are never minted",
+   "surface": "chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Template ⟦EMAIL_1⟧ and ⟦ email_2 ⟧; real a@example.com and b@example.com"
+    }
+   ],
+   "expected": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Template ⟦EMAIL_1⟧ and ⟦ email_2 ⟧; real ⟦EMAIL_3⟧ and ⟦EMAIL_4⟧"
+     }
+    ],
+    "entities": {
+     "email": 2
+    }
+   }
+  },
+  {
+   "name": "chat: nothing to replace",
+   "surface": "chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarise the quarterly report, diagnosis and account number fields"
+    }
+   ],
+   "expected": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Summarise the quarterly report, diagnosis and account number fields"
+     }
+    ],
+    "entities": {}
+   }
+  },
+  {
+   "name": "chat: categories filter",
+   "surface": "chat",
+   "categories": [
+    "email"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "a@example.com 555-123-4567 4111111111111111"
+    }
+   ],
+   "expected": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "⟦EMAIL_1⟧ 555-123-4567 4111111111111111"
+     }
+    ],
+    "entities": {
+     "email": 1
+    }
+   }
+  },
+  {
+   "name": "messages: system first, Anthropic blocks, signed thinking reserved",
+   "surface": "messages",
+   "system": [
+    {
+     "type": "text",
+     "text": "Owner: owner@example.com"
+    }
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Mail owner@example.com and guest@example.com"
+      },
+      {
+       "type": "document",
+       "title": "Note for guest@example.com",
+       "context": "ctx 555-123-4567",
+       "source": {
+        "type": "text",
+        "media_type": "text/plain",
+        "data": "Doc mentions 10.0.0.1"
+       }
+      },
+      {
+       "type": "document",
+       "source": {
+        "type": "content",
+        "content": [
+         {
+          "type": "text",
+          "text": "inner x@example.org"
+         }
+        ]
+       }
+      },
+      {
+       "type": "document",
+       "source": {
+        "type": "base64",
+        "media_type": "application/pdf",
+        "data": "a@b.co"
+       }
+      },
+      {
+       "type": "search_result",
+       "title": "t y@example.org",
+       "source": "https://e.com",
+       "content": [
+        {
+         "type": "text",
+         "text": "z@example.org"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "user is ⟦EMAIL_3⟧",
+       "signature": "sig"
+      },
+      {
+       "type": "tool_use",
+       "id": "tu_1",
+       "name": "send",
+       "input": {
+        "to": "guest@example.com",
+        "n": 4791234567,
+        "tags": [
+         "k@example.com",
+         1.5,
+         true
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "tu_1",
+       "content": "sent to new@example.com"
+      },
+      {
+       "type": "tool_result",
+       "tool_use_id": "tu_1",
+       "content": [
+        {
+         "type": "text",
+         "text": "and 192.168.0.1"
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Mail ⟦EMAIL_1⟧ and ⟦EMAIL_2⟧"
+       },
+       {
+        "type": "document",
+        "title": "Note for ⟦EMAIL_2⟧",
+        "context": "ctx ⟦PHONE_1⟧",
+        "source": {
+         "type": "text",
+         "media_type": "text/plain",
+         "data": "Doc mentions ⟦IP_ADDRESS_1⟧"
+        }
+       },
+       {
+        "type": "document",
+        "source": {
+         "type": "content",
+         "content": [
+          {
+           "type": "text",
+           "text": "inner ⟦EMAIL_4⟧"
+          }
+         ]
+        }
+       },
+       {
+        "type": "document",
+        "source": {
+         "type": "base64",
+         "media_type": "application/pdf",
+         "data": "a@b.co"
+        }
+       },
+       {
+        "type": "search_result",
+        "title": "t ⟦EMAIL_6⟧",
+        "source": "https://e.com",
+        "content": [
+         {
+          "type": "text",
+          "text": "⟦EMAIL_5⟧"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "thinking",
+        "thinking": "user is ⟦EMAIL_3⟧",
+        "signature": "sig"
+       },
+       {
+        "type": "tool_use",
+        "id": "tu_1",
+        "name": "send",
+        "input": {
+         "to": "⟦EMAIL_2⟧",
+         "n": "⟦PHONE_2⟧",
+         "tags": [
+          "⟦EMAIL_7⟧",
+          1.5,
+          true
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "tu_1",
+        "content": "sent to ⟦EMAIL_8⟧"
+       },
+       {
+        "type": "tool_result",
+        "tool_use_id": "tu_1",
+        "content": [
+         {
+          "type": "text",
+          "text": "and ⟦IP_ADDRESS_2⟧"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "system": [
+     {
+      "type": "text",
+      "text": "Owner: ⟦EMAIL_1⟧"
+     }
+    ],
+    "entities": {
+     "email": 7,
+     "phone": 2,
+     "ip_address": 2
+    }
+   }
+  },
+  {
+   "name": "messages: string system",
+   "surface": "messages",
+   "system": "System has sys@example.com",
+   "messages": [
+    {
+     "role": "user",
+     "content": "User has sys@example.com and usr@example.com"
+    }
+   ],
+   "expected": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "User has ⟦EMAIL_1⟧ and ⟦EMAIL_2⟧"
+     }
+    ],
+    "system": "System has ⟦EMAIL_1⟧",
+    "entities": {
+     "email": 2
+    }
+   }
+  }
+ ],
+ "restore": [
+  {
+   "name": "plain",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "text": "Write to ⟦EMAIL_1⟧ and ⟦ email_1 ⟧ and ⟦Phone_001⟧; card ⟦CREDIT_CARD_1⟧",
+   "json_escape": false,
+   "expected": "Write to kari@example.no and kari@example.no and +47 912 34 567; card 4111 1111 1111 1111"
+  },
+  {
+   "name": "unknown and look-alikes",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "text": "⟦EMAIL_9⟧ [EMAIL_1] ⟦EMAIL_1 ⟦EMAIL⟧ ⟦IBAN_1⟧",
+   "json_escape": false,
+   "expected": "⟦EMAIL_9⟧ [EMAIL_1] ⟦EMAIL_1 ⟦EMAIL⟧ GB82 WEST 1234 5698 7654 32"
+  },
+  {
+   "name": "json escape",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "text": "{\"to\": \"\\u27e6EMAIL_1\\u27E7\", \"c\": \"⟦NATIONAL_ID_1⟧\"}",
+   "json_escape": true,
+   "expected": "{\"to\": \"kari@example.no\", \"c\": \"19121212-1212\"}"
+  },
+  {
+   "name": "no brackets",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "text": "nothing here",
+   "json_escape": false,
+   "expected": "nothing here"
+  }
+ ],
+ "stream": [
+  {
+   "name": "split inside placeholders",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "json_escape": false,
+   "pieces": [
+    "Hi ",
+    "⟦",
+    "EMA",
+    "IL_",
+    "1",
+    "⟧",
+    " and ",
+    "⟦PHONE_1",
+    "⟧ end ",
+    "⟦x"
+   ],
+   "outputs": [
+    "Hi ",
+    "",
+    "",
+    "",
+    "",
+    "kari@example.no",
+    " and ",
+    "",
+    "+47 912 34 567 end ",
+    ""
+   ],
+   "flush": "⟦x"
+  },
+  {
+   "name": "text that cannot be a placeholder is not held",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "json_escape": false,
+   "pieces": [
+    "a ⟦not a placeholder at all because this is long",
+    " ok"
+   ],
+   "outputs": [
+    "a ⟦not a placeholder at all because this is long",
+    " ok"
+   ],
+   "flush": ""
+  },
+  {
+   "name": "json escapes split",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "json_escape": true,
+   "pieces": [
+    "{\"to\": \"\\",
+    "u27",
+    "e6EMAIL_1\\u2",
+    "7e7\"}"
+   ],
+   "outputs": [
+    "{\"to\": \"",
+    "",
+    "",
+    "kari@example.no\"}"
+   ],
+   "flush": ""
+  },
+  {
+   "name": "character by character",
+   "mapping_from": "chat: every category, repeated values, multi-part content",
+   "json_escape": false,
+   "pieces": [
+    "x",
+    " ",
+    "⟦",
+    " ",
+    "E",
+    "m",
+    "a",
+    "i",
+    "l",
+    "_",
+    "1",
+    " ",
+    "⟧",
+    "y",
+    "⟦",
+    "S",
+    "S",
+    "N",
+    "_",
+    "1",
+    "⟧"
+   ],
+   "outputs": [
+    "x",
+    " ",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "kari@example.no",
+    "y",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "123-45-6789"
+   ],
+   "flush": ""
+  }
+ ],
+ "dataset": {
+  "se-email-001": "Hej! Du når mig på ⟦EMAIL_1⟧.",
+  "se-email-002": "Skicka kvittot till ⟦EMAIL_1⟧ tack.",
+  "se-email-003": "Ny kontakt: Lars Andersson, e-post ⟦EMAIL_1⟧",
+  "se-email-004": "Hej! Du når mig på ⟦EMAIL_1⟧.",
+  "se-email-005": "Skicka kvittot till ⟦EMAIL_1⟧ tack.",
+  "se-email-006": "Ny kontakt: Maria Andersson, e-post ⟦EMAIL_1⟧",
+  "se-phone-001": "Ring mig på ⟦PHONE_1⟧ efter lunch.",
+  "se-phone-002": "Mitt mobilnummer är ⟦PHONE_1⟧.",
+  "se-phone-003": "Lars Lindqvist nås på tel. ⟦PHONE_1⟧",
+  "se-phone-004": "Ring mig på ⟦PHONE_1⟧ efter lunch.",
+  "se-phone-005": "Mitt mobilnummer är ⟦PHONE_1⟧.",
+  "se-phone-006": "Johan Nyström nås på tel. ⟦PHONE_1⟧",
+  "se-phone-007": "Ring mig på ⟦PHONE_1⟧ efter lunch.",
+  "se-phone-008": "Mitt mobilnummer är ⟦PHONE_1⟧.",
+  "se-phone-009": "Maria Berg nås på tel. ⟦PHONE_1⟧",
+  "se-iban-001": "Betala till mitt IBAN ⟦IBAN_1⟧.",
+  "se-iban-002": "Kontonummer (IBAN): ⟦IBAN_1⟧",
+  "se-iban-003": "Pengarna ska sättas in på ⟦IBAN_1⟧.",
+  "se-iban-004": "Betala till mitt IBAN ⟦IBAN_1⟧.",
+  "se-iban-005": "Kontonummer (IBAN): ⟦IBAN_1⟧",
+  "se-iban-006": "Pengarna ska sättas in på ⟦IBAN_1⟧.",
+  "se-card-001": "Kortnummer ⟦CREDIT_CARD_1⟧, giltigt till 08/29.",
+  "se-card-002": "Debitera kortet ⟦CREDIT_CARD_1⟧.",
+  "se-card-003": "Kortnummer ⟦CREDIT_CARD_1⟧, giltigt till 08/29.",
+  "se-card-004": "Debitera kortet ⟦CREDIT_CARD_1⟧.",
+  "se-ip-001": "Inloggningen kom från ⟦IP_ADDRESS_1⟧.",
+  "se-ip-002": "Servern svarar inte på ⟦IP_ADDRESS_1⟧.",
+  "se-ip-003": "Inloggningen kom från ⟦IP_ADDRESS_1⟧.",
+  "se-nid-001": "Mitt personnummer är ⟦NATIONAL_ID_1⟧.",
+  "se-nid-002": "Personnr: ⟦NATIONAL_ID_1⟧",
+  "se-nid-003": "Patienten Anna Berg (⟦NATIONAL_ID_1⟧) är inskriven.",
+  "se-nid-004": "Mitt personnummer är ⟦NATIONAL_ID_1⟧.",
+  "se-nid-005": "Personnr: ⟦NATIONAL_ID_1⟧",
+  "se-nid-006": "Patienten Oskar Lindqvist (⟦NATIONAL_ID_1⟧) är inskriven.",
+  "se-nid-007": "Mitt personnummer är ⟦NATIONAL_ID_1⟧.",
+  "se-nid-008": "Personnr: ⟦NATIONAL_ID_1⟧",
+  "se-nid-009": "Patienten Maria Berg (⟦NATIONAL_ID_1⟧) är inskriven.",
+  "se-nid-010": "Mitt personnummer är ⟦NATIONAL_ID_1⟧.",
+  "se-nid-011": "Personnr: ⟦NATIONAL_ID_1⟧",
+  "se-nid-012": "Patienten Karin Nyström (⟦NATIONAL_ID_1⟧) är inskriven.",
+  "se-mixed-001": "Skicka kvittot till ⟦EMAIL_1⟧ tack. Mitt mobilnummer är ⟦PHONE_1⟧. Personnr: ⟦NATIONAL_ID_1⟧ Kontonummer (IBAN): ⟦IBAN_1⟧",
+  "se-mixed-002": "Skicka kvittot till ⟦EMAIL_1⟧ tack. Mitt mobilnummer är ⟦PHONE_1⟧. Personnr: ⟦NATIONAL_ID_1⟧",
+  "se-mixed-003": "Skicka kvittot till ⟦EMAIL_1⟧ tack. Mitt mobilnummer är ⟦PHONE_1⟧. Personnr: ⟦NATIONAL_ID_1⟧",
+  "se-lookalike-003": "Ordernummer ⟦PHONE_1⟧",
+  "se-lookalike-005": "Faktura nr ⟦PHONE_1⟧",
+  "se-lookalike-006": "Faktura nr ⟦NATIONAL_ID_1⟧",
+  "se-lookalike-007": "Kundnummer ⟦PHONE_1⟧",
+  "se-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "se-lookalike-013": "Org.nr ⟦PHONE_1⟧",
+  "se-lookalike-014": "Org.nr SE⟦PHONE_1⟧",
+  "se-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "se-lookalike-016": "Build ⟦PHONE_1⟧",
+  "se-lookalike-017": "ref 4b1e4657-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "no-email-001": "Send svaret til ⟦EMAIL_1⟧.",
+  "no-email-002": "E-posten min er ⟦EMAIL_1⟧.",
+  "no-email-003": "Kontakt Henrik Johansen på ⟦EMAIL_1⟧",
+  "no-email-004": "Send svaret til ⟦EMAIL_1⟧.",
+  "no-email-005": "E-posten min er ⟦EMAIL_1⟧.",
+  "no-email-006": "Kontakt Sindre Hansen på ⟦EMAIL_1⟧",
+  "no-phone-002": "Mobil: ⟦PHONE_1⟧",
+  "no-phone-003": "Henrik Solberg har telefon +⟦PHONE_1⟧",
+  "no-phone-008": "Mobil: +⟦PHONE_1⟧",
+  "no-phone-009": "Ola Johansen har telefon +⟦PHONE_1⟧",
+  "no-iban-001": "Overfør beløpet til IBAN ⟦IBAN_1⟧.",
+  "no-iban-002": "Kontoen min: ⟦IBAN_1⟧",
+  "no-iban-003": "Utbetaling til ⟦IBAN_1⟧",
+  "no-iban-004": "Overfør beløpet til IBAN ⟦IBAN_1⟧.",
+  "no-iban-005": "Kontoen min: ⟦IBAN_1⟧",
+  "no-iban-006": "Utbetaling til ⟦IBAN_1⟧",
+  "no-card-001": "Kortnummeret er ⟦CREDIT_CARD_1⟧.",
+  "no-card-002": "Belast ⟦CREDIT_CARD_1⟧ for abonnementet.",
+  "no-card-003": "Kortnummeret er ⟦CREDIT_CARD_1⟧.",
+  "no-card-004": "Belast ⟦CREDIT_CARD_1⟧ for abonnementet.",
+  "no-ip-001": "Forespørselen kom fra ⟦IP_ADDRESS_1⟧.",
+  "no-ip-002": "Blokker adressen ⟦IP_ADDRESS_1⟧.",
+  "no-ip-003": "Forespørselen kom fra ⟦IP_ADDRESS_1⟧.",
+  "no-ip-004": "Blokker adressen ⟦IP_ADDRESS_1⟧.",
+  "no-nid-001": "Fødselsnummeret mitt er ⟦NATIONAL_ID_1⟧.",
+  "no-nid-002": "Fnr. ⟦NATIONAL_ID_1⟧",
+  "no-nid-003": "Ingrid Berntsen, fødselsnummer ⟦NATIONAL_ID_1⟧",
+  "no-nid-004": "Fødselsnummeret mitt er ⟦NATIONAL_ID_1⟧.",
+  "no-nid-005": "Fnr. ⟦NATIONAL_ID_1⟧",
+  "no-nid-006": "Sindre Hansen, fødselsnummer ⟦NATIONAL_ID_1⟧",
+  "no-nid-007": "Fødselsnummeret mitt er ⟦NATIONAL_ID_1⟧.",
+  "no-nid-008": "Fnr. ⟦NATIONAL_ID_1⟧",
+  "no-nid-009": "Kari Haugen, fødselsnummer ⟦NATIONAL_ID_1⟧",
+  "no-nid-010": "Fødselsnummeret mitt er ⟦NATIONAL_ID_1⟧.",
+  "no-nid-011": "Fnr. ⟦NATIONAL_ID_1⟧",
+  "no-nid-012": "Ingrid Berntsen, fødselsnummer ⟦NATIONAL_ID_1⟧",
+  "no-mixed-001": "E-posten min er ⟦EMAIL_1⟧. Mobil: ⟦PHONE_1⟧ Fnr. ⟦NATIONAL_ID_1⟧",
+  "no-mixed-002": "E-posten min er ⟦EMAIL_1⟧. Mobil: +⟦PHONE_1⟧ Fnr. ⟦NATIONAL_ID_1⟧ Kontoen min: ⟦IBAN_1⟧",
+  "no-mixed-003": "E-posten min er ⟦EMAIL_1⟧. Mobil: +⟦PHONE_1⟧ Fnr. ⟦NATIONAL_ID_1⟧",
+  "no-lookalike-003": "Ordrenummer ⟦PHONE_1⟧",
+  "no-lookalike-005": "Fakturanr. ⟦NATIONAL_ID_1⟧",
+  "no-lookalike-006": "Fakturanr. ⟦NATIONAL_ID_1⟧",
+  "no-lookalike-007": "Kundenummer ⟦PHONE_1⟧",
+  "no-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "no-lookalike-013": "Org.nr. ⟦PHONE_1⟧",
+  "no-lookalike-014": "Org.nr. NO⟦PHONE_1⟧",
+  "no-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "no-lookalike-016": "Build ⟦PHONE_1⟧",
+  "no-lookalike-017": "ref 4b1e0274-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "dk-email-001": "Skriv til mig på ⟦EMAIL_1⟧.",
+  "dk-email-002": "Min mail er ⟦EMAIL_1⟧.",
+  "dk-email-003": "Kontaktperson: Mads Jensen (⟦EMAIL_1⟧)",
+  "dk-email-004": "Skriv til mig på ⟦EMAIL_1⟧.",
+  "dk-email-005": "Min mail er ⟦EMAIL_1⟧.",
+  "dk-email-006": "Kontaktperson: Rasmus Pedersen (⟦EMAIL_1⟧)",
+  "dk-phone-001": "Ring på ⟦PHONE_1⟧ i dag.",
+  "dk-phone-003": "Ida Nielsen kan træffes på ⟦PHONE_1⟧",
+  "dk-phone-005": "Telefon: ⟦PHONE_1⟧",
+  "dk-phone-006": "Freja Kristensen kan træffes på ⟦PHONE_1⟧",
+  "dk-phone-007": "Ring på ⟦PHONE_1⟧ i dag.",
+  "dk-phone-008": "Telefon: +⟦PHONE_1⟧",
+  "dk-iban-001": "Indbetal til IBAN ⟦IBAN_1⟧.",
+  "dk-iban-002": "Kontonummer: ⟦IBAN_1⟧",
+  "dk-iban-003": "Refusion til ⟦IBAN_1⟧",
+  "dk-iban-004": "Indbetal til IBAN ⟦IBAN_1⟧.",
+  "dk-iban-005": "Kontonummer: ⟦IBAN_1⟧",
+  "dk-iban-006": "Refusion til ⟦IBAN_1⟧",
+  "dk-card-001": "Kortnummer ⟦CREDIT_CARD_1⟧.",
+  "dk-card-002": "Træk beløbet på kortet ⟦CREDIT_CARD_1⟧.",
+  "dk-card-003": "Kortnummer ⟦CREDIT_CARD_1⟧.",
+  "dk-card-004": "Træk beløbet på kortet ⟦CREDIT_CARD_1⟧.",
+  "dk-ip-001": "Login fra ⟦IP_ADDRESS_1⟧ blev afvist.",
+  "dk-ip-002": "Klienten bruger ⟦IP_ADDRESS_1⟧.",
+  "dk-ip-003": "Login fra ⟦IP_ADDRESS_1⟧ blev afvist.",
+  "dk-nid-001": "Mit CPR-nummer er ⟦NATIONAL_ID_1⟧.",
+  "dk-nid-002": "CPR: ⟦NATIONAL_ID_1⟧",
+  "dk-nid-003": "Mads Jensen, cpr.nr. ⟦NATIONAL_ID_1⟧",
+  "dk-nid-004": "Mit CPR-nummer er ⟦NATIONAL_ID_1⟧.",
+  "dk-nid-005": "CPR: ⟦NATIONAL_ID_1⟧",
+  "dk-nid-006": "Rasmus Nielsen, cpr.nr. ⟦NATIONAL_ID_1⟧",
+  "dk-nid-007": "Mit CPR-nummer er ⟦NATIONAL_ID_1⟧.",
+  "dk-nid-008": "CPR: ⟦NATIONAL_ID_1⟧",
+  "dk-nid-009": "Freja Nielsen, cpr.nr. ⟦NATIONAL_ID_1⟧",
+  "dk-nid-010": "Mit CPR-nummer er ⟦NATIONAL_ID_1⟧.",
+  "dk-nid-011": "CPR: ⟦NATIONAL_ID_1⟧",
+  "dk-nid-012": "Søren Nielsen, cpr.nr. ⟦NATIONAL_ID_1⟧",
+  "dk-mixed-001": "Min mail er ⟦EMAIL_1⟧. Telefon: +⟦PHONE_1⟧ CPR: ⟦NATIONAL_ID_1⟧ Kontonummer: ⟦IBAN_1⟧",
+  "dk-mixed-002": "Min mail er ⟦EMAIL_1⟧. Telefon: ⟦PHONE_1⟧ CPR: ⟦NATIONAL_ID_1⟧",
+  "dk-mixed-003": "Min mail er ⟦EMAIL_1⟧. Telefon: ⟦PHONE_1⟧ CPR: ⟦NATIONAL_ID_1⟧",
+  "dk-lookalike-005": "Fakturanr. ⟦PHONE_1⟧",
+  "dk-lookalike-006": "Fakturanr. ⟦NATIONAL_ID_1⟧",
+  "dk-lookalike-007": "Kundenummer ⟦PHONE_1⟧",
+  "dk-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "dk-lookalike-013": "CVR ⟦PHONE_1⟧",
+  "dk-lookalike-014": "CVR DK⟦PHONE_1⟧",
+  "dk-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "dk-lookalike-016": "Build ⟦CREDIT_CARD_1⟧",
+  "dk-lookalike-017": "ref 4b1e4484-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "fi-email-001": "Lähetä vastaus osoitteeseen ⟦EMAIL_1⟧.",
+  "fi-email-002": "Sähköpostini on ⟦EMAIL_1⟧.",
+  "fi-email-003": "Yhteyshenkilö Sanna Laine, ⟦EMAIL_1⟧",
+  "fi-email-004": "Lähetä vastaus osoitteeseen ⟦EMAIL_1⟧.",
+  "fi-email-005": "Sähköpostini on ⟦EMAIL_1⟧.",
+  "fi-email-006": "Yhteyshenkilö Ville Nieminen, ⟦EMAIL_1⟧",
+  "fi-phone-001": "Soita minulle numeroon ⟦PHONE_1⟧.",
+  "fi-phone-002": "Puhelin: ⟦PHONE_1⟧",
+  "fi-phone-003": "Mikko Nieminen vastaa numerossa ⟦PHONE_1⟧",
+  "fi-phone-004": "Soita minulle numeroon ⟦PHONE_1⟧.",
+  "fi-phone-005": "Puhelin: ⟦PHONE_1⟧",
+  "fi-phone-006": "Aino Mäkinen vastaa numerossa ⟦PHONE_1⟧",
+  "fi-phone-007": "Soita minulle numeroon ⟦PHONE_1⟧.",
+  "fi-phone-008": "Puhelin: ⟦PHONE_1⟧",
+  "fi-phone-009": "Ville Korhonen vastaa numerossa ⟦PHONE_1⟧",
+  "fi-iban-001": "Maksa tilille IBAN ⟦IBAN_1⟧.",
+  "fi-iban-002": "Tilinumero: ⟦IBAN_1⟧",
+  "fi-iban-003": "Palautus tilille ⟦IBAN_1⟧",
+  "fi-iban-004": "Maksa tilille IBAN ⟦IBAN_1⟧.",
+  "fi-iban-005": "Tilinumero: ⟦IBAN_1⟧",
+  "fi-iban-006": "Palautus tilille ⟦IBAN_1⟧",
+  "fi-card-001": "Kortin numero ⟦CREDIT_CARD_1⟧.",
+  "fi-card-002": "Veloita kortilta ⟦CREDIT_CARD_1⟧.",
+  "fi-card-003": "Kortin numero ⟦CREDIT_CARD_1⟧.",
+  "fi-card-004": "Veloita kortilta ⟦CREDIT_CARD_1⟧.",
+  "fi-ip-002": "Estä osoite ⟦IP_ADDRESS_1⟧.",
+  "fi-ip-003": "Kirjautuminen osoitteesta ⟦IP_ADDRESS_1⟧.",
+  "fi-ip-004": "Estä osoite ⟦IP_ADDRESS_1⟧.",
+  "fi-nid-001": "Henkilötunnukseni on ⟦NATIONAL_ID_1⟧.",
+  "fi-nid-002": "Hetu: ⟦NATIONAL_ID_1⟧",
+  "fi-nid-003": "Juha Nieminen, henkilötunnus ⟦NATIONAL_ID_1⟧",
+  "fi-nid-004": "Henkilötunnukseni on ⟦NATIONAL_ID_1⟧.",
+  "fi-nid-005": "Hetu: ⟦NATIONAL_ID_1⟧",
+  "fi-nid-006": "Juha Laine, henkilötunnus ⟦NATIONAL_ID_1⟧",
+  "fi-nid-007": "Henkilötunnukseni on ⟦NATIONAL_ID_1⟧.",
+  "fi-nid-008": "Hetu: ⟦NATIONAL_ID_1⟧",
+  "fi-nid-009": "Mikko Mäkinen, henkilötunnus ⟦NATIONAL_ID_1⟧",
+  "fi-nid-010": "Henkilötunnukseni on ⟦NATIONAL_ID_1⟧.",
+  "fi-nid-011": "Hetu: ⟦NATIONAL_ID_1⟧",
+  "fi-nid-012": "Mikko Korhonen, henkilötunnus ⟦NATIONAL_ID_1⟧",
+  "fi-mixed-001": "Sähköpostini on ⟦EMAIL_1⟧. Puhelin: ⟦PHONE_1⟧ Hetu: ⟦NATIONAL_ID_1⟧",
+  "fi-mixed-002": "Sähköpostini on ⟦EMAIL_1⟧. Puhelin: ⟦PHONE_1⟧ Hetu: ⟦NATIONAL_ID_1⟧",
+  "fi-mixed-003": "Sähköpostini on ⟦EMAIL_1⟧. Puhelin: ⟦PHONE_1⟧ Hetu: ⟦NATIONAL_ID_1⟧",
+  "fi-lookalike-003": "Tilausnumero ⟦PHONE_1⟧",
+  "fi-lookalike-005": "Laskun numero ⟦PHONE_1⟧",
+  "fi-lookalike-006": "Laskun numero ⟦NATIONAL_ID_1⟧",
+  "fi-lookalike-007": "Asiakasnumero ⟦PHONE_1⟧",
+  "fi-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "fi-lookalike-013": "Y-tunnus ⟦PHONE_1⟧",
+  "fi-lookalike-014": "Y-tunnus FI⟦PHONE_1⟧",
+  "fi-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "fi-lookalike-016": "Build ⟦PHONE_1⟧",
+  "fi-lookalike-017": "ref 4b1e8972-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "de-email-001": "Bitte schreiben Sie an ⟦EMAIL_1⟧.",
+  "de-email-002": "Meine E-Mail-Adresse: ⟦EMAIL_1⟧",
+  "de-email-003": "Ansprechpartner: Anna Fischer, ⟦EMAIL_1⟧",
+  "de-email-004": "Bitte schreiben Sie an ⟦EMAIL_1⟧.",
+  "de-email-005": "Meine E-Mail-Adresse: ⟦EMAIL_1⟧",
+  "de-email-006": "Ansprechpartner: Lea Schneider, ⟦EMAIL_1⟧",
+  "de-phone-001": "Rufen Sie mich unter ⟦PHONE_1⟧ an.",
+  "de-phone-002": "Tel.: ⟦PHONE_1⟧",
+  "de-phone-003": "Lukas Müller ist unter ⟦PHONE_1⟧ erreichbar",
+  "de-phone-004": "Rufen Sie mich unter ⟦PHONE_1⟧ an.",
+  "de-phone-005": "Tel.: ⟦PHONE_1⟧",
+  "de-phone-006": "Jonas Schmidt ist unter ⟦PHONE_1⟧ erreichbar",
+  "de-phone-007": "Rufen Sie mich unter ⟦PHONE_1⟧ an.",
+  "de-phone-008": "Tel.: ⟦PHONE_1⟧",
+  "de-phone-009": "Lukas Fischer ist unter ⟦PHONE_1⟧ erreichbar",
+  "de-iban-001": "Bitte überweisen Sie auf IBAN ⟦IBAN_1⟧.",
+  "de-iban-002": "Bankverbindung: ⟦IBAN_1⟧",
+  "de-iban-003": "Erstattung auf das Konto ⟦IBAN_1⟧",
+  "de-iban-004": "Bitte überweisen Sie auf IBAN ⟦IBAN_1⟧.",
+  "de-iban-005": "Bankverbindung: ⟦IBAN_1⟧",
+  "de-iban-006": "Erstattung auf das Konto ⟦IBAN_1⟧",
+  "de-card-001": "Kreditkartennummer ⟦CREDIT_CARD_1⟧.",
+  "de-card-002": "Bitte die Karte ⟦CREDIT_CARD_1⟧ belasten.",
+  "de-card-003": "Kreditkartennummer ⟦CREDIT_CARD_1⟧.",
+  "de-card-004": "Bitte die Karte ⟦CREDIT_CARD_1⟧ belasten.",
+  "de-ip-001": "Zugriff von ⟦IP_ADDRESS_1⟧ wurde blockiert.",
+  "de-ip-002": "Der Server unter ⟦IP_ADDRESS_1⟧ ist offline.",
+  "de-ip-003": "Zugriff von ⟦IP_ADDRESS_1⟧ wurde blockiert.",
+  "de-ip-004": "Der Server unter ⟦IP_ADDRESS_1⟧ ist offline.",
+  "de-mixed-001": "Meine E-Mail-Adresse: ⟦EMAIL_1⟧ Tel.: ⟦PHONE_1⟧ Bankverbindung: ⟦IBAN_1⟧",
+  "de-mixed-002": "Meine E-Mail-Adresse: ⟦EMAIL_1⟧ Tel.: ⟦PHONE_1⟧ Bankverbindung: ⟦IBAN_1⟧",
+  "de-mixed-003": "Meine E-Mail-Adresse: ⟦EMAIL_1⟧ Tel.: ⟦PHONE_1⟧ Bankverbindung: ⟦IBAN_1⟧",
+  "de-lookalike-003": "Bestellnummer ⟦PHONE_1⟧",
+  "de-lookalike-005": "Rechnungsnr. ⟦NATIONAL_ID_1⟧",
+  "de-lookalike-006": "Rechnungsnr. ⟦NATIONAL_ID_1⟧",
+  "de-lookalike-007": "Kundennummer ⟦PHONE_1⟧",
+  "de-lookalike-008": "Kundennummer ⟦PHONE_1⟧",
+  "de-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "de-lookalike-013": "USt-IdNr. ⟦PHONE_1⟧",
+  "de-lookalike-014": "USt-IdNr. DE⟦PHONE_1⟧",
+  "de-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "de-lookalike-016": "Build ⟦PHONE_1⟧",
+  "de-lookalike-017": "ref 4b1e0314-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "fr-email-001": "Écrivez-moi à ⟦EMAIL_1⟧.",
+  "fr-email-002": "Mon adresse e-mail : ⟦EMAIL_1⟧",
+  "fr-email-003": "Contact : Camille Moreau, ⟦EMAIL_1⟧",
+  "fr-email-004": "Écrivez-moi à ⟦EMAIL_1⟧.",
+  "fr-email-005": "Mon adresse e-mail : ⟦EMAIL_1⟧",
+  "fr-email-006": "Contact : Camille Moreau, ⟦EMAIL_1⟧",
+  "fr-phone-001": "Appelez-moi au ⟦PHONE_1⟧.",
+  "fr-phone-002": "Tél. : ⟦PHONE_1⟧",
+  "fr-phone-003": "Manon Bernard est joignable au ⟦PHONE_1⟧",
+  "fr-phone-004": "Appelez-moi au ⟦PHONE_1⟧.",
+  "fr-phone-005": "Tél. : ⟦PHONE_1⟧",
+  "fr-phone-006": "Lucas Dubois est joignable au ⟦PHONE_1⟧",
+  "fr-phone-007": "Appelez-moi au ⟦IP_ADDRESS_1⟧.17.",
+  "fr-phone-008": "Tél. : ⟦IP_ADDRESS_1⟧.52",
+  "fr-phone-009": "Lucas Martin est joignable au ⟦PHONE_1⟧",
+  "fr-iban-001": "Virement sur l'IBAN ⟦IBAN_1⟧.",
+  "fr-iban-002": "RIB : ⟦IBAN_1⟧",
+  "fr-iban-003": "Remboursement sur le compte ⟦IBAN_1⟧",
+  "fr-iban-004": "Virement sur l'IBAN ⟦IBAN_1⟧.",
+  "fr-iban-005": "RIB : ⟦IBAN_1⟧",
+  "fr-iban-006": "Remboursement sur le compte ⟦IBAN_1⟧",
+  "fr-card-001": "Numéro de carte ⟦CREDIT_CARD_1⟧.",
+  "fr-card-002": "Débitez la carte ⟦CREDIT_CARD_1⟧.",
+  "fr-card-003": "Numéro de carte ⟦CREDIT_CARD_1⟧.",
+  "fr-card-004": "Débitez la carte ⟦CREDIT_CARD_1⟧.",
+  "fr-ip-001": "Connexion depuis ⟦IP_ADDRESS_1⟧.",
+  "fr-ip-002": "Le serveur ⟦IP_ADDRESS_1⟧ ne répond plus.",
+  "fr-ip-003": "Connexion depuis ⟦IP_ADDRESS_1⟧.",
+  "fr-ip-004": "Le serveur ⟦IP_ADDRESS_1⟧ ne répond plus.",
+  "fr-nid-001": "Mon numéro de sécurité sociale : ⟦CREDIT_CARD_1⟧ 76",
+  "fr-mixed-001": "Mon adresse e-mail : ⟦EMAIL_1⟧ Tél. : ⟦IP_ADDRESS_1⟧.03 RIB : ⟦IBAN_1⟧",
+  "fr-mixed-002": "Mon adresse e-mail : ⟦EMAIL_1⟧ Tél. : ⟦PHONE_1⟧ RIB : ⟦IBAN_1⟧",
+  "fr-mixed-003": "Mon adresse e-mail : ⟦EMAIL_1⟧ Tél. : ⟦PHONE_1⟧ RIB : ⟦IBAN_1⟧",
+  "fr-lookalike-005": "Facture n° ⟦PHONE_1⟧",
+  "fr-lookalike-006": "Facture n° ⟦NATIONAL_ID_1⟧",
+  "fr-lookalike-007": "Client n° ⟦PHONE_1⟧",
+  "fr-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "fr-lookalike-013": "SIREN ⟦PHONE_1⟧",
+  "fr-lookalike-014": "SIREN FR⟦PHONE_1⟧",
+  "fr-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "fr-lookalike-016": "Build ⟦PHONE_1⟧",
+  "fr-lookalike-017": "ref 4b1e2120-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "nl-email-001": "Mail me op ⟦EMAIL_1⟧.",
+  "nl-email-002": "Mijn e-mailadres is ⟦EMAIL_1⟧.",
+  "nl-email-003": "Contactpersoon: Emma de Jong, ⟦EMAIL_1⟧",
+  "nl-email-004": "Mail me op ⟦EMAIL_1⟧.",
+  "nl-email-005": "Mijn e-mailadres is ⟦EMAIL_1⟧.",
+  "nl-email-006": "Contactpersoon: Daan Jansen, ⟦EMAIL_1⟧",
+  "nl-phone-001": "Bel me op ⟦PHONE_1⟧.",
+  "nl-phone-002": "Telefoon: ⟦PHONE_1⟧",
+  "nl-phone-003": "Julia de Vries is bereikbaar op ⟦PHONE_1⟧",
+  "nl-phone-004": "Bel me op ⟦PHONE_1⟧.",
+  "nl-phone-005": "Telefoon: ⟦PHONE_1⟧",
+  "nl-phone-006": "Sem Bakker is bereikbaar op ⟦PHONE_1⟧",
+  "nl-phone-007": "Bel me op ⟦PHONE_1⟧.",
+  "nl-phone-008": "Telefoon: ⟦PHONE_1⟧",
+  "nl-phone-009": "Daan van Dijk is bereikbaar op ⟦PHONE_1⟧",
+  "nl-iban-001": "Maak het bedrag over naar IBAN ⟦IBAN_1⟧.",
+  "nl-iban-002": "Rekeningnummer: ⟦IBAN_1⟧",
+  "nl-iban-003": "Terugbetaling naar ⟦IBAN_1⟧",
+  "nl-iban-004": "Maak het bedrag over naar IBAN ⟦IBAN_1⟧.",
+  "nl-iban-005": "Rekeningnummer: ⟦IBAN_1⟧",
+  "nl-iban-006": "Terugbetaling naar ⟦IBAN_1⟧",
+  "nl-card-001": "Creditcardnummer ⟦CREDIT_CARD_1⟧.",
+  "nl-card-002": "Schrijf af van kaart ⟦CREDIT_CARD_1⟧.",
+  "nl-card-003": "Creditcardnummer ⟦CREDIT_CARD_1⟧.",
+  "nl-card-004": "Schrijf af van kaart ⟦CREDIT_CARD_1⟧.",
+  "nl-ip-002": "Blokkeer ⟦IP_ADDRESS_1⟧ in de firewall.",
+  "nl-ip-003": "Inlog vanaf ⟦IP_ADDRESS_1⟧.",
+  "nl-ip-004": "Blokkeer ⟦IP_ADDRESS_1⟧ in de firewall.",
+  "nl-mixed-001": "Mijn e-mailadres is ⟦EMAIL_1⟧. Telefoon: ⟦PHONE_1⟧",
+  "nl-mixed-002": "Mijn e-mailadres is ⟦EMAIL_1⟧. Telefoon: ⟦PHONE_1⟧ Rekeningnummer: ⟦IBAN_1⟧",
+  "nl-mixed-003": "Mijn e-mailadres is ⟦EMAIL_1⟧. Telefoon: ⟦PHONE_1⟧ Rekeningnummer: ⟦IBAN_1⟧",
+  "nl-lookalike-003": "Bestelnummer ⟦PHONE_1⟧",
+  "nl-lookalike-005": "Factuurnr. ⟦PHONE_1⟧",
+  "nl-lookalike-006": "Factuurnr. ⟦NATIONAL_ID_1⟧",
+  "nl-lookalike-007": "Klantnummer ⟦PHONE_1⟧",
+  "nl-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "nl-lookalike-013": "KvK ⟦PHONE_1⟧",
+  "nl-lookalike-014": "KvK NL⟦PHONE_1⟧",
+  "nl-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "nl-lookalike-016": "Build ⟦PHONE_1⟧",
+  "nl-lookalike-017": "ref 4b1e0719-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "es-email-001": "Escríbeme a ⟦EMAIL_1⟧.",
+  "es-email-002": "Mi correo es ⟦EMAIL_1⟧.",
+  "es-email-003": "Contacto: Carmen Martínez, ⟦EMAIL_1⟧",
+  "es-email-004": "Escríbeme a ⟦EMAIL_1⟧.",
+  "es-email-005": "Mi correo es ⟦EMAIL_1⟧.",
+  "es-email-006": "Contacto: Javier Fernández, ⟦EMAIL_1⟧",
+  "es-phone-001": "Llámame al ⟦PHONE_1⟧.",
+  "es-phone-004": "Llámame al ⟦PHONE_1⟧.",
+  "es-phone-006": "Pablo Fernández está en el ⟦PHONE_1⟧",
+  "es-phone-007": "Llámame al ⟦PHONE_1⟧.",
+  "es-phone-008": "Teléfono: ⟦PHONE_1⟧",
+  "es-iban-001": "Transfiere a la cuenta IBAN ⟦IBAN_1⟧.",
+  "es-iban-002": "Cuenta: ⟦IBAN_1⟧",
+  "es-iban-003": "Reembolso a ⟦IBAN_1⟧",
+  "es-iban-004": "Transfiere a la cuenta IBAN ⟦IBAN_1⟧.",
+  "es-iban-005": "Cuenta: ⟦IBAN_1⟧",
+  "es-iban-006": "Reembolso a ⟦IBAN_1⟧",
+  "es-card-001": "Número de tarjeta ⟦CREDIT_CARD_1⟧.",
+  "es-card-002": "Cargar en la tarjeta ⟦CREDIT_CARD_1⟧.",
+  "es-card-003": "Número de tarjeta ⟦CREDIT_CARD_1⟧.",
+  "es-card-004": "Cargar en la tarjeta ⟦CREDIT_CARD_1⟧.",
+  "es-ip-001": "Acceso desde ⟦IP_ADDRESS_1⟧.",
+  "es-ip-002": "Bloquear la IP ⟦IP_ADDRESS_1⟧.",
+  "es-ip-003": "Acceso desde ⟦IP_ADDRESS_1⟧.",
+  "es-ip-004": "Bloquear la IP ⟦IP_ADDRESS_1⟧.",
+  "es-mixed-001": "Mi correo es ⟦EMAIL_1⟧. Teléfono: ⟦PHONE_1⟧",
+  "es-mixed-002": "Mi correo es ⟦EMAIL_1⟧. Teléfono: 615 82 40 72",
+  "es-mixed-003": "Mi correo es ⟦EMAIL_1⟧. Teléfono: ⟦PHONE_1⟧ Cuenta: ⟦IBAN_1⟧",
+  "es-lookalike-005": "Factura n.º ⟦PHONE_1⟧",
+  "es-lookalike-006": "Factura n.º ⟦NATIONAL_ID_1⟧",
+  "es-lookalike-007": "Cliente n.º ⟦PHONE_1⟧",
+  "es-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "es-lookalike-013": "CIF ⟦PHONE_1⟧",
+  "es-lookalike-014": "CIF ES⟦PHONE_1⟧",
+  "es-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "es-lookalike-016": "Build ⟦PHONE_1⟧",
+  "es-lookalike-017": "ref 4b1e7145-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "it-email-001": "Scrivimi a ⟦EMAIL_1⟧.",
+  "it-email-002": "La mia email è ⟦EMAIL_1⟧.",
+  "it-email-003": "Referente: Giulia Colombo, ⟦EMAIL_1⟧",
+  "it-email-004": "Scrivimi a ⟦EMAIL_1⟧.",
+  "it-email-005": "La mia email è ⟦EMAIL_1⟧.",
+  "it-email-006": "Referente: Marco Rossi, ⟦EMAIL_1⟧",
+  "it-phone-001": "Chiamami al ⟦PHONE_1⟧.",
+  "it-phone-002": "Tel.: ⟦PHONE_1⟧",
+  "it-phone-003": "Luca Bianchi risponde al ⟦PHONE_1⟧",
+  "it-phone-004": "Chiamami al ⟦PHONE_1⟧.",
+  "it-phone-005": "Tel.: ⟦PHONE_1⟧",
+  "it-phone-006": "Marco Colombo risponde al ⟦PHONE_1⟧",
+  "it-phone-007": "Chiamami al ⟦PHONE_1⟧.",
+  "it-phone-008": "Tel.: ⟦PHONE_1⟧",
+  "it-phone-009": "Francesca Rossi risponde al ⟦PHONE_1⟧",
+  "it-iban-001": "Bonifico sull'IBAN ⟦IBAN_1⟧.",
+  "it-iban-002": "Conto corrente: ⟦IBAN_1⟧",
+  "it-iban-003": "Rimborso su ⟦IBAN_1⟧",
+  "it-iban-004": "Bonifico sull'IBAN ⟦IBAN_1⟧.",
+  "it-iban-005": "Conto corrente: ⟦IBAN_1⟧",
+  "it-iban-006": "Rimborso su ⟦IBAN_1⟧",
+  "it-card-001": "Numero della carta ⟦CREDIT_CARD_1⟧.",
+  "it-card-002": "Addebita sulla carta ⟦CREDIT_CARD_1⟧.",
+  "it-card-003": "Numero della carta ⟦CREDIT_CARD_1⟧.",
+  "it-card-004": "Addebita sulla carta ⟦CREDIT_CARD_1⟧.",
+  "it-ip-001": "Accesso da ⟦IP_ADDRESS_1⟧.",
+  "it-ip-002": "Blocca l'indirizzo ⟦IP_ADDRESS_1⟧.",
+  "it-ip-003": "Accesso da ⟦IP_ADDRESS_1⟧.",
+  "it-ip-004": "Blocca l'indirizzo ⟦IP_ADDRESS_1⟧.",
+  "it-mixed-001": "La mia email è ⟦EMAIL_1⟧. Tel.: ⟦PHONE_1⟧",
+  "it-mixed-002": "La mia email è ⟦EMAIL_1⟧. Tel.: ⟦PHONE_1⟧ Conto corrente: ⟦IBAN_1⟧",
+  "it-mixed-003": "La mia email è ⟦EMAIL_1⟧. Tel.: ⟦PHONE_1⟧ Conto corrente: ⟦IBAN_1⟧",
+  "it-lookalike-005": "Fattura n. ⟦PHONE_1⟧",
+  "it-lookalike-006": "Fattura n. ⟦NATIONAL_ID_1⟧",
+  "it-lookalike-007": "Codice cliente ⟦PHONE_1⟧",
+  "it-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "it-lookalike-013": "P.IVA ⟦PHONE_1⟧",
+  "it-lookalike-014": "P.IVA IT⟦PHONE_1⟧",
+  "it-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "it-lookalike-016": "Build ⟦PHONE_1⟧",
+  "it-lookalike-017": "ref 4b1e4343-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "pl-email-001": "Napisz do mnie na ⟦EMAIL_1⟧.",
+  "pl-email-002": "Mój e-mail to ⟦EMAIL_1⟧.",
+  "pl-email-003": "Kontakt: Jakub Kowalski, ⟦EMAIL_1⟧",
+  "pl-email-004": "Napisz do mnie na ⟦EMAIL_1⟧.",
+  "pl-email-005": "Mój e-mail to ⟦EMAIL_1⟧.",
+  "pl-email-006": "Kontakt: Zofia Wójcik, ⟦EMAIL_1⟧",
+  "pl-phone-007": "Zadzwoń pod ⟦PHONE_1⟧.",
+  "pl-phone-009": "Piotr Wiśniewska, telefon ⟦PHONE_1⟧",
+  "pl-iban-001": "Przelew na IBAN ⟦IBAN_1⟧.",
+  "pl-iban-002": "Numer rachunku: ⟦IBAN_1⟧",
+  "pl-iban-003": "Zwrot na konto ⟦IBAN_1⟧",
+  "pl-iban-004": "Przelew na IBAN ⟦IBAN_1⟧.",
+  "pl-iban-005": "Numer rachunku: ⟦IBAN_1⟧",
+  "pl-iban-006": "Zwrot na konto ⟦IBAN_1⟧",
+  "pl-card-001": "Numer karty ⟦CREDIT_CARD_1⟧.",
+  "pl-card-002": "Obciąż kartę ⟦CREDIT_CARD_1⟧.",
+  "pl-card-003": "Numer karty ⟦CREDIT_CARD_1⟧.",
+  "pl-card-004": "Obciąż kartę ⟦CREDIT_CARD_1⟧.",
+  "pl-ip-001": "Logowanie z ⟦IP_ADDRESS_1⟧.",
+  "pl-ip-002": "Zablokuj adres ⟦IP_ADDRESS_1⟧.",
+  "pl-ip-003": "Logowanie z ⟦IP_ADDRESS_1⟧.",
+  "pl-nid-001": "Mój PESEL to ⟦PHONE_1⟧.",
+  "pl-nid-002": "Mój PESEL to ⟦PHONE_1⟧.",
+  "pl-mixed-001": "Mój e-mail to ⟦EMAIL_1⟧. Tel.: 568-088-490",
+  "pl-mixed-002": "Mój e-mail to ⟦EMAIL_1⟧. Tel.: 538-249-365 Numer rachunku: ⟦IBAN_1⟧",
+  "pl-mixed-003": "Mój e-mail to ⟦EMAIL_1⟧. Tel.: 568-015-982 Numer rachunku: ⟦IBAN_1⟧",
+  "pl-lookalike-005": "Faktura nr ⟦PHONE_1⟧",
+  "pl-lookalike-006": "Faktura nr ⟦NATIONAL_ID_1⟧",
+  "pl-lookalike-007": "Nr klienta ⟦PHONE_1⟧",
+  "pl-lookalike-011": "EAN ⟦CREDIT_CARD_1⟧",
+  "pl-lookalike-013": "REGON ⟦PHONE_1⟧",
+  "pl-lookalike-014": "REGON PL⟦PHONE_1⟧",
+  "pl-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "pl-lookalike-016": "Build ⟦PHONE_1⟧",
+  "pl-lookalike-017": "ref 4b1e6740-9c2a-4f1d-8e7b-⟦PHONE_1⟧",
+  "gb-email-001": "Please reply to ⟦EMAIL_1⟧.",
+  "gb-email-002": "My email is ⟦EMAIL_1⟧.",
+  "gb-email-003": "Contact Isla Jones at ⟦EMAIL_1⟧",
+  "gb-email-004": "Please reply to ⟦EMAIL_1⟧.",
+  "gb-email-005": "My email is ⟦EMAIL_1⟧.",
+  "gb-email-006": "Contact Isla Jones at ⟦EMAIL_1⟧",
+  "gb-phone-001": "Call me on ⟦PHONE_1⟧.",
+  "gb-phone-002": "Mobile: ⟦PHONE_1⟧",
+  "gb-phone-003": "Jack Jones can be reached on ⟦PHONE_1⟧",
+  "gb-phone-004": "Call me on ⟦PHONE_1⟧.",
+  "gb-phone-005": "Mobile: ⟦PHONE_1⟧",
+  "gb-phone-006": "Amelia Brown can be reached on ⟦PHONE_1⟧",
+  "gb-phone-007": "Call me on ⟦PHONE_1⟧.",
+  "gb-phone-008": "Mobile: ⟦PHONE_1⟧",
+  "gb-phone-009": "Isla Taylor can be reached on ⟦PHONE_1⟧",
+  "gb-iban-001": "Please pay into IBAN ⟦IBAN_1⟧.",
+  "gb-iban-002": "Account: ⟦IBAN_1⟧",
+  "gb-iban-003": "Refund to ⟦IBAN_1⟧",
+  "gb-iban-004": "Please pay into IBAN ⟦IBAN_1⟧.",
+  "gb-iban-005": "Account: ⟦IBAN_1⟧",
+  "gb-iban-006": "Refund to ⟦IBAN_1⟧",
+  "gb-card-001": "Card number ⟦CREDIT_CARD_1⟧, expiry 08/29.",
+  "gb-card-002": "Charge the card ⟦CREDIT_CARD_1⟧.",
+  "gb-card-003": "Card number ⟦CREDIT_CARD_1⟧, expiry 08/29.",
+  "gb-card-004": "Charge the card ⟦CREDIT_CARD_1⟧.",
+  "gb-ip-002": "Block ⟦IP_ADDRESS_1⟧ at the firewall.",
+  "gb-ip-003": "Login attempt from ⟦IP_ADDRESS_1⟧.",
+  "gb-ip-004": "Block ⟦IP_ADDRESS_1⟧ at the firewall.",
+  "gb-mixed-001": "My email is ⟦EMAIL_1⟧. Mobile: ⟦PHONE_1⟧",
+  "gb-mixed-002": "My email is ⟦EMAIL_1⟧. Mobile: ⟦PHONE_1⟧",
+  "gb-mixed-003": "My email is ⟦EMAIL_1⟧. Mobile: ⟦PHONE_1⟧",
+  "gb-lookalike-003": "Order no. ⟦PHONE_1⟧",
+  "gb-lookalike-005": "Invoice no. ⟦PHONE_1⟧",
+  "gb-lookalike-006": "Invoice no. ⟦NATIONAL_ID_1⟧",
+  "gb-lookalike-007": "Customer no. ⟦PHONE_1⟧",
+  "gb-lookalike-011": "EAN ⟦PHONE_1⟧",
+  "gb-lookalike-013": "Company no. ⟦PHONE_1⟧",
+  "gb-lookalike-014": "Company no. GB⟦PHONE_1⟧",
+  "gb-lookalike-015": "Firmware ⟦IP_ADDRESS_1⟧",
+  "gb-lookalike-016": "Build ⟦PHONE_1⟧",
+  "gb-lookalike-017": "ref 4b1e6180-9c2a-4f1d-8e7b-⟦PHONE_1⟧"
+ },
+ "restore_stats": {
+  "restored": 7,
+  "unknown": 1
+ }
+}
