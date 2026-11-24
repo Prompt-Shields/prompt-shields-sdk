@@ -140,32 +140,56 @@ def test_openai_vendor_filter_still_covers_azure():
     assert [e["vendor"] for e in _events()] == ["azure_openai"]
 
 
-def test_azure_stream_is_wrapped_without_stream_options():
-    openai = pytest.importorskip("openai")
-    http = _openai_http(openai)
-    seen = []
-
+def _azure_stream(openai, http, api_version, seen):
     def sse(request):
         seen.append(json.loads(request.content))
         chunk = {"id": "c", "object": "chat.completion.chunk", "created": 0,
                  "model": "gpt-4o", "choices": [{"index": 0,
                                                  "delta": {"content": "hello"}}]}
-        return http.Response(200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n",
+        text = f"data: {json.dumps(chunk)}\n\n"
+        if seen[-1].get("stream_options", {}).get("include_usage"):
+            usage = {**chunk, "choices": [], "usage": {
+                "prompt_tokens": 9, "completion_tokens": 1, "total_tokens": 10}}
+            text += f"data: {json.dumps(usage)}\n\n"
+        return http.Response(200, text=text + "data: [DONE]\n\n",
                              headers={"content-type": "text/event-stream"})
 
     prompt_shields.instrument(ps_api_key="ps_key")
     client = openai.AzureOpenAI(
-        api_key="k", api_version="2024-10-21",
+        api_key="k", api_version=api_version,
         azure_endpoint="https://example.openai.azure.com",
         http_client=http.Client(transport=http.MockTransport(sse)))
-    chunks = list(client.chat.completions.create(
+    return list(client.chat.completions.create(
         model="dep", messages=MESSAGES, stream=True))
-    assert len(chunks) == 1
-    assert "stream_options" not in seen[0]
+
+
+def test_azure_stream_requests_usage_and_hides_the_usage_chunk():
+    # #389: Azure OpenAI accepts stream_options from API version 2024-07-01.
+    openai = pytest.importorskip("openai")
+    http = _openai_http(openai)
+    seen = []
+    chunks = _azure_stream(openai, http, "2024-10-21", seen)
+    assert len(chunks) == 1  # the usage-only chunk is hidden
+    assert seen[0]["stream_options"] == {"include_usage": True}
     event = _events()[0]
     assert event["vendor"] == "azure_openai"
     assert event["stream_completed"] is True
+    assert event["tokens_in"] == 9
+    assert event["tokens_out"] == 1
+    assert event["usage_source"] == "provider"
+    assert "tokens_estimated" not in event
+
+
+def test_azure_stream_on_an_old_api_version_is_not_sent_stream_options():
+    openai = pytest.importorskip("openai")
+    http = _openai_http(openai)
+    seen = []
+    chunks = _azure_stream(openai, http, "2024-02-01", seen)
+    assert len(chunks) == 1
+    assert "stream_options" not in seen[0]
+    event = _events()[0]
     assert event["tokens_estimated"] is True  # no usage chunk was requested
+    assert event["usage_source"] == "estimated"
 
 
 # --- google-genai -------------------------------------------------------------

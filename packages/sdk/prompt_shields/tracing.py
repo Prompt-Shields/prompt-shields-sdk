@@ -47,6 +47,7 @@ import functools
 import inspect
 import ipaddress
 import logging
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -71,6 +72,9 @@ PROVIDER_NAMES = {
     "anthropic": "anthropic",
     "azure_openai": "azure.ai.openai",
     "bedrock": "aws.bedrock",
+    # Claude on Vertex AI / Bedrock through the Anthropic SDK (#388).
+    "google-vertex-ai": "gcp.vertex_ai",
+    "aws-bedrock": "aws.bedrock",
     "google": "gcp.gemini",
     "vertex": "gcp.vertex_ai",
     "cohere": "cohere",
@@ -92,6 +96,28 @@ INTERNAL_SUFFIXES = (".local", ".internal", ".svc", ".cluster.local", ".localhos
 _HTTP_MODE: contextvars.ContextVar[tuple[str, Any] | None] = contextvars.ContextVar(
     "prompt_shields_http_mode", default=None
 )
+
+
+# The chat spans start_chat_span made (#386: an OTLP exporter puts its
+# attributes on a live one instead of exporting a second span for the call).
+_CHAT_SPANS: weakref.WeakSet = weakref.WeakSet()
+
+
+def live_chat_span(span: Any) -> Any:
+    """The OTel span behind ``span`` (a :class:`ChatSpan`, a raw span, or
+    None for the current span) when it is a chat span of this module that
+    is still recording, else None."""
+    if not AVAILABLE:
+        return None
+    try:
+        if span is None:
+            span = _trace.get_current_span()
+        span = getattr(span, "span", span) if isinstance(span, ChatSpan) else span
+        if span in _CHAT_SPANS and span.is_recording():
+            return span
+    except Exception:  # noqa: BLE001 - fail-open
+        return None
+    return None
 
 
 def _tracer():
@@ -228,7 +254,7 @@ class ChatSpan:
     def record(self, fields: Mapping[str, Any] | None) -> None:
         """Response attributes from an SDK telemetry event or adapter fields
         (``tokens_in``, ``tokens_out``, ``served_model``,
-        ``finish_reasons``)."""
+        ``finish_reasons``, ``usage_source``)."""
         if not fields:
             return
         reasons = fields.get("finish_reasons")
@@ -242,6 +268,10 @@ class ChatSpan:
                 else None,
                 "gen_ai.response.finish_reasons": [r for r in reasons if isinstance(r, str)]
                 if isinstance(reasons, (list, tuple))
+                else None,
+                # #389: a stream's counts are the provider's or estimated.
+                "ps.usage_source": fields.get("usage_source")
+                if isinstance(fields.get("usage_source"), str)
                 else None,
             },
         )
@@ -298,6 +328,10 @@ def start_chat_span(
                 "gen_ai.conversation.id": session_id if isinstance(session_id, str) else None,
             },
         )
+        try:
+            _CHAT_SPANS.add(span)
+        except TypeError:  # a span type that cannot be weakly referenced
+            pass
         return ChatSpan(span)
     except Exception:
         logger.debug("chat span start failed", exc_info=True)
@@ -446,6 +480,11 @@ class RunSpans:
 
     def has_span(self, run_id: Any) -> bool:
         return run_id in self._spans
+
+    def span_of(self, run_id: Any) -> Any:
+        """The (not yet ended) OTel span of a run, or None."""
+        entry = self._spans.get(run_id)
+        return entry[0] if entry is not None else None
 
     def _parent_context(self, parent_run_id: Any) -> Any:
         seen = 0

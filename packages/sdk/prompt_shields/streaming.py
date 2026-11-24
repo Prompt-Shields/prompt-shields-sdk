@@ -10,9 +10,10 @@ ends early without an error (closed or abandoned) runs to the last chunk
 read, not to the close or the garbage collection.
 
 Usage comes from the provider when it sends it:
-  - OpenAI: the final usage chunk, present when
-    `stream_options={"include_usage": True}`. The SDK requests it by default
-    (see `request_openai_stream_usage`) and hides the extra usage-only chunk
+  - OpenAI and OpenAI-compatible APIs: the final usage chunk, present when
+    `stream_options={"include_usage": True}`. The SDK requests it for the
+    hosts in `STREAM_USAGE_HOSTS` (see `upstream_accepts_stream_options` and
+    `request_openai_stream_usage`) and hides the extra usage-only chunk
     from callers who did not ask for it, so their chunk sequence is unchanged.
   - Anthropic: `message_start` (input and cache tokens) and `message_delta`
     (cumulative output tokens, and cumulative input/cache tokens when sent).
@@ -24,8 +25,11 @@ Usage comes from the provider when it sends it:
 Cached-input, cache-write and reasoning token counts are parsed with the same
 helpers as non-streamed responses (`prompt_shields.providers`).
 When usage is missing (truncated stream, gateway that drops it), tokens are
-estimated at ~4 characters per token and the event carries
-`tokens_estimated=True`.
+estimated (`prompt_shields.usage_estimate`, the same algorithm as the
+gateway's) and the event carries `usage_source="estimated"` and
+`tokens_estimated=True`; otherwise `usage_source="provider"`. A stream cut
+before its final usage (closed early, failed, abandoned) reports the larger
+of the provider's partial output count and the estimate of the text read.
 
 Fail-open: any error inside observation or emission is logged and swallowed;
 the caller's stream is never affected.
@@ -34,6 +38,7 @@ the caller's stream is never affected.
 import contextlib
 import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -52,30 +57,90 @@ from prompt_shields.providers import (
     mcp_tool_call,
     openai_usage_fields,
 )
+from prompt_shields.usage_estimate import (
+    TokenCounter,
+    estimate_messages_tokens,
+    token_family,
+)
 
 logger = logging.getLogger("prompt_shields.streaming")
 
-_CHARS_PER_TOKEN = 4
+USAGE_SOURCE_PROVIDER = "provider"
+USAGE_SOURCE_ESTIMATED = "estimated"
+
+# API hosts that accept `stream_options.include_usage` (#389), shared with
+# the gateway: schemas/stream-usage/include-usage.v1.json. A leading "."
+# matches any subdomain (Azure OpenAI resources).
+STREAM_USAGE_HOSTS = (
+    "api.openai.com",
+    ".openai.azure.com",
+    ".cognitiveservices.azure.com",
+    "api.groq.com",
+    "api.together.xyz",
+    "api.together.ai",
+    "api.fireworks.ai",
+    "api.deepseek.com",
+    "api.x.ai",
+    "openrouter.ai",
+)
+
+
+# Azure OpenAI accepts `stream_options` from this API version on (and on
+# the dateless `v1` API); older versions reject it.
+AZURE_STREAM_USAGE_MIN_API_VERSION = "2024-07-01"
+_AZURE_HOSTS = (".openai.azure.com", ".cognitiveservices.azure.com")
+
+
+def azure_api_version_accepts_stream_options(version: Any) -> bool:
+    if not isinstance(version, str) or not version.strip():
+        return False
+    v = version.strip().lower()
+    if not v[:1].isdigit():
+        return v in ("v1", "latest", "preview")
+    return v >= AZURE_STREAM_USAGE_MIN_API_VERSION
+
+
+def _host_listed(host: str, hosts) -> bool:
+    return any(
+        host.endswith(h) if h.startswith(".") else host == h for h in hosts
+    )
 
 
 def upstream_accepts_stream_options(upstream: Any) -> bool:
-    """True when the OpenAI client talks to api.openai.com.
+    """True when the OpenAI client talks to a host known to accept
+    `stream_options` (`STREAM_USAGE_HOSTS`).
 
-    OpenAI-compatible servers (older Azure API versions, self-hosted
-    gateways) may reject `stream_options` with a 400, so the SDK only adds
-    it for the official API. Elsewhere, callers can opt in by passing
+    Other OpenAI-compatible servers (self-hosted gateways, some older
+    servers) may reject `stream_options` with a 400, so the SDK only adds it
+    for listed hosts. `PS_STREAM_INCLUDE_USAGE_HOSTS` (comma-separated exact
+    hostnames, e.g. a vLLM server) adds hosts; `PS_STREAM_INCLUDE_USAGE=false`
+    turns it off. Azure OpenAI needs API version 2024-07-01 or later. Callers can always pass
     `stream_options={"include_usage": True}` themselves.
     """
     from urllib.parse import urlsplit
 
+    if os.environ.get("PS_STREAM_INCLUDE_USAGE", "").strip().lower() == "false":
+        return False
     base_url = getattr(upstream, "base_url", None)
     if base_url is None:
         return False
     try:
-        host = urlsplit(str(base_url)).hostname or ""
+        host = (urlsplit(str(base_url)).hostname or "").lower()
     except ValueError:
         return False
-    return host == "api.openai.com"
+    if not host:
+        return False
+    extra = [
+        h.strip().lower()
+        for h in os.environ.get("PS_STREAM_INCLUDE_USAGE_HOSTS", "").split(",")
+        if h.strip()
+    ]
+    if host in extra:
+        return True
+    if _host_listed(host, _AZURE_HOSTS):
+        return azure_api_version_accepts_stream_options(
+            getattr(upstream, "_api_version", None))
+    return _host_listed(host, STREAM_USAGE_HOSTS)
 
 
 def request_openai_stream_usage(kwargs: dict) -> bool:
@@ -96,24 +161,18 @@ def request_openai_stream_usage(kwargs: dict) -> bool:
     return False
 
 
-def _estimate_tokens(chars: int) -> int:
-    return (chars + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
-
-
-def _message_chars(messages: list) -> int:
-    return sum(
-        len(m["content"])
-        for m in messages
-        if isinstance(m, dict) and isinstance(m.get("content"), str)
-    )
-
-
 class StreamAccumulator:
     """Collects usage, served model, and tool calls from stream chunks."""
 
-    def __init__(self, vendor: str, messages: list):
+    def __init__(self, vendor: str, messages: list, model: str | None = None):
         self._vendor = vendor
         self._messages = messages
+        self._model = model
+        # Text the stream generated, for the estimate when usage is missing.
+        self._output = TokenCounter()
+        # tokens_out is the provider's final count, not a placeholder
+        # (Anthropic's message_start reports 1 output token).
+        self._output_final = False
         self.tokens_in: int | None = None
         self.tokens_out: int | None = None
         self.tokens_cached: int | None = None
@@ -133,6 +192,12 @@ class StreamAccumulator:
         self._mcp_calls: list[dict] = []
         # Raw stop/finish reasons seen, for the outcome signals (#44).
         self.finish_reasons: list[Any] = []
+
+    def _text(self, text: Any) -> None:
+        """Generated text: counted for the output-token estimate."""
+        if isinstance(text, str):
+            self.output_chars += len(text)
+            self._output.feed(text)
 
     def _finish_reason(self, value: Any) -> None:
         if value is not None and len(self.finish_reasons) < 16:
@@ -159,6 +224,8 @@ class StreamAccumulator:
                      "tokens_cache_write", "tokens_reasoning"):
             if fields.get(name) is not None:
                 setattr(self, name, fields[name])
+        if fields.get("tokens_out") is not None:
+            self._output_final = True
         if fields.get("served_model"):
             self.served_model = fields["served_model"]
         self._update_pricing(fields)
@@ -174,8 +241,7 @@ class StreamAccumulator:
             self._finish_reason(_field(candidate, "finish_reason"))
             for part in _items(_field(_field(candidate, "content"), "parts")):
                 text = _field(part, "text")
-                if isinstance(text, str):
-                    self.output_chars += len(text)
+                self._text(text)
 
     def _observe_cohere(self, event: Any) -> None:
         etype = _field(event, "type")  # v2
@@ -183,8 +249,7 @@ class StreamAccumulator:
         if etype == "content-delta":
             content = _field(_field(delta, "message"), "content")
             text = _field(content, "text")
-            if isinstance(text, str):
-                self.output_chars += len(text)
+            self._text(text)
         elif etype == "tool-call-start":
             call = _field(_field(delta, "message"), "tool_calls")
             self._tool_calls[len(self._tool_calls)] = _field(
@@ -196,8 +261,7 @@ class StreamAccumulator:
         etype = _field(event, "event_type")  # v1
         if etype == "text-generation":
             text = _field(event, "text")
-            if isinstance(text, str):
-                self.output_chars += len(text)
+            self._text(text)
         elif etype == "stream-end":
             # The final event carries the whole response, tool calls included.
             self._finish_reason(_field(event, "finish_reason"))
@@ -217,8 +281,7 @@ class StreamAccumulator:
         # ConverseStream; a Nova `invoke_model` chunk body has the same keys.
         delta = _field(event.get("contentBlockDelta"), "delta")
         text = _field(delta, "text")
-        if isinstance(text, str):
-            self.output_chars += len(text)
+        self._text(text)
         tool_use = _field(_field(event.get("contentBlockStart"), "start"), "toolUse")
         if tool_use is not None:
             self._tool_calls[len(self._tool_calls)] = _field(tool_use, "name")
@@ -259,15 +322,13 @@ class StreamAccumulator:
                 self._finish_reason(_field(body.get("delta"), "stop_reason"))
             elif etype == "content_block_delta":
                 text = _field(body.get("delta"), "text")
-                if isinstance(text, str):
-                    self.output_chars += len(text)
+                self._text(text)
             return
         if "contentBlockDelta" in body or "contentBlockStart" in body:  # Nova
             self._observe_bedrock({k: v for k, v in body.items() if k != "metadata"})
             return
         for key in ("outputText", "generation"):  # Titan, Llama
-            if isinstance(body.get(key), str):
-                self.output_chars += len(body[key])
+            self._text(body.get(key))
 
     def _observe_openai(self, chunk: Any) -> None:
         model = getattr(chunk, "model", None)
@@ -283,6 +344,7 @@ class StreamAccumulator:
             self.tokens_out = fields["tokens_out"]
             self.tokens_cached = fields["tokens_cached"]
             self.tokens_reasoning = fields["tokens_reasoning"]
+            self._output_final = self.tokens_out is not None
             self._update_pricing(fields)
         for choice in getattr(chunk, "choices", None) or []:
             self._finish_reason(getattr(choice, "finish_reason", None))
@@ -290,12 +352,13 @@ class StreamAccumulator:
             if delta is None:
                 continue
             content = getattr(delta, "content", None)
-            if isinstance(content, str):
-                self.output_chars += len(content)
+            self._text(content)
             for tc in getattr(delta, "tool_calls", None) or []:
                 key = (getattr(choice, "index", 0), getattr(tc, "index", 0))
                 fn = getattr(tc, "function", None)
                 name = getattr(fn, "name", None) if fn is not None else None
+                self._text(name)
+                self._text(getattr(fn, "arguments", None) if fn is not None else None)
                 # The name arrives on the first delta for each tool call;
                 # later deltas carry only argument fragments.
                 if name or key not in self._tool_calls:
@@ -308,7 +371,7 @@ class StreamAccumulator:
             model = getattr(message, "model", None)
             if model:
                 self.served_model = model
-            self._observe_anthropic_usage(getattr(message, "usage", None))
+            self._observe_anthropic_usage(getattr(message, "usage", None), final=False)
         elif etype == "message_delta":
             self._finish_reason(
                 getattr(getattr(event, "delta", None), "stop_reason", None))
@@ -321,9 +384,10 @@ class StreamAccumulator:
             elif (mcp := mcp_tool_call(block)) is not None:
                 self._mcp_calls.append(mcp)
         elif etype == "content_block_delta":
-            text = getattr(getattr(event, "delta", None), "text", None)
-            if isinstance(text, str):
-                self.output_chars += len(text)
+            delta = getattr(event, "delta", None)
+            self._text(getattr(delta, "text", None))
+            self._text(getattr(delta, "partial_json", None))
+            self._text(getattr(delta, "thinking", None))
 
     def _update_pricing(self, fields: dict) -> None:
         for key in ("service_tier", "tokens_audio_in", "tokens_audio_out",
@@ -332,13 +396,14 @@ class StreamAccumulator:
             if fields.get(key) is not None:
                 self.pricing_fields[key] = fields[key]
 
-    def _observe_anthropic_usage(self, usage: Any) -> None:
+    def _observe_anthropic_usage(self, usage: Any, final: bool = True) -> None:
         if usage is None:
             return
         self._update_pricing(anthropic_usage_extras(usage))
         out = _int(_field(usage, "output_tokens"))
         if out is not None:
             self.tokens_out = out
+            self._output_final = final
         for attr, name in (
             ("_anthropic_input", "input_tokens"),
             ("_anthropic_cache_read", "cache_read_input_tokens"),
@@ -357,8 +422,13 @@ class StreamAccumulator:
         self.tokens_cached = fields["tokens_cached"]
         self.tokens_cache_write = fields["tokens_cache_write"]
 
-    def adapter_fields(self) -> dict:
-        """Event fields in the same shape as `ProviderAdapter.extract`."""
+    def adapter_fields(self, cut: bool = False) -> dict:
+        """Event fields in the same shape as `ProviderAdapter.extract`.
+
+        `cut`: the stream ended before it completed (closed early, failed or
+        abandoned), so a non-final output count is topped up to the estimate
+        of the text read before the cut.
+        """
         tool_type = (
             "tool_use" if self._vendor in ("anthropic", "bedrock") else "function"
         )
@@ -377,12 +447,19 @@ class StreamAccumulator:
         }
         if self.finish_reasons:
             fields["finish_reasons"] = list(self.finish_reasons)
+        family = token_family(self.served_model or self._model, self._vendor)
         if fields["tokens_in"] is None:
-            fields["tokens_in"] = _estimate_tokens(_message_chars(self._messages))
+            fields["tokens_in"] = estimate_messages_tokens(self._messages, family)
             fields["tokens_estimated"] = True
-        if fields["tokens_out"] is None:
-            fields["tokens_out"] = _estimate_tokens(self.output_chars)
-            fields["tokens_estimated"] = True
+        if fields["tokens_out"] is None or (cut and not self._output_final):
+            estimate = self._output.tokens(family)
+            if fields["tokens_out"] is None or estimate > fields["tokens_out"]:
+                fields["tokens_out"] = estimate
+                fields["tokens_estimated"] = True
+        fields["usage_source"] = (
+            USAGE_SOURCE_ESTIMATED if fields.get("tokens_estimated")
+            else USAGE_SOURCE_PROVIDER
+        )
         return fields
 
 
@@ -510,7 +587,8 @@ class _StreamBase:
             end = (self._last_read if not completed and error is None
                    else time.monotonic())
             latency_ms = int((end - self._start) * 1000)
-            return self._acc.adapter_fields(), stream_fields, latency_ms
+            return (self._acc.adapter_fields(cut=not completed), stream_fields,
+                    latency_ms)
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"Stream telemetry finish error: {e}")
             return None

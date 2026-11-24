@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from prompt_shields import AsyncShieldsClient, ShieldsClient
 from prompt_shields.streaming import StreamAccumulator, request_openai_stream_usage
+from prompt_shields.usage_estimate import estimate_messages_tokens
 
 MESSAGES = [{"role": "user", "content": "hello there, how are you"}]
 
@@ -220,8 +221,11 @@ def test_sync_openai_without_usage_estimates_tokens():
     assert list(stream) == chunks
     event = events[0]
     assert event["tokens_estimated"] is True
-    assert event["tokens_out"] == 2  # "Hello" -> 5 chars -> ceil(5/4)
-    assert event["tokens_in"] == 6  # 24 chars of message text
+    assert event["usage_source"] == "estimated"
+    # The tokenizer estimate (#389): "Hello" is one token; the message text
+    # plus 3 framing tokens for the message and 3 for the reply.
+    assert event["tokens_out"] == 1
+    assert event["tokens_in"] == estimate_messages_tokens(MESSAGES, "o200k")
 
 
 def test_sync_openai_tool_calls_collected():

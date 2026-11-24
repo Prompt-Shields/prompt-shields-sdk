@@ -435,6 +435,13 @@ export function usageCost(
 /** `cost_source` of a table-priced cost (SDK COST_SOURCE_PRICING_TABLE). */
 export const COST_SOURCE_PRICING_TABLE = 'pricing_table';
 
+/**
+ * `cost_source` of a table price of estimated token counts (#389; SDK
+ * COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS).
+ */
+export const COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS =
+  'pricing_table_estimated_tokens';
+
 /** `cost_source` of a response served from the gateway cache (#33): cost 0. */
 export const COST_SOURCE_CACHE = 'cache';
 

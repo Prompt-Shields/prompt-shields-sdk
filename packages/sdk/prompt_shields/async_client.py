@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from prompt_shields import cloud_platforms, tracing
+from prompt_shields import cloud_platforms, otlp, tracing
 from prompt_shields.budgets import (
     BudgetStore,
     budget_attributes,
@@ -430,6 +430,9 @@ class _AsyncCompletionsNamespace:
         )
         if _event_hook is not None:
             _event_hook(event)
+        # OTLP export (#386), before the SDK span ends: an exporter may put its
+        # attributes on that span instead of exporting a second one. No I/O.
+        otlp.export_event(event, messages, sdk_span=span)
         if span is not None:
             span.finish(event)
         attach_outcome_signals(event, model=model, messages=messages,
@@ -483,8 +486,13 @@ class _AsyncCompletionsNamespace:
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):
                 event["tokens_estimated"] = True
+            if adapter_fields.get("usage_source"):
+                event["usage_source"] = adapter_fields["usage_source"]
             if event_hook is not None:
                 event_hook(event)
+            # OTLP export (#386), before the SDK span ends: an exporter may put its
+            # attributes on that span instead of exporting a second one. No I/O.
+            otlp.export_event(event, messages, sdk_span=span)
             if span is not None:
                 span.finish({**event, "finish_reasons": adapter_fields.get("finish_reasons")})
             attach_outcome_signals(
@@ -499,7 +507,9 @@ class _AsyncCompletionsNamespace:
             return AsyncShieldsStream(
                 response,
                 StreamAccumulator(
-                    cloud_platforms.stream_vendor(self._parent._vendor), messages
+                    cloud_platforms.stream_vendor(self._parent._vendor),
+                    messages,
+                    model,
                 ),
                 on_finish,
                 start,

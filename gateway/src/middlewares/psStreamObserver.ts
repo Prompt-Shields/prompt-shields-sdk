@@ -12,6 +12,23 @@ import {
   hasRefusal,
   stopReasonsOf,
 } from './psOutcomeSignals';
+import {
+  STREAM_USAGE_SIDEBAND_KEY,
+  StreamUsageSideband,
+} from './psStreamUsage';
+import {
+  TokenCounter,
+  estimateRequestTokens,
+  tokenFamily,
+} from './psUsageEstimate';
+
+/**
+ * Where a stream's token counts came from (#389): `provider` when the
+ * provider reported them, `estimated` when any of them is the gateway's
+ * estimate (psUsageEstimate.ts) because the provider sent none, or the
+ * stream was cut before its final usage.
+ */
+export type UsageSource = 'provider' | 'estimated';
 
 export interface StreamSummary {
   tokens_in?: number;
@@ -30,6 +47,8 @@ export interface StreamSummary {
   stopReasons?: string[];
   /** The stream carried an explicit refusal (#44). */
   refusal?: boolean;
+  /** Where tokens_in / tokens_out came from (#389), once finalised. */
+  usageSource?: UsageSource;
 }
 
 // A single SSE line larger than this is not parsed (usage lines are tiny).
@@ -151,6 +170,10 @@ export class SSEUsageTracker {
   private input?: number;
   private cacheRead?: number;
   private cacheCreation?: number;
+  // Text the stream generated, for the estimate when usage is missing.
+  private output = new TokenCounter();
+  // tokens_out came from a final usage report (not message_start's).
+  private outputFinal = false;
   readonly summary: StreamSummary = {
     terminal: false,
     truncated: false,
@@ -166,6 +189,21 @@ export class SSEUsageTracker {
     this.partial = lines.pop() ?? '';
     if (this.partial.length > MAX_LINE_CHARS) this.partial = '';
     for (const line of lines) this.line(line);
+  }
+
+  /** Feeds a data payload the client never saw (psStreamUsage sideband). */
+  pushData(data: string) {
+    this.line(`data: ${data}`);
+  }
+
+  /** Estimated output tokens of the text the stream generated. */
+  outputTokens(family: Parameters<TokenCounter['tokens']>[0]): number {
+    return this.output.tokens(family);
+  }
+
+  /** Whether tokens_out is the provider's final count. */
+  get outputReported(): boolean {
+    return this.summary.tokens_out !== undefined && this.outputFinal;
   }
 
   /** Flushes the last unterminated line and returns the summary. */
@@ -212,11 +250,22 @@ export class SSEUsageTracker {
       this.summary.terminal = true;
     }
 
+    this.countOutput(obj);
+
     // Usage: chat chunks / message_delta carry `usage`, Anthropic
     // message_start nests it in `message`, Responses events in `response`.
+    const outBefore = this.summary.tokens_out;
     this.usage(obj.usage);
     this.usage(obj.message?.usage);
     this.usage(obj.response?.usage);
+    // message_start's output count is a placeholder; any other report of
+    // output tokens is the provider's count so far.
+    if (
+      this.summary.tokens_out !== outBefore ||
+      obj.usage?.output_tokens !== undefined ||
+      obj.usage?.completion_tokens !== undefined
+    )
+      this.outputFinal = type !== 'message_start';
 
     // Chat chunks and Responses events report the tier outside `usage`.
     const tier = obj.service_tier ?? obj.response?.service_tier;
@@ -232,6 +281,45 @@ export class SSEUsageTracker {
 
     const model = obj.model ?? obj.message?.model ?? obj.response?.model;
     if (typeof model === 'string' && model) this.summary.model = model;
+  }
+
+  /** Feeds the text a chunk generated to the output estimate. */
+  private countOutput(obj: any) {
+    const out = this.output;
+    if (Array.isArray(obj.choices)) {
+      for (const ch of obj.choices) {
+        if (!ch || typeof ch !== 'object') continue;
+        out.feed(ch.text);
+        const d = ch.delta;
+        if (!d || typeof d !== 'object') continue;
+        out.feed(d.content);
+        out.feed(d.reasoning_content);
+        out.feed(d.reasoning);
+        out.feed(d.refusal);
+        if (Array.isArray(d.tool_calls)) {
+          for (const tc of d.tool_calls) {
+            out.feed(tc?.function?.name);
+            out.feed(tc?.function?.arguments);
+          }
+        }
+      }
+      return;
+    }
+    const type = obj.type;
+    if (type === 'content_block_delta') {
+      const d = obj.delta;
+      out.feed(d?.text);
+      out.feed(d?.partial_json);
+      out.feed(d?.thinking);
+      return;
+    }
+    if (type === 'content_block_start') {
+      out.feed(obj.content_block?.name);
+      return;
+    }
+    if (typeof type === 'string' && type.endsWith('.delta')) {
+      out.feed(obj.delta);
+    }
   }
 
   private details(d: UsageDetails) {
@@ -272,7 +360,8 @@ export class SSEUsageTracker {
  */
 export function observeSSE(
   res: Response,
-  onDone: (summary: StreamSummary) => void
+  onDone: (summary: StreamSummary, tracker: SSEUsageTracker) => void,
+  sideband?: () => StreamUsageSideband | undefined
 ): Response {
   if (!res.body) return res;
   const reader = res.body.getReader();
@@ -284,13 +373,14 @@ export function observeSSE(
     let summary = tracker.summary;
     try {
       summary = tracker.end();
+      for (const data of sideband?.()?.lines ?? []) tracker.pushData(data);
     } catch {
       /* fail-open */
     }
     if (how === 'cancelled') summary.cancelled = true;
     else summary.truncated = !summary.terminal;
     try {
-      onDone(summary);
+      onDone(summary, tracker);
     } catch {
       /* fail-open */
     }
@@ -331,9 +421,56 @@ const isSSE = (res: Response | undefined) =>
   !!res?.body &&
   (res.headers.get('content-type') ?? '').includes('text/event-stream');
 
+// Paths whose streams generate text, where a missing count is estimated.
+const GENERATION_PATH =
+  /\/(chat\/completions|completions|messages|responses)\/?$/;
+
+/**
+ * Fills the counts the provider did not report with estimates (#389) and
+ * sets `usageSource`. Input comes from the request body; output from the
+ * text the stream carried. A cut stream (cancelled or truncated) whose
+ * final output count never arrived reports the larger of the provider's
+ * partial count and the estimate of the text sent before the cut.
+ */
+export function finaliseUsage(
+  summary: StreamSummary,
+  tracker: SSEUsageTracker,
+  requestBody: any
+): StreamSummary {
+  const family = tokenFamily(summary.model ?? requestBody?.model);
+  let estimated = false;
+  if (summary.tokens_in === undefined) {
+    const est = estimateRequestTokens(requestBody, family);
+    if (est !== undefined) {
+      summary.tokens_in = est;
+      estimated = true;
+    }
+  }
+  if (!tracker.outputReported) {
+    const est = tracker.outputTokens(family);
+    if (summary.tokens_out === undefined || est > summary.tokens_out) {
+      summary.tokens_out = est;
+      estimated = true;
+    }
+  }
+  summary.usageSource = estimated ? 'estimated' : 'provider';
+  return summary;
+}
+
+async function requestJson(c: any): Promise<any> {
+  try {
+    const type = (c.req.header('content-type') || '').toLowerCase();
+    if (!type.includes('json')) return undefined;
+    return await c.req.json();
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * For a streamed Hono response, wraps `c.res` once and returns a promise of
  * its summary, resolved when the stream ends. Returns undefined otherwise.
+ * On text-generation paths, missing counts are estimated (finaliseUsage).
  */
 export function observeStream(c: any): Promise<StreamSummary> | undefined {
   const existing = c.get('psStreamSummary');
@@ -341,7 +478,29 @@ export function observeStream(c: any): Promise<StreamSummary> | undefined {
   if (!isSSE(c.res)) return undefined;
   let resolve!: (s: StreamSummary) => void;
   const promise = new Promise<StreamSummary>((r) => (resolve = r));
-  c.res = observeSSE(c.res, resolve);
+  let generation = false;
+  try {
+    generation = GENERATION_PATH.test(new URL(c.req.url).pathname);
+  } catch {
+    generation = false;
+  }
+  c.res = observeSSE(
+    c.res,
+    (summary, tracker) => {
+      if (!generation) return resolve(summary);
+      requestJson(c)
+        .then((body) => finaliseUsage(summary, tracker, body))
+        .catch(() => summary)
+        .then(resolve, () => resolve(summary));
+    },
+    () => {
+      try {
+        return c.get(STREAM_USAGE_SIDEBAND_KEY);
+      } catch {
+        return undefined;
+      }
+    }
+  );
   c.set('psStreamSummary', promise);
   return promise;
 }

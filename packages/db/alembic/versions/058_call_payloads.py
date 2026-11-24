@@ -12,10 +12,10 @@ tenant erasure and by end-user erasure.
 The new table gets the tenant_isolation policy (same SQL as 015) and, if
 RLS is already enforced on ai_assets, enforcement too (same as 020).
 
-Chained from 044 (inference credential vault, #342; ids are not in order).
+Chained from 056 (usage_source, #389; ids are not in order).
 
-Revision ID: 056
-Revises: 044
+Revision ID: 058
+Revises: 056
 Create Date: 2026-11-24
 """
 
@@ -25,8 +25,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "056"
-down_revision: str | None = "044"
+revision: str = "058"
+down_revision: str | None = "056"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

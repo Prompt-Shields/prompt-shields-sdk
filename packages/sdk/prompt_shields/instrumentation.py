@@ -82,7 +82,7 @@ import weakref
 from types import SimpleNamespace
 from typing import Any
 
-from prompt_shields import cloud_platforms, mcp_instrumentation
+from prompt_shields import cloud_platforms, mcp_instrumentation, otlp
 from prompt_shields.feedback import attach_call_id, new_call_id
 from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.providers import (
@@ -1587,6 +1587,8 @@ def _stream_event(call: dict, adapter_fields: dict, stream_fields: dict,
     event.update(stream_fields)
     if adapter_fields.get("tokens_estimated"):
         event["tokens_estimated"] = True
+    if adapter_fields.get("usage_source"):
+        event["usage_source"] = adapter_fields["usage_source"]
     attach_outcome_signals(event, model=call["model"], messages=call["messages"],
                            request=call.get("kwargs"),
                            reasons=adapter_fields.get("finish_reasons") or [])
@@ -1596,6 +1598,7 @@ def _stream_event(call: dict, adapter_fields: dict, stream_fields: dict,
 def _send_sync(call: dict, event: dict) -> None:
     state = call["state"]
     state.telemetry.enqueue(event)
+    otlp.export_event(event, call["messages"])
     state.telemetry.flush_sync()
     if state.atlas is not None:
         state.atlas.enqueue(build_atlas_event(event, call["messages"]))
@@ -1606,6 +1609,7 @@ def _send_later(call: dict, event: dict) -> None:
     """Enqueue without sending (no I/O): it goes out with the next flush."""
     state = call["state"]
     state.telemetry.enqueue(event)
+    otlp.export_event(event, call["messages"])
     if state.atlas is not None:
         state.atlas.enqueue(build_atlas_event(event, call["messages"]))
 
@@ -1613,6 +1617,7 @@ def _send_later(call: dict, event: dict) -> None:
 async def _send_async(call: dict, event: dict, flush: bool = True) -> None:
     state = call["state"]
     state.telemetry.enqueue(event)
+    otlp.export_event(event, call["messages"])
     if flush:
         await state.telemetry.flush()
     if state.atlas is not None:
@@ -1663,6 +1668,7 @@ class _ResponsesAccumulator(StreamAccumulator):
                 self.tokens_in = fields["tokens_in"]
             if fields["tokens_out"] is not None:
                 self.tokens_out = fields["tokens_out"]
+                self._output_final = True
             if fields["tokens_cached"] is not None:
                 self.tokens_cached = fields["tokens_cached"]
             if fields["tokens_reasoning"] is not None:
@@ -1672,10 +1678,10 @@ class _ResponsesAccumulator(StreamAccumulator):
                 getattr(event, "response", None), "incomplete_details"), "reason"))
         elif etype == "response.refusal.done":
             self._finish_reason("refusal")
-        elif etype == "response.output_text.delta":
-            delta = getattr(event, "delta", None)
-            if isinstance(delta, str):
-                self.output_chars += len(delta)
+        elif etype in ("response.output_text.delta",
+                       "response.function_call_arguments.delta",
+                       "response.reasoning_summary_text.delta"):
+            self._text(getattr(event, "delta", None))
         elif etype == "response.output_item.added":
             item = getattr(event, "item", None)
             if getattr(item, "type", None) == "function_call":
@@ -1697,5 +1703,5 @@ def _accumulator(call: dict) -> StreamAccumulator:
     elif vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS:
         vendor = "anthropic"
     if call["api"] == "responses":
-        return _ResponsesAccumulator(vendor, call["messages"])
-    return StreamAccumulator(vendor, call["messages"])
+        return _ResponsesAccumulator(vendor, call["messages"], call.get("model"))
+    return StreamAccumulator(vendor, call["messages"], call.get("model"))

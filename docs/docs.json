@@ -74,6 +74,7 @@
         "guides/admin-sso-scim",
         "guides/security-events",
         "guides/observability",
+        "guides/otlp-langfuse",
         "guides/agent-traces",
         "guides/alert-runbooks",
         "guides/gateway-oidc",

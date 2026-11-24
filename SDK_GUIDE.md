@@ -865,6 +865,19 @@ response = client.chat.completions.create(
 
 The trade-off: gateway mode gives less control over event shape (no `ps_metadata`, no Python-level PII scanning), but requires zero code changes.
 
+### Pattern 4: Spans to Langfuse or any OTLP backend
+
+Every call can also go out as an OpenTelemetry GenAI span (model, tokens, cost from the price table, session, user hash; no prompt text) next to the collector events:
+
+```python
+import prompt_shields
+
+prompt_shields.configure_langfuse()  # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
+prompt_shields.configure_otlp()      # OTEL_EXPORTER_OTLP_* (Tempo, Honeycomb, an OTel Collector, ...)
+```
+
+or `PS_LANGFUSE_EXPORT=true` / `PS_OTLP_EXPORT=true` without code. Export is batched from a background thread, bounded (`OTEL_BSP_MAX_QUEUE_SIZE`) and fail-open. If your own `TracerProvider` already exports the SDK's `chat {model}` spans, the attributes go on those spans instead of a second span per call (`PS_OTLP_SDK_SPANS=export` to send both). See [OTLP export and Langfuse](docs/guides/otlp-langfuse.mdx).
+
 ---
 
 ## 15. Common questions
@@ -885,8 +898,8 @@ If a vendor releases a new method (e.g., `client.responses.create()`), we add an
 
 Pass `stream=True` as usual. The SDK returns a thin wrapper around the provider's stream: you get the same chunks, unchanged and as soon as they arrive, and one telemetry event is sent when the stream ends. Iteration, `with` / `async with`, and `close()` all work on both the sync and async clients.
 
-- **Usage:** OpenAI sends token usage on a final chunk only when `stream_options={"include_usage": True}`. When the client talks to `api.openai.com`, the SDK sets this for you if you haven't, and hides that extra usage-only chunk (empty `choices`) so your loop sees exactly what it would have without it. If you set `include_usage` yourself, True or False, the SDK leaves it alone and passes every chunk through. With a custom `base_url` (Azure, a gateway, a self-hosted server) the SDK never adds `stream_options`, because some OpenAI-compatible servers reject it; pass `stream_options={"include_usage": True}` yourself if yours supports it. Anthropic usage comes from `message_start` and `message_delta`.
-- **Estimates:** when no usage arrives (you set `include_usage: False`, or the stream stopped early), tokens are estimated at about 4 characters per token and the event carries `tokens_estimated: true`.
+- **Usage:** OpenAI and most OpenAI-compatible APIs send token usage on a final chunk only when `stream_options={"include_usage": True}`. When the client talks to a host known to accept it (`api.openai.com`, Azure OpenAI with API version 2024-07-01 or later, Groq, Together, Fireworks, DeepSeek, xAI, OpenRouter; `prompt_shields.streaming.STREAM_USAGE_HOSTS`), the SDK sets this for you if you haven't, and hides that extra usage-only chunk (empty `choices`) so your loop sees exactly what it would have without it. If you set `include_usage` yourself, True or False, the SDK leaves it alone and passes every chunk through. Other hosts (a gateway, a self-hosted server) are left alone, because some OpenAI-compatible servers reject the parameter: list yours in `PS_STREAM_INCLUDE_USAGE_HOSTS` (comma-separated hostnames, e.g. a vLLM server) or pass `stream_options` yourself. `PS_STREAM_INCLUDE_USAGE=false` turns injection off. The Prompt Shields gateway does the same for its OpenAI and Azure OpenAI targets. Anthropic usage comes from `message_start` and `message_delta`.
+- **Estimates:** when no usage arrives (you set `include_usage: False`, or the stream stopped early), tokens are estimated with a tokenizer-shaped estimate per model family (`prompt_shields.usage_estimate`, the same as the gateway's; `schemas/stream-usage/README.md`) and the event carries `usage_source: "estimated"` (and `tokens_estimated: true`); otherwise `usage_source: "provider"`. A stream closed early or cut off reports the output up to the cut: the larger of the provider's partial count and the estimate of the text read. Spans carry the same value as `ps.usage_source`.
 - **Incomplete streams:** every streamed event has `stream: true` and `stream_completed`. It is `false` when you `break`, `close()` the stream, or exit the `with` block before the end, and when the stream raises (`stream_error` holds the exception type). The exception is re-raised unchanged.
 - **Abandoned streams:** a stream that is neither consumed to the end nor closed emits no event. Use `with` or call `close()`.
 

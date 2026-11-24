@@ -258,6 +258,9 @@ class AIUsageEvent(Base):
     # client disconnected before the stream ended.
     stream_truncated = Column(Boolean)
     stream_cancelled = Column(Boolean)
+    # Where tokens_in / tokens_out came from (#389): "provider", or
+    # "estimated" when the SDK or gateway estimated any of them.
+    usage_source = Column(Text)
     # Cost attribution (#347), all optional; see collector/cost_attribution.py.
     # team_id / project_id: the tenant's team and project (#338) the call is
     # attributed to, resolved at ingest (no foreign key: events outlive a

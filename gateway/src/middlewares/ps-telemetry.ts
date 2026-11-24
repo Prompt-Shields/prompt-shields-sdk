@@ -48,6 +48,8 @@ import { RoutePolicy } from './router/types';
 import { activePolicyVersion } from './policyPull/state';
 import {
   COST_SOURCE_CACHE,
+  COST_SOURCE_PRICING_TABLE,
+  COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS,
   COST_SOURCE_PROVIDER_REPORTED,
   costFields,
   endpointScopeOf,
@@ -147,6 +149,10 @@ interface TelemetryEvent {
   stream?: boolean;
   stream_truncated?: boolean;
   stream_cancelled?: boolean;
+  // Where a stream's token counts came from (#389): `provider`, or
+  // `estimated` when the gateway estimated any of them (psUsageEstimate.ts)
+  // because the provider sent no usage or the stream was cut before it.
+  usage_source?: string;
   // Stable fingerprint of the upstream credential's identity (#76), only
   // with PS_TELEMETRY_CREDENTIAL_FINGERPRINT=true; see
   // utils/credentialFingerprint.ts. Never a key or token.
@@ -410,10 +416,14 @@ export function withCost(
     endpoint_scope: endpointScopeOf(event.vendor, event.model, event.region),
   };
   const model = event.model === 'unknown' ? undefined : event.model;
-  return {
-    ...event,
-    ...costFields(event.vendor, model, servedModel, usage),
-  };
+  const priced = costFields(event.vendor, model, servedModel, usage);
+  // As the SDK: a table price of estimated tokens says so (#389).
+  if (
+    event.usage_source === 'estimated' &&
+    priced.cost_source === COST_SOURCE_PRICING_TABLE
+  )
+    priced.cost_source = COST_SOURCE_PRICING_TABLE_ESTIMATED_TOKENS;
+  return { ...event, ...priced };
 }
 
 /**
@@ -783,6 +793,7 @@ export function withStreamSummary(
   if (routed && summary.model) out.served_model = summary.model;
   if (summary.truncated) out.stream_truncated = true;
   if (summary.cancelled) out.stream_cancelled = true;
+  if (summary.usageSource) out.usage_source = summary.usageSource;
   return out;
 }
 
