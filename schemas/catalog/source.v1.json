@@ -5,7 +5,8 @@
     "Hand-maintained source for scripts/build_catalog.py. Edit this file, then run `python scripts/build_catalog.py` to regenerate packages/sdk/prompt_shields/catalog.json and gateway/src/middlewares/router/defaultPolicy.json. CI fails when the generated files drift from this source.",
     "Model entries use LiteLLM model_prices_and_context_window.json field names: prices are per token in `currency` (USD unless stated). `litellm_key` names the LiteLLM entry used to cross-check the entry (`--litellm`).",
     "Sovereignty fields are set per provider and copied onto each of its models; a model entry may override them. null means unknown or not verified, and policies must treat it as non-compliant. `us_cloud_act_exposure` reflects the provider's ownership and hosting, not a legal opinion. `zdr` is true only when prompts and outputs are not retained by default; ZDR available on request is false with a note. `certifications` lists company-level certifications, whose scope may not cover the inference service.",
-    "Models billed per unit rather than per token carry LiteLLM per-unit prices instead of token prices: `input_cost_per_second` (speech to text), `input_cost_per_character` (text to speech), `ocr_cost_per_page` (OCR) and `input_cost_per_query` (rerank search units). Generated images are priced by `output_cost_per_image_by_quality` ({quality: {size: USD per image}}), a catalog field LiteLLM does not have. Models billed by tokens are not given unit prices (their unit counts cannot be priced exactly), and prices that could not be confirmed are left out rather than guessed."
+    "Models billed per unit rather than per token carry LiteLLM per-unit prices instead of token prices: `input_cost_per_second` (speech to text), `input_cost_per_character` (text to speech), `ocr_cost_per_page` (OCR) and `input_cost_per_query` (rerank search units). Generated images are priced by `output_cost_per_image_by_quality` ({quality: {size: USD per image}}), a catalog field LiteLLM does not have. Models billed by tokens are not given unit prices (their unit counts cannot be priced exactly), and prices that could not be confirmed are left out rather than guessed.",
+    "`regional_endpoint_premium` (not a LiteLLM field) is the fraction Google Vertex AI and Amazon Bedrock charge above their global endpoint when a model is called on a regional endpoint (a Vertex region or multi-region other than `global`; a Bedrock in-region model id or a geographic cross-region inference profile such as `us.` or `eu.`, not `global.`). Claude on those platforms is otherwise priced at Anthropic list prices (pricing.PRICING_VENDOR_FALLBACK); the premium is applied only to calls the SDK or gateway identifies as regional."
   ],
   "providers": {
     "openai": {
@@ -969,6 +970,7 @@
     },
     "anthropic/claude-opus-4-7": {
       "litellm_key": "claude-opus-4-7",
+      "regional_endpoint_premium": 0.1,
       "max_input_tokens": 1000000,
       "max_output_tokens": 128000,
       "mode": "chat",
@@ -988,6 +990,7 @@
     },
     "anthropic/claude-sonnet-4-6": {
       "litellm_key": "claude-sonnet-4-6",
+      "regional_endpoint_premium": 0.1,
       "max_input_tokens": 1000000,
       "max_output_tokens": 128000,
       "mode": "chat",
@@ -1007,6 +1010,7 @@
     },
     "anthropic/claude-opus-4-5": {
       "litellm_key": "claude-opus-4-5",
+      "regional_endpoint_premium": 0.1,
       "max_input_tokens": 200000,
       "max_output_tokens": 64000,
       "mode": "chat",
@@ -1026,6 +1030,7 @@
     },
     "anthropic/claude-sonnet-4-5": {
       "litellm_key": "claude-sonnet-4-5",
+      "regional_endpoint_premium": 0.1,
       "max_input_tokens": 1000000,
       "max_output_tokens": 64000,
       "mode": "chat",
@@ -1051,6 +1056,7 @@
     },
     "anthropic/claude-haiku-4-5": {
       "litellm_key": "claude-haiku-4-5",
+      "regional_endpoint_premium": 0.1,
       "max_input_tokens": 200000,
       "max_output_tokens": 64000,
       "mode": "chat",

@@ -8,6 +8,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
   costFields,
+  endpointScopeOf,
+  normaliseClaudeModel,
   pricingCandidates,
   resolvePricingModel,
   usageCost,
@@ -151,5 +153,95 @@ describe('per-model service-tier rates', () => {
         service_tier: 'batch',
       })
     ).toBeCloseTo((300000 * 2.5 + 1000 * 15.0) / 1e6 / 2, 9);
+  });
+});
+
+describe('Claude on Vertex AI and Bedrock (#388)', () => {
+  const IDS: { platform_id: string; anthropic_id: string | null }[] =
+    JSON.parse(
+      readFileSync(join(PRICING_DIR, 'claude-model-ids.v1.json'), 'utf8')
+    ).ids;
+
+  test.each(IDS.map((v) => [v.platform_id, v.anthropic_id]))(
+    'normalises %s as the SDK does',
+    (platformId, anthropicId) => {
+      expect(normaliseClaudeModel(platformId as string)).toBe(anthropicId);
+    }
+  );
+
+  const usage = { tokens_in: 1000, tokens_out: 2000 };
+
+  test('a vertex-ai request id is priced at Anthropic list prices', () => {
+    expect(
+      costFields(
+        'vertex-ai',
+        'anthropic.claude-sonnet-4-5@20250929',
+        undefined,
+        {
+          ...usage,
+          endpoint_scope: 'global',
+        }
+      )
+    ).toEqual({ cost: 0.033, cost_source: 'pricing_table' });
+  });
+
+  test('a regional vertex-ai endpoint adds the premium', () => {
+    const fields = costFields(
+      'vertex-ai',
+      'anthropic.claude-sonnet-4-5@20250929',
+      'claude-sonnet-4-5-20250929',
+      { ...usage, endpoint_scope: 'regional' }
+    );
+    expect(fields.cost).toBeCloseTo(0.0363, 9);
+  });
+
+  test('a Bedrock geographic profile is regional, global. is not', () => {
+    const us = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
+    const global = 'global.anthropic.claude-sonnet-4-5-20250929-v1:0';
+    expect(endpointScopeOf('bedrock', us, undefined)).toBe('regional');
+    expect(endpointScopeOf('bedrock', global, undefined)).toBe('global');
+    expect(
+      costFields('bedrock', us, undefined, {
+        ...usage,
+        endpoint_scope: endpointScopeOf('bedrock', us, undefined),
+      }).cost
+    ).toBeCloseTo(0.0363, 9);
+    expect(
+      costFields('bedrock', global, undefined, {
+        ...usage,
+        endpoint_scope: endpointScopeOf('bedrock', global, undefined),
+      }).cost
+    ).toBeCloseTo(0.033, 9);
+  });
+
+  test('endpoint scope needs a Claude model, and a region on Vertex AI', () => {
+    const claude = 'anthropic.claude-sonnet-4-5@20250929';
+    expect(endpointScopeOf('vertex-ai', claude, 'global')).toBe('global');
+    expect(endpointScopeOf('vertex-ai', claude, 'europe-west1')).toBe(
+      'regional'
+    );
+    expect(endpointScopeOf('vertex-ai', claude, undefined)).toBeUndefined();
+    expect(
+      endpointScopeOf('vertex-ai', 'gemini-2.5-pro', 'us-central1')
+    ).toBeUndefined();
+    expect(endpointScopeOf('openai', 'gpt-4o', 'us')).toBeUndefined();
+  });
+
+  test('existing Bedrock rows still win over Anthropic list prices', () => {
+    // The bedrock row's own cache rate: 0.08 per 1M cached tokens.
+    expect(
+      costFields(
+        'bedrock',
+        'us.anthropic.claude-3-5-haiku-20241022-v1:0',
+        undefined,
+        { tokens_in: 1000, tokens_out: 1000, tokens_cached: 500 }
+      ).cost
+    ).toBeCloseTo(0.00444, 9);
+  });
+
+  test('an unknown Claude id stays unmetered, never zero', () => {
+    expect(
+      costFields('vertex-ai', 'claude-unknown-9@20990101', undefined, usage)
+    ).toEqual({});
   });
 });

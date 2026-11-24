@@ -14,6 +14,10 @@ outermost named chain or agent the run belongs to (LangChain's default names,
 such as `RunnableSequence` or `AgentExecutor`, are skipped). See
 `prompt_shields.integrations` for delivery and double-counting rules.
 
+Inside a LangGraph graph, each event also carries the cost tag
+`langgraph_node` (the node that made the call), so the collector can break
+usage down per node (see `langgraph_tags`).
+
 With the `opentelemetry` extra installed, the handler also creates spans
 (prompt_shields.tracing): `invoke_agent` for the outermost chain or agent
 run, `chat` per model run and `execute_tool` per tool run, parented by the
@@ -45,7 +49,9 @@ from prompt_shields.integrations._common import (
     claim_outer_call,
     emit,
     flush_telemetry,
+    langgraph_tags,
     normalize_vendor,
+    platform_vendor,
     text_of,
 )
 from prompt_shields.providers import _int, openai_usage_fields
@@ -174,16 +180,16 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
             if outer is not None and not hint:
                 hint = outer.use_case_hint
             fc = FrameworkCall("langchain", hint,
-                               previous=current_framework_call())
+                               previous=current_framework_call(),
+                               tags=langgraph_tags(metadata))
             _FRAMEWORK_CALL.set(fc)
+            model = (metadata.get("ls_model_name")
+                     or invocation.get("model")
+                     or invocation.get("model_name"))
+            vendor = normalize_vendor(metadata.get("ls_provider")
+                                      or invocation.get("_type"))
             run = self._runs[run_id] = _Run(
-                fc,
-                normalize_vendor(metadata.get("ls_provider")
-                                 or invocation.get("_type")),
-                metadata.get("ls_model_name")
-                or invocation.get("model")
-                or invocation.get("model_name"),
-                messages,
+                fc, platform_vendor(vendor, model), model, messages,
             )
             self._spans.start(run_id, parent_run_id, "chat", None,
                               vendor=run.vendor, model=run.model,

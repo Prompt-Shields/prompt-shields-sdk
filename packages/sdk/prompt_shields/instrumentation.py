@@ -13,7 +13,11 @@
                   through `azure_deployments`)
   - anthropic:    `messages.create`, `beta.messages.create` (MCP connector),
                   and the `messages.stream()` / `beta.messages.stream()` helpers
-  - google:       google-genai `models.generate_content`,
+  - google-vertex-ai / aws-bedrock: the same methods, called on an
+                  `AnthropicVertex` or `AnthropicBedrock[Mantle]` client
+                  (sync or async): vendor, region, jurisdiction and the
+                  platform's Claude prices (see `cloud_platforms`)
+  - google:      google-genai `models.generate_content`,
                   `models.generate_content_stream`
   - mistral:      mistralai `chat.complete` / `chat.complete_async`,
                   `chat.stream` / `chat.stream_async`
@@ -78,7 +82,7 @@ import weakref
 from types import SimpleNamespace
 from typing import Any
 
-from prompt_shields import mcp_instrumentation, otlp
+from prompt_shields import cloud_platforms, mcp_instrumentation, otlp
 from prompt_shields.feedback import attach_call_id, new_call_id
 from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.providers import (
@@ -190,8 +194,12 @@ _TARGETS = (
     ("mcp", "mcp.client.session", "ClientSession", "call_tool", "mcp_call_tool"),
 )
 
-# Patched for either vendor: Azure clients reuse the OpenAI resource classes.
-_TARGET_VENDORS = {"openai": ("openai", "azure_openai")}
+# Patched for either vendor: Azure clients reuse the OpenAI resource classes,
+# and the Anthropic SDK's Vertex AI and Bedrock clients the Anthropic ones.
+_TARGET_VENDORS = {
+    "openai": ("openai", "azure_openai"),
+    "anthropic": ("anthropic", *cloud_platforms.CLAUDE_PLATFORM_VENDORS),
+}
 
 # Vendors patched when their SDK is first imported (at once if it already
 # is), so `instrument()` does not import them: together they add ~1s to
@@ -295,15 +303,19 @@ class FrameworkCall:
     """
 
     __slots__ = ("captured", "finished", "frame", "framework", "model",
-                 "previous", "seq", "use_case_hint")
+                 "previous", "seq", "tags", "use_case_hint")
 
     def __init__(self, framework: str, use_case_hint: str | None = None,
                  model: str | None = None,
-                 previous: "FrameworkCall | None" = None):
+                 previous: "FrameworkCall | None" = None,
+                 tags: dict[str, str] | None = None):
         self.framework = framework
         self.use_case_hint = use_case_hint
         self.model = model
         self.previous = previous
+        # Cost tags the framework knows for the call (the LangGraph node,
+        # #388); the event's own tags win on a key clash.
+        self.tags = tags
         self.captured = False
         self.finished = False
         self.frame = None  # the generator frame of a deferred call
@@ -424,10 +436,17 @@ def _release_framework_call(call: dict) -> None:
 
 
 def apply_framework_fields(event: dict, fc: FrameworkCall) -> None:
-    """Tag an event with its framework; the hint fills an unset use case."""
+    """Tag an event with its framework; the hint fills an unset use case and
+    the framework's cost tags are added to the event's (which win)."""
     event["framework"] = fc.framework
     if fc.use_case_hint and not event.get("use_case_name"):
         event["use_case_name"] = fc.use_case_hint
+    if fc.tags:
+        own = event.get("tags")
+        if own is None:
+            event["tags"] = dict(fc.tags)
+        elif isinstance(own, dict):
+            event["tags"] = {**fc.tags, **own}
 
 
 @contextlib.contextmanager
@@ -887,11 +906,23 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             details["model"] = (
                 getattr(upstream, "_azure_deployment", None) or details["model"]
             )
+        # Claude on Vertex AI / Bedrock through the Anthropic SDK (#388), and
+        # boto3 Bedrock: region, jurisdiction and pricing endpoint scope.
+        platform = None
+        if vendor == "anthropic":
+            platform = cloud_platforms.detect(upstream)
+            if platform is not None:
+                vendor = platform.vendor
+        elif api == "bedrock":
+            platform = cloud_platforms.for_boto3(resource)
         if state.vendors is not None and not (
             vendor in state.vendors
             # Azure clients were instrumented as "openai" before they had
             # their own tag; selecting "openai" still covers them.
             or (vendor == "azure_openai" and "openai" in state.vendors)
+            # Likewise "anthropic" covers its Vertex AI and Bedrock clients.
+            or (vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS
+                and "anthropic" in state.vendors)
         ):
             return None
         hide_usage_chunk = False
@@ -923,6 +954,7 @@ def _prepare(resource: Any, vendor: str, api: str, args: tuple,
             "hide_usage_chunk": hide_usage_chunk,
             "api_key": api_key if isinstance(api_key, str) and api_key else None,
             "framework": framework,
+            "platform": platform,
             # Per-call id (#43): on the event, last_call_id(), and
             # response.ps_call_id where the response takes an attribute.
             "call_id": new_call_id(),
@@ -1481,7 +1513,8 @@ def build_event(state: _State, *, vendor: str, model: Any, messages: list,
                 latency_ms: int, adapter_fields: dict,
                 api_key: str | None = None,
                 adapter: ProviderAdapter | None = None,
-                call_id: str | None = None) -> dict:
+                call_id: str | None = None,
+                platform: "cloud_platforms.CloudPlatform | None" = None) -> dict:
     """A `ShieldsClient`-shaped event from already extracted usage fields."""
     # Imported here: client.py imports this module for suppress_instrumentation.
     from prompt_shields.client import ShieldsClient, _fingerprint
@@ -1503,6 +1536,7 @@ def build_event(state: _State, *, vendor: str, model: Any, messages: list,
         _send_prompt_text=state.send_prompt_text,
         _pricing_table=state.pricing_table,
         _api_key_fingerprint=fingerprint or None,
+        _platform=platform,
     )
     return ShieldsClient._build_event(
         shim,
@@ -1536,6 +1570,7 @@ def _event(call: dict, response: Any, latency_ms: int,
         adapter_fields=adapter_fields,
         api_key=call["api_key"],
         call_id=call.get("call_id"),
+        platform=call.get("platform"),
     )
     if call.get("framework") is not None:
         apply_framework_fields(event, call["framework"])
@@ -1657,8 +1692,13 @@ class _ResponsesAccumulator(StreamAccumulator):
 
 
 def _accumulator(call: dict) -> StreamAccumulator:
-    # Azure OpenAI streams are OpenAI chunks.
-    vendor = "openai" if call["vendor"] == "azure_openai" else call["vendor"]
+    # Azure OpenAI streams are OpenAI chunks; Claude on Vertex AI and
+    # Bedrock (Anthropic SDK clients) streams Anthropic events.
+    vendor = call["vendor"]
+    if vendor == "azure_openai":
+        vendor = "openai"
+    elif vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS:
+        vendor = "anthropic"
     if call["api"] == "responses":
         return _ResponsesAccumulator(vendor, call["messages"])
     return StreamAccumulator(vendor, call["messages"])
