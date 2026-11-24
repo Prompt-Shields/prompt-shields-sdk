@@ -17,6 +17,7 @@ import {
 import { HooksManager } from '../src/middlewares/hooks';
 import { HookType } from '../src/middlewares/hooks/types';
 import { pluginRequest, PluginEgressError } from './egress';
+import { setEgressResolverForTests } from '../src/utils/egressGuard';
 import { handler as webhookHandler } from './default/webhook';
 import { handler as logHandler } from './default/log';
 import { handler as validUrlsHandler } from './default/validUrls';
@@ -381,5 +382,53 @@ describe('failOnError semantics are unchanged for a refused egress', () => {
     expect(shouldDeny).toBe(true);
     expect(results[0].verdict).toBe(false);
     expect(results[0].checks[0].fail_on_error).toBe(true);
+  });
+});
+
+describe('pluginRequest resolves the host (#377)', () => {
+  const resolveTo = (address: string) => async () => [
+    { address, family: address.includes(':') ? 6 : 4 },
+  ];
+  afterEach(() => setEgressResolverForTests(null));
+
+  test.each([
+    '169.254.169.254',
+    'fd00:ec2::254',
+    '::ffff:a9fe:a9fe',
+    '127.0.0.1',
+  ])(
+    'a public name resolving to %s is refused without a request',
+    async (address) => {
+      env.TRUSTED_CUSTOM_HOSTS = undefined;
+      setEgressResolverForTests(resolveTo(address));
+      const fetchSpy = jest.spyOn(globalThis, 'fetch');
+      await expect(
+        pluginRequest('https://guard.example.com/check', { method: 'POST' })
+      ).rejects.toBeInstanceOf(PluginEgressError);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  test('a name resolving to a private address is not refused by the lookup', async () => {
+    env.TRUSTED_CUSTOM_HOSTS = undefined;
+    setEgressResolverForTests(resolveTo('10.0.0.7'));
+    const fetchSpy = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const { text } = await pluginRequest('https://guard.example.com/check');
+    expect(text).toBe('{}');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a host listed in TRUSTED_CUSTOM_HOSTS is not resolved', async () => {
+    env.TRUSTED_CUSTOM_HOSTS = 'guard.example.com';
+    const resolver = jest.fn(resolveTo('169.254.169.254'));
+    setEgressResolverForTests(resolver);
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('ok', { status: 200 }));
+    const { text } = await pluginRequest('https://guard.example.com/check');
+    expect(text).toBe('ok');
+    expect(resolver).not.toHaveBeenCalled();
   });
 });

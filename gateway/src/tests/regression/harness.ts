@@ -12,6 +12,8 @@
  * jose 6, which ships ES modules only and is never called here.
  */
 
+import { setEgressResolverForTests } from '../../utils/egressGuard';
+
 export const COLLECTOR = 'http://collector.test';
 export const OTEL = 'http://otel.test/v1/traces';
 
@@ -161,7 +163,16 @@ export function upstream(match: RegExp, respond: Responder) {
   routes.unshift({ match, respond });
 }
 
+/**
+ * Egress resolve-and-check (#377): every host "resolves" to a public
+ * documentation address, offline and at once. Suites that test the check
+ * install their own resolver after resetHarness().
+ */
+const offlineResolver = async () => [{ address: '203.0.113.10', family: 4 }];
+setEgressResolverForTests(offlineResolver);
+
 export function resetHarness() {
+  setEgressResolverForTests(offlineResolver);
   routes.length = 0;
   upstreamCalls.length = 0;
   events.length = 0;

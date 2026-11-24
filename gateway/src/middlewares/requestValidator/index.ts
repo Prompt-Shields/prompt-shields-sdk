@@ -79,6 +79,33 @@ export function configuredTrustedCustomHosts(c?: Context): Set<string> {
   );
 }
 
+/**
+ * PS fork (#377): is the host of `rawUrl` exempt from the egress
+ * resolve-and-check, i.e. listed in TRUSTED_CUSTOM_HOSTS (with its
+ * unset-variable development defaults, as the upstream URL checks use it)?
+ * Matching is the same as in those checks; the set is not changed here.
+ */
+export function isTrustedUpstreamHost(rawUrl: string, c?: Context): boolean {
+  return hostInTrustedSet(rawUrl, TRUSTED_CUSTOM_HOSTS(c));
+}
+
+/** PS fork (#377): the same for guardrail plugin egress (no defaults). */
+export function isTrustedPluginHost(rawUrl: string, c?: Context): boolean {
+  return hostInTrustedSet(rawUrl, configuredTrustedCustomHosts(c));
+}
+
+function hostInTrustedSet(rawUrl: string, trustedHosts: Set<string>): boolean {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return (
+      trustedHosts.has(host) ||
+      (trustedHosts.has('localhost') && host.endsWith('.localhost'))
+    );
+  } catch {
+    return false;
+  }
+}
+
 // Pre-computed IPv4 range boundaries for performance optimization
 const IPV4_RANGES = {
   PRIVATE: [
