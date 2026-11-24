@@ -545,7 +545,9 @@ async def delete_principal(
         target_type="principal",
         target_id=principal_id,
         memberships_removed=[str(m.id) for m in memberships],
-        admin_tokens_revoked=[str(t.id) for t in tokens],
+        # Not "admin_tokens_revoked": audit details redact keys naming a
+        # token unless they end in _ids (db.audit_chain.sanitize_details).
+        revoked_token_ids=[str(t.id) for t in tokens],
         partner_credentials_revoked=[str(c.id) for c in creds],
     )
     await db.commit()
