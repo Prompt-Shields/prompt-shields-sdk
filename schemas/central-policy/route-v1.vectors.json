@@ -1,0 +1,1374 @@
+{
+  "description": "Central policy route section v1 (#383): route-policy.v1 documents and whether the gateway accepts them (gateway/src/middlewares/router/policyDoc.ts parseRoutePolicyDoc). The collector (packages/collector/collector/route_policy_schema.py) must agree on every case: both test suites run this file.",
+  "cases": [
+    {
+      "name": "minimal",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "every optional field; an integral float counts as an integer",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "missing groups",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown top-level key",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        },
+        "extra": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "schema_version v2",
+      "policy": {
+        "schema_version": "route-policy.v2",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "default_group is not a group",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "frontier",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "quality_to_group misses a key",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "quality_to_group names an unknown group",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "nope"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "empty groups",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {}
+      },
+      "valid": false
+    },
+    {
+      "name": "group name not an identifier",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "Cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "group name with a trailing newline",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ],
+          "cheap\n": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "model tier misses its output cost",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "model tier cost is a string",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": "0.1",
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "model tier negative cost",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": -1,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "model tier unknown key",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "region": "eu"
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "jurisdiction in lower case",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "eea"
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown strategy",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        },
+        "strategy": "random"
+      },
+      "valid": false
+    },
+    {
+      "name": "group_order names an unknown group",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "huge"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "group_order repeats a group",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "cheap"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "use case min_group is not a group",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "huge",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "min_parity above 1",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 1.5
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "data_policy names an unknown level",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          },
+          "internal": {
+            "jurisdictions": [
+              "EEA"
+            ]
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "data_policy without the default levels",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        },
+        "data_policy": {
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ]
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "data_policy over the default levels",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        },
+        "data_policy": {
+          "restricted": {
+            "jurisdictions": [
+              "EEA"
+            ]
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "unclassified_default is not a level",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "internal",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "pii_escalation to an unknown level",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "top"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "sensitivity without levels",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "fallback max_attempts 0",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 0
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "fallback max_attempts not an integer",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 2.5
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "fallback no_compliant_candidate other than fail_closed",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "policy_version": "eu-1",
+        "default_group": "cheap",
+        "group_order": [
+          "cheap",
+          "frontier"
+        ],
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "frontier"
+        },
+        "strategy": "cheapest",
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006,
+              "jurisdiction": "EEA",
+              "zdr": true
+            }
+          ],
+          "frontier": [
+            {
+              "model": "gpt-4o",
+              "provider": "openai",
+              "input_cost_per_1k": 0.0025,
+              "output_cost_per_1k": 0.01,
+              "jurisdiction": "US",
+              "us_cloud_act_exposure": true
+            }
+          ]
+        },
+        "sensitivity": {
+          "levels": [
+            "public",
+            "secret"
+          ],
+          "unclassified_default": "secret",
+          "pii_escalation": {
+            "email": "secret"
+          },
+          "anonymise_then_route": [
+            "secret"
+          ]
+        },
+        "data_policy": {
+          "public": {
+            "jurisdictions": [
+              "any"
+            ]
+          },
+          "secret": {
+            "jurisdictions": [
+              "EEA"
+            ],
+            "require_zdr": true
+          }
+        },
+        "use_cases": {
+          "summarise": {
+            "min_group": "frontier",
+            "min_parity": 0.9
+          }
+        },
+        "fallback": {
+          "budget_unsatisfiable": "fail",
+          "max_attempts": 3.0,
+          "no_compliant_candidate": "allow"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "policy_version empty",
+      "policy": {
+        "schema_version": "route-policy.v1",
+        "default_group": "cheap",
+        "quality_to_group": {
+          "draft": "cheap",
+          "balanced": "cheap",
+          "critical": "cheap"
+        },
+        "groups": {
+          "cheap": [
+            {
+              "model": "mistral-small",
+              "provider": "mistral",
+              "input_cost_per_1k": 0.0002,
+              "output_cost_per_1k": 0.0006
+            }
+          ]
+        },
+        "policy_version": ""
+      },
+      "valid": false
+    }
+  ]
+}

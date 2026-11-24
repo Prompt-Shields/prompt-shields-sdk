@@ -778,6 +778,7 @@ def test_policy_schemas_match_serializers():
         created_by="token:abc",
         created_at=now,
         updated_at=None,
+        deleted_at=None,
     )
     keys = set(policies_api.serialize_policy(policy))
     assert _props("Policy") == keys == set(SCHEMAS["Policy"]["required"])
