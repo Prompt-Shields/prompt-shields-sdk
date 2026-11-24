@@ -203,6 +203,7 @@ function describe(policy: CentralPolicy): string {
   if (policy.access) parts.push('access policy');
   if (policy.prices)
     parts.push(`${policy.prices.overrides.length} negotiated price(s)`);
+  if (policy.budgets) parts.push(`${policy.budgets.budgets.length} budget(s)`);
   if (policy.rateLimits?.tenant)
     parts.push(
       `${policy.rateLimits.tenant.config.rules.length} rate-limit rule(s)`

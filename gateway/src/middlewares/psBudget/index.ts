@@ -1,8 +1,10 @@
 /**
- * Spend budgets (#28): budget.v1 (schemas/budget/, shared with the SDK) per
- * business unit, use case, owner or the whole deployment, by UTC day, ISO
- * week or month, from PS_BUDGETS or PS_BUDGETS_FILE. Spend lives in the
- * shared counters (./keys.ts), in Redis for every replica and the SDK.
+ * Spend budgets (#28, #29): budget.v1 (schemas/budget/, shared with the SDK)
+ * in USD or tokens per business unit, use case, owner, team, project, user,
+ * calling service, requested model or the whole deployment, by UTC day, ISO
+ * week or month, from PS_BUDGETS or PS_BUDGETS_FILE, or the central policy's
+ * `budgets` section. Spend lives in the shared counters (./keys.ts), in Redis
+ * for every replica and the SDK.
  *
  * Per billed call, mounted after psRouter (it sees the routed model and its
  * estimate) and before psTelemetry (served calls carry budget_state; a
@@ -24,16 +26,20 @@
  *    reservation is an atomic check (spent + reserved must be under the
  *    limit), so calls racing on several replicas see each other.
  * 5. After the call, settle: drop the reservation and add the actual cost
- *    (priced as telemetry prices it; a cache hit or failed call costs
- *    nothing; an unpriced call keeps its estimate). Streams settle at the end.
+ *    and tokens (priced as telemetry prices it; a cache hit or failed call
+ *    costs nothing; an unpriced call keeps its estimate). Streams settle at
+ *    the end. A settle that crosses a budget's warn share or limit is
+ *    reported (./notify.ts: metric, log line, optional signed webhook).
  *
- * Attributes come from X-PS-Business-Unit, X-PS-Use-Case and X-PS-Owner, as
- * the caller declares them for attribution. They are not authenticated: a
- * caller can send another value, or none, and so move its spend to another
- * budget or out of one. Only `global` budgets (never header-controlled) and,
- * when OIDC is on, `owner` budgets are enforcement against the caller: with
- * a verified OIDC identity the owner is the identity's subject hash and
- * X-PS-Owner is ignored.
+ * Attributes come from X-PS-Business-Unit, X-PS-Use-Case, X-PS-Owner,
+ * X-PS-Team, X-PS-Project and X-PS-Service, as the caller declares them for
+ * attribution, and `model` from the requested model. They are not
+ * authenticated: a caller can send another value, or none, and so move its
+ * spend to another budget or out of one. Only `global` budgets (never
+ * header-controlled) and, when OIDC is on, `owner` and `user` budgets are
+ * enforcement against the caller: with a verified OIDC identity the owner
+ * is the identity's subject hash and X-PS-Owner is ignored, and `user` is
+ * that subject hash (a `user` budget never matches without OIDC).
  */
 import { Context, Next } from 'hono';
 import { env } from 'hono/adapter';
@@ -75,6 +81,7 @@ import { Budget, BudgetConfig } from './config';
 import { DowngradePick, pickDowngrade } from './downgrade';
 import {
   BudgetScope,
+  BudgetUnit,
   counterKey,
   counterTtl,
   GLOBAL_SUBJECT,
@@ -83,9 +90,11 @@ import {
 } from './keys';
 import {
   budgetDecisionsTotal,
+  budgetSpendTokens,
   budgetSpendUsd,
   budgetStoreErrorsTotal,
 } from './metrics';
+import { notifyThresholds, thresholdCrossings } from './notify';
 import { BudgetRuntime, getBudgetRuntime } from './runtime';
 
 export type BudgetState = 'ok' | 'warn' | 'unknown' | 'exceeded';
@@ -137,25 +146,33 @@ export type BudgetAttributes = Partial<
 export interface Matched {
   budget: Budget;
   subject: string;
+  period: string;
   key: string;
   ttlSeconds: number;
   periodEndsAt: number;
 }
 
 /**
- * The call's attribution attributes from its X-PS-* headers. With a verified
- * OIDC identity (`verifiedOwner`, its subject hash) the owner is that
- * identity, whatever X-PS-Owner says.
+ * The call's attribution attributes from its X-PS-* headers and requested
+ * `model`. With a verified OIDC identity (`verifiedOwner`, its subject hash)
+ * the owner and the user are that identity, whatever X-PS-Owner says;
+ * without one there is no user.
  */
 export function attributesOf(
   headers: Record<string, string | undefined>,
-  verifiedOwner?: string
+  verifiedOwner?: string,
+  model?: string
 ): BudgetAttributes {
   const clean = (v: string | undefined) => (v && v.trim() ? v : undefined);
   return {
     business_unit: clean(headers['x-ps-business-unit']),
     use_case: clean(headers['x-ps-use-case']),
     owner: verifiedOwner || clean(headers['x-ps-owner']),
+    team: clean(headers['x-ps-team']),
+    project: clean(headers['x-ps-project']),
+    service: clean(headers['x-ps-service']),
+    user: verifiedOwner || undefined,
+    model: clean(model),
   };
 }
 
@@ -175,15 +192,18 @@ export function matchBudgets(
       if (budget.subject !== '*' && budget.subject !== value) continue;
       subject = value;
     }
+    const period = periodOf(budget.window, nowMs);
     out.push({
       budget,
       subject,
+      period,
       key: counterKey(
         config.namespace,
         budget.scope,
         subject,
         budget.window,
-        periodOf(budget.window, nowMs)
+        period,
+        budget.unit
       ),
       ttlSeconds: counterTtl(budget.window, nowMs),
       periodEndsAt: periodEnd(budget.window, nowMs),
@@ -193,15 +213,15 @@ export function matchBudgets(
 }
 
 export interface Status extends Matched {
-  /** Counter (plus live reservations) in USD; null when unreadable. */
+  /** Counter (plus live reservations) in the budget's unit; null when unreadable. */
   spent: number | null;
   state: BudgetState;
 }
 
 export function budgetState(budget: Budget, spent: number | null): BudgetState {
   if (spent === null) return 'unknown';
-  if (spent >= budget.limitUsd) return 'exceeded';
-  if (spent >= budget.warnAt * budget.limitUsd) return 'warn';
+  if (spent >= budget.limit) return 'exceeded';
+  if (spent >= budget.warnAt * budget.limit) return 'warn';
   return 'ok';
 }
 
@@ -244,7 +264,7 @@ export function decide(
       if (s.spent === null) {
         if (onStoreError !== 'closed') continue;
         remaining = 0;
-      } else remaining = Math.max(b.limitUsd - s.spent, 0);
+      } else remaining = Math.max(b.limit - s.spent, 0);
       ceiling = ceiling === null ? remaining : Math.min(ceiling, remaining);
       if (exhausted && action === 'none') action = 'downgrade';
     }
@@ -259,9 +279,11 @@ export function decide(
   };
 }
 
-/** USD with cents, or four decimals for a budget under $1. */
-const fmt = (usd: number, limit: number) =>
-  `$${usd.toFixed(limit < 1 ? 4 : 2)}`;
+/** USD with cents (four decimals for a budget under $1), or whole tokens. */
+const fmt = (amount: number, limit: number, unit: BudgetUnit) =>
+  unit === 'tokens'
+    ? `${Math.round(amount)} tokens`
+    : `$${amount.toFixed(limit < 1 ? 4 : 2)}`;
 
 function budgetExceededResponse(
   c: Context,
@@ -279,7 +301,7 @@ function budgetExceededResponse(
       error: {
         message:
           `Budget "${b.id}" (${scope}, per ${b.window}) is exhausted: ` +
-          `${fmt(used, b.limitUsd)} of ${fmt(b.limitUsd, b.limitUsd)} used. ` +
+          `${fmt(used, b.limit, b.unit)} of ${fmt(b.limit, b.limit, b.unit)} used. ` +
           `It resets at ${resets}.`,
         type: 'budget_exceeded',
         param: null,
@@ -403,15 +425,18 @@ function estimateOf(
   return 0;
 }
 
-/** The call's actual cost, priced as psTelemetry prices it; undefined if unpriced. */
-function actualCost(
+/**
+ * The call's actual cost, priced as psTelemetry prices it, and its tokens
+ * (input + output); each undefined when unknown.
+ */
+function actualUsage(
   vendor: string,
   path: string,
   route: PSRoute | undefined,
   requestBody: any,
   responseBody: any,
   summary?: StreamSummary
-): number | undefined {
+): { cost?: number; tokens?: number } {
   const adapted =
     path.startsWith('/v1/responses') && !supportsResponsesApiNatively(vendor);
   const zeroFilled = usageZeroFilled(vendor, adapted);
@@ -435,18 +460,42 @@ function actualCost(
     served = summary.model || served;
   }
   const cost = withCost(event, served).cost;
-  return typeof cost === 'number' && Number.isFinite(cost) && cost >= 0
-    ? cost
-    : undefined;
+  const tin = Number(event.tokens_in);
+  const tout = Number(event.tokens_out);
+  const known = (n: number) => Number.isFinite(n) && n >= 0;
+  return {
+    ...(typeof cost === 'number' && known(cost) ? { cost } : {}),
+    ...(known(tin) || known(tout)
+      ? { tokens: (known(tin) ? tin : 0) + (known(tout) ? tout : 0) }
+      : {}),
+  };
 }
 
-function recordSpend(s: Status, estimate: number) {
+function recordSpend(s: Status, estimate: Record<BudgetUnit, number>) {
   if (s.spent === null) return;
   if (s.budget.subject === '*') return;
-  budgetSpendUsd.set(
+  const gauge = s.budget.unit === 'tokens' ? budgetSpendTokens : budgetSpendUsd;
+  gauge.set(
     { budget: s.budget.id, window: s.budget.window },
-    s.spent + estimate
+    s.spent + estimate[s.budget.unit]
   );
+}
+
+/** Estimated tokens of the call (input estimate plus its output cap). */
+function estimateTokensOf(body: any): number {
+  if (!body || typeof body !== 'object') return 0;
+  const chat = Array.isArray(body.messages);
+  const tokensIn = chat
+    ? estimateInputTokens(body.messages)
+    : Math.ceil(JSON.stringify(body.input ?? body.prompt ?? '').length / 4);
+  const tokensOut = chat
+    ? body.max_tokens ??
+      body.max_completion_tokens ??
+      body.max_output_tokens ??
+      DEFAULT_OUTPUT_TOKENS
+    : 0;
+  const n = tokensIn + (Number(tokensOut) || 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 /**
@@ -521,9 +570,21 @@ export function psBudget(options: PsBudgetOptions = {}) {
     } catch {
       verifiedOwner = undefined;
     }
+    let body: any;
+    if ((headers['content-type'] || '').includes('application/json')) {
+      try {
+        body = await c.req.json();
+      } catch {
+        body = undefined; // the handler rejects it
+      }
+    }
+    let route = c.get('psRoute');
+    const requested =
+      route?.requestedModel ??
+      (typeof body?.model === 'string' ? body.model : undefined);
     const matched = matchBudgets(
       rt.config,
-      attributesOf(headers, verifiedOwner),
+      attributesOf(headers, verifiedOwner, requested),
       nowMs
     );
     if (!matched.length) return next();
@@ -534,16 +595,12 @@ export function psBudget(options: PsBudgetOptions = {}) {
     };
 
     const vendor = detectVendor(c.req.url, providerFromHeaders(headers));
-    let body: any;
-    if ((headers['content-type'] || '').includes('application/json')) {
-      try {
-        body = await c.req.json();
-      } catch {
-        body = undefined; // the handler rejects it
-      }
-    }
-    let route = c.get('psRoute');
     let estimate = estimateOf(policy, vendor, body, route);
+    const estimateTokens = estimateTokensOf(body);
+    const unitOf = (key: string) =>
+      matched.find((m) => m.key === key)!.budget.unit;
+    const amountOf = (key: string) =>
+      unitOf(key) === 'tokens' ? estimateTokens : estimate;
 
     // 1. Read and decide.
     const keys = [...new Set(matched.map((m) => m.key))];
@@ -654,7 +711,7 @@ export function psBudget(options: PsBudgetOptions = {}) {
       Promise.all(
         reserved.map((m) =>
           rt.store
-            .settle(m.key, reservationId, estimate, 0, m.ttlSeconds)
+            .settle(m.key, reservationId, amountOf(m.key), 0, m.ttlSeconds)
             .catch(() => undefined)
         )
       );
@@ -663,18 +720,16 @@ export function psBudget(options: PsBudgetOptions = {}) {
         const onKey = statuses.filter((s) => s.key === key);
         const blocking = onKey.filter((s) => s.budget.mode === 'block');
         const tightest = blocking.length
-          ? blocking.reduce((x, y) =>
-              y.budget.limitUsd < x.budget.limitUsd ? y : x
-            )
+          ? blocking.reduce((x, y) => (y.budget.limit < x.budget.limit ? y : x))
           : undefined;
         try {
           const r = await rt.store.reserve({
             key,
             id: reservationId,
-            amount: estimate,
+            amount: amountOf(key),
             nowMs,
             reservationTtlMs: rt.reservationTtlMs,
-            limit: tightest?.budget.limitUsd,
+            limit: tightest?.budget.limit,
           });
           if (!r.ok) {
             // Another call (on any replica) used up the budget meanwhile.
@@ -700,7 +755,8 @@ export function psBudget(options: PsBudgetOptions = {}) {
       action,
     });
     record(action);
-    for (const s of statuses) recordSpend(s, estimate);
+    for (const s of statuses)
+      recordSpend(s, { usd: estimate, tokens: estimateTokens });
 
     // 5. The call, then settle with its actual cost on every counter.
     try {
@@ -711,28 +767,52 @@ export function psBudget(options: PsBudgetOptions = {}) {
     }
     setHeader(c, BUDGET_STATE_HEADER, decision.state);
 
-    const settle = (actual: number | undefined) =>
+    const runtimeEnv = env<Record<string, string | undefined>>(c);
+    const settle = (actual: { cost?: number; tokens?: number } | undefined) =>
       Promise.all(
-        keys.map((key) => {
+        keys.map(async (key) => {
           const m = matched.find((x) => x.key === key)!;
-          return rt.store
-            .settle(
+          const held = amountOf(key);
+          const value =
+            (m.budget.unit === 'tokens' ? actual?.tokens : actual?.cost) ??
+            held;
+          try {
+            const after = await rt.store.settle(
               key,
               reservationId,
-              estimate,
-              actual ?? estimate,
+              held,
+              value,
               m.ttlSeconds
-            )
-            .catch((err) => storeError('settle', err));
+            );
+            return thresholdCrossings(
+              matched.filter((x) => x.key === key),
+              rt.config.namespace,
+              after - Math.max(value, 0),
+              after,
+              now()
+            );
+          } catch (err) {
+            storeError('settle', err);
+            return [];
+          }
         })
-      ).then(() => undefined);
+      ).then((crossed) => {
+        const events = crossed.flat();
+        if (!events.length) return;
+        const sent = notifyThresholds(events, runtimeEnv);
+        try {
+          c.executionCtx?.waitUntil?.(sent);
+        } catch {
+          /* no execution context on Node: the promise runs on its own */
+        }
+      });
 
     try {
       const cacheHit = (
         c.res.headers.get(RESPONSE_HEADER_KEYS.CACHE_STATUS) || ''
       ).endsWith('HIT');
       if (c.res.status >= 400 || cacheHit) {
-        await settle(0);
+        await settle({ cost: 0, tokens: 0 });
         return;
       }
       const requestBody = await requestBodyForTelemetry(c);
@@ -741,7 +821,7 @@ export function psBudget(options: PsBudgetOptions = {}) {
         const done = stream
           .then((summary) =>
             settle(
-              actualCost(vendor, path, route, requestBody, undefined, summary)
+              actualUsage(vendor, path, route, requestBody, undefined, summary)
             )
           )
           .catch(() => settle(undefined));
@@ -762,7 +842,7 @@ export function psBudget(options: PsBudgetOptions = {}) {
           responseBody = undefined;
         }
       }
-      await settle(actualCost(vendor, path, route, requestBody, responseBody));
+      await settle(actualUsage(vendor, path, route, requestBody, responseBody));
     } catch (err) {
       console.warn('[PS Budget] settle skipped:', (err as Error)?.message);
       await settle(undefined);

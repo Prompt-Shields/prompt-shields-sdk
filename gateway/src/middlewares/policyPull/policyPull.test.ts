@@ -87,8 +87,10 @@ describe('parsePolicyBundle', () => {
   });
 
   test('sections this gateway does not enforce are ignored', () => {
-    const p = parsePolicyBundle(bundle({ budgets: { version: 1, x: 1 } }));
-    expect(p.ignored).toEqual(['budgets']);
+    const p = parsePolicyBundle(
+      bundle({ pseudonymisation: { version: 1, x: 1 } })
+    );
+    expect(p.ignored).toEqual(['pseudonymisation']);
   });
 
   test.each([
