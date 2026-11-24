@@ -2,6 +2,7 @@ import { Context } from 'hono';
 import { getRuntimeKey } from 'hono/adapter';
 import { redactString } from '../../utils/redact';
 import { findPiiSpans, piiPlaceholder, redactPii } from '../router/pii';
+import { scrubOutput } from '../psGuardrails/scrub';
 
 let logId = 0;
 const MAX_RESPONSE_LENGTH = 100000;
@@ -197,6 +198,38 @@ const broadcastLog = async (log: any) => {
   });
 };
 
+/**
+ * PS fork (#349): a log entry with the provider's response body
+ * (`originalResponse.body`) passed through the call's output guardrails,
+ * as the client got it; withheld when they denied it. The entry itself is
+ * not modified.
+ */
+export const scrubLogEntry = (c: Context, option: any): any => {
+  const body = option?.originalResponse?.body;
+  if (!body || typeof body !== 'object') return option;
+  let copy: any;
+  try {
+    copy = structuredClone(body);
+  } catch {
+    return option;
+  }
+  const outcome = scrubOutput(c, copy);
+  if (outcome === 'none') return option;
+  return {
+    ...option,
+    originalResponse: {
+      ...option.originalResponse,
+      body:
+        outcome === 'denied'
+          ? {
+              message:
+                'Withheld: the response was blocked by a guardrail policy.',
+            }
+          : copy,
+    },
+  };
+};
+
 async function processLog(c: Context, start: number) {
   const ms = Date.now() - start;
   if (!c.req.url.includes('/v1/')) return;
@@ -225,7 +258,10 @@ async function processLog(c: Context, start: number) {
       endpoint: endpoint === undefined ? endpoint : redactEndpoint(endpoint),
       status: c.res.status,
       duration: ms,
-      requestOptions: buildLogRequestOptions(requestOptionsArray, response),
+      requestOptions: buildLogRequestOptions(
+        requestOptionsArray.map((o: any) => scrubLogEntry(c, o)),
+        response
+      ),
     })
   );
 }

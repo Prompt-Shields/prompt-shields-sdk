@@ -65,6 +65,19 @@ Sections today:
     Unlike other sections, the ``rate_limits`` of a team or project are
     applied on top of the tenant's (to calls that name it in X-PS-Team /
     X-PS-Project), never instead of them.
+``guardrails`` v1
+    ``{"version": 1, "rules": [...], "stream_window_chars": 256}``: checks
+    the gateway runs itself on every model call's input and output,
+    whatever guardrails the caller sends (#349). Each rule is
+    ``{"id", "check": "pii"|"secrets"|"injection", "action":
+    "deny"|"redact"|"log", "stages": ["input", "output"], "categories":
+    [...], "models": [...]}``; ``stages`` defaults to both, ``categories``
+    to every value category of the check (``health_data`` and
+    ``financial_data`` only when named), ``models`` (glob patterns) to
+    every model. Unlike other sections, guardrails add up across levels:
+    the gateway applies the tenant's rules and those of the caller's team
+    and project together, the strictest action winning, so a lower level
+    can add rules but never drop the tenant's (docs/guides/guardrails.mdx).
 
 Inheritance
 -----------
@@ -114,7 +127,6 @@ MAX_DOCUMENT_BYTES = 256 * 1024
 # Planned sections, refused until the issue that enforces them adds them.
 RESERVED_SECTIONS: dict[str, str] = {
     "prices": "model prices (#348)",
-    "guardrails": "guardrail settings (#349)",
     "pseudonymisation": "pseudonymisation settings (#350)",
     "budgets": "budget references",
 }
@@ -327,6 +339,123 @@ def _rate_limits_v1(at: str, body: dict, problems: list[str]) -> None:
                 problems.append(f"{where}.{k} must be a positive integer")
 
 
+# Guardrails v1 (#349); mirrored by gateway/src/middlewares/psGuardrails/config.ts.
+GUARDRAIL_RULE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+GUARDRAIL_RULE_KEYS = frozenset({"id", "check", "action", "stages", "categories", "models"})
+GUARDRAIL_STAGES = ("input", "output")
+GUARDRAIL_MAX_RULES = 64
+# PII categories with a value to redact (the gateway's findPiiSpans), and
+# keyword categories that only mark context (deny or log).
+PII_VALUE_CATEGORIES = (
+    "credit_card",
+    "email",
+    "iban",
+    "ip_address",
+    "national_id",
+    "phone",
+    "ssn",
+)
+PII_CONTEXT_CATEGORIES = ("financial_data", "health_data")
+SECRET_CATEGORIES = (
+    "anthropic_key",
+    "aws_access_key",
+    "github_token",
+    "google_api_key",
+    "jwt",
+    "openai_key",
+    "private_key",
+    "slack_token",
+    "stripe_key",
+)
+GUARDRAIL_CHECKS: dict[str, dict[str, Any]] = {
+    "pii": {
+        "categories": PII_VALUE_CATEGORIES + PII_CONTEXT_CATEGORIES,
+        "actions": ("deny", "redact", "log"),
+    },
+    "secrets": {"categories": SECRET_CATEGORIES, "actions": ("deny", "redact", "log")},
+    "injection": {"categories": (), "actions": ("deny", "log")},
+}
+STREAM_WINDOW_RANGE = (64, 4096)
+MODEL_PATTERN = re.compile(r"^[A-Za-z0-9_.:@/ +*-]{1,128}$")
+
+
+def _guardrails_v1(at: str, body: dict, problems: list[str]) -> None:
+    extra = sorted(set(body) - {"version", "rules", "stream_window_chars"})
+    if extra:
+        problems.append(f"{at}: unknown keys {extra}")
+    if "stream_window_chars" in body:
+        w = body["stream_window_chars"]
+        lo, hi = STREAM_WINDOW_RANGE
+        if not (isinstance(w, int) and not isinstance(w, bool) and lo <= w <= hi):
+            problems.append(f"{at}.stream_window_chars must be an integer {lo}-{hi}")
+    rules = body.get("rules")
+    if not isinstance(rules, list):
+        problems.append(f"{at}.rules must be an array")
+        return
+    if len(rules) > GUARDRAIL_MAX_RULES:
+        problems.append(f"{at}.rules: at most {GUARDRAIL_MAX_RULES} rules")
+    seen: set[str] = set()
+    for i, r in enumerate(rules):
+        where = f"{at}.rules[{i}]"
+        if not _is_obj(r):
+            problems.append(f"{where} must be an object")
+            continue
+        unknown = sorted(set(r) - GUARDRAIL_RULE_KEYS)
+        if unknown:
+            problems.append(f"{where}: unknown keys {unknown}")
+        rid = r.get("id")
+        if not (isinstance(rid, str) and GUARDRAIL_RULE_ID.match(rid)):
+            problems.append(f"{where}.id must be 1-64 characters of [a-z0-9_.-]")
+        elif rid in seen:
+            problems.append(f'{where}.id "{rid}" is used twice')
+        else:
+            seen.add(rid)
+        check = r.get("check")
+        spec = GUARDRAIL_CHECKS.get(check) if isinstance(check, str) else None
+        if spec is None:
+            problems.append(f"{where}.check must be one of {list(GUARDRAIL_CHECKS)}")
+            continue
+        action = r.get("action")
+        if action not in spec["actions"]:
+            problems.append(f"{where}.action must be one of {list(spec['actions'])} for {check}")
+        if "stages" in r:
+            st = r["stages"]
+            if not (
+                isinstance(st, list)
+                and st
+                and all(s in GUARDRAIL_STAGES for s in st)
+                and len(set(st)) == len(st)
+            ):
+                problems.append(
+                    f"{where}.stages must be a non-empty subset of {list(GUARDRAIL_STAGES)}"
+                )
+        if "categories" in r:
+            cats = r["categories"]
+            if not spec["categories"]:
+                problems.append(f"{where}.categories: {check} has no categories")
+            elif not (
+                isinstance(cats, list)
+                and cats
+                and all(isinstance(x, str) and x in spec["categories"] for x in cats)
+            ):
+                problems.append(
+                    f"{where}.categories must be a non-empty array of {list(spec['categories'])}"
+                )
+            elif action == "redact" and set(cats) & set(PII_CONTEXT_CATEGORIES):
+                problems.append(
+                    f"{where}: {sorted(set(cats) & set(PII_CONTEXT_CATEGORIES))} mark context, "
+                    "not a value, and cannot be redacted (use deny or log)"
+                )
+        if "models" in r:
+            models = r["models"]
+            if not (
+                isinstance(models, list)
+                and models
+                and all(isinstance(m, str) and MODEL_PATTERN.match(m) for m in models)
+            ):
+                problems.append(f"{where}.models must be a non-empty array of model patterns")
+
+
 @dataclass(frozen=True)
 class Section:
     description: str
@@ -349,6 +478,12 @@ SECTIONS: dict[str, Section] = {
         "Request and token rate limits (rpm, tpm, tpd, concurrency) per tenant, "
         "virtual key, team, project or user, enforced by the gateway",
         {1: _rate_limits_v1},
+    ),
+    "guardrails": Section(
+        "Checks the gateway enforces on every model call's input and output "
+        "(PII, secrets, prompt injection; deny, redact or log), added up across "
+        "tenant, team and project",
+        {1: _guardrails_v1},
     ),
 }
 
