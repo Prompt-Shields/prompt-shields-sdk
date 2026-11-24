@@ -45,6 +45,7 @@ from collector.admin_auth import (
     AdminPrincipal,
     admin_actor,
     can_manage_owner,
+    created_by,
     require_admin,
 )
 from collector.partner_auth import (
@@ -330,6 +331,7 @@ async def issue_partner_credential(
         partner_metadata=body.metadata or {},
         expires_at=body.expires_at,
         principal_id=body.principal_id,
+        created_by=created_by(request, principal),
     )
     db.add(partner)
     await db.flush()

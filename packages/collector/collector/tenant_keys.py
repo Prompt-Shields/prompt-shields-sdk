@@ -212,8 +212,11 @@ async def issue_key(
     *,
     expires_at: datetime | None = None,
     scopes=DEFAULT_KEY_SCOPES,
+    created_by: str | None = None,
 ) -> tuple[TenantApiKey, str]:
     """Create a key holding ``scopes`` (``ingest:write`` by default).
+    ``created_by`` is who issued it (admin_auth.created_by), which lets
+    disabling a principal revoke the keys its tokens made (#396).
     Returns (row, plaintext). Flushes; the caller commits."""
     bad = unknown_key_scopes(scopes)
     if bad or not scopes:
@@ -231,6 +234,7 @@ async def issue_key(
         scopes=ordered_scopes(scopes),
         created_at=datetime.now(UTC),
         expires_at=expires_at,
+        created_by=created_by,
     )
     db.add(row)
     await db.flush()

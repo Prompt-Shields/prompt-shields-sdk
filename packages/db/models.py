@@ -322,6 +322,8 @@ class TenantApiKey(Base):
     previous_expires_at = Column(TIMESTAMP(timezone=True))
     # 'api' (issued here) or 'legacy' (moved from tenants.api_key_*).
     origin = Column(Text, nullable=False, default="api", server_default="api")
+    # Who issued it, like AdminToken.created_by (#396); NULL before 056.
+    created_by = Column(Text)
     # ingest:write | registry:read | registry:attest | policy:read (collector/tenant_keys.py).
     # Keys from before migration 037 hold all three; a new row defaults to
     # ingest:write only.
@@ -454,6 +456,9 @@ class Principal(Base):
     display_name = Column(Text)
     # SCIM userName (#339); unique per tenant, compared case-insensitively.
     user_name = Column(Text)
+    # 'admin' (admin API) or 'scim' (SCIM POST /Users, #396): SCIM only
+    # re-identifies, re-enables or deletes principals it provisioned.
+    provisioned_by = Column(Text, nullable=False, default="admin", server_default="admin")
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True))
     disabled_at = Column(TIMESTAMP(timezone=True))
@@ -461,6 +466,9 @@ class Principal(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('user', 'service_account')", name="ck_principals_kind"
+        ),
+        CheckConstraint(
+            "provisioned_by IN ('admin', 'scim')", name="ck_principals_provisioned_by"
         ),
         Index(
             "ux_principals_tenant_external_id",
@@ -1322,6 +1330,8 @@ class PartnerCredential(Base):
     principal_id = Column(
         UUID(as_uuid=True), ForeignKey("principals.id", ondelete="SET NULL")
     )
+    # Who issued it, like AdminToken.created_by (#396); NULL before 056.
+    created_by = Column(Text)
 
     __table_args__ = (
         Index("ix_partner_credentials_tenant", "tenant_id"),
