@@ -48,6 +48,7 @@ from prompt_shields.instrumentation import (
 from prompt_shields.integrations._common import (
     claim_outer_call,
     emit,
+    flush_telemetry,
     langgraph_tags,
     normalize_vendor,
     platform_vendor,
@@ -216,13 +217,22 @@ class PromptShieldsCallbackHandler(BaseCallbackHandler):
         try:
             run = self._finish(run_id)
             fields = _extract(response) if run is not None else None
-            self._spans.end(run_id, fields=fields)
-            if run is None or run.fc.captured:
-                return
-            latency_ms = int((time.monotonic() - run.start) * 1000)
-            emit(run.fc, vendor=run.vendor, model=run.model,
-                 messages=run.messages, latency_ms=latency_ms,
-                 adapter_fields=fields)
+            emitted = False
+            try:
+                if run is not None and not run.fc.captured:
+                    latency_ms = int((time.monotonic() - run.start) * 1000)
+                    # Before the run's span ends, so the OTLP export (#386)
+                    # can put its attributes on it instead of a second span;
+                    # the flush (I/O) waits until the span has ended.
+                    emitted = emit(run.fc, vendor=run.vendor, model=run.model,
+                                   messages=run.messages, latency_ms=latency_ms,
+                                   adapter_fields=fields,
+                                   sdk_span=self._spans.span_of(run_id),
+                                   flush=False)
+            finally:
+                self._spans.end(run_id, fields=fields)
+            if emitted:
+                flush_telemetry()
         except Exception as e:  # noqa: BLE001 - fail-open
             logger.debug(f"LangChain handler error: {e}")
 
