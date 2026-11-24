@@ -1,0 +1,110 @@
+---
+title: Agent Traces
+description: One trace id from the app through every model and tool call, the gateway and the collector, queryable with the Partner API
+---
+
+# Agent Traces
+
+An agent turn makes several model calls and tool calls. With tracing on, they share one W3C trace id: the app's own tracer (if any), the Python SDK, the gateway and the collector all use it, and the collector stores the spans so you can look a turn up later.
+
+```
+app span (your tracer, optional)
+└─ invoke_agent support            SDK: agent_span() / LangChain handler
+   ├─ chat gpt-4o                  SDK chat span          ─┐ traceparent
+   │  └─ chat gpt-4o               gateway CLIENT span   <─┘
+   ├─ execute_tool lookup_order    SDK: tool_span() / @traced_tool
+   │  └─ GET                       instrument_http(): HTTP call inside the tool
+   └─ chat gpt-4o
+      └─ chat gpt-4o               gateway
+```
+
+No content is ever stored: no prompt, completion, tool argument or result, exception message or URL query is put on an SDK span or kept by the collector.
+
+## SDK
+
+Install the extra and configure OpenTelemetry as usual (the SDK only creates spans; your `TracerProvider` decides where they go):
+
+```bash
+pip install "prompt-shields[opentelemetry]" opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+```
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
+    endpoint="https://collector.example.com/ingest/otel/v1/traces",
+    headers={"Authorization": "Bearer ps_..."},  # tenant ingest key
+)))
+trace.set_tracer_provider(provider)
+```
+
+Then:
+
+- **`ShieldsClient`, `ShieldsOpenAI`, `ShieldsAnthropic`** and their async versions create a `chat {model}` CLIENT span per call, with `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens` / `output_tokens`, `gen_ai.response.finish_reasons`, `error.type` and `gen_ai.conversation.id` (from `ps_metadata["session_id"]`). The span joins the active context.
+- **Tools and agents:**
+
+  ```python
+  from prompt_shields import tracing
+
+  @tracing.traced_tool
+  def lookup_order(order_id: str) -> dict: ...
+
+  with tracing.agent_span("support", session_id=session):
+      answer = client.chat.completions.create(...)
+      with tracing.tool_span("refund", call_id=call.id):
+          refund(...)
+  ```
+
+  A tool that raises marks its span `ERROR` with `error.type` (the exception class).
+- **LangChain:** `PromptShieldsCallbackHandler` adds an `invoke_agent` span for the outermost chain or agent run, a `chat` span per model run and an `execute_tool` span per tool run, parented by LangChain's run tree. `ps_session_id` (or LangGraph's `thread_id`) in the run metadata becomes `gen_ai.conversation.id`.
+- **HTTP calls:** `tracing.instrument_http()` (once at startup) patches `httpx` and `requests`: a call made inside a tool span becomes a CLIENT child span (method, host, port, scheme, status code), and a call made inside a `chat` span, such as a LangChain model's request to the gateway, carries that span's `traceparent`. `tracing.uninstrument_http()` undoes it.
+
+### Where the traceparent goes
+
+The SDK sends a call's `traceparent` with the request only when the client's `base_url` is an **internal host**: loopback, a private address, a single-label name (a Kubernetes service such as `prompt-shields-gateway`) or a `.internal`, `.local`, `.svc` or `.cluster.local` name. A trace id sent to a third party lets it correlate your calls, so public hosts (providers, or a gateway on a public name) do not get one unless you ask:
+
+```python
+client = ShieldsOpenAI(..., base_url="https://gateway.example.com/v1", propagate_trace=True)
+```
+
+`propagate_trace=False` never sends it. `ShieldsRouter` in gateway mode always sends it to its gateway. `instrument_http(propagate=...)` takes the same setting.
+
+### Overhead
+
+Without a configured `TracerProvider`, OpenTelemetry hands out no-op spans: the SDK's work per call (span, activation, header injection, end) is a few microseconds; the test suite holds it under 2 ms at p95. Without the extra, every helper is a no-op.
+
+## Gateway
+
+- Every response carries `traceparent: 00-<trace id>-<gateway span id>-<flags>`. The trace id is the caller's when it sent a `traceparent` (the SDK does), else a new one. Look the trace up with the returned id even when the caller has no tracer.
+- The gateway's own OTel spans (`PS_OTEL_ENDPOINT`) use that span id, so they nest under the SDK's chat span.
+- **`PS_OTEL_PROPAGATE_UPSTREAM=true`** also sends `traceparent` (the gateway span as parent) and the caller's `tracestate` to the provider and to MCP servers. **Off by default**: most providers do not trace, and a trace id lets them correlate a tenant's calls. When off, the gateway adds nothing; headers a caller forwards itself (`forward_headers`, the `/v1/proxy` pass-through) behave as before.
+
+## Collector
+
+`POST /ingest/otel/v1/traces` (OTLP/HTTP JSON or protobuf, tenant ingest key) keeps, per tenant, the spans of every trace that has at least one GenAI or MCP span: model calls, `execute_tool` and `invoke_agent` spans, MCP calls, and the other spans of those traces (an HTTP call inside a tool, the app's own root span). Exporters batch independently and a child span ends before its parent, so a span can arrive before any GenAI span of its trace (an HTTP call inside a tool, the SDK's spans before the gateway's): such a span is held as *pending* for `PS_TRACE_PENDING_SECONDS` (default 300; at most 500 per request; `0` turns this off), never returned by the API, and joins the trace when a GenAI span of the trace arrives. Spans of traces that gain no GenAI span in that window are deleted, so pointing a whole service's export here does not fill the database.
+
+Stored per span: trace id, span id, parent span id, name, kind, status, `error.type`, start and end time, duration, `service.name`, environment, operation, provider, request and response model, tool name, token counts, `gen_ai.conversation.id` and the user id (`ps.user.hash`, `user.id` or `enduser.id`) **hashed with the tenant's salt** (the id as sent is not kept). Usage events made from OTLP spans also carry their `trace_id`.
+
+- **Retention:** spans are purged with the tenant's usage events (`retention_days`), and removed by tenant erasure.
+- **User erasure** (`POST /api/v1/admin/users/erase`) clears `user_id_hash` and `session_id` on the user's spans (`rows_erased.trace_spans`); timings and token counts stay.
+- **Turn off:** `PS_TRACE_STORE_ENABLED=false` (operator) stores usage events and MCP calls only, as before.
+
+### Query
+
+With a partner credential holding **`traces:read`** (never granted by default):
+
+```bash
+# Newest traces of the last 24 hours with an error, for one session
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://collector.example.com/partner/v1/traces?status=error&session_id=sess-1"
+
+# Every stored span of one trace
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://collector.example.com/partner/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736"
+```
+
+The list filters on span start time (`since`, `until`; default the last 24 hours), `session_id`, `user_id_hash` (the salted hash) and `status` (`error`: at least one errored span), newest first, paged with `meta.next_cursor`. Each summary has the root span's name and service, start and end, duration, span and error counts and token totals (the SDK's and the gateway's span of one call are both counted). The TypeScript client has `client.traces.list()`, `listPage()` and `get()`.
