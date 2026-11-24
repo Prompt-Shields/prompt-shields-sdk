@@ -32,6 +32,7 @@ from db.models import (
     AuditEvent,
     Base,
     CallFeedback,
+    CredentialCreator,
     DataFlow,
     GatewaySecurityEvent,
     IdpGroupRole,
@@ -347,6 +348,12 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     created_by="operator",
                 ),
                 IdpGroupRole(tenant_id=tenant_id, team_id=team.id, created_by="operator"),
+                CredentialCreator(
+                    tenant_id=tenant_id,
+                    credential_type="tenant_api_key",
+                    credential_id=uuid.uuid4(),
+                    created_by="operator",
+                ),
             ]
         )
         policy = Policy(

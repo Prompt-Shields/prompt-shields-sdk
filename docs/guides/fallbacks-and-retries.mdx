@@ -1,0 +1,233 @@
+---
+title: Fallbacks and Retries
+description: Fallback chains, load balancing and retries on the gateway, how they interact with budgets, rate limits and the cache, and how each attempt shows up in telemetry and traces
+---
+
+# Fallbacks and Retries
+
+The gateway can retry a failed provider call, fall back to another provider
+or model, and spread traffic across several keys or providers. You describe
+this in a gateway config (the `x-portkey-config` header, or a config saved
+with the gateway). Every upstream call the gateway makes for a request is an
+**attempt**. Each attempt is recorded in the request's usage event and on its
+GenAI span. The request is still billed once.
+
+| You want | Use |
+|---|---|
+| Try provider B when provider A fails | A `fallback` config ([below](#fallback-from-one-provider-to-another)) |
+| Split traffic across keys or providers by weight | A `loadbalance` config ([below](#load-balancing)) |
+| Retry the same provider on a 429 or 5xx | `retry` ([below](#retries)) |
+| Fail over between models that a data policy allows | The router's own failover (see [Routing](/guides/routing#failover)). A config with its own `strategy`, `targets`, `retry` or `override_params.model` takes over from it, so a call is never retried by both |
+| Fail over in the Python SDK without a gateway | `ShieldsRouter` in local mode (see [Routing](/guides/routing#failover)) |
+
+The examples on this page are tested: `gateway/src/tests/regression/fallbacksGuide.test.ts`
+reads each JSON block below and sends it through the gateway against mocked
+providers.
+
+## Sending a config
+
+Send the config as JSON in the `x-portkey-config` header. With a config you
+do not need `x-portkey-provider` or a provider `Authorization` header: each
+target carries its own provider and key.
+
+```python
+import json
+from openai import OpenAI
+
+config = json.load(open("fallback.json"))
+client = OpenAI(
+    base_url="https://gateway.example.com/v1",
+    api_key="unused",  # each target has its own api_key
+    default_headers={"x-portkey-config": json.dumps(config)},
+)
+client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
+```
+
+```bash
+curl https://gateway.example.com/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H "x-portkey-config: $(jq -c . fallback.json)" \
+  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+## Fallback from one provider to another
+
+The targets are tried in order. The next target is tried when the previous
+one answered with a status in `on_status_codes`; without `on_status_codes`,
+on any non-2xx status. The first answer that is not in the list is returned,
+success or not.
+
+```json fallback.json
+{
+  "strategy": {
+    "mode": "fallback",
+    "on_status_codes": [429, 500, 502, 503, 504]
+  },
+  "targets": [
+    {
+      "provider": "openai",
+      "api_key": "sk-openai-primary",
+      "override_params": { "model": "gpt-4o-mini" }
+    },
+    {
+      "provider": "mistral-ai",
+      "api_key": "mistral-backup",
+      "override_params": { "model": "mistral-small-latest" }
+    }
+  ]
+}
+```
+
+When OpenAI answers 503, the gateway calls Mistral with the same request and
+`mistral-small-latest` as the model, and returns Mistral's answer. The
+response carries `x-portkey-last-used-option-index` (`config.targets[1]`
+here) so the caller can see which target answered.
+
+Keep `on_status_codes` to statuses that another provider could fix. A 400
+(bad request) or 401 (bad key) will usually fail on the next target too, and
+a content-filter refusal should not be retried on a laxer model.
+
+## Load balancing
+
+`loadbalance` picks one target per request at random, by `weight` (default
+1). It does not fall back by itself: nest a `fallback` strategy inside a
+target, or add `retry`, if a failed pick should be retried.
+
+```json loadbalance.json
+{
+  "strategy": { "mode": "loadbalance" },
+  "targets": [
+    { "provider": "openai", "api_key": "sk-openai-key-a", "weight": 0.7 },
+    { "provider": "openai", "api_key": "sk-openai-key-b", "weight": 0.3 }
+  ]
+}
+```
+
+About 70% of requests go out on key A and 30% on key B. This spreads load
+across two keys or accounts, each with its own provider rate limit.
+
+## Retries
+
+`retry` retries the same target on the listed statuses, up to `attempts`
+extra times, with exponential backoff. With `use_retry_after_header` (off by
+default) the gateway waits as long as the provider's `Retry-After` asks,
+within a bounded total wait. Retries can sit at the top level (inherited by
+every target) or on one target.
+
+```json retry.json
+{
+  "retry": { "attempts": 2, "on_status_codes": [429, 503] },
+  "provider": "openai",
+  "api_key": "sk-openai-primary"
+}
+```
+
+Two 503s and then a 200 make three attempts and one response. The response
+carries `x-portkey-retry-attempt-count`.
+
+Retries and fallbacks combine: put `retry` on each target of a `fallback`
+config and each target is retried before the next one is tried. Every
+attempt counts towards the per-request limit of 32 recorded attempts (more
+are counted, not listed).
+
+## Budgets, rate limits and the cache
+
+All three act **per request**, not per attempt.
+
+**Rate limits** ([Gateway Rate Limits](/guides/gateway-rate-limits)) are
+checked and charged once, before the first attempt: one request on `rpm`,
+the token estimate on `tpm`/`tpd`, one lease on `concurrency`. Retries and
+fallbacks do not charge `rpm` again. Afterwards the token counters are
+corrected to the usage the serving attempt reported; a request that failed
+on every target is refunded. A rule's `match` sees the request as it arrived:
+the `x-portkey-provider` header or, with a config, the first target's
+provider, and the request's (or the router's) model. It does not see later
+targets. A 429 from a gateway rate limit is the gateway's own answer, not an
+upstream status, so it never triggers a fallback.
+
+**Budgets** ([Cost Attribution](/guides/cost-attribution)) reserve the call's
+estimate once, before the first attempt, and settle once, after the call,
+with the cost of the attempt that served it, priced on the model that ran
+(the fallback target's model when the fallback answered). Failed attempts
+cost nothing. A refused call (HTTP 429 `budget_exceeded`) makes no attempt.
+
+**The cache** (`"cache": {"mode": "simple"}` in the config) is looked up per
+target, just before that target's upstream call, and the key is scoped to the
+target's provider and credentials. So:
+
+- a hit on the first target answers the request with no attempt at all, at
+  cost 0 (`cost_source: cache`);
+- an answer from a fallback target is cached under that target. A repeated
+  request still calls the earlier targets first (and fails on them again)
+  before it reaches the cached answer;
+- only a complete 200 JSON response is written. A failed attempt's error,
+  and a streamed response, are never cached.
+
+**Streams** fail over only before the response starts: once the gateway has
+returned the headers of a streamed response, an error later in the stream is
+passed to the caller and not retried.
+
+## What each attempt records
+
+**Usage events.** Every request sends one event to the collector, and it is
+the one billed usage row: tokens and cost are those of the attempt that
+served the request. When the gateway made upstream attempts, the event also
+has:
+
+| Field | Meaning |
+|---|---|
+| `attempts` | One record per attempt, in order: `attempt` (1-based, across all targets), `provider`, `model`, `status` (absent when no response came back), `latency_ms`, `error_class` (`rate_limited`, `server_error`, `timeout`, `client_error`, `network_error`; absent for a success) |
+| `retry_count` | Attempts minus one |
+| `fallback_chain` | The `error_class` of each failed attempt, in order |
+| `trace_id` | The caller's `x-portkey-trace-id`, else a generated id |
+| `served_provider` | The provider of the target that answered |
+
+The fallback example above with OpenAI answering 503 gives one event like:
+
+```json
+{
+  "served_provider": "mistral-ai",
+  "retry_count": 1,
+  "fallback_chain": ["server_error"],
+  "attempts": [
+    { "attempt": 1, "provider": "openai", "model": "gpt-4o-mini", "status": 503, "latency_ms": 212, "error_class": "server_error" },
+    { "attempt": 2, "provider": "mistral-ai", "model": "mistral-small-latest", "status": 200, "latency_ms": 640 }
+  ]
+}
+```
+
+The collector stores `attempts`, `retry_count`, `fallback_chain` and
+`trace_id` on `ai_usage_events`, and its usage rollups count error rates
+from the last attempt's status. Attempt records never hold request or
+response content, error messages or headers.
+
+**Spans.** With `PS_OTEL_ENDPOINT` set (see [Observability](/guides/observability)
+and [Agent Traces](/guides/agent-traces)), the gateway exports one GenAI CLIENT
+span per request, in the caller's trace when it sends a W3C `traceparent`
+(the response's `traceparent` names that span). A request that was retried
+or fell back (more than one upstream attempt) also carries the following. A
+request served by its first attempt stays one span:
+
+| Where | What |
+|---|---|
+| The GenAI span: `ps.attempt.count` | How many attempts were made |
+| The GenAI span: `ps.fallback_chain` | The `error.type` of each failed attempt, in order |
+| One child CLIENT span per attempt, named `attempt <n>` | `ps.attempt.number`, `ps.attempt.provider`, `ps.attempt.model`, `http.request.resend_count` (from the second attempt), `http.response.status_code`, `error.type` and an error status (failed attempts only), `ps.attempt.latency_ms`. It ends when the attempt's response or error came in |
+
+So a fallback from A to B is one trace holding the GenAI span and two
+attempt spans under it. The attempt spans carry no `gen_ai.*` attribute on
+purpose: a backend that bills GenAI spans, the Prompt Shields collector
+included, still counts one call. The collector's trace store keeps the
+attempt spans with their provider, model, status and error, so
+`GET /partner/v1/traces/{trace_id}` shows them. The GenAI span's own
+`gen_ai.provider.name` is the request's provider (the first target's, for a
+config). The provider that answered is the one on the last attempt.
+
+## Checking it
+
+- The usage rollups and the provider error metrics on
+  [Observability](/guides/observability) show which providers fail.
+- The [alert runbooks](/guides/alert-runbooks) cover provider error and
+  latency alerts, where retries and fallbacks add attempts and latency.
+- Run the tested examples locally:
+  `cd gateway && npx jest src/tests/regression/fallbacksGuide.test.ts`.

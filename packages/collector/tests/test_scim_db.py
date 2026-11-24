@@ -301,7 +301,7 @@ async def test_deactivation_revokes_tokens_credentials_and_sessions(env, ops):
             s,
             tid,
             name="sso-x",
-            scopes=["admin:read", "admin:tokens"],
+            scopes=["admin:read", "admin:tokens", "admin:keys", "admin:partners"],
             expires_at=datetime.now(UTC) + timedelta(hours=1),
             created_by="sso",
             principal_id=uuid.UUID(u["id"]),
@@ -310,6 +310,9 @@ async def test_deactivation_revokes_tokens_credentials_and_sessions(env, ops):
         sess_id = sess_row.id
     child = await _post(c, session, "/tokens", {"name": "child", "scopes": ["admin:read"]})
     assert child["principal_id"] is None
+    # Keys the session minted go too (#396).
+    key = await _post(c, session, "/api-keys", {"name": "sdk"})
+    unbound = await _post(c, session, "/partner-credentials", {"partner_name": "bi"})
     for t in (tok, session, child["token"]):
         assert (await c.get(f"{A}/principals", headers=H(t))).status_code == 200
     assert (await c.get("/partner/v1/teams", headers=H(cred["api_key"]))).status_code == 200
@@ -327,6 +330,11 @@ async def test_deactivation_revokes_tokens_credentials_and_sessions(env, ops):
     [disable] = await _audit(engine, tid, "principal.disable")
     assert disable.actor_type == "scim_token"
     assert str(sess_id) in disable.details["revoked_token_ids"]
+    assert disable.details["revoked_api_key_ids"] == [key["id"]]
+    assert disable.details["partner_credentials_revoked"] == [unbound["id"]]
+    got = (await c.get(f"{A}/api-keys/{key['id']}", headers=H(boot))).json()
+    assert got["status"] == "revoked"
+    assert (await c.get("/partner/v1/teams", headers=H(unbound["api_key"]))).status_code == 401
     # Re-activating restores the (unrevoked) admin token and credential, not
     # the revoked session.
     out = await _patch(c, scim, f"{S}/Users/{u['id']}", [{"op": "replace", "path": "active", "value": True}])
@@ -360,6 +368,30 @@ async def test_owner_protections(env):
     u = await _create_user(c, scim, userName="r", externalId="r", roles=[{"value": "owner"}])
     p = (await c.get(f"{A}/principals/{u['id']}", headers=H(boot))).json()
     assert p["memberships"] == []
+
+
+async def test_scim_only_deactivates_users_it_did_not_provision(env):
+    """A user created through the admin API: SCIM may deactivate it and
+    change its names, but not re-identify, re-enable or delete it (#396)."""
+    c, scim, boot = env["c"], env["scim"], env["boot"]
+    p = await _post(c, boot, "/principals", {"kind": "user", "external_id": "adm-1"})
+    await _post(c, boot, "/memberships", {"principal_id": p["id"], "role": "admin"})
+    path = f"{S}/Users/{p['id']}"
+    await _patch(c, scim, path, [{"op": "replace", "path": "externalId", "value": "evil"}], 403)
+    await _patch(c, scim, path, [{"op": "replace", "path": "displayName", "value": "Ann"}])
+    out = await _patch(c, scim, path, [{"op": "replace", "path": "active", "value": False}])
+    assert out["active"] is False
+    await _patch(c, scim, path, [{"op": "replace", "path": "active", "value": True}], 403)
+    assert (await c.delete(path, headers=H(scim))).status_code == 403
+    got = (await c.get(f"{A}/principals/{p['id']}", headers=H(boot))).json()
+    assert got["external_id"] == "adm-1" and got["status"] == "disabled"
+    # An admin can.
+    resp = await c.patch(f"{A}/principals/{p['id']}", headers=H(boot), json={"disabled": False})
+    assert resp.status_code == 200
+    # A SCIM-provisioned user is still fully managed by SCIM.
+    u = await _create_user(c, scim, userName="s", externalId="s")
+    await _patch(c, scim, f"{S}/Users/{u['id']}", [{"op": "replace", "path": "externalId", "value": "s2"}])
+    assert (await c.delete(f"{S}/Users/{u['id']}", headers=H(scim))).status_code == 204
 
 
 # ──────────────────────────────────────────────────────────────────────
