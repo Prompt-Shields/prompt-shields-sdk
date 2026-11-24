@@ -183,9 +183,9 @@ async def _version(
     ).scalar_one_or_none()
 
 
-def _validated(document: dict, scope: str) -> dict:
+def _validated(document: dict) -> dict:
     try:
-        return policy_doc.validate_document(document, scope)
+        return policy_doc.validate_document(document)
     except policy_doc.PolicyDocumentError as e:
         raise _problem(422, "Unprocessable Entity", e.problems) from None
 
@@ -198,6 +198,9 @@ async def _add_version(
     document: dict,
     comment: str | None,
 ) -> PolicyVersion:
+    problems = policy_doc.tenant_only_problems(document, policy.scope)
+    if problems:
+        raise _problem(422, "Unprocessable Entity", problems)
     current = (
         await db.execute(
             select(func.max(PolicyVersion.version)).where(PolicyVersion.policy_id == policy.id)
@@ -300,7 +303,10 @@ async def create_policy(
 ) -> dict:
     db = request.state.db
     tid = principal.tenant_id
-    document = _validated(body.document, body.scope) if body.document is not None else None
+    document = _validated(body.document) if body.document is not None else None
+    problems = policy_doc.tenant_only_problems(document, body.scope)
+    if problems:
+        raise _problem(422, "Unprocessable Entity", problems)
     # FOR SHARE on the team or project: a concurrent team/project delete
     # (which takes FOR UPDATE, rbac_admin.py) waits for this policy and then
     # refuses with 409, or ran first and the team is gone here (404),
@@ -528,9 +534,9 @@ async def create_version(
     principal: AdminPrincipal = _POLICIES,
 ) -> dict:
     db = request.state.db
+    document = _validated(body.document)
     # The row lock numbers concurrent versions one after another.
     row = await _policy(db, principal.tenant_id, policy_id, lock=True, write=True)
-    document = _validated(body.document, row.scope)
     version = await _add_version(request, db, principal, row, document, body.comment)
     if body.activate:
         await _activate(request, db, principal, row, version, 201)

@@ -50,6 +50,13 @@ Sections today:
     telemetry cost and cost metric, and by the collector at ingest. Only a
     tenant-scope policy may carry it (a negotiated contract is the
     tenant's); see collector/prices.py and docs/guides/negotiated-prices.mdx.
+``pseudonymisation`` v1
+    ``{"version": 1, "enabled": bool, "categories": [...], "on_unsupported":
+    "refuse"|"passthrough"}``: the gateway's reversible pseudonymisation
+    (#350; docs/guides/pseudonymisation.mdx). ``categories`` (optional, default
+    all) are entity categories of the SDK's ``SPAN_CATEGORIES``;
+    ``on_unsupported`` (default ``refuse``) says what happens to model calls
+    the gateway cannot pseudonymise. Mirrors gateway psPseudonymise/config.ts.
 ``rate_limits`` v1 (#344)
     ``{"version": 1, "on_store_error": "open"|"closed", "rules": [...]}``:
     request and token rate limits, enforced by the gateway (the same format
@@ -113,7 +120,7 @@ tenant in one document, so a gateway needs one request (and one ETag)::
 
     {
       "schema": "ps-policy-bundle.v1",
-      "tenant":   {"version": "default@3", "sections": {...}},
+      "tenant":   {"version": "default@3", "sections": {...}, "required": [...]},
       "teams":    {"<team id>":    {"name": ..., "version": ..., "sections": {...}}},
       "projects": {"<project id>": {"name": ..., "team_id": ..., "version": ..., "sections": {...}}}
     }
@@ -122,7 +129,9 @@ tenant in one document, so a gateway needs one request (and one ETag)::
 (``default@3+team-eu@2``); the gateway records it as ``policy_version`` in
 telemetry. ``teams`` and ``projects`` list only those with an active policy
 of their own (or, for a project, whose team has one). The bundle's ETag is
-the SHA-256 of its canonical JSON.
+the SHA-256 of its canonical JSON. ``required`` (only when not empty) lists
+the sections a gateway must enforce to apply the bundle at all (see
+``REQUIRED_WHEN``).
 """
 
 from __future__ import annotations
@@ -144,10 +153,9 @@ BUNDLE_SCHEMA = "ps-policy-bundle.v1"
 # A policy document is a few KB; anything larger is not one.
 MAX_DOCUMENT_BYTES = 256 * 1024
 
-# Planned sections, refused until the issue that enforces them adds them.
-RESERVED_SECTIONS: dict[str, str] = {
-    "pseudonymisation": "pseudonymisation settings (#350)",
-}
+# Planned sections, refused until the issue that enforces them adds them
+# (none at the moment).
+RESERVED_SECTIONS: dict[str, str] = {}
 
 ROUTE_SCHEMA_VERSION = "route-policy.v1"
 
@@ -158,6 +166,11 @@ ACCESS_GROUP_KEYS = frozenset({"name", "match", "providers", "models", "rate_lim
 MCP_SERVER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}\Z")
 MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,128}\Z")
 
+# The SDK's prompt_shields.pii.SPAN_CATEGORIES (the gateway's
+# ENTITY_CATEGORIES): what the pseudonymiser can replace.
+PSEUDONYMISATION_CATEGORIES = (
+    "national_id", "email", "iban", "ssn", "credit_card", "ip_address", "phone",
+)
 # psRateLimit/config.ts parseRateLimitSection, mirrored.
 RATE_LIMIT_RULE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 RATE_LIMIT_SCOPES = ("global", "virtual_key", "team", "project", "user")
@@ -297,8 +310,6 @@ MAX_PRICE_OVERRIDES = 1000
 MAX_PRICE_MODEL_LENGTH = 200
 # A multiplier above this is a typo, not a contract.
 MAX_PRICE_MULTIPLIER = 10.0
-# Sections only a tenant-scope policy may carry.
-TENANT_ONLY_SECTIONS = frozenset({"prices"})
 
 
 def parse_instant(value: Any) -> datetime | None:
@@ -410,6 +421,25 @@ def _prices_v1(at: str, body: dict, problems: list[str]) -> None:
                 )
 
 
+def _pseudonymisation_v1(at: str, body: dict, problems: list[str]) -> None:
+    extra = sorted(set(body) - {"version", "enabled", "categories", "on_unsupported"})
+    if extra:
+        problems.append(f"{at}: unknown keys {extra}")
+    if not isinstance(body.get("enabled"), bool):
+        problems.append(f"{at}.enabled must be true or false")
+    if "categories" in body:
+        cats = body["categories"]
+        if not (isinstance(cats, list) and cats and all(isinstance(c, str) for c in cats)):
+            problems.append(f"{at}.categories must be a non-empty array of category names")
+        else:
+            unknown = sorted(set(cats) - set(PSEUDONYMISATION_CATEGORIES))
+            if unknown:
+                problems.append(
+                    f"{at}.categories: unknown {unknown} "
+                    f"(known: {list(PSEUDONYMISATION_CATEGORIES)})"
+                )
+    if body.get("on_unsupported", "refuse") not in ("refuse", "passthrough"):
+        problems.append(f'{at}.on_unsupported must be "refuse" or "passthrough"')
 def _match_values(at: str, v: Any, problems: list[str]) -> None:
     values = [v] if isinstance(v, str) else v
     if not (
@@ -705,6 +735,11 @@ SECTIONS: dict[str, Section] = {
         "group (the gateway's PS_OIDC_POLICY format)",
         {1: _access_v1},
     ),
+    "pseudonymisation": Section(
+        "Reversible pseudonymisation of model calls at the gateway (off unless "
+        "enabled; categories; what happens to calls it cannot pseudonymise)",
+        {1: _pseudonymisation_v1},
+    ),
     "rate_limits": Section(
         "Request and token rate limits (rpm, tpm, tpd, concurrency) per tenant, "
         "virtual key, team, project or user, enforced by the gateway",
@@ -731,8 +766,8 @@ SECTIONS: dict[str, Section] = {
 
 def validate_document(doc: Any, scope: str | None = None) -> dict:
     """The document unchanged if valid, else PolicyDocumentError listing
-    every problem found. With ``scope`` (the policy's binding), sections a
-    scope may not carry (`TENANT_ONLY_SECTIONS`) are refused too."""
+    every problem found. With ``scope`` (the policy's binding), the
+    `tenant_only_problems` of that scope are listed too."""
     if not _is_obj(doc):
         raise PolicyDocumentError(["the policy document must be a JSON object"])
     problems: list[str] = []
@@ -758,9 +793,6 @@ def validate_document(doc: Any, scope: str | None = None) -> dict:
             else:
                 problems.append(f"{at}: unknown section (known: {list(SECTIONS)})")
             continue
-        if scope is not None and scope != "tenant" and name in TENANT_ONLY_SECTIONS:
-            problems.append(f"{at}: only a tenant-scope policy may carry this section")
-            continue
         if not _is_obj(body):
             problems.append(f"{at} must be an object")
             continue
@@ -769,6 +801,7 @@ def validate_document(doc: Any, scope: str | None = None) -> dict:
             problems.append(f"{at}.version must be one of {sorted(spec.versions)}")
             continue
         spec.versions[version](at, body, problems)
+    problems += tenant_only_problems(doc, scope)
     if problems:
         raise PolicyDocumentError(problems)
     return doc
@@ -795,6 +828,41 @@ class ActivePolicy:
         return f"{self.name}@{self.version}"
 
 
+# Sections a gateway must not silently ignore (#350): when one of these is in
+# an effective policy and its predicate holds, the effective policy lists it
+# in ``required``, and a gateway that does not enforce it refuses the whole
+# bundle (keeping its last good policy, logged as an error) instead of, say,
+# forwarding the original values an enabled ``pseudonymisation`` section was
+# meant to replace. Gateways since #350 check ``required``; the #340 puller
+# never shipped in a release without it.
+REQUIRED_WHEN: dict[str, Callable[[Any], bool]] = {
+    "pseudonymisation": lambda body: isinstance(body, dict) and body.get("enabled") is True,
+}
+
+# Sections only a tenant-scope policy may carry; refused (422) in team and
+# project policies. `pseudonymisation`: the gateway applies it from the
+# tenant-wide policy only (not team or project policies yet), so a team never
+# believes it has a protection nothing enforces. `prices`: a negotiated
+# contract is the tenant's, and the gateway and collector read it from the
+# tenant policy only. The one check for both: `tenant_only_problems`.
+TENANT_ONLY_SECTIONS = frozenset({"prices", "pseudonymisation"})
+
+
+def tenant_only_problems(document: Mapping[str, Any] | None, scope: str | None) -> list[str]:
+    """Problems with ``document`` as the document of a ``scope`` policy
+    (none for a tenant policy, or when the scope is not known)."""
+    if scope is None or scope == "tenant":
+        return []
+    sections = (document or {}).get("sections") or {}
+    if not isinstance(sections, Mapping):
+        return []
+    return [
+        f"$.sections.{name}: only a tenant-scope policy may carry this section "
+        f"(applied tenant-wide only); set it in the tenant policy"
+        for name in sorted(TENANT_ONLY_SECTIONS & set(sections))
+    ]
+
+
 def compile_effective(layers: Iterable[ActivePolicy | None]) -> dict:
     """The effective policy of ``layers`` (most general first, None for a
     level without an active policy): sections replaced whole, later wins."""
@@ -805,7 +873,11 @@ def compile_effective(layers: Iterable[ActivePolicy | None]) -> dict:
             continue
         sections.update(layer.sections)
         labels.append(layer.label)
-    return {"version": "+".join(labels) or None, "sections": sections}
+    out: dict[str, Any] = {"version": "+".join(labels) or None, "sections": sections}
+    required = sorted(n for n, when in REQUIRED_WHEN.items() if n in sections and when(sections[n]))
+    if required:
+        out["required"] = required
+    return out
 
 
 def build_bundle(

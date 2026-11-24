@@ -469,28 +469,31 @@ function* validMatches(
 }
 
 /**
- * Where detectPiiCategories' pattern categories are in `text`: the same
- * patterns and validators, each match reported instead of presence only.
- * Overlapping matches are merged (see SPAN_PRIORITY). The keyword
- * categories (health_data, financial_data) mark context, not a value, and
- * have no spans. Spans are sorted and disjoint.
+ * Every validated match in `text`, possibly overlapping, in the SDK's order
+ * (packages/sdk/prompt_shields/pii.py `_entity_spans`): IBANs (blanked out
+ * before the other patterns run, same length, so offsets hold), cards, the
+ * plain patterns, the validated phone patterns, then national IDs.
+ * `sdkCards` keeps only the card windows the SDK's scan reports: after a
+ * valid window it resumes past it, so a window starting inside the one
+ * before is dropped.
  */
-export function findPiiSpans(text: string | undefined | null): PiiSpan[] {
-  if (!text) return [];
+function rawPiiSpans(text: string, sdkCards = false): PiiSpan[] {
   const raw: PiiSpan[] = [];
   const add = (start: number, end: number, category: string) => {
-    if (end > start) raw.push({ start, end, category });
+    raw.push({ start, end, category });
   };
-  // As in detectPiiCategories: valid IBANs are blanked (same length, so
-  // offsets hold) before the other patterns run.
   const masked = text.replace(IBAN_RE, (match: string, offset: number) => {
     const n = ibanValidLength(match);
     if (n < 0) return match;
     add(offset, offset + n, 'iban');
     return ' '.repeat(n) + match.slice(n);
   });
-  for (const [start, end] of cardWindows(masked))
+  let cardEnd = -1;
+  for (const [start, end] of cardWindows(masked)) {
+    if (sdkCards && start < cardEnd) continue;
     add(start, end, 'credit_card');
+    cardEnd = end;
+  }
   for (const [name, pattern] of SPAN_PATTERNS)
     for (const m of validMatches(pattern, masked, () => true))
       add(m.index, m.index + m[0].length, name);
@@ -500,7 +503,19 @@ export function findPiiSpans(text: string | undefined | null): PiiSpan[] {
   for (const [pattern, validate] of DETECTORS)
     for (const m of validMatches(pattern, masked, validate))
       add(m.index, m.index + m[0].length, 'national_id');
+  return raw;
+}
 
+/**
+ * Where detectPiiCategories' pattern categories are in `text`: the same
+ * patterns and validators, each match reported instead of presence only.
+ * Overlapping matches are merged (see SPAN_PRIORITY). The keyword
+ * categories (health_data, financial_data) mark context, not a value, and
+ * have no spans. Spans are sorted and disjoint.
+ */
+export function findPiiSpans(text: string | undefined | null): PiiSpan[] {
+  if (!text) return [];
+  const raw = rawPiiSpans(text).filter((s) => s.end > s.start);
   raw.sort((a, b) => a.start - b.start || b.end - a.end);
   const merged: PiiSpan[] = [];
   for (const span of raw) {
@@ -517,6 +532,87 @@ export function findPiiSpans(text: string | undefined | null): PiiSpan[] {
     }
   }
   return merged;
+}
+
+/**
+ * Categories findEntitySpans reports, most specific first: where two
+ * matches overlap, the earlier category wins. The SDK's `SPAN_CATEGORIES`.
+ */
+export const ENTITY_CATEGORIES = [
+  'national_id',
+  'email',
+  'iban',
+  'ssn',
+  'credit_card',
+  'ip_address',
+  'phone',
+] as const;
+
+// First index in `taken` (sorted, disjoint) whose span starts at or after `end`.
+function firstStartingAt(taken: PiiSpan[], end: number): number {
+  let lo = 0;
+  let hi = taken.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (taken[mid].start < end) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function mergeSorted(a: PiiSpan[], b: PiiSpan[]): PiiSpan[] {
+  if (!b.length) return a;
+  const out: PiiSpan[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (j >= b.length || (i < a.length && a[i].start <= b[j].start))
+      out.push(a[i++]);
+    else out.push(b[j++]);
+  }
+  return out;
+}
+
+/**
+ * Non-overlapping entity spans, resolved exactly as the SDK's
+ * `find_pii_spans` resolves them (packages/sdk/prompt_shields/pii.py), so
+ * the gateway's pseudonymiser (#350) replaces the same values as the SDK's
+ * and mints the same placeholders: greedy in ENTITY_CATEGORIES order, a
+ * match is kept when it overlaps no match kept before it. Unlike
+ * findPiiSpans, overlaps are not merged. Sorted by start.
+ *
+ * For in-process pseudonymisation only: callers must never log, store or
+ * send the matched text. O(n log n): kept spans are a sorted disjoint list
+ * checked by bisection; each category's matches come in runs ascending by
+ * start, merged into it when a run ends.
+ */
+export function findEntitySpans(text: string | undefined | null): PiiSpan[] {
+  if (!text) return [];
+  const byCategory = new Map<string, PiiSpan[]>();
+  for (const span of rawPiiSpans(text, true)) {
+    const list = byCategory.get(span.category);
+    if (list) list.push(span);
+    else byCategory.set(span.category, [span]);
+  }
+  let taken: PiiSpan[] = [];
+  for (const category of ENTITY_CATEGORIES) {
+    let run: PiiSpan[] = [];
+    let runStart = -1;
+    for (const { start, end } of byCategory.get(category) ?? []) {
+      if (end <= start) continue;
+      if (start < runStart) {
+        taken = mergeSorted(taken, run);
+        run = [];
+      }
+      runStart = start;
+      if (run.length && run[run.length - 1].end > start) continue;
+      const i = firstStartingAt(taken, end);
+      if (i && taken[i - 1].end > start) continue;
+      run.push({ start, end, category });
+    }
+    taken = mergeSorted(taken, run);
+  }
+  return taken;
 }
 
 /** Placeholder for a redacted span: `[EMAIL]`, `[CREDIT_CARD]`, ... */

@@ -3357,11 +3357,15 @@ components:
         `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
         the gateway's PS_OIDC_POLICY format), `rate_limits` v1
         (`{"version": 1, "on_store_error": "open"|"closed", "rules": [...]}`,
-        the gateway's PS_RATE_LIMITS format), `guardrails` v1
+        the gateway's PS_RATE_LIMITS format), `pseudonymisation` v1
+        (`{"version": 1, "enabled": bool, "categories": [...],
+        "on_unsupported": "refuse"|"passthrough"}`), `guardrails` v1
         (`{"version": 1, "rules": [...], "stream_window_chars": N}`, see
-        docs/guides/guardrails.mdx), `budgets` v1 (budget.v1 budgets) and
-        `prices` v1 (negotiated model prices, tenant-scope policies only;
-        see `PriceSection`). Reserved for later: `pseudonymisation`. See
+        docs/guides/guardrails.mdx), `budgets` v1 (`{"version": 1,
+        "budgets": [<budget.v1>, ...], "on_store_error": "open"|"closed"}`)
+        and `prices` v1 (negotiated model prices; see `PriceSection`).
+        `pseudonymisation` and `prices` are accepted in tenant-scope
+        policies only. No section is reserved. See
         docs/guides/central-policy.mdx and docs/guides/negotiated-prices.mdx.
       properties:
         schema:
@@ -3629,6 +3633,15 @@ components:
           description: Section name -> section, each taken whole from the most specific active policy that has it
           additionalProperties:
             type: object
+        required:
+          type: array
+          items:
+            type: string
+          description: |
+            Sections a gateway must enforce to apply the bundle at all (today
+            an enabled `pseudonymisation`); a gateway that does not enforce
+            one refuses the bundle and keeps its last good policy. Present
+            only when not empty.
       required: [version, sections]
 
     PolicyBundle:

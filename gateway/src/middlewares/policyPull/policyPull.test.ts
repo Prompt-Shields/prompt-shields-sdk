@@ -6,6 +6,7 @@ import {
   activeRoutePolicy,
   centralAccessPolicy,
   centralPolicy,
+  centralPseudonymisation,
   parsePolicyBundle,
   PolicyBundleError,
   setCentralPolicy,
@@ -87,10 +88,9 @@ describe('parsePolicyBundle', () => {
   });
 
   test('sections this gateway does not enforce are ignored', () => {
-    const p = parsePolicyBundle(
-      bundle({ pseudonymisation: { version: 1, x: 1 } })
-    );
-    expect(p.ignored).toEqual(['pseudonymisation']);
+    // Every known section is enforced now: a section added later.
+    const p = parsePolicyBundle(bundle({ later: { version: 1, x: 1 } }));
+    expect(p.ignored).toEqual(['later']);
   });
 
   test.each([
@@ -124,6 +124,53 @@ describe('parsePolicyBundle', () => {
     ],
   ])('refuses the whole bundle: %s', (_name, raw) => {
     expect(() => parsePolicyBundle(raw)).toThrow(PolicyBundleError);
+  });
+
+  test('pseudonymisation v1 (#350) is enforced, and validated whole', () => {
+    const p = parsePolicyBundle(
+      bundle({
+        pseudonymisation: { version: 1, enabled: true, categories: ['email'] },
+      })
+    );
+    expect(p.pseudonymisation).toEqual({
+      enabled: true,
+      categories: ['email'],
+      onUnsupported: 'refuse',
+    });
+    expect(p.ignored).toEqual([]);
+    setCentralPolicy(p);
+    expect(centralPseudonymisation()?.enabled).toBe(true);
+    for (const bad of [
+      { version: 2, enabled: true },
+      { version: 1 },
+      { version: 1, enabled: true, categories: ['person_name'] },
+    ])
+      expect(() =>
+        parsePolicyBundle(bundle({ pseudonymisation: bad }))
+      ).toThrow(PolicyBundleError);
+  });
+
+  test('a required section this gateway does not enforce refuses the bundle', () => {
+    const p = parsePolicyBundle({
+      ...bundle({ pseudonymisation: { version: 1, enabled: true } }),
+    });
+    expect(p.pseudonymisation?.enabled).toBe(true);
+    const required = (req: unknown) => {
+      const b: any = bundle({
+        pseudonymisation: { version: 1, enabled: true },
+        later: { version: 1 },
+      });
+      b.tenant.required = req;
+      return b;
+    };
+    expect(parsePolicyBundle(required(['pseudonymisation'])).ignored).toEqual([
+      'later',
+    ]);
+    for (const bad of [['later'], 'pseudonymisation', [1]])
+      expect(() => parsePolicyBundle(required(bad))).toThrow(PolicyBundleError);
+    expect(() => parsePolicyBundle(required(['later']))).toThrow(
+      /does not enforce \["later"\]/
+    );
   });
 
   test('team and project entries are validated and counted', () => {

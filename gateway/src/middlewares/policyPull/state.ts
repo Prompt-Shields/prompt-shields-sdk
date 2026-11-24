@@ -17,6 +17,8 @@
  *   - `route` v1: the router's route policy; replaces PS_ROUTE_POLICY_FILE.
  *   - `access` v1: the OIDC group policy; replaces PS_OIDC_POLICY (needs
  *     PS_OIDC_ENABLED).
+ *   - `pseudonymisation` v1 (#350): reversible pseudonymisation of model
+ *     calls; replaces PS_PSEUDONYMISE* (psPseudonymise/config.ts).
  *   - `budgets` v1: spend budgets (budget.v1 budgets, #29); replace the
  *     budgets and on_store_error of PS_BUDGETS / PS_BUDGETS_FILE (the
  *     namespace and store stay the gateway's, ../psBudget/runtime.ts).
@@ -39,6 +41,10 @@ import { CentralBudgets, parseBudgetsSection } from '../psBudget/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
 import { RoutePolicy } from '../router/types';
 import {
+  parsePseudonymisationSection,
+  PseudonymisationSettings,
+} from '../psPseudonymise/config';
+import {
   combineSections,
   GuardrailsSection,
   parseGuardrailsSection,
@@ -52,6 +58,7 @@ export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
+  pseudonymisation: [1],
   budgets: [1],
   guardrails: [1],
   prices: [1],
@@ -89,6 +96,7 @@ export interface CentralPolicy {
   etag?: string;
   route?: RoutePolicy;
   access?: OidcPolicy;
+  pseudonymisation?: PseudonymisationSettings;
   budgets?: CentralBudgets;
   /** The tenant-wide guardrails (#349). */
   guardrails?: GuardrailsSection;
@@ -111,6 +119,7 @@ const isObject = (v: unknown): v is Record<string, any> =>
 interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
+  pseudonymisation?: PseudonymisationSettings;
   budgets?: CentralBudgets;
   guardrails?: GuardrailsSection;
   prices?: PriceBook;
@@ -136,6 +145,24 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
     throw new PolicyBundleError(`${at}.version must be a string or null`);
   if (!isObject(raw.sections))
     throw new PolicyBundleError(`${at}.sections must be an object`);
+  // Sections the collector marks as required (#350): ones that must not be
+  // silently ignored, such as an enabled `pseudonymisation`. A gateway that
+  // does not enforce one refuses the whole bundle (the last good policy
+  // stays) instead of forwarding what the section was meant to protect.
+  if (raw.required !== undefined) {
+    if (
+      !Array.isArray(raw.required) ||
+      raw.required.some((r: unknown) => typeof r !== 'string')
+    )
+      throw new PolicyBundleError(`${at}.required must be an array of names`);
+    const unknown = (raw.required as string[]).filter(
+      (r) => !ENFORCED_SECTIONS[r]
+    );
+    if (unknown.length)
+      throw new PolicyBundleError(
+        `${at}.required: this gateway does not enforce ${JSON.stringify(unknown)}; upgrade it`
+      );
+  }
   const out: ParsedSections = { ignored: [] };
   for (const [name, body] of Object.entries(raw.sections)) {
     const where = `${at}.sections.${name}`;
@@ -157,6 +184,8 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
       } else if (name === 'access') {
         const { version: _v, ...rest } = body;
         out.access = parsePolicy(rest);
+      } else if (name === 'pseudonymisation') {
+        out.pseudonymisation = parsePseudonymisationSection(body);
       } else if (name === 'budgets') {
         out.budgets = parseBudgetsSection(body);
       } else if (name === 'guardrails') {
@@ -231,6 +260,7 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     etag,
     route: tenant.route,
     access: tenant.access,
+    pseudonymisation: tenant.pseudonymisation,
     ...(tenant.budgets ? { budgets: tenant.budgets } : {}),
     prices: tenant.prices,
     rateLimits,
@@ -267,6 +297,13 @@ export function centralAccessPolicy(): OidcPolicy | undefined {
 /** The negotiated prices from the central `prices` section, if any. */
 export function centralPriceBook(): PriceBook | undefined {
   return active?.prices;
+}
+
+/** Pseudonymisation settings from the central `pseudonymisation` section. */
+export function centralPseudonymisation():
+  | PseudonymisationSettings
+  | undefined {
+  return active?.pseudonymisation;
 }
 
 /**
