@@ -149,9 +149,13 @@ function describe(policy: CentralPolicy): string {
   if (policy.access) parts.push('access policy');
   if (policy.prices)
     parts.push(`${policy.prices.overrides.length} negotiated price(s)`);
+  if (policy.rateLimits?.tenant)
+    parts.push(
+      `${policy.rateLimits.tenant.config.rules.length} rate-limit rule(s)`
+    );
   if (policy.teams || policy.projects)
     parts.push(
-      `${policy.teams} team / ${policy.projects} project policies (validated, not applied)`
+      `${policy.teams} team / ${policy.projects} project policies (validated; only their rate limits apply)`
     );
   if (policy.ignored.length)
     parts.push(`not enforced here: ${policy.ignored.join(', ')}`);

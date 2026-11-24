@@ -117,7 +117,7 @@ _BEDROCK_PROFILE_PREFIX = re.compile(r"^(?:us|us-gov|eu|apac|au|ca|jp|in|global)
 _SIX = Decimal("0.000001")
 
 
-def _d(x: float | int | Decimal | None) -> Decimal:
+def _d(x: float | Decimal | None) -> Decimal:
     """Decimal of a JSON number as written (str(), not the binary float)."""
     return x if isinstance(x, Decimal) else Decimal(str(x or 0))
 

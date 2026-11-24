@@ -3205,13 +3205,14 @@ components:
       type: object
       description: |
         A `ps-policy.v1` document. Each section is `{"version": N, ...}`;
-        known sections: `route` v1 (`{"version": 1, "policy": <route-policy.v1>}`)
-        and `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
-        the gateway's PS_OIDC_POLICY format) and `prices` v1 (negotiated
+        known sections: `route` v1 (`{"version": 1, "policy": <route-policy.v1>}`),
+        `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
+        the gateway's PS_OIDC_POLICY format), `rate_limits` v1
+        (`{"version": 1, "on_store_error": "open"|"closed", "rules": [...]}`,
+        the gateway's PS_RATE_LIMITS format) and `prices` v1 (negotiated
         model prices, tenant-scope policies only; see `PriceSection`).
-        Reserved for later: `rate_limits`, `guardrails`, `pseudonymisation`,
-        `budgets`. See docs/guides/central-policy.mdx and
-        docs/guides/negotiated-prices.mdx.
+        Reserved for later: `guardrails`, `pseudonymisation`, `budgets`.
+        See docs/guides/central-policy.mdx and docs/guides/negotiated-prices.mdx.
       properties:
         schema:
           type: string
