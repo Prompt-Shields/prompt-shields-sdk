@@ -1,0 +1,554 @@
+{
+  "description": "Central policy access section v1 (#383): the section body without its version and whether the gateway accepts it (gateway/src/middlewares/psOidc/config.ts parsePolicy, the PS_OIDC_POLICY format). The collector (packages/collector/collector/policy_doc.py) must agree on every case: both test suites run this file.",
+  "cases": [
+    {
+      "name": "one group",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "every field",
+      "access": {
+        "default": "allow",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "providers": [
+              "openai"
+            ],
+            "models": [
+              "gpt-4o"
+            ],
+            "rate_limit": {
+              "requests_per_minute": 60,
+              "per": "group"
+            },
+            "mcp": {
+              "servers": {
+                "github": {
+                  "tools": {
+                    "allow": [
+                      "list_issues"
+                    ],
+                    "deny": [
+                      "delete_repo"
+                    ]
+                  }
+                },
+                "docs": {}
+              }
+            }
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "no groups",
+      "access": {
+        "groups": []
+      },
+      "valid": true
+    },
+    {
+      "name": "default null means deny",
+      "access": {
+        "default": null,
+        "groups": []
+      },
+      "valid": true
+    },
+    {
+      "name": "rate_limit per null means user",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "rate_limit": {
+              "requests_per_minute": 5,
+              "per": null
+            }
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "an integral float is an integer",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "rate_limit": {
+              "requests_per_minute": 5.0
+            }
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "groups missing",
+      "access": {
+        "default": "deny"
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown top-level key",
+      "access": {
+        "groups": [],
+        "extra": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "default other than allow/deny",
+      "access": {
+        "default": "maybe",
+        "groups": []
+      },
+      "valid": false
+    },
+    {
+      "name": "group not an object",
+      "access": {
+        "groups": [
+          "eng"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "group unknown key",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "extra": 1
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "group name with a space",
+      "access": {
+        "groups": [
+          {
+            "name": "eng team",
+            "match": [
+              "engineering"
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "group name with a trailing newline",
+      "access": {
+        "groups": [
+          {
+            "name": "eng\n",
+            "match": [
+              "engineering"
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "group name used twice",
+      "access": {
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ]
+          },
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "match empty",
+      "access": {
+        "groups": [
+          {
+            "name": "eng",
+            "match": []
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "match blank string",
+      "access": {
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "  "
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "providers not strings",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "providers": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "models null",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "models": null
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "rate_limit zero",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "rate_limit": {
+              "requests_per_minute": 0
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "rate_limit fractional",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "rate_limit": {
+              "requests_per_minute": 1.5
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "rate_limit boolean",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "rate_limit": {
+              "requests_per_minute": true
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "rate_limit per other",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "rate_limit": {
+              "requests_per_minute": 5,
+              "per": "team"
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "rate_limit null",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "rate_limit": null
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp without servers",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {}
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp unknown key",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {},
+              "x": 1
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp server id in upper case",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {
+                "GitHub": {}
+              }
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp server rule not an object",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {
+                "github": []
+              }
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp tools null",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {
+                "github": {
+                  "tools": null
+                }
+              }
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp tools unknown key",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {
+                "github": {
+                  "tools": {
+                    "only": []
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp tool name with a space",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {
+                "github": {
+                  "tools": {
+                    "allow": [
+                      "list issues"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp tool name too long",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {
+                "github": {
+                  "tools": {
+                    "deny": [
+                      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mcp tools allow null",
+      "access": {
+        "default": "deny",
+        "groups": [
+          {
+            "name": "eng",
+            "match": [
+              "engineering"
+            ],
+            "mcp": {
+              "servers": {
+                "github": {
+                  "tools": {
+                    "allow": null
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "valid": false
+    }
+  ]
+}

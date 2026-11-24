@@ -13,19 +13,20 @@ scope grants, and tenant isolation with row-level security enforced.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import uuid
 from pathlib import Path
 
 import pytest
-from collector import audit_trail, policy_doc, rls, tenant_keys
+from collector import audit_trail, policy_doc, retention, rls, tenant_keys
 from collector.admin_auth import ADMIN_SCOPES, TENANT_KEY_SCOPES
 from collector.app import app
 from collector.config import settings
 from db.api_keys import api_key_lookup_prefix, hash_api_key
-from db.models import AuditEvent, PolicyVersion, Tenant
+from db.models import AuditEvent, Policy, PolicyVersion, Team, Tenant
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -288,9 +289,11 @@ async def test_create_version_activate_rollback_and_audit(env):
     )
     assert resp.json()["active_version"] is None
     assert (await c.delete(f"{A}/policies/{p['id']}", headers=H(boot))).status_code == 204
-    assert (await c.get(f"{A}/policies/{p['id']}", headers=H(boot))).status_code == 404
+    # Soft delete (#383): still readable, with its versions.
+    got = (await c.get(f"{A}/policies/{p['id']}", headers=H(boot))).json()
+    assert got["deleted_at"] is not None and got["active_version"] is None
     last = (await _audit(engine, tid))[-1]
-    assert last.action == "policy.delete" and last.details["versions_deleted"] == 2
+    assert last.action == "policy.delete" and last.details["versions_kept"] == 2
 
 
 async def test_versions_are_immutable(env):
@@ -326,7 +329,7 @@ async def test_invalid_documents_are_refused_with_every_problem(env):
     )
     assert resp.status_code == 422
     problems = resp.json()["detail"]["detail"]
-    assert any("route.policy is missing" in x for x in problems)
+    assert any("route.policy: missing default_group" in x for x in problems)
     assert any("access.version" in x for x in problems)
     assert any("reserved for rate-limit policies" in x for x in problems)
     assert any("bogus: unknown section" in x for x in problems)
@@ -377,6 +380,198 @@ async def test_team_and_project_with_a_policy_cannot_be_deleted(env):
     assert (await c.delete(f"{A}/teams/{team['id']}", headers=H(boot))).status_code == 409
     await c.delete(f"{A}/policies/{tp['id']}", headers=H(boot))
     assert (await c.delete(f"{A}/teams/{team['id']}", headers=H(boot))).status_code == 204
+
+
+async def test_delete_keeps_the_version_history(env):
+    """#383: a deleted policy and its versions stay until tenant erasure."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    key = await _policy_key(c, boot)
+    team = await _post(c, boot, "/teams", {"name": "eng"})
+    body = {
+        "name": "team-eng",
+        "scope": "team",
+        "team_id": team["id"],
+        "document": DOC(access=ACCESS(["gpt-4o-mini"])),
+        "activate": True,
+    }
+    p = await _post(c, boot, "/policies", body)
+    await _post(c, boot, f"/policies/{p['id']}/versions", {"document": DOC(), "activate": True})
+    bundle = (await c.get("/api/v1/policy/effective", headers=H(key))).json()
+    assert team["id"] in bundle["teams"]
+
+    assert (await c.delete(f"{A}/policies/{p['id']}", headers=H(boot))).status_code == 204
+    # Out of the bundle and the listing...
+    bundle = (await c.get("/api/v1/policy/effective", headers=H(key))).json()
+    assert bundle["teams"] == {}
+    assert (await c.get(A + "/policies", headers=H(boot))).json()["data"] == []
+    # ...but kept, readable, with every version and document.
+    listed = (await c.get(A + "/policies?include_deleted=true", headers=H(boot))).json()["data"]
+    assert [x["id"] for x in listed] == [p["id"]] and listed[0]["deleted_at"]
+    versions = (await c.get(f"{A}/policies/{p['id']}/versions", headers=H(boot))).json()["data"]
+    assert [v["version"] for v in versions] == [2, 1]
+    v1 = (await c.get(f"{A}/policies/{p['id']}/versions/1", headers=H(boot))).json()
+    assert v1["document"] == body["document"]
+    # The audit row says what was in force, what changed, and what was kept.
+    last = (await _audit(engine, tid))[-1]
+    assert last.action == "policy.delete"
+    assert last.details["versions_kept"] == 2
+    assert last.details["before"] == {"version": 2, "sha256": policy_doc.digest(DOC())}
+    assert last.details["team_id"] == team["id"]
+
+    # A deleted policy cannot be changed or deleted again.
+    for method, path, payload in (
+        ("patch", "", {"name": "x"}),
+        ("post", "/versions", {"document": DOC()}),
+        ("post", "/activate", {"version": 1}),
+        ("delete", "", None),
+    ):
+        resp = await c.request(
+            method, f"{A}/policies/{p['id']}{path}", headers=H(boot), json=payload
+        )
+        assert resp.status_code == 409, (method, path, resp.text)
+
+    # Its name and binding are free again.
+    again = await _post(c, boot, "/policies", body)
+    assert again["id"] != p["id"]
+    assert (await c.delete(f"{A}/policies/{again['id']}", headers=H(boot))).status_code == 204
+
+    # Nothing but tenant erasure deletes the rows.
+    async with _admin(engine)() as s:
+        for table in ("policy_versions", "policies"):
+            with pytest.raises(DBAPIError, match="kept until tenant erasure"):
+                await s.execute(text(f"DELETE FROM {table}"))
+            await s.rollback()
+
+    # Deleting the team keeps the deleted policies, without the reference.
+    assert (await c.delete(f"{A}/teams/{team['id']}", headers=H(boot))).status_code == 204
+    async with _admin(engine)() as s:
+        rows = (await s.execute(select(Policy).where(Policy.tenant_id == tid))).scalars().all()
+        assert len(rows) == 2 and all(r.team_id is None and r.deleted_at for r in rows)
+        assert (await s.execute(select(func.count()).select_from(PolicyVersion))).scalar() == 3
+    got = (await c.get(f"{A}/policies/{p['id']}", headers=H(boot))).json()
+    assert got["scope"] == "team" and got["team_id"] is None
+
+    # Tenant erasure removes them.
+    async with _admin(engine)() as s:
+        result = await retention.erase_tenant(s, tid)
+    assert result.rows_deleted["policies"] == 2
+    assert result.rows_deleted["policy_versions"] == 3
+
+
+async def test_team_delete_racing_a_policy_create_is_a_conflict(env):
+    """#383: a team delete and a policy create on that team serialise on the
+    team row: whichever comes second gets 409/404, never a 500."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    team = await _post(c, boot, "/teams", {"name": "eng"})
+    tid_ = uuid.UUID(team["id"])
+
+    # A policy create is in flight (team row FOR SHARE, row inserted, not
+    # committed): the team delete waits for it, then sees the policy.
+    async with _admin(engine)() as s:
+        await s.execute(select(Team.id).where(Team.id == tid_).with_for_update(read=True))
+        s.add(Policy(tenant_id=tid, name="p", scope="team", team_id=tid_, created_by="t"))
+        await s.flush()
+        delete = asyncio.create_task(c.delete(f"{A}/teams/{team['id']}", headers=H(boot)))
+        await asyncio.sleep(0.5)
+        assert not delete.done()  # waiting on the team row
+        await s.commit()
+    resp = await delete
+    assert resp.status_code == 409, resp.text
+    assert "policy first" in resp.text
+
+    # A team delete is in flight (team row FOR UPDATE, deleted, not
+    # committed): the policy create waits, then finds no team.
+    other = await _post(c, boot, "/teams", {"name": "ops"})
+    oid = uuid.UUID(other["id"])
+    async with _admin(engine)() as s:
+        await s.execute(select(Team.id).where(Team.id == oid).with_for_update())
+        await s.execute(text("DELETE FROM teams WHERE id = :t"), {"t": oid})
+        create = asyncio.create_task(
+            c.post(
+                A + "/policies",
+                headers=H(boot),
+                json={"name": "q", "scope": "team", "team_id": other["id"]},
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert not create.done()
+        await s.commit()
+    resp = await create
+    assert resp.status_code == 404, resp.text
+
+
+async def test_project_move_audits_a_change_of_effective_policy(env):
+    """#383: moving a project to another team writes policy.effective_change
+    when the project's effective policy changes, and nothing when not."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    await _post(
+        c,
+        boot,
+        "/policies",
+        {
+            "name": "default",
+            "scope": "tenant",
+            "document": DOC(route={"version": 1, "policy": ROUTE}),
+            "activate": True,
+        },
+    )
+    eng = await _post(c, boot, "/teams", {"name": "eng"})
+    ops = await _post(c, boot, "/teams", {"name": "ops"})
+    lab = await _post(c, boot, "/teams", {"name": "lab"})
+    await _post(
+        c,
+        boot,
+        "/policies",
+        {
+            "name": "team-eng",
+            "scope": "team",
+            "team_id": eng["id"],
+            "document": DOC(access=ACCESS(["gpt-4o-mini"])),
+            "activate": True,
+        },
+    )
+    app_ = await _post(c, boot, "/projects", {"name": "app", "team_id": eng["id"]})
+
+    def changes(rows):
+        return [r for r in rows if r.action == "policy.effective_change"]
+
+    resp = await c.patch(f"{A}/projects/{app_['id']}", headers=H(boot), json={"team_id": ops["id"]})
+    assert resp.status_code == 200, resp.text
+    rows = changes(await _audit(engine, tid))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.target_type == "project" and row.target_id == app_["id"]
+    assert row.details["cause"] == "project.move"
+    assert row.details["previous_team_id"] == eng["id"]
+    assert row.details["team_id"] == ops["id"]
+    assert row.details["before"]["version"] == "default@1+team-eng@1"
+    assert row.details["after"]["version"] == "default@1"
+    assert row.details["before"]["sha256"] != row.details["after"]["sha256"]
+    assert row.details["sections_changed"] == ["access"]
+
+    # ops -> lab: neither team has a policy, nothing changes, no row.
+    await c.patch(f"{A}/projects/{app_['id']}", headers=H(boot), json={"team_id": lab["id"]})
+    assert len(changes(await _audit(engine, tid))) == 1
+
+    # With its own access section, the team's no longer matters either.
+    await _post(
+        c,
+        boot,
+        "/policies",
+        {
+            "name": "proj-app",
+            "scope": "project",
+            "project_id": app_["id"],
+            "document": DOC(access=ACCESS(["mistral-small"])),
+            "activate": True,
+        },
+    )
+    await c.patch(f"{A}/projects/{app_['id']}", headers=H(boot), json={"team_id": eng["id"]})
+    rows = changes(await _audit(engine, tid))
+    # The version label changes (team-eng now contributes, though overridden).
+    assert len(rows) == 2
+    assert rows[-1].details["sections_changed"] == []
+    assert rows[-1].details["after"]["version"] == "default@1+team-eng@1+proj-app@1"
 
 
 # ──────────────────────────────────────────────────────────────────────

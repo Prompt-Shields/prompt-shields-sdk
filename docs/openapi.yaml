@@ -3186,7 +3186,15 @@ components:
         updated_at:
           type: [string, 'null']
           format: date-time
-      required: [id, name, description, scope, team_id, project_id, active_version, created_by, created_at, updated_at]
+        deleted_at:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Set when the policy was deleted (#383). A deleted policy and its
+            versions are kept until tenant erasure; it is inactive, out of
+            the bundle and cannot be changed. Its team or project reference
+            becomes null once that team or project is deleted.
+      required: [id, name, description, scope, team_id, project_id, active_version, created_by, created_at, updated_at, deleted_at]
 
     PolicyWithDocument:
       allOf:
@@ -7406,7 +7414,8 @@ paths:
       summary: Delete a team
       description: |
         Its memberships go with it. 409 while the team has projects or a
-        governance policy.
+        live governance policy (also one created concurrently). A deleted
+        policy does not block; it keeps its history without the team.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7520,6 +7529,12 @@ paths:
       operationId: updateProject
       tags: [Admin]
       summary: Rename, describe or move a project
+      description: |
+        `team_id` moves the project to another team. When that changes the
+        project's effective governance policy (its old team's policy stops
+        applying, the new team's starts), the move is also audited as
+        `policy.effective_change` with the effective version and digest
+        before and after and the sections that changed (#383).
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7550,8 +7565,9 @@ paths:
       tags: [Admin]
       summary: Delete a project
       description: |
-        Its memberships go with it. 409 while the project has a governance
-        policy.
+        Its memberships go with it. 409 while the project has a live
+        governance policy (also one created concurrently). A deleted policy
+        does not block; it keeps its history without the project.
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7750,9 +7766,14 @@ paths:
       summary: Create a policy
       description: |
         A governance policy bound to the tenant (`scope: tenant`), a team or a
-        project; one policy per binding. With `document`, version 1 is
-        created (and, with `activate: true`, made active). Audited
-        (`policy.create`, `policy.version_create`, `policy.activate`).
+        project; one live policy per binding (a deleted policy frees its name
+        and binding). With `document`, version 1 is created (and, with
+        `activate: true`, made active). A `route` section is checked against
+        route-policy.v1 and its cross-field rules, and an `access` section
+        against the gateway's PS_OIDC_POLICY rules, exactly as the gateway
+        checks them (#383), so a document the gateway would refuse is never
+        stored. Audited (`policy.create`, `policy.version_create`,
+        `policy.activate`).
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7773,7 +7794,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: A policy with this name, or for this binding, exists
+          description: A policy with this name, or for this binding, exists, or its team or project was deleted meanwhile
         '422':
           description: Invalid field, binding or policy document (`detail` lists every problem)
         '401':
@@ -7795,6 +7816,13 @@ paths:
           schema:
             type: string
             enum: [tenant, team, project]
+        - name: include_deleted
+          in: query
+          required: false
+          description: Also list deleted policies (with `deleted_at` set)
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: Policies, by name
@@ -7829,6 +7857,7 @@ paths:
         - TenantApiKey: []
         - AdminToken: []
       x-admin-scope: admin:policies
+      description: Deleted policies too (with `deleted_at` set), so their history stays readable.
       responses:
         '200':
           description: The policy, with its active document
@@ -7867,7 +7896,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: A policy with this name exists
+          description: A policy with this name exists, or the policy was deleted
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -7877,9 +7906,12 @@ paths:
       tags: [Admin]
       summary: Delete a policy
       description: |
-        Deletes the policy and every version. Gateways stop applying it at
-        their next pull. Audited (`policy.delete`, with the active version's
-        number and SHA-256).
+        Marks the policy deleted (#383): it becomes inactive, gateways stop
+        applying it at their next pull, and its name and binding are free
+        again. The policy and every version are kept (still readable by id)
+        until tenant erasure; the database refuses any other delete.
+        Audited (`policy.delete`, with the active version's number and
+        SHA-256 and the number of versions kept).
       security:
         - TenantApiKey: []
         - AdminToken: []
@@ -7889,6 +7921,8 @@ paths:
           description: Deleted
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: The policy was already deleted
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -7929,6 +7963,8 @@ paths:
                 $ref: '#/components/schemas/PolicyVersionSummary'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: The policy was deleted
         '422':
           description: Invalid policy document (`detail` lists every problem)
         '401':
@@ -8034,6 +8070,8 @@ paths:
                 $ref: '#/components/schemas/Policy'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: The policy was deleted
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
