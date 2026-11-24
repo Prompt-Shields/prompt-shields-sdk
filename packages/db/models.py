@@ -452,6 +452,8 @@ class Principal(Base):
     external_id = Column(Text)
     email = Column(Text)
     display_name = Column(Text)
+    # SCIM userName (#339); unique per tenant, compared case-insensitively.
+    user_name = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True))
     disabled_at = Column(TIMESTAMP(timezone=True))
@@ -467,6 +469,13 @@ class Principal(Base):
             unique=True,
             postgresql_where=text("external_id IS NOT NULL"),
         ),
+        Index(
+            "ux_principals_tenant_user_name",
+            "tenant_id",
+            text("lower(user_name)"),
+            unique=True,
+            postgresql_where=text("user_name IS NOT NULL"),
+        ),
         Index("ix_principals_tenant", "tenant_id", "created_at"),
     )
 
@@ -480,6 +489,8 @@ class Team(Base):
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     name = Column(Text, nullable=False)
     description = Column(Text)
+    # SCIM Group externalId (#339): the identity provider's id for the group.
+    external_id = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True))
 
@@ -567,9 +578,15 @@ class Policy(Base):
 
     Its content lives in immutable ``policy_versions`` rows; ``active_version``
     names the one in force (NULL: none, the policy is inactive). At most one
-    policy per binding: one tenant-wide, one per team, one per project.
+    live policy per binding: one tenant-wide, one per team, one per project.
     collector/policy_doc.py documents the ps-policy.v1 document and how the
     effective policy is compiled (project > team > tenant, per section).
+
+    Deleting a policy sets ``deleted_at`` (#383): the row and its versions
+    stay, so policy history survives until tenant erasure (a trigger refuses
+    any other DELETE). A deleted policy is out of listings and the bundle,
+    and frees its name and binding. Deleting its team or project later sets
+    the reference to NULL.
     """
 
     __tablename__ = "policies"
@@ -580,38 +597,46 @@ class Policy(Base):
     description = Column(Text)
     # 'tenant', 'team' or 'project'.
     scope = Column(Text, nullable=False)
-    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id"))
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"))
+    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="SET NULL"))
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"))
     active_version = Column(Integer)
     created_by = Column(Text, nullable=False)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True))
+    deleted_at = Column(TIMESTAMP(timezone=True))
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "name", name="uq_policies_tenant_name"),
         CheckConstraint(
             "(scope = 'tenant' AND team_id IS NULL AND project_id IS NULL) OR "
             "(scope = 'team' AND team_id IS NOT NULL AND project_id IS NULL) OR "
-            "(scope = 'project' AND project_id IS NOT NULL AND team_id IS NULL)",
+            "(scope = 'project' AND project_id IS NOT NULL AND team_id IS NULL) OR "
+            "(deleted_at IS NOT NULL AND team_id IS NULL AND project_id IS NULL)",
             name="ck_policies_scope_binding",
+        ),
+        Index(
+            "ux_policies_tenant_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
         ),
         Index(
             "ux_policies_tenant_wide",
             "tenant_id",
             unique=True,
-            postgresql_where=text("scope = 'tenant'"),
+            postgresql_where=text("scope = 'tenant' AND deleted_at IS NULL"),
         ),
         Index(
             "ux_policies_team",
             "team_id",
             unique=True,
-            postgresql_where=text("team_id IS NOT NULL"),
+            postgresql_where=text("team_id IS NOT NULL AND deleted_at IS NULL"),
         ),
         Index(
             "ux_policies_project",
             "project_id",
             unique=True,
-            postgresql_where=text("project_id IS NOT NULL"),
+            postgresql_where=text("project_id IS NOT NULL AND deleted_at IS NULL"),
         ),
     )
 
@@ -620,7 +645,9 @@ class PolicyVersion(Base):
     """One immutable version of a policy's ps-policy.v1 document (#340).
 
     Rows are never updated (a trigger refuses UPDATE); a change is a new
-    version. ``sha256`` is the digest of the canonical JSON document.
+    version. ``sha256`` is the digest of the canonical JSON document. Rows
+    are only deleted by tenant erasure (#383; a trigger refuses any other
+    DELETE), also when their policy is deleted.
     """
 
     __tablename__ = "policy_versions"
@@ -640,6 +667,123 @@ class PolicyVersion(Base):
     __table_args__ = (
         UniqueConstraint("policy_id", "version", name="uq_policy_versions_policy_version"),
         Index("ix_policy_versions_tenant", "tenant_id"),
+    )
+
+
+class TenantOidcConfig(Base):
+    """A tenant's OpenID Connect identity provider for admin API login
+    (#339, collector/sso.py). One per tenant.
+
+    ``client_secret_ciphertext`` is sealed with the PS_WEBHOOK_SECRET_KEYS
+    keyring (bound to the tenant and row id); NULL for a public client
+    (PKCE only).
+    """
+
+    __tablename__ = "tenant_oidc_configs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    issuer = Column(Text, nullable=False)
+    client_id = Column(Text, nullable=False)
+    client_secret_ciphertext = Column(Text)
+    redirect_uri = Column(Text, nullable=False)
+    # Expected ``aud``; NULL means the client id.
+    audience = Column(Text)
+    algorithms = Column(ARRAY(Text), nullable=False)
+    # ID token claim matched against principals.external_id.
+    subject_claim = Column(Text, nullable=False, default="sub")
+    session_ttl_seconds = Column(Integer, nullable=False, default=3600)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        Index("ux_tenant_oidc_configs_tenant", "tenant_id", unique=True),
+    )
+
+
+class OidcLoginState(Base):
+    """One pending admin API login (#339): the ``state`` (by SHA-256), the
+    browser binding cookie (by SHA-256), the ``nonce`` and the PKCE
+    ``code_verifier``. Single use; expires after a few minutes."""
+
+    __tablename__ = "oidc_login_states"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    state_hash = Column(Text, nullable=False)
+    browser_hash = Column(Text, nullable=False)
+    nonce = Column(Text, nullable=False)
+    code_verifier = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    expires_at = Column(TIMESTAMP(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ux_oidc_login_states_state", "state_hash", unique=True),
+        Index("ix_oidc_login_states_tenant", "tenant_id", "expires_at"),
+    )
+
+
+class ScimToken(Base):
+    """A per-tenant SCIM 2.0 bearer token (#339, collector/scim.py).
+
+    Reaches /scim/v2 only, with its scopes (``scim:users``,
+    ``scim:groups``). Hashed like admin tokens and shown once.
+    """
+
+    __tablename__ = "scim_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    scopes = Column(ARRAY(Text), nullable=False)
+    token_prefix = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False)
+    token_hint = Column(Text, nullable=False)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    expires_at = Column(TIMESTAMP(timezone=True))
+    revoked_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        Index("ux_scim_tokens_prefix", "token_prefix", unique=True),
+        Index(
+            "ux_scim_tokens_tenant_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+
+class IdpGroupRole(Base):
+    """Roles that come with an identity provider group (#339): a SCIM Group
+    is a team; its members get a team membership with ``member_role`` and,
+    with ``tenant_role`` set, that tenant-wide role (collector/scim.py).
+    Never ``owner``."""
+
+    __tablename__ = "idp_group_roles"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    team_id = Column(
+        UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    member_role = Column(Text, nullable=False, default="viewer")
+    tenant_role = Column(Text)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "member_role <> 'owner' AND (tenant_role IS NULL OR tenant_role <> 'owner')",
+            name="ck_idp_group_roles_not_owner",
+        ),
+        Index("ux_idp_group_roles_team", "team_id", unique=True),
+        Index("ix_idp_group_roles_tenant", "tenant_id"),
     )
 
 
@@ -1571,12 +1715,41 @@ CREATE TRIGGER policy_versions_no_update
 BEFORE UPDATE ON policy_versions
 FOR EACH ROW EXECUTE FUNCTION policy_versions_immutable()
 """
+# Migration 054 (#383): policies and their versions outlive a policy delete
+# (soft delete) and go only with tenant erasure.
+POLICY_NO_DELETE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION policies_no_delete() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('prompt_shields.erasing_tenant', true) = OLD.tenant_id::text THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION USING MESSAGE = TG_TABLE_NAME
+        || ' rows are kept until tenant erasure; delete a policy through the API (soft delete)';
+END;
+$$ LANGUAGE plpgsql
+"""
+POLICY_NO_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER policies_no_delete
+BEFORE DELETE ON policies
+FOR EACH ROW EXECUTE FUNCTION policies_no_delete()
+"""
+POLICY_VERSION_NO_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER policy_versions_no_delete
+BEFORE DELETE ON policy_versions
+FOR EACH ROW EXECUTE FUNCTION policies_no_delete()
+"""
 
 # Install the triggers when the schema is built with create_all too (tests).
 for _table, _ddls in (
+    (Policy.__table__, (POLICY_NO_DELETE_FUNCTION_SQL, POLICY_NO_DELETE_TRIGGER_SQL)),
     (
         PolicyVersion.__table__,
-        (POLICY_VERSION_IMMUTABLE_FUNCTION_SQL, POLICY_VERSION_IMMUTABLE_TRIGGER_SQL),
+        (
+            POLICY_VERSION_IMMUTABLE_FUNCTION_SQL,
+            POLICY_VERSION_IMMUTABLE_TRIGGER_SQL,
+            # policies is created first (foreign key), so the function exists.
+            POLICY_VERSION_NO_DELETE_TRIGGER_SQL,
+        ),
     ),
     (
         RiskMappingReview.__table__,

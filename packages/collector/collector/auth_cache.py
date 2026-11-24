@@ -240,6 +240,21 @@ _FAILED_AUTH = FailedAuthLimiter(
 )
 
 
+# Admin API SSO logins started per client per minute (collector/sso.py):
+# starting a login is unauthenticated and holds one of the tenant's
+# MAX_PENDING_LOGINS slots for ten minutes, so one client must not be able
+# to fill them.
+SSO_LOGIN_STARTS_PER_MINUTE = 10
+_SSO_LOGIN_STARTS = FailedAuthLimiter(
+    limit=SSO_LOGIN_STARTS_PER_MINUTE,
+    max_clients=settings.auth_failure_tracked_clients,
+)
+
+
+def get_sso_login_limiter() -> FailedAuthLimiter:
+    return _SSO_LOGIN_STARTS
+
+
 def get_key_cache() -> VerifiedKeyCache:
     return _KEY_CACHE
 
