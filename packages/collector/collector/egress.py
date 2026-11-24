@@ -40,6 +40,13 @@ _METADATA = frozenset(
 )
 
 
+# "This network" 0.0.0.0/8 (only 0.0.0.0 itself is `is_unspecified`) and
+# the limited broadcast address: never a unicast destination, so refused
+# even with ``allow_private``.
+_THIS_NETWORK = ipaddress.ip_network("0.0.0.0/8")
+_BROADCAST = ipaddress.ip_address("255.255.255.255")
+
+
 class AddressNotAllowed(ValueError):
     """The host did not resolve, or resolved to a refused address."""
 
@@ -51,8 +58,8 @@ def ip_is_public(
     allow_local: bool = True,
 ) -> bool:
     """True for publicly routable unicast addresses only. With
-    ``allow_private`` only unspecified and multicast addresses (and IPv6
-    forms embedding them) are refused; with ``allow_local=False`` as well,
+    ``allow_private`` only unspecified, "this network" 0.0.0.0/8, broadcast
+    and multicast addresses (and IPv6 forms embedding them) are refused; with ``allow_local=False`` as well,
     loopback, link-local (cloud metadata 169.254.169.254) and the other
     cloud metadata addresses stay refused, so the opt-in admits an internal
     network but not this host or its metadata service."""
@@ -73,6 +80,8 @@ def ip_is_public(
         ):
             return False
     if ip.is_unspecified or ip.is_multicast:
+        return False
+    if ip.version == 4 and (ip in _THIS_NETWORK or ip == _BROADCAST):
         return False
     if not allow_local and (ip.is_loopback or ip.is_link_local or ip in _METADATA):
         return False

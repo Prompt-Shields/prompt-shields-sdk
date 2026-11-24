@@ -28,7 +28,9 @@
  *
  * Egress: the endpoint must pass `isSafeUpstreamURL` (no metadata, private
  * or loopback addresses unless listed in `TRUSTED_CUSTOM_HOSTS`), and sends
- * go through `upstreamFetch`, which never follows a redirect.
+ * go through `guardedUpstreamFetch`, which never follows a redirect and (on
+ * Node) refuses a name resolving to a link-local or metadata address and
+ * pins the connection to the checked address (#377).
  *
  * Delivery is best-effort: enqueue never blocks the request, the queue is
  * bounded (oldest dropped first), at most MAX_IN_FLIGHT batches are in
@@ -39,7 +41,7 @@
 import { isSafeUpstreamURL } from '../requestValidator';
 import { parseHeaderList, toOtlpAttributes } from '../psOtel';
 import { telemetryDroppedTotal } from '../psMetrics/security';
-import { upstreamFetch } from '../../utils/fetch';
+import { guardedUpstreamFetch } from '../../utils/egressFetch';
 import {
   SECURITY_EVENT_SCHEMA_VERSION,
   SecurityEvent,
@@ -189,7 +191,8 @@ export class OtlpLogsExporter {
 
   constructor(
     readonly config: SecurityLogsOtlpConfig,
-    private fetchFn: FetchFn = upstreamFetch
+    // #377: resolve-and-check (no link-local / metadata address), pinned.
+    private fetchFn: FetchFn = guardedUpstreamFetch
   ) {}
 
   get pending() {
