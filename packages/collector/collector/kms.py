@@ -37,6 +37,13 @@ versioned id is stored). Algorithm ``PS_AZURE_KEYVAULT_WRAP_ALGORITHM``
     cannot send a token or a data key anywhere else. The same check runs
     on every stored ``kek_ref`` before an unwrap and on the key id Key
     Vault returns.
+  - Unwrap is also pinned to the configured key (same vault and key name,
+    any version) plus the keys listed in
+    ``PS_AZURE_KEYVAULT_UNWRAP_KEY_IDS`` (comma-separated, for a move
+    between vaults or keys). A ``kek_ref`` naming any other key, even in
+    another vault on an allowed host, is refused before any call: a vault
+    an attacker controls could otherwise hand back a data key of their
+    choosing for a forged row.
   - Authentication: workload identity (``AZURE_FEDERATED_TOKEN_FILE``,
     AKS) or managed identity (``AZURE_CLIENT_ID`` picks a user-assigned
     one), through the optional ``azure-identity`` package
@@ -318,12 +325,14 @@ class AzureKeyVaultProvider:
         timeout: float = 5.0,
         credential: Any = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        unwrap_key_ids: tuple[str, ...] = (),
     ) -> None:
         if algorithm not in WRAP_ALGORITHMS:
             raise KeyProviderNotConfigured(
                 f"PS_AZURE_KEYVAULT_WRAP_ALGORITHM must be one of {', '.join(WRAP_ALGORITHMS)}"
             )
         self.key = parse_azure_key_id(key_id) if key_id else None
+        self.unwrap_keys = tuple(parse_azure_key_id(k) for k in unwrap_key_ids if k.strip())
         self.algorithm = algorithm
         self.timeout = timeout
         self._credential = credential
@@ -394,6 +403,15 @@ class AzureKeyVaultProvider:
             raise KeyProviderError(f"azure-keyvault: {op or 'get'} returned invalid JSON")
         return data
 
+    def _may_unwrap(self, key: AzureKeyId) -> bool:
+        """Whether a stored key id is the configured key (any version) or one
+        listed in PS_AZURE_KEYVAULT_UNWRAP_KEY_IDS (same vault and name)."""
+        return any(
+            allowed.host == key.host and allowed.name.lower() == key.name.lower()
+            for allowed in (self.key, *self.unwrap_keys)
+            if allowed is not None
+        )
+
     def _returned_key(self, requested: AzureKeyId, kid: object) -> AzureKeyId:
         """The versioned key id Key Vault reports, which must be the key we
         asked for (same host and name)."""
@@ -439,6 +457,13 @@ class AzureKeyVaultProvider:
             key = parse_azure_key_id(key_url, require_version=True)
         except KeyProviderNotConfigured:
             raise KeyProviderError("stored azure-keyvault kek_ref is invalid") from None
+        if not self._may_unwrap(key):
+            if self.key is None and not self.unwrap_keys:
+                raise KeyProviderNotConfigured("PS_AZURE_KEYVAULT_KEY_ID is not set")
+            raise KeyProviderError(
+                "stored azure-keyvault kek_ref names a key that is neither "
+                "PS_AZURE_KEYVAULT_KEY_ID nor in PS_AZURE_KEYVAULT_UNWRAP_KEY_IDS"
+            )
         data = await self._call(key, "unwrapkey", {"alg": algorithm, "value": _b64url(wrapped)})
         self._returned_key(key, data.get("kid"))
         value = data.get("value")
@@ -482,6 +507,7 @@ def _build(name: str) -> KeyProvider:
             settings.azure_keyvault_key_id,
             settings.azure_keyvault_wrap_algorithm,
             settings.azure_keyvault_timeout_seconds,
+            settings.azure_keyvault_unwrap_key_ids,
         )
         provider = _instances.get(cache_key)
         if provider is None:
@@ -489,6 +515,9 @@ def _build(name: str) -> KeyProvider:
                 settings.azure_keyvault_key_id,
                 algorithm=settings.azure_keyvault_wrap_algorithm,
                 timeout=settings.azure_keyvault_timeout_seconds,
+                unwrap_key_ids=tuple(
+                    k.strip() for k in settings.azure_keyvault_unwrap_key_ids.split(",")
+                ),
             )
             _instances[cache_key] = provider
         return provider

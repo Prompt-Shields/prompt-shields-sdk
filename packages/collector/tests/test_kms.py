@@ -298,6 +298,10 @@ async def test_a_response_naming_another_key_is_refused():
         "azure-keyvault:RSA-OAEP-256:https://ps-kek-test.vault.azure.net/keys/k",  # no version
         f"azure-keyvault:RSA1_5:{KEY_URL}/{V1}",
         f"local:{KEY_URL}",
+        # Allowed Azure hosts, but not the configured key: a vault an
+        # attacker controls could return a data key of their choosing.
+        f"azure-keyvault:RSA-OAEP-256:https://other-vault.vault.azure.net/keys/credential-kek/{V1}",
+        f"azure-keyvault:RSA-OAEP-256:{VAULT}/keys/another-key/{V1}",
     ],
 )
 async def test_a_tampered_kek_ref_never_leaves_the_process(ref):
@@ -307,6 +311,38 @@ async def test_a_tampered_kek_ref_never_leaves_the_process(ref):
     with pytest.raises(kms.KeyProviderError):
         await provider.unwrap(ref, b"x" * 256, b"")
     assert fake.requests == []
+
+
+async def test_unwrap_from_a_previous_vault_needs_it_listed():
+    old_vault = FakeKeyVault(host="ps-kek-old.vault.azure.net")
+    old_vault.add_version("old-kek", V1)
+    new_vault = FakeKeyVault()
+    new_vault.add_version("credential-kek", V1)
+    fakes = {f.host: f for f in (old_vault, new_vault)}
+    transport = httpx.MockTransport(lambda r: fakes[r.url.host].handler(r))
+    dek = secrets.token_bytes(32)
+    old = await kms.AzureKeyVaultProvider(
+        f"https://{old_vault.host}/keys/old-kek", credential=FakeCredential(), transport=transport
+    ).wrap(dek, b"")
+
+    pinned = kms.AzureKeyVaultProvider(KEY_URL, credential=FakeCredential(), transport=transport)
+    n = len(old_vault.requests)
+    with pytest.raises(kms.KeyProviderError, match="PS_AZURE_KEYVAULT_UNWRAP_KEY_IDS"):
+        await pinned.unwrap(old.kek_ref, old.wrapped, b"")
+    assert len(old_vault.requests) == n
+
+    moving = kms.AzureKeyVaultProvider(
+        KEY_URL,
+        credential=FakeCredential(),
+        transport=transport,
+        unwrap_key_ids=(f"https://{old_vault.host}/keys/old-kek",),
+    )
+    assert await moving.unwrap(old.kek_ref, old.wrapped, b"") == dek
+    # Nothing configured at all: reported as not configured, no call.
+    with pytest.raises(kms.KeyProviderNotConfigured):
+        await kms.AzureKeyVaultProvider("", transport=transport).unwrap(
+            old.kek_ref, old.wrapped, b""
+        )
 
 
 async def test_network_errors_are_key_provider_errors():
@@ -374,3 +410,58 @@ async def test_local_keyring_is_not_the_webhook_keyring(monkeypatch):
     with pytest.raises(kms.KeyProviderNotConfigured) as err:
         await kms.LocalKeyProvider().wrap(b"x" * 32, b"")
     assert "short" not in str(err.value)
+
+
+# ── data-layer AAD (the KEK layer does not bind context for Azure) ───
+
+
+async def test_sealed_key_aad_is_checked_even_when_the_kek_ignores_context():
+    """RSA-OAEP / A256KW wraps carry no context, so only the AES-GCM AAD on
+    ``sealed_key`` keeps a row's ciphertext (with its wrapped DEK) from
+    opening as another row, tenant or provider. Fresh DEK and nonce on
+    every seal, including a re-seal of the same row (rotate)."""
+    import uuid
+
+    from collector import credential_vault as cv
+    from db.models import InferenceCredential
+
+    fake = FakeKeyVault()
+    fake.add_version("credential-kek", V1)
+    provider = azure_provider(fake)
+    kms.use_provider(provider)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+
+    async def row(tenant, provider_name, secret):
+        rid = uuid.uuid4()
+        s = await cv.seal(secret, tenant, provider_name, rid, provider)
+        return InferenceCredential(
+            id=rid,
+            tenant_id=tenant,
+            provider=provider_name,
+            label="x",
+            sealed_key=s.sealed_key,
+            wrapped_dek=s.wrapped_dek,
+            kek_ref=s.kek_ref,
+        )
+
+    a = await row(tenant_a, "openai", "sk-secret-of-a-0001")
+    b_same_tenant = await row(tenant_a, "openai", "sk-secret-of-b-0002")
+    c_other_tenant = await row(tenant_b, "openai", "sk-secret-of-c-0003")
+    d_other_provider = await row(tenant_a, "anthropic", "sk-secret-of-d-0004")
+    assert await cv.open_row(a) == "sk-secret-of-a-0001"
+
+    for victim in (b_same_tenant, c_other_tenant, d_other_provider):
+        victim.sealed_key, victim.wrapped_dek, victim.kek_ref = (
+            a.sealed_key,
+            a.wrapped_dek,
+            a.kek_ref,
+        )
+        # The DEK unwraps (Key Vault does not check context); AES-GCM refuses.
+        with pytest.raises(ValueError, match="could not be decrypted"):
+            await cv.open_row(victim)
+
+    # Re-sealing the same row (rotate) never reuses a DEK or a nonce.
+    seals = [await cv.seal("sk-same-key-0005", tenant_a, "openai", a.id, provider) for _ in range(4)]
+    nonces = {base64.urlsafe_b64decode(s.sealed_key[3:])[:12] for s in seals}
+    assert len(nonces) == 4
+    assert len({s.wrapped_dek for s in seals}) == 4

@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     azure_keyvault_key_id: str = ""
     azure_keyvault_wrap_algorithm: str = "RSA-OAEP-256"
     azure_keyvault_timeout_seconds: float = 5.0
+    # Further Key Vault keys (comma-separated key ids, any version) whose
+    # stored data keys may still be unwrapped, e.g. the old key while
+    # `credential_vault rewrap` moves to a new vault. Unwrap is otherwise
+    # pinned to PS_AZURE_KEYVAULT_KEY_ID's vault and key name.
+    azure_keyvault_unwrap_key_ids: str = ""
     # Dev/test only: allow http:// targets; private destinations (RFC 1918,
     # ULA, CGNAT; never loopback, link-local or cloud metadata); loopback
     # destinations (127.0.0.0/8, ::1) for a receiver on the same host.
