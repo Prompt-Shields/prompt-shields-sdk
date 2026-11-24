@@ -4,7 +4,7 @@
  * as `x-portkey-config` through the real gateway app against mocked
  * providers, and the behaviour the guide describes is checked: which
  * targets are called, the one usage event per request with its `attempts`,
- * and the one GenAI span per request with a `ps.attempt` event per attempt.
+ * and the one GenAI span per request with a child span per attempt.
  */
 jest.mock('jose', () => ({}));
 // Real backoff waits (1 s, 2 s, ...) are not under test; run retries
@@ -111,15 +111,33 @@ const attrsOf = (list: any[] = []) =>
     ])
   );
 
-async function oneSpan() {
-  await until(() => otelSpans().length > 0, 'OTel span');
+/**
+ * The request's spans once `n` are exported: its one GenAI span (the call)
+ * and its children, one per upstream attempt, in attempt order.
+ */
+async function callSpans(n: number) {
+  await until(() => otelSpans().length >= n, `${n} OTel spans`);
+  await new Promise((r) => setTimeout(r, 50));
   const spans = otelSpans();
-  expect(spans).toHaveLength(1);
-  return spans[0];
+  expect(spans).toHaveLength(n);
+  const calls = spans.filter(
+    (s) => attrsOf(s.attributes)['gen_ai.operation.name']
+  );
+  expect(calls).toHaveLength(1);
+  const call = calls[0];
+  const attempts = spans
+    .filter((s) => s !== call)
+    .sort(
+      (a, b) =>
+        attrsOf(a.attributes)['ps.attempt.number'] -
+        attrsOf(b.attributes)['ps.attempt.number']
+    );
+  for (const a of attempts) {
+    expect(a.traceId).toBe(call.traceId);
+    expect(a.parentSpanId).toBe(call.spanId);
+  }
+  return { call, attempts };
 }
-
-const attemptEvents = (span: any) =>
-  (span.events ?? []).filter((e: any) => e.name === 'ps.attempt');
 
 beforeEach(() => {
   resetHarness();
@@ -182,37 +200,48 @@ describe('fallback.json', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(events).toHaveLength(1);
 
-    // One span in the caller's trace, with one ps.attempt event per attempt.
-    const span = await oneSpan();
-    expect(span.traceId).toBe(TRACE_ID);
-    expect(span.parentSpanId).toBe(PARENT);
-    const attrs = attrsOf(span.attributes);
+    // One GenAI span in the caller's trace, one child span per attempt.
+    const { call, attempts } = await callSpans(3);
+    expect(call.traceId).toBe(TRACE_ID);
+    expect(call.parentSpanId).toBe(PARENT);
+    expect(res.headers.get('traceparent')).toBe(
+      `00-${TRACE_ID}-${call.spanId}-01`
+    );
+    const attrs = attrsOf(call.attributes);
     expect(attrs['ps.attempt.count']).toBe(2);
     expect(attrs['ps.fallback_chain']).toEqual(['server_error']);
-    const attempts = attemptEvents(span).map((e: any) => attrsOf(e.attributes));
-    expect(attempts).toEqual([
+    expect(attempts.map((a) => attrsOf(a.attributes))).toEqual([
       expect.objectContaining({
         'ps.attempt.number': 1,
-        'gen_ai.provider.name': 'openai',
-        'gen_ai.request.model': 'gpt-4o-mini',
+        'ps.attempt.provider': 'openai',
+        'ps.attempt.model': 'gpt-4o-mini',
         'http.response.status_code': 503,
         'error.type': 'server_error',
       }),
       expect.objectContaining({
         'ps.attempt.number': 2,
-        'gen_ai.provider.name': 'mistral_ai',
-        'gen_ai.request.model': 'mistral-small-latest',
+        'ps.attempt.provider': 'mistral_ai',
+        'ps.attempt.model': 'mistral-small-latest',
+        'http.request.resend_count': 1,
         'http.response.status_code': 200,
       }),
     ]);
-    expect(attempts[1]['error.type']).toBeUndefined();
-    // Events lie within the span, in order.
-    const times = attemptEvents(span).map((e: any) => BigInt(e.timeUnixNano));
-    expect(times[0] <= times[1]).toBe(true);
-    expect(times[0] >= BigInt(span.startTimeUnixNano)).toBe(true);
-    expect(times[1] <= BigInt(span.endTimeUnixNano)).toBe(true);
-    // Metadata only: no content or error message on the span.
-    expect(JSON.stringify(span)).not.toContain('upstream unavailable');
+    expect(attempts[0].status.code).toBe(2);
+    expect(attempts[1].status.code).toBe(0);
+    expect(attrsOf(attempts[1].attributes)['error.type']).toBeUndefined();
+    // Attempts lie within the call span, in order.
+    const ns = (v: string) => BigInt(v);
+    expect(ns(attempts[0].endTimeUnixNano)).toBeLessThanOrEqual(
+      ns(attempts[1].endTimeUnixNano)
+    );
+    expect(ns(attempts[0].startTimeUnixNano)).toBeGreaterThanOrEqual(
+      ns(call.startTimeUnixNano)
+    );
+    expect(ns(attempts[1].endTimeUnixNano)).toBeLessThanOrEqual(
+      ns(call.endTimeUnixNano)
+    );
+    // Metadata only: no content or error message on any span.
+    expect(JSON.stringify(otelSpans())).not.toContain('upstream unavailable');
   });
 
   test('A answers: one attempt, B is never called', async () => {
@@ -225,9 +254,9 @@ describe('fallback.json', () => {
     const ev = await telemetryEvent();
     expect(ev.retry_count).toBe(0);
     expect(ev.attempts).toHaveLength(1);
-    const span = await oneSpan();
-    expect(attemptEvents(span)).toHaveLength(1);
-    expect(attrsOf(span.attributes)['ps.fallback_chain']).toBeUndefined();
+    const { call, attempts } = await callSpans(2);
+    expect(attempts).toHaveLength(1);
+    expect(attrsOf(call.attributes)['ps.fallback_chain']).toBeUndefined();
   });
 
   test('a status outside on_status_codes is returned as is', async () => {
@@ -314,13 +343,11 @@ describe('retry.json', () => {
     expect(ev.attempts.map((a: any) => a.status)).toEqual([503, 503, 200]);
     expect(ev.fallback_chain).toEqual(['server_error', 'server_error']);
 
-    const span = await oneSpan();
-    expect(attrsOf(span.attributes)['ps.attempt.count']).toBe(3);
+    const { call, attempts } = await callSpans(4);
+    expect(attrsOf(call.attributes)['ps.attempt.count']).toBe(3);
     expect(
-      attemptEvents(span).map(
-        (e: any) => attrsOf(e.attributes)['ps.attempt.number']
-      )
-    ).toEqual([1, 2, 3]);
+      attempts.map((a) => attrsOf(a.attributes)['http.request.resend_count'])
+    ).toEqual([undefined, 1, 2]);
   });
 
   test('a status outside on_status_codes is not retried', async () => {

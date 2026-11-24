@@ -4,6 +4,7 @@
  */
 import { Hono } from 'hono';
 import {
+  buildAttemptSpans,
   buildExportRequest,
   buildGenAISpan,
   contentAttributes,
@@ -270,16 +271,17 @@ describe('buildGenAISpan', () => {
     expect(buildGenAISpan({ ...base, path: '/v1/files' })).toBeUndefined();
   });
 
-  test('no attempt attributes or events without attempts (#390)', () => {
-    const { span } = buildGenAISpan({ ...base, attempts: [] })!;
-    expect(span.events).toBeUndefined();
-    const a = attrsOf(span);
+  test('no attempt attributes or spans without attempts (#390)', () => {
+    const input = { ...base, attempts: [] };
+    const built = buildGenAISpan(input)!;
+    expect(buildAttemptSpans(input, built)).toEqual([]);
+    const a = attrsOf(built.span);
     expect(a['ps.attempt.count']).toBeUndefined();
     expect(a['ps.fallback_chain']).toBeUndefined();
   });
 
-  test('one ps.attempt event per attempt, within the span (#390)', () => {
-    const { span } = buildGenAISpan({
+  test('one child span per attempt, within the call span (#390)', () => {
+    const input = {
       ...base,
       attempts: [
         {
@@ -293,38 +295,53 @@ describe('buildGenAISpan', () => {
         { attempt: 2, provider: 'azure-openai', latency_ms: 9 },
         { attempt: 3, provider: 'bedrock', status: 200, latency_ms: 100 },
       ],
-      // Second time missing; first before the span start (clamped).
+      // First ends before the span start (clamped); second time missing.
       attemptEndMs: [base.startMs - 5, NaN, base.startMs + 200],
       attemptCount: 40,
-    })!;
-    const a = attrsOf(span);
+    };
+    const built = buildGenAISpan(input)!;
+    const a = attrsOf(built.span);
     expect(a['ps.attempt.count']).toBe(40);
     expect(a['ps.fallback_chain']).toEqual(['rate_limited']);
-    expect(span.events.map((e: any) => e.name)).toEqual([
-      'ps.attempt',
-      'ps.attempt',
-      'ps.attempt',
-    ]);
-    expect(span.events.map((e: any) => e.timeUnixNano)).toEqual([
-      span.startTimeUnixNano,
-      span.endTimeUnixNano,
-      `${base.startMs + 200}000000`,
-    ]);
-    const ev = span.events.map((e: any) => attrsOf(e));
-    expect(ev[0]).toEqual({
+    expect(built.span.events).toBeUndefined();
+
+    const children = buildAttemptSpans(input, built);
+    expect(children).toHaveLength(3);
+    for (const c of children) {
+      expect(c.environment).toBe('prod');
+      expect(c.span.traceId).toBe(built.span.traceId);
+      expect(c.span.parentSpanId).toBe(built.span.spanId);
+      expect(c.span.spanId).toMatch(/^[0-9a-f]{16}$/);
+      expect(c.span.kind).toBe(3);
+      // Never a GenAI span: a consumer billing GenAI spans sees one call.
+      expect(
+        c.span.attributes.filter((x: any) => x.key.startsWith('gen_ai.'))
+      ).toEqual([]);
+    }
+    const [first, second, third] = children.map((c) => c.span);
+    expect(first.name).toBe('attempt 1');
+    expect(first.startTimeUnixNano).toBe(built.span.startTimeUnixNano);
+    expect(first.endTimeUnixNano).toBe(built.span.startTimeUnixNano);
+    expect(first.status).toEqual({ code: 2, message: 'rate_limited' });
+    expect(attrsOf(first)).toEqual({
       'ps.attempt.number': 1,
-      'gen_ai.provider.name': 'openai',
-      'gen_ai.request.model': 'gpt-4o',
+      'ps.attempt.provider': 'openai',
+      'ps.attempt.model': 'gpt-4o',
       'http.response.status_code': 429,
       'error.type': 'rate_limited',
       'ps.attempt.latency_ms': 40,
     });
     // No status (no response came back): left out, not zero.
-    expect(ev[1]).toEqual({
+    expect(attrsOf(second)).toEqual({
       'ps.attempt.number': 2,
-      'gen_ai.provider.name': 'azure.ai.openai',
+      'ps.attempt.provider': 'azure.ai.openai',
+      'http.request.resend_count': 1,
       'ps.attempt.latency_ms': 9,
     });
+    expect(second.endTimeUnixNano).toBe(built.span.endTimeUnixNano);
+    expect(third.status).toEqual({ code: 0 });
+    expect(third.startTimeUnixNano).toBe(`${base.startMs + 100}000000`);
+    expect(third.endTimeUnixNano).toBe(`${base.startMs + 200}000000`);
   });
 });
 

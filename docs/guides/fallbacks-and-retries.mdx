@@ -201,21 +201,26 @@ The collector stores `attempts`, `retry_count`, `fallback_chain` and
 from the last attempt's status. Attempt records never hold request or
 response content, error messages or headers.
 
-**Spans.** With `PS_OTEL_ENDPOINT` set (see [Observability](/guides/observability)),
-the gateway exports one GenAI CLIENT span per request, in the caller's trace
-when it sends a W3C `traceparent`. A request that made upstream attempts
-carries:
+**Spans.** With `PS_OTEL_ENDPOINT` set (see [Observability](/guides/observability)
+and [Agent Traces](/guides/agent-traces)), the gateway exports one GenAI CLIENT
+span per request, in the caller's trace when it sends a W3C `traceparent`
+(the response's `traceparent` names that span). A request that made upstream
+attempts carries:
 
-| On the span | Meaning |
+| Where | What |
 |---|---|
-| `ps.attempt.count` | How many attempts were made |
-| `ps.fallback_chain` | The `error.type` of each failed attempt, in order |
-| `ps.attempt` span events, one per attempt | `ps.attempt.number`, `gen_ai.provider.name`, `gen_ai.request.model`, `http.response.status_code`, `error.type` (failed attempts only), `ps.attempt.latency_ms`; timed when the attempt's response or error came in |
+| The GenAI span: `ps.attempt.count` | How many attempts were made |
+| The GenAI span: `ps.fallback_chain` | The `error.type` of each failed attempt, in order |
+| One child CLIENT span per attempt, named `attempt <n>` | `ps.attempt.number`, `ps.attempt.provider`, `ps.attempt.model`, `http.request.resend_count` (from the second attempt), `http.response.status_code`, `error.type` and an error status (failed attempts only), `ps.attempt.latency_ms`. It ends when the attempt's response or error came in |
 
-So a fallback from A to B is one span with two `ps.attempt` events in one
-trace, and still one billed call for a backend that counts GenAI spans. The
-span's own `gen_ai.provider.name` is the request's provider (the first
-target's, for a config); the provider that answered is the last attempt's.
+So a fallback from A to B is one trace holding the GenAI span and two
+attempt spans under it. The attempt spans carry no `gen_ai.*` attribute on
+purpose: a backend that bills GenAI spans, the Prompt Shields collector
+included, still counts one call. The collector's trace store keeps the
+attempt spans with their provider, model, status and error, so
+`GET /partner/v1/traces/{trace_id}` shows them. The GenAI span's own
+`gen_ai.provider.name` is the request's provider (the first target's, for a
+config). The provider that answered is the one on the last attempt.
 
 ## Checking it
 

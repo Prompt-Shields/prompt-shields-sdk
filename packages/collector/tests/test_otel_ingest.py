@@ -173,6 +173,7 @@ def mocked():
         patch.object(otel_ingest, "resolve_tenant", AsyncMock(return_value=TENANT)),
         patch.object(otel_ingest, "write_spans", writer),
         patch.object(otel_ingest, "record_otel", AsyncMock()),
+        patch.object(otel_ingest, "store_trace_spans", AsyncMock(return_value=0)),
     ):
         yield writer
 
@@ -200,46 +201,6 @@ async def test_ingests_genai_spans_and_ignores_others(mocked):
     assert tenant_id == TENANT
     assert len(spans) == 2
     assert all(s.vendor == "openai" for s in spans)
-
-
-async def test_gateway_fallback_span_is_one_billed_call(mocked):
-    # The gateway's span for a fallback A -> B (#390): one CLIENT span with a
-    # ps.attempt event per upstream attempt. It is one usage row, not two.
-    def attempt(n, provider, status, error=None):
-        attrs = [
-            _attr("ps.attempt.number", n),
-            _attr("gen_ai.provider.name", provider),
-            _attr("http.response.status_code", status),
-        ]
-        if error:
-            attrs.append(_attr("error.type", error))
-        return {
-            "timeUnixNano": "1700000000100000000",
-            "name": "ps.attempt",
-            "attributes": attrs,
-        }
-
-    span = _span(
-        {**GENAI_ATTRS, "ps.attempt.count": 2},
-        events=[
-            attempt(1, "openai", 503, "server_error"),
-            attempt(2, "mistral_ai", 200),
-        ],
-    )
-    span["attributes"].append(
-        {
-            "key": "ps.fallback_chain",
-            "value": {"arrayValue": {"values": [{"stringValue": "server_error"}]}},
-        }
-    )
-    resp = await _post(
-        json.dumps(_payload(span)), {**AUTH, "Content-Type": "application/json"}
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {}
-    _db, _tenant, spans = mocked.await_args.args
-    assert len(spans) == 1
-    assert (spans[0].tokens_in, spans[0].tokens_out) == (150, 300)
 
 
 async def test_no_genai_spans_skips_writer(mocked):
