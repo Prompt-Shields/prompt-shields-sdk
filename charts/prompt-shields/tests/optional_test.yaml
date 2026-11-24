@@ -347,6 +347,40 @@ tests:
           path: data.PS_BUDGET_REDIS_URL
           value: redis://redis:6379/0
 
+  - it: renders no rate limits by default
+    template: templates/configmap.yaml
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: data.PS_RATE_LIMITS
+
+  - it: renders rate limits as a rate_limits v1 section
+    template: templates/configmap.yaml
+    documentIndex: 0
+    set:
+      gateway.rateLimits.enabled: true
+      gateway.rateLimits.redis.url: redis://redis:6379/1
+      gateway.rateLimits.rules:
+        - {id: per-key, scope: virtual_key, rpm: 600}
+    asserts:
+      - equal:
+          path: data.PS_RATE_LIMITS
+          value: '{"on_store_error":"open","rules":[{"id":"per-key","rpm":600,"scope":"virtual_key"}],"version":1}'
+      - equal:
+          path: data.PS_RATELIMIT_NAMESPACE
+          value: default
+      - equal:
+          path: data.PS_RATELIMIT_REDIS_URL
+          value: redis://redis:6379/1
+
+  - it: refuses rate limits without rules
+    template: templates/configmap.yaml
+    set:
+      gateway.rateLimits.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "gateway.rateLimits.rules"
+
   - it: refuses budgets without entries
     template: templates/configmap.yaml
     set:

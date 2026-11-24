@@ -691,6 +691,17 @@
         "ps.rate_limit.source": {
           "enum": ["upstream", "gateway"]
         },
+        "ps.rate_limit.rule": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,64}$",
+          "description": "The rate-limit policy rule that refused the call (gateway rate_limits section), if one did."
+        },
+        "ps.rate_limit.scope": {
+          "enum": ["global", "virtual_key", "team", "project", "user"]
+        },
+        "ps.rate_limit.limit": {
+          "enum": ["rpm", "tpm", "tpd", "concurrency"]
+        },
         "http.response.status_code": {
           "const": 429
         }
