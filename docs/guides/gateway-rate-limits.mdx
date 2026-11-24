@@ -1,0 +1,137 @@
+---
+title: Gateway Rate Limits
+description: Requests, tokens and concurrency per tenant, key, team, project or user, shared by every gateway replica through Redis
+---
+
+# Gateway Rate Limits
+
+The gateway can limit requests per minute (`rpm`), tokens per minute
+(`tpm`, input plus output), tokens per UTC day (`tpd`) and calls in flight
+(`concurrency`) on its model calls: `/v1/chat/completions`,
+`/v1/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`,
+`/v1/rerank`, images, audio and OCR, prompt completions (`/v1/prompts/...`)
+and every other POST the `/v1` proxy forwards to the provider (`/v1/proxy/*`,
+`/v1/*`), so a passthrough path does not step around them. Feedback, token
+counts, cancels, files, batches, fine-tuning jobs, the MCP proxy and GET
+requests are not counted. Without rules nothing changes: no headers, no
+Redis calls.
+
+## Where the rules come from
+
+- The `rate_limits` section of the [central policy](/guides/central-policy),
+  when the gateway pulls one (`PS_POLICY_PULL_ENABLED`). The tenant's section
+  applies to every call. A team's or project's own section applies, **in
+  addition**, to calls that name the team or project in `X-PS-Team` /
+  `X-PS-Project` (by id or name). A header can add limits, never remove the
+  tenant's.
+- Otherwise `PS_RATE_LIMITS` (the JSON below) or `PS_RATE_LIMITS_FILE` (a
+  file containing it). An invalid document stops the gateway at startup.
+
+```json
+{
+  "version": 1,
+  "on_store_error": "open",
+  "rules": [
+    {"id": "everyone", "scope": "global", "rpm": 3000, "tpm": 2000000},
+    {"id": "per-key", "scope": "virtual_key", "rpm": 600, "concurrency": 20},
+    {"id": "payments-gpt4o", "scope": "team", "subjects": ["payments"],
+     "match": {"model": "gpt-4o*"}, "tpm": 200000, "tpd": 5000000}
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | 1-64 characters of `[A-Za-z0-9_.:-]`, unique in the section. Named in 429s, metrics and security events |
+| `scope` | What the rule counts per: `global` (all calls together), `virtual_key` (`x-portkey-virtual-key`, else a SHA-256 fingerprint of the caller's provider key), `team` / `project` (`X-PS-Team` / `X-PS-Project`), `user` (the verified OIDC subject; needs `PS_OIDC_ENABLED`) |
+| `subjects` | Optional: only these scope values (not with `global`). For `user`, the OIDC `sub` claim; for `virtual_key`, the `x-portkey-virtual-key` id (a provider key is `key:` plus the first 16 hex characters of its SHA-256) |
+| `match` | Optional `model`, `provider` and `route`, each a string or array, `*` as a wildcard. The model is the routed model when the router changed it |
+| `rpm`, `tpm`, `tpd`, `concurrency` | At least one, positive integers |
+| `on_store_error` | `open` (default) or `closed`, see below |
+
+Every rule that applies to a call is enforced, so the strictest one decides.
+A call that has no value for a rule's scope (no `X-PS-Team` header, no OIDC
+identity) is not counted by that rule. `X-PS-Team` and `X-PS-Project` are
+declared by the caller, not authenticated: rules on them are attribution, as
+with [budgets](/guides/routing#spend-budgets); `global`, `virtual_key` and (with OIDC)
+`user` are enforcement against the caller. Scope values are hashed before
+they reach Redis.
+
+## How calls are counted
+
+Each limit is a **sliding window counter**: the current window's count plus
+the previous window's, weighted by how much of it still overlaps the last
+minute (or day). A 60 rpm rule admits about 60 calls in any rolling minute,
+across all replicas, without the double burst a fixed window allows at its
+boundary or a token bucket's burst on top of its refill rate. A call's limits
+are checked and charged in one atomic Redis script: either all admit it, or
+none is charged.
+
+Tokens are charged twice: before the call, an estimate (the input, about 4
+characters a token, plus `max_tokens` / `max_completion_tokens` /
+`max_output_tokens`, else 512 for generative endpoints); after it, the
+counter is corrected to the usage the provider reported. A streamed call is
+corrected once, when the stream ends. A failed call or a cache hit is
+refunded its tokens (it still counts as a request); a call without reported
+usage keeps its estimate. A request whose estimate alone exceeds a `tpm` or
+`tpd` limit is refused without `Retry-After`: lower `max_tokens`.
+
+Concurrency leases are released when the call ends, the client disconnects
+or the handler fails; a lease held by a replica that died lapses after
+`PS_RATELIMIT_LEASE_MS` (default 10 minutes).
+
+## Responses
+
+Calls a rule applied to carry, for the tightest `rpm` and `tpm` rule:
+
+```
+x-ratelimit-limit-requests: 600
+x-ratelimit-remaining-requests: 599
+x-ratelimit-reset-requests: 1m59s
+x-ratelimit-limit-tokens: 200000
+x-ratelimit-remaining-tokens: 199912
+x-ratelimit-reset-tokens: 1m59s
+```
+
+They replace a provider's headers of the same name. `reset` is the time until
+the counter is back to full. A refused call gets 429:
+
+```json
+{"error": {"message": "Rate limit \"per-key\" (600 requests per minute, scope virtual_key) exceeded. Retry in 1.5s.",
+  "type": "rate_limit_error", "param": null, "code": "rate_limit_exceeded",
+  "rule_id": "per-key", "scope": "virtual_key", "limit": "rpm"}}
+```
+
+with `Retry-After` in seconds. Nothing is charged for a refused call.
+
+## Redis and failure behaviour
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PS_RATELIMIT_REDIS_URL` | `REDIS_CONNECTION_STRING` | The Redis every replica shares counters through. Without one each replica counts on its own (`GET /v1/health` reports `"store": "memory"`) |
+| `PS_RATELIMIT_REDIS_TIMEOUT_MS` | `250` | Command timeout |
+| `PS_RATELIMIT_NAMESPACE` | `default` | Key prefix, to separate deployments sharing a Redis |
+| `PS_RATELIMIT_LEASE_MS` | `600000` | How long an unreleased concurrency lease holds a slot |
+
+Keys are `ps:rl:v1:{<namespace>}:<rule>:<limit>:<hash>:<window>`; the braces
+put them in one Redis Cluster slot so a call's check runs as one script.
+
+When Redis fails, `on_store_error` decides:
+
+- `open` (default): the call is counted in the replica's memory instead, so
+  limits still hold per replica during the outage. Redis is skipped for 5
+  seconds after a failure, so an outage costs one timeout per interval, not
+  per call (as the collector's limiter).
+- `closed`: the call is refused with 503 `rate_limit_store_unavailable`.
+
+Either way `ps_gateway_rate_limit_store_errors_total{op,outcome}` counts it.
+
+## Observability
+
+- `ps_gateway_rate_limit_hits_total{scope,rule,limit}`: refusals by rule.
+- `ps_gateway_rate_limited_total{source="gateway"}`: with every other 429
+  the gateway answers.
+- A `rate_limit.hit` [security event](/guides/security-events) with
+  `ps.rate_limit.rule`, `ps.rate_limit.scope` and `ps.rate_limit.limit`.
+- `GET /v1/health` reports `rate_limits: {source, rules, store}` when rules
+  are configured.

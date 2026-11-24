@@ -3226,10 +3226,12 @@ components:
       type: object
       description: |
         A `ps-policy.v1` document. Each section is `{"version": N, ...}`;
-        known sections: `route` v1 (`{"version": 1, "policy": <route-policy.v1>}`)
-        and `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
-        the gateway's PS_OIDC_POLICY format). Reserved for later:
-        `rate_limits`, `prices`, `guardrails`, `pseudonymisation`, `budgets`.
+        known sections: `route` v1 (`{"version": 1, "policy": <route-policy.v1>}`),
+        `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
+        the gateway's PS_OIDC_POLICY format) and `rate_limits` v1
+        (`{"version": 1, "on_store_error": "open"|"closed", "rules": [...]}`,
+        the gateway's PS_RATE_LIMITS format). Reserved for later: `prices`,
+        `guardrails`, `pseudonymisation`, `budgets`.
         See docs/guides/central-policy.mdx.
       properties:
         schema:
