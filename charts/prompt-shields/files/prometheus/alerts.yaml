@@ -9,7 +9,8 @@
 # Every expression uses metrics that exist today:
 #   gateway   /metrics (PS_METRICS_ENABLED=true):
 #     ps_gateway_requests_total, ps_gateway_guardrail_verdicts_total,
-#     ps_gateway_telemetry_dropped_total
+#     ps_gateway_telemetry_dropped_total,
+#     ps_gateway_budget_threshold_crossings_total (with spend budgets)
 #   collector /metrics (PS_COLLECTOR_METRICS_ENABLED=true):
 #     ps_collector_requests_total, ps_collector_ingest_events_total
 #
@@ -95,6 +96,46 @@ groups:
             the last 30 minutes (reason {{ $labels.reason }}). Check that the
             receiving endpoint is reachable and sized for the load; gaps in
             this telemetry are gaps in the audit trail.
+
+      - alert: PromptShieldsBudgetExceeded
+        # A spend budget (PS_BUDGETS, PS_BUDGETS_FILE or the central
+        # policy's budgets section) reached its limit in this window: block
+        # budgets now refuse calls (HTTP 429 budget_exceeded), downgrade
+        # budgets serve cheaper models. The gateway counts each crossing once
+        # across replicas (the counter write is atomic) and registers every
+        # budget's series at 0, so the first crossing is seen. Stays firing
+        # for an hour after the crossing. Crossings recorded by SDK processes
+        # (RedisBudgetStore) reach their on_threshold callback, not this
+        # metric.
+        expr: |
+          sum by (budget, window) (
+            increase(ps_gateway_budget_threshold_crossings_total{threshold="exceeded"}[1h])
+          ) > 0
+        labels:
+          severity: warning
+          service: prompt-shields-gateway
+        annotations:
+          summary: "Budget {{ $labels.budget }} reached its limit"
+          description: >-
+            Budget {{ $labels.budget }} (per {{ $labels.window }}) reached its
+            limit in the last hour. Block budgets refuse calls until the window
+            resets; downgrade budgets serve cheaper models. See
+            ps_gateway_budget_decisions_total and the ps.budget log lines.
+
+      - alert: PromptShieldsBudgetWarning
+        # A budget crossed its warn_at share of the limit (default 80%).
+        expr: |
+          sum by (budget, window) (
+            increase(ps_gateway_budget_threshold_crossings_total{threshold="warn"}[1h])
+          ) > 0
+        labels:
+          severity: info
+          service: prompt-shields-gateway
+        annotations:
+          summary: "Budget {{ $labels.budget }} crossed its warning threshold"
+          description: >-
+            Budget {{ $labels.budget }} (per {{ $labels.window }}) crossed its
+            warn_at share of the limit in the last hour.
 
   - name: prompt-shields-collector
     rules:

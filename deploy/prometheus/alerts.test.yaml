@@ -218,3 +218,41 @@ tests:
       - eval_time: 25m
         alertname: PromptShieldsIngestFailing
         exp_alerts: []
+
+  - name: budget exceeded
+    interval: 1m
+    input_series:
+      # Registered at 0 when the budget is loaded, crossed at minute 10.
+      - series: 'ps_gateway_budget_threshold_crossings_total{budget="team-data",window="month",threshold="exceeded",instance="gw-1"}'
+        values: "0x9 1x80"
+      - series: 'ps_gateway_budget_threshold_crossings_total{budget="team-data",window="month",threshold="warn",instance="gw-2"}'
+        values: "0x4 1x80"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PromptShieldsBudgetExceeded
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PromptShieldsBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              budget: team-data
+              window: month
+            exp_annotations:
+              summary: Budget team-data reached its limit
+              description: "Budget team-data (per month) reached its limit in the last hour. Block budgets refuse calls until the window resets; downgrade budgets serve cheaper models. See ps_gateway_budget_decisions_total and the ps.budget log lines."
+      - eval_time: 75m
+        alertname: PromptShieldsBudgetExceeded
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: PromptShieldsBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              service: prompt-shields-gateway
+              budget: team-data
+              window: month
+            exp_annotations:
+              summary: Budget team-data crossed its warning threshold
+              description: "Budget team-data (per month) crossed its warn_at share of the limit in the last hour."

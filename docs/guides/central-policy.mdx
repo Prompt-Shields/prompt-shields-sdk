@@ -58,9 +58,10 @@ section has its own format version:
 |---|---|---|---|
 | `route` | 1 | `policy`: a [`route-policy.v1`](/guides/routing) document, the same as `PS_ROUTE_POLICY_FILE` | The gateway router: model groups, sensitivity levels and the fail-closed data policy |
 | `access` | 1 | `default` and `groups`, the [`PS_OIDC_POLICY`](/guides/gateway-oidc) format: providers, models, MCP servers and tools, and rate limits per identity-provider group | Gateway OIDC authentication (needs `PS_OIDC_ENABLED=true`) |
+| `budgets` | 1 | `budgets`: [`budget.v1`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/schemas/budget/README.md) budgets (USD or token limits per tenant, team, project, user, service, model or attribution, per day, week or month, mode `warn`, `downgrade` or `block`), and optional `on_store_error` | Gateway spend budgets: replaces the budgets of `PS_BUDGETS` / `PS_BUDGETS_FILE`; the counter namespace and store stay the gateway's (`PS_BUDGET_NAMESPACE`, `PS_BUDGET_REDIS_URL`). An empty `budgets` list turns budgets off |
 
 Sections planned by other work items are reserved and refused until they ship:
-`rate_limits`, `prices`, `guardrails`, `pseudonymisation`, `budgets`. Unknown
+`rate_limits`, `prices`, `guardrails`, `pseudonymisation`. Unknown
 sections are refused too, so nothing is stored that nothing enforces.
 
 **Extending it.** A section changes incompatibly only by adding a new version
@@ -162,9 +163,10 @@ What the gateway does with it:
 
 - The first pull runs before the gateway serves. Then it polls with
   `If-None-Match`, so an unchanged policy costs a 304.
-- The tenant-wide `route` section replaces `PS_ROUTE_POLICY_FILE` and the
-  `access` section replaces `PS_OIDC_POLICY`. A section the central policy
-  does not have falls back to the local setting.
+- The tenant-wide `route` section replaces `PS_ROUTE_POLICY_FILE`, the
+  `access` section replaces `PS_OIDC_POLICY` and the `budgets` section
+  replaces the budgets of `PS_BUDGETS` / `PS_BUDGETS_FILE`. A section the
+  central policy does not have falls back to the local setting.
 - **Collector unreachable** (or an error status, or a timeout): the last good
   central policy keeps applying. If the gateway has never had one, its local
   settings apply, exactly as without the pull.

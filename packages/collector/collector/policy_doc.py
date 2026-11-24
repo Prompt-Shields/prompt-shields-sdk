@@ -40,6 +40,16 @@ Sections today:
     rate limit, by identity-provider group. Same format as the gateway's
     PS_OIDC_POLICY (docs/guides/gateway-oidc.mdx) and enforced by the gateway's
     OIDC authentication, so it needs PS_OIDC_ENABLED there.
+``budgets`` v1
+    ``{"version": 1, "on_store_error": "open"|"closed", "budgets": [...]}``:
+    spend budgets (#29), each a budget.v1 budget
+    (schemas/budget/budget.v1.schema.json): a USD (``limit_usd``) or token
+    (``limit_tokens``) limit per scope (global, business_unit, use_case,
+    owner, team, project, user, service, model) and UTC day, ISO week or
+    month, mode warn / downgrade / block. The gateway replaces the budgets of
+    PS_BUDGETS / PS_BUDGETS_FILE with them; the counter namespace stays the
+    gateway's (PS_BUDGET_NAMESPACE), so it is not part of the section. The
+    collector checks every budget as the SDK and the gateway do.
 
 Inheritance
 -----------
@@ -89,7 +99,6 @@ RESERVED_SECTIONS: dict[str, str] = {
     "prices": "model prices (#348)",
     "guardrails": "guardrail settings (#349)",
     "pseudonymisation": "pseudonymisation settings (#350)",
-    "budgets": "budget references",
 }
 
 ROUTE_SCHEMA_VERSION = "route-policy.v1"
@@ -215,6 +224,95 @@ def _access_v1(at: str, body: dict, problems: list[str]) -> None:
             _mcp(f"{where}.mcp", g["mcp"], problems)
 
 
+# budget.v1 (schemas/budget/budget.v1.schema.json), mirrored from the SDK's
+# prompt_shields.budgets.parse_budget and the gateway's psBudget/config.ts.
+BUDGET_KEYS = frozenset({"id", "scope", "subject", "window", "limit_usd",
+                         "limit_tokens", "mode", "warn_at", "downgrade_model"})
+BUDGET_TOKEN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+BUDGET_SCOPES = ("global", "business_unit", "use_case", "owner", "team",
+                 "project", "user", "service", "model")
+BUDGET_WINDOWS = ("day", "week", "month")
+BUDGET_MODES = ("warn", "downgrade", "block")
+MAX_BUDGETS = 500
+
+
+def _num(v: Any) -> bool:
+    """A finite number (NaN fails both comparisons), never a bool."""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and float("-inf") < v < float("inf"))
+
+
+def _budget(where: str, b: Any, problems: list[str]) -> str | None:
+    """Check one budget; returns its id when it has a valid one."""
+    if not _is_obj(b):
+        problems.append(f"{where} must be an object")
+        return None
+    unknown = sorted(set(b) - BUDGET_KEYS)
+    if unknown:
+        problems.append(f"{where}: unknown keys {unknown}")
+    bid = b.get("id")
+    if not (isinstance(bid, str) and BUDGET_TOKEN.match(bid)):
+        problems.append(f"{where}.id must match {BUDGET_TOKEN.pattern}")
+        bid = None
+    scope = b.get("scope")
+    if scope not in BUDGET_SCOPES:
+        problems.append(f"{where}.scope must be one of {list(BUDGET_SCOPES)}")
+    subject = b.get("subject")
+    if scope == "global":
+        if subject is not None:
+            problems.append(f"{where}: a global budget has no subject")
+    elif scope in BUDGET_SCOPES and not (isinstance(subject, str) and subject):
+        problems.append(f'{where}.subject is required for scope "{scope}" ("*" for each value)')
+    if b.get("window") not in BUDGET_WINDOWS:
+        problems.append(f"{where}.window must be one of {list(BUDGET_WINDOWS)}")
+    has_usd, has_tokens = "limit_usd" in b, "limit_tokens" in b
+    if has_usd == has_tokens:
+        problems.append(f"{where} needs exactly one of limit_usd, limit_tokens")
+    elif has_usd and not (_num(b["limit_usd"]) and b["limit_usd"] >= 0):
+        problems.append(f"{where}.limit_usd must be a number >= 0")
+    elif has_tokens and not (
+        isinstance(b["limit_tokens"], int) and not isinstance(b["limit_tokens"], bool)
+        and b["limit_tokens"] >= 0
+    ):
+        problems.append(f"{where}.limit_tokens must be an integer >= 0")
+    mode = b.get("mode")
+    if mode not in BUDGET_MODES:
+        problems.append(f"{where}.mode must be one of {list(BUDGET_MODES)}")
+    elif mode == "downgrade" and has_tokens and not has_usd:
+        problems.append(f'{where}: a token budget\'s mode must be "warn" or "block"')
+    if "warn_at" in b and not (_num(b["warn_at"]) and 0 < b["warn_at"] <= 1):
+        problems.append(f"{where}.warn_at must be in (0, 1]")
+    if "downgrade_model" in b:
+        dm = b["downgrade_model"]
+        if mode != "downgrade":
+            problems.append(f'{where}.downgrade_model needs mode "downgrade"')
+        elif not (isinstance(dm, str) and dm):
+            problems.append(f"{where}.downgrade_model must be a model id")
+    return bid
+
+
+def _budgets_v1(at: str, body: dict, problems: list[str]) -> None:
+    extra = sorted(set(body) - {"version", "on_store_error", "budgets"})
+    if extra:
+        problems.append(f"{at}: unknown keys {extra}")
+    if body.get("on_store_error", "open") not in ("open", "closed"):
+        problems.append(f'{at}.on_store_error must be "open" or "closed"')
+    budgets = body.get("budgets")
+    if not isinstance(budgets, list):
+        problems.append(f"{at}.budgets must be an array")
+        return
+    if len(budgets) > MAX_BUDGETS:
+        problems.append(f"{at}.budgets has more than {MAX_BUDGETS} budgets")
+    seen: set[str] = set()
+    for i, b in enumerate(budgets):
+        bid = _budget(f"{at}.budgets[{i}]", b, problems)
+        if bid is None:
+            continue
+        if bid in seen:
+            problems.append(f'{at}.budgets[{i}].id "{bid}" is used twice')
+        seen.add(bid)
+
+
 @dataclass(frozen=True)
 class Section:
     description: str
@@ -232,6 +330,11 @@ SECTIONS: dict[str, Section] = {
         "Providers, models, MCP servers/tools and rate limits by identity-provider "
         "group (the gateway's PS_OIDC_POLICY format)",
         {1: _access_v1},
+    ),
+    "budgets": Section(
+        "Spend budgets (budget.v1 budgets): USD or token limits per tenant, team, "
+        "project, user, service, model and attribution, enforced by the gateway",
+        {1: _budgets_v1},
     ),
 }
 

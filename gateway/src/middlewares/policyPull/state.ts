@@ -17,12 +17,16 @@
  *   - `route` v1: the router's route policy; replaces PS_ROUTE_POLICY_FILE.
  *   - `access` v1: the OIDC group policy; replaces PS_OIDC_POLICY (needs
  *     PS_OIDC_ENABLED).
+ *   - `budgets` v1: spend budgets (budget.v1 budgets, #29); replace the
+ *     budgets and on_store_error of PS_BUDGETS / PS_BUDGETS_FILE (the
+ *     namespace and store stay the gateway's, ../psBudget/runtime.ts).
  * A section the central policy does not have falls back to the local
  * setting. Team and project entries are validated (so a bad one never
  * becomes active later) but not applied yet: the gateway does not know a
  * caller's team.
  */
 import { parsePolicy, OidcPolicy } from '../psOidc/config';
+import { CentralBudgets, parseBudgetsSection } from '../psBudget/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
 import { RoutePolicy } from '../router/types';
 
@@ -32,6 +36,7 @@ export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
+  budgets: [1],
 };
 
 export class PolicyBundleError extends Error {
@@ -48,6 +53,7 @@ export interface CentralPolicy {
   etag?: string;
   route?: RoutePolicy;
   access?: OidcPolicy;
+  budgets?: CentralBudgets;
   /** Sections present but not enforced by this gateway. */
   ignored: string[];
   teams: number;
@@ -60,6 +66,7 @@ const isObject = (v: unknown): v is Record<string, any> =>
 interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
+  budgets?: CentralBudgets;
   ignored: string[];
 }
 
@@ -91,6 +98,8 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
       } else if (name === 'access') {
         const { version: _v, ...rest } = body;
         out.access = parsePolicy(rest);
+      } else if (name === 'budgets') {
+        out.budgets = parseBudgetsSection(body);
       }
     } catch (err) {
       throw new PolicyBundleError(`${where}: ${(err as Error).message}`);
@@ -124,6 +133,7 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     etag,
     route: tenant.route,
     access: tenant.access,
+    ...(tenant.budgets ? { budgets: tenant.budgets } : {}),
     ignored: tenant.ignored,
     teams,
     projects,
@@ -139,6 +149,11 @@ export function setCentralPolicy(policy: CentralPolicy | undefined): void {
 
 export function centralPolicy(): CentralPolicy | undefined {
   return active;
+}
+
+/** The central `budgets` section, if the active policy has one. */
+export function centralBudgets(): CentralBudgets | undefined {
+  return active?.budgets;
 }
 
 /** The OIDC group policy from the central `access` section, if any. */

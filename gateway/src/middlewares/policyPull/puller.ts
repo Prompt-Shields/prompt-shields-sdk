@@ -147,6 +147,7 @@ function describe(policy: CentralPolicy): string {
   ];
   if (policy.route) parts.push('route policy');
   if (policy.access) parts.push('access policy');
+  if (policy.budgets) parts.push(`${policy.budgets.budgets.length} budget(s)`);
   if (policy.teams || policy.projects)
     parts.push(
       `${policy.teams} team / ${policy.projects} project policies (validated, not applied)`

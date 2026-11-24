@@ -19,6 +19,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GATEWAY = ROOT / "gateway" / "src" / "middlewares" / "psMetrics"
+# Budget metrics live with the budget middleware (#28, #29).
+GATEWAY_EXTRA = [ROOT / "gateway" / "src" / "middlewares" / "psBudget" / "metrics.ts"]
 COLLECTOR = ROOT / "packages" / "collector" / "collector" / "metrics.py"
 CHECKED = [ROOT / "deploy" / "grafana", ROOT / "deploy" / "prometheus"]
 CHART_FILES = ROOT / "charts" / "prompt-shields" / "files"
@@ -30,7 +32,7 @@ COPIES = {
 for dash in (ROOT / "deploy" / "grafana" / "dashboards").glob("*.json"):
     COPIES[dash] = CHART_FILES / "dashboards" / dash.name
 
-GATEWAY_RE = re.compile(r"new (Counter|Histogram)\(\s*'(ps_[a-z0-9_]+)'")
+GATEWAY_RE = re.compile(r"new (Counter|Histogram|Gauge)\(\s*'(ps_[a-z0-9_]+)'")
 COLLECTOR_RE = re.compile(r"\b(Counter|Histogram)\(\s*\"(ps_[a-z0-9_]+)\"")
 USED_RE = re.compile(r"\b(ps_(?:gateway|collector)_[a-z0-9_]+)")
 
@@ -46,7 +48,7 @@ def series(kind: str, name: str, prometheus_client: bool) -> set[str]:
 
 def known() -> set[str]:
     names: set[str] = set()
-    for ts in GATEWAY.glob("*.ts"):
+    for ts in [*GATEWAY.glob("*.ts"), *GATEWAY_EXTRA]:
         if ts.name.endswith(".test.ts"):
             continue
         for kind, name in GATEWAY_RE.findall(ts.read_text()):
