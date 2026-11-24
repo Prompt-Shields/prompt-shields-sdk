@@ -92,6 +92,10 @@ SCOPES: dict[str, str] = {
         "verdicts, PII and injection detections, auth failures, policy "
         "denials, rate limits, payload rejections) from /security-events"
     ),
+    "logs:read": (
+        "Read a call's logged request and response payload (payload logging, "
+        "when the tenant turned it on) from /calls/{call_id}; every read is audited"
+    ),
     "traces:read": (
         "List the tenant's agent traces and read one trace's spans (ids, "
         "timings, status, models, tools and token counts; never content) "

@@ -69,6 +69,7 @@
         "guides/risk-frameworks",
         "guides/confidence-scoring",
         "guides/data-retention",
+        "guides/payload-logging",
         "guides/terraform",
         "guides/admin-sso-scim",
         "guides/security-events",

@@ -1445,6 +1445,33 @@ export interface ListSecurityEventsParams {
   limit?: number;
 }
 
+// ── Logged call payloads (client.calls) ─────────────────────────────────
+
+/** The tenant's payload logging mode when the payload was written. */
+export type PayloadLoggingMode = 'off' | 'metadata' | 'redacted' | 'full';
+
+/**
+ * One call's logged payload (`GET /partner/v1/calls/{call_id}`). Needs
+ * `logs:read`; every read is written to the tenant's audit trail.
+ */
+export interface CallPayload {
+  callId: string;
+  mode: PayloadLoggingMode;
+  receivedAt: string;
+  route: string | null;
+  statusCode: number | null;
+  error: boolean;
+  /** Size of the request as sent (before redaction), in bytes. */
+  requestBytes: number;
+  responseBytes: number;
+  /** Spans replaced per category (`email`, `card`, `ip_address`, ...), kept as sent. */
+  redactions: Record<string, number>;
+  /** The logged request, kept as sent (PII replaced in `redacted` mode); null in `metadata` mode. */
+  request: unknown;
+  /** The logged response; null in `metadata` mode. */
+  response: unknown;
+}
+
 // ── Agent traces (client.traces) ─────────────────────────────────────────
 
 /** One stored span of an agent trace. Metadata only, never content. */

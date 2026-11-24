@@ -37,6 +37,21 @@ The Partner API `usage-summary` endpoint already does this, so a `90d` summary f
 
 Hourly and daily usage aggregates (`usage_rollup_hourly`, `usage_rollup_daily`, read by `GET /partner/v1/usage/series`) have their own, longer retention: `PS_USAGE_ROLLUP_RETENTION_DAYS` (default `760`, about 25 months), never less than the tenant's raw retention. They hold counts, sums and user id hashes only, never raw user ids or content, and they are not shrunk when the raw events they were computed from are purged. The retention purge deletes rollup rows whose bucket starts before `now - PS_USAGE_ROLLUP_RETENTION_DAYS` (counted as `usage_rollups_deleted`), and erasing a tenant deletes them.
 
+## Logged payloads and legal hold
+
+Logged request/response payloads (`call_payloads`, written only when a tenant turns [payload logging](/guides/payload-logging) on) have their own, shorter retention: the tenant's `payload_logging.retention_days`, else `PS_PAYLOAD_RETENTION_DAYS_DEFAULT` (default `30`). The purge deletes payloads received before that cutoff (`payloads_deleted`), and a payload past it is no longer readable even before the purge runs. Tenant erasure deletes them; erasure by end user deletes the user's payloads.
+
+Retention per data class:
+
+| Data | Kept for |
+|------|----------|
+| Logged payloads | `payload_logging.retention_days` or `PS_PAYLOAD_RETENTION_DAYS_DEFAULT` (30 days) |
+| Usage events | `retention_days` or `PS_RETENTION_DAYS_DEFAULT` (365 days) |
+| Usage rollups | `PS_USAGE_ROLLUP_RETENTION_DAYS` (760 days, about 25 months) |
+| Audit trail (`audit_events`) | forever, unless `PS_AUDIT_EVENT_RETENTION_DAYS` is set |
+
+A tenant on **legal hold** is skipped by every purge (usage events and everything purged with them, rollups, payloads, `partner_audit_log` and the audit trail) until the hold is lifted; the purge result says `legal_hold: true`. A tenant admin places or lifts it with `PUT /api/v1/admin/legal-hold` (`{"enabled": true}`, scope `admin:privacy`), audited as `tenant.legal_hold.set`. Erasure (tenant or end user) is an explicit request and still runs during a hold.
+
 ## Running the purge
 
 Nothing is deleted until the purge runs. The collector has no built-in scheduler. The Helm chart (0.4.11 and later) runs it daily as the `retentionPurge` CronJob (`37 2 * * *`), **on by default**: after an upgrade from an earlier chart, its first run deletes everything already past each tenant's retention window (see "Upgrading" in the chart README; set `cronJobs.jobs.retentionPurge.enabled: false` to opt out). Elsewhere, run it from cron or a Kubernetes CronJob:
@@ -103,6 +118,8 @@ What changes, in the caller's tenant only:
 Call feedback and MCP usage store the id as the gateway sent it, so only the POST form reaches them.
 
 The response gives the user's salted hash (`user_id_hash`, null if the tenant never stored a user id), per-table counts in `rows_erased` and the audit row's id. The erasure runs immediately, in batches. It is idempotent: a repeat reports zeros. Every request, including a repeat, writes a `user.erase` row to the tenant's [audit trail](/guides/audit-trail) (target: the salted hash, details: the counts) and an `erase_user` row to `retention_audit_log`. Counts only ever cover the caller's tenant, so the answer does not reveal whether another tenant has seen the same id.
+
+The user's logged payloads (`call_payloads`, see [payload logging](/guides/payload-logging)) are deleted: those stored with the user's id, and those whose call id is on one of the user's usage events.
 
 Events that arrive after the erasure are stored as usual, so stop sending the id first. Copies already sent elsewhere (webhook receivers, Microsoft Sentinel or another SIEM) are outside the collector: erase them there.
 

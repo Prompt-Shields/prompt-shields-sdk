@@ -267,6 +267,7 @@ _MCP = _Lazy("mcp")
 _FEEDBACK = _Lazy("feedback")
 _SECURITY_EVENTS = _Lazy("security_events")
 _OTEL_TRACES = _Lazy("otel_traces")
+_PAYLOADS = _Lazy("payloads")
 
 
 def get_rate_limiter() -> RateLimiter:
@@ -305,3 +306,9 @@ def get_security_events_rate_limiter() -> RateLimiter:
 # (PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE).
 def get_otel_traces_rate_limiter() -> RateLimiter:
     return _OTEL_TRACES()
+
+
+# /ingest/payloads (payload logging, #352) counts apart from /ingest/events,
+# with the tenant's events limit (one payload per call).
+def get_payload_rate_limiter() -> RateLimiter:
+    return _PAYLOADS()

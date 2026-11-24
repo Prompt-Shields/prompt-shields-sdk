@@ -20,6 +20,9 @@ module records *changes* and security events in ``audit_events``:
   policy.effective_change                       (a project moved to another
                                                 team changed its effective
                                                 policy, #383)
+  payload_logging.set                           (payload logging mode, #352)
+  payload.read                                  (every logged payload read)
+  tenant.legal_hold.set                         (legal hold placed or lifted)
   operator.access                               (named operator token, #341)
   operator.break_glass                          (PS_ADMIN_TOKEN, every use)
   operator_token.issue|rotate|revoke            (named operator tokens)
@@ -650,7 +653,10 @@ async def purge_expired(
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     actor = actor or system_actor("audit-trail-purge")
     tenants = [tenant_id] if tenant_id is not None else await chain_tenants(db)
-    return [await purge_chain(db, t, cutoff, actor=actor) for t in tenants]
+    from collector import payload_policy  # late: avoids an import cycle
+
+    held = await payload_policy.held_tenant_ids(db)  # legal hold (#352)
+    return [await purge_chain(db, t, cutoff, actor=actor) for t in tenants if t not in held]
 
 
 # ──────────────────────────────────────────────────────────────────────

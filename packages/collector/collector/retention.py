@@ -11,7 +11,10 @@ Retention
     (explicit feedback on a call, #43) last updated before the cutoff,
     ``spend_alerts`` (spend anomaly alerts, #30) for days before the cutoff,
     and ``trace_spans`` (agent traces, #385) that started or arrived before
-    it.
+    it. Logged payloads (``call_payloads``, #352) have their own period,
+    ``payload_logging.retention_days`` (default 30 days). A tenant on legal
+    hold (``settings["legal_hold"]``, collector.payload_policy) is skipped
+    by every purge until the hold is lifted.
     :func:`purge_expired_events` deletes older events in batches, committing
     after each batch so no lock is held for long. Running it twice deletes
     nothing the second time.
@@ -59,6 +62,7 @@ from db.models import (
     AssetAttestation,
     AuditEvent,
     CallFeedback,
+    CallPayload,
     CredentialCreator,
     DataFlow,
     GatewaySecurityEvent,
@@ -99,7 +103,7 @@ from db.models import (
 from sqlalchemy import Table, delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector import audit_trail
+from collector import audit_trail, payload_policy
 from collector.config import settings
 
 logger = logging.getLogger(__name__)
@@ -121,6 +125,8 @@ TRAIL_ACTIONS: dict[str, str] = {
 # silently left behind by an erasure.
 ERASE_ORDER: tuple[type, ...] = (
     AIUsageEvent,
+    # Logged request/response payloads (#352).
+    CallPayload,
     DataFlow,
     RiskMapping,
     AssetAttestation,
@@ -186,6 +192,10 @@ class PurgeResult:
     spend_alerts_deleted: int = 0
     security_events_deleted: int = 0
     usage_rollups_deleted: int = 0
+    payloads_deleted: int = 0
+    payload_retention_days: int | None = None
+    # A tenant on legal hold (#352) is skipped: nothing is deleted.
+    legal_hold: bool = False
     trace_spans_deleted: int = 0
 
 
@@ -424,6 +434,19 @@ async def purge_tenant_events(
 
     days = retention_days_for(tenant_settings)
     cutoff = retention_cutoff(tenant_settings, now)
+    payload_days = payload_policy.retention_days_for(tenant_settings)
+    if payload_policy.on_legal_hold(tenant_settings):
+        # Legal hold (#352) pauses every purge for the tenant.
+        logger.info("retention purge skipped: tenant=%s is on legal hold", tenant_id)
+        return PurgeResult(
+            tenant_id=str(tenant_id),
+            retention_days=days,
+            cutoff=cutoff.isoformat(),
+            events_deleted=0,
+            dry_run=dry_run,
+            payload_retention_days=payload_days,
+            legal_hold=True,
+        )
     table = AIUsageEvent.__table__
     conditions = [table.c.tenant_id == tenant_id, table.c.timestamp < cutoff]
 
@@ -464,6 +487,12 @@ async def purge_tenant_events(
         (m.__table__, [m.__table__.c.tenant_id == tenant_id, m.__table__.c.bucket_start < r_cutoff])
         for m in (UsageRollupHourly, UsageRollupDaily)
     ]
+    # Logged payloads (#352) have their own, shorter retention.
+    cp = CallPayload.__table__
+    cp_conditions = [
+        cp.c.tenant_id == tenant_id,
+        cp.c.received_at < payload_policy.payload_cutoff(tenant_settings, now or _utcnow()),
+    ]
 
     if dry_run:
         deleted = await _count(db, table, conditions)
@@ -474,6 +503,7 @@ async def purge_tenant_events(
         se_deleted = await _count(db, se, se_conditions)
         ts_deleted = await _count(db, ts, ts_conditions)
         rollups_deleted = sum([await _count(db, t, c) for t, c in rollups])
+        payloads_deleted = await _count(db, cp, cp_conditions)
     else:
         deleted = await _delete_in_batches(db, table, conditions, size)
         mcp_deleted = await _delete_in_batches(db, mcp, mcp_conditions, size)
@@ -483,6 +513,7 @@ async def purge_tenant_events(
         se_deleted = await _delete_in_batches(db, se, se_conditions, size)
         ts_deleted = await _delete_in_batches(db, ts, ts_conditions, size)
         rollups_deleted = sum([await _delete_in_batches(db, t, c, size) for t, c in rollups])
+        payloads_deleted = await _delete_in_batches(db, cp, cp_conditions, size)
         if (
             deleted
             or mcp_deleted
@@ -492,6 +523,7 @@ async def purge_tenant_events(
             or se_deleted
             or ts_deleted
             or rollups_deleted
+            or payloads_deleted
         ):
             details = {AIUsageEvent.__tablename__: deleted}
             if mcp_deleted:
@@ -508,6 +540,8 @@ async def purge_tenant_events(
                 details[TraceSpan.__tablename__] = ts_deleted
             if rollups_deleted:
                 details["usage_rollups"] = rollups_deleted
+            if payloads_deleted:
+                details[CallPayload.__tablename__] = payloads_deleted
             await _audit(
                 db,
                 tenant_id=tenant_id,
@@ -536,6 +570,8 @@ async def purge_tenant_events(
         spend_alerts_deleted=sa_deleted,
         security_events_deleted=se_deleted,
         usage_rollups_deleted=rollups_deleted,
+        payloads_deleted=payloads_deleted,
+        payload_retention_days=payload_days,
         trace_spans_deleted=ts_deleted,
     )
 
