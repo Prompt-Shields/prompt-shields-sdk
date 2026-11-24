@@ -477,6 +477,28 @@ async def test_manual_tenant_roles_are_never_touched_by_sync(env):
     assert (await _tenant_role(engine, u["id"])).role == "auditor"
 
 
+async def test_sync_never_demotes_an_owner_it_once_granted_a_role(env):
+    """A tenant-wide membership sync created and an owner then raised to
+    owner (PATCH keeps created_by = scim) is out of sync's reach: leaving
+    the group, or resetting or deleting it, neither demotes nor drops the
+    owner (the last one here, besides the bootstrap token's tenant)."""
+    c, scim, boot, engine = env["c"], env["scim"], env["boot"], env["engine"]
+    u = await _create_user(c, scim)
+    g = await _create_group(c, scim, members=[u["id"]])
+    await c.put(f"{A}/idp-group-roles/{g['id']}", headers=H(boot), json={"tenant_role": "admin"})
+    m = await _tenant_role(engine, u["id"])
+    assert m.role == "admin" and m.created_by == "scim"
+    resp = await c.patch(f"{A}/memberships/{m.id}", headers=H(boot), json={"role": "owner"})
+    assert resp.status_code == 200, resp.text
+    await c.put(f"{A}/idp-group-roles/{g['id']}", headers=H(boot), json={"tenant_role": "viewer"})
+    assert (await _tenant_role(engine, u["id"])).role == "owner"
+    await _patch(c, scim, f"{S}/Groups/{g['id']}", [{"op": "remove", "path": "members"}])
+    assert (await _tenant_role(engine, u["id"])).role == "owner"
+    await _patch(c, scim, f"{S}/Groups/{g['id']}", [{"op": "add", "path": "members", "value": [{"value": u["id"]}]}])
+    assert (await c.delete(f"{S}/Groups/{g['id']}", headers=H(scim))).status_code == 204
+    assert (await _tenant_role(engine, u["id"])).role == "owner"
+
+
 async def test_group_roles_never_owner_and_need_the_role_scopes(env):
     c, scim, boot = env["c"], env["scim"], env["boot"]
     g = await _create_group(c, scim)

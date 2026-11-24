@@ -18,7 +18,10 @@ browser binding by SHA-256, nonce, PKCE verifier; ten minutes) and sets the
 browser binding as an HttpOnly, Secure, SameSite=Lax cookie scoped to
 /api/v1/sso, so a callback only completes in the browser that started the
 login (no login CSRF). At most MAX_PENDING_LOGINS unexpired logins per
-tenant (429 past that).
+tenant, and auth_cache.SSO_LOGIN_STARTS_PER_MINUTE starts per client
+address (429 past either). A callback with an unknown state or from
+another browser counts as a failed authentication for the per-address
+limiter (collector/auth.py).
 
 ``callback`` deletes the state row first (a replayed callback finds
 nothing), checks the cookie, exchanges the code at the IdP's token endpoint
@@ -50,6 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -60,8 +64,13 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import delete, func, select
 
-from collector import audit_trail, idp_sync, oidc, rbac, rls, secret_keyring
+from collector import audit_trail, auth_cache, idp_sync, oidc, rbac, rls, secret_keyring
 from collector.admin_auth import ADMIN_SCOPES, TOKEN_WARNING, issue_token
+from collector.auth import (
+    check_failed_auth_limit,
+    failed_auth_client,
+    record_failed_auth,
+)
 
 router = APIRouter(prefix="/api/v1/sso", tags=["SSO"])
 
@@ -70,14 +79,19 @@ MAX_PENDING_LOGINS = 500
 COOKIE = "ps_sso_binding"
 COOKIE_PATH = "/api/v1/sso"
 CLIENT_SECRET_INFO = b"prompt-shields/oidc-client-secret/v1"
+# RFC 6749 §4.1.2.1 error codes are short ASCII words; anything else from
+# the query string is not copied into the audit trail.
+_IDP_ERROR_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
-def _problem(status: int, title: str, detail: str) -> JSONResponse:
+def _problem(
+    status: int, title: str, detail: str, headers: dict[str, str] | None = None
+) -> JSONResponse:
     return JSONResponse(
         {"type": "about:blank", "title": title, "status": status, "detail": detail},
         status_code=status,
         media_type="application/problem+json",
-        headers={"Cache-Control": "no-store"},
+        headers={"Cache-Control": "no-store", **(headers or {})},
     )
 
 
@@ -137,6 +151,19 @@ async def _audit_failure(request: Request, tenant_id: UUID, reason: str, status:
 
 @router.get("/{tenant_id}/login", summary="Start an admin API SSO login")
 async def login(tenant_id: UUID, request: Request):
+    # Unauthenticated, and each start holds a pending-login slot of the
+    # tenant for LOGIN_TTL: limited per client so one cannot fill them.
+    limiter = auth_cache.get_sso_login_limiter()
+    client = failed_auth_client(request)
+    retry_after = limiter.retry_after(client)
+    if retry_after:
+        return _problem(
+            429,
+            "Too Many Requests",
+            f"Too many logins started from this address; retry after {retry_after} seconds",
+            {"Retry-After": str(retry_after)},
+        )
+    limiter.record_failure(client)
     db = request.state.db
     cfg = await _config(db, tenant_id)
     if cfg is None:
@@ -215,6 +242,8 @@ async def callback(
     db = request.state.db
     if not state:
         return _problem(400, "Bad Request", "Missing state")
+    # Unknown states and browser mismatches count as failed authentications.
+    client = check_failed_auth_limit(request)
     async with rls.auth_lookup(db):
         row = (
             await db.execute(
@@ -233,15 +262,18 @@ async def callback(
             await db.execute(delete(OidcLoginState).where(OidcLoginState.id == row.id))
             await db.commit()
     if row is None or row.expires_at <= _now():
+        record_failed_auth(client)
         return _problem(400, "Bad Request", "Unknown or expired login; start again")
     tenant_id = row.tenant_id
     await rls.set_tenant(db, tenant_id)
     binding = request.cookies.get(COOKIE) or ""
     if not hmac.compare_digest(_sha256(binding), row.browser_hash):
+        record_failed_auth(client)
         await _audit_failure(request, tenant_id, "browser_mismatch", 400)
         return _problem(400, "Bad Request", "This login was started in another browser")
     if error or not code:
-        await _audit_failure(request, tenant_id, "idp_error", 400, idp_error=error or "no_code")
+        idp_error = "no_code" if not error else error if _IDP_ERROR_RE.match(error) else "other"
+        await _audit_failure(request, tenant_id, "idp_error", 400, idp_error=idp_error)
         return _problem(400, "Bad Request", "The identity provider did not return a code")
     cfg = await _config(db, tenant_id)
     if cfg is None:
@@ -277,7 +309,10 @@ async def callback(
     try:
         claims = await oidc.verify_id_token(id_token, disc.jwks_uri, expected)
     except oidc.TokenError as exc:
-        await _audit_failure(request, tenant_id, "invalid_id_token", 401, token_error=exc.reason)
+        # Not "token_error": audit details redact keys naming a token.
+        await _audit_failure(
+            request, tenant_id, "invalid_id_token", 401, verification_error=exc.reason
+        )
         return _problem(401, "Unauthorized", f"ID token refused: {exc.reason}")
     subject = claims.get(cfg.subject_claim)
     if not isinstance(subject, str) or not subject or len(subject) > 255:

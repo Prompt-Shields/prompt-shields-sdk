@@ -34,7 +34,7 @@ curl -X PUT "$COLLECTOR/api/v1/admin/sso/oidc" \
 | `redirect_uri` | required | This collector's `/api/v1/sso/callback`, registered at the IdP |
 | `audience` | the client id | Expected `aud` |
 | `algorithms` | RS256..ES512 (no EdDSA) | Asymmetric only; `HS*` and `none` are refused |
-| `subject_claim` | `sub` | The ID token claim matched against the principal's `external_id` (`oid` for Microsoft Entra ID, whose `sub` is pairwise) |
+| `subject_claim` | `sub` | The ID token claim matched against the principal's `external_id` (`oid` for Microsoft Entra ID, whose `sub` is pairwise). Claims a user or directory admin can change or reuse (`email`, `preferred_username`, `upn`, names) and shared or per-token claims (`iss`, `aud`, `nonce`, ...) are refused |
 | `session_ttl_seconds` | `3600` | 300 to 43200 |
 | `enabled` | `true` | |
 
@@ -58,6 +58,8 @@ The response's `login_path` (`/api/v1/sso/{tenant_id}/login`) is where a browser
 ```
 
 There is no just-in-time provisioning: an identity without a principal is refused (403). Create principals through SCIM (below) or `POST /api/v1/admin/principals` with the IdP subject as `external_id`. A principal whose roles grant no admin scope (an `auditor`, say) gets no session.
+
+Starting a login is limited to 10 per minute per client address (429 with `Retry-After`), and a tenant has at most 500 logins in progress. Callbacks with an unknown `state` or from another browser count as failed authentications for the collector's per-address limit.
 
 The session is an ordinary admin token issued for the principal: it never reaches more than the principal's roles grant at request time, demoting the principal narrows it at once, and disabling the principal stops it on the next request.
 
@@ -95,7 +97,7 @@ curl -X PUT "$COLLECTOR/api/v1/admin/idp-group-roles/$TEAM_ID" \
   -d '{"member_role": "developer", "tenant_role": "developer"}'
 ```
 
-Group membership changes in the IdP change team membership, and the tenant-wide role, on the next SCIM sync. A principal in several mapped groups gets the first of `admin`, `developer`, `billing`, `auditor`, `viewer` among them. A tenant-wide role granted through the admin API is never changed by sync. Setting a mapping needs what granting its roles would.
+Group membership changes in the IdP change team membership, and the tenant-wide role, on the next SCIM sync. A principal in several mapped groups gets the first of `admin`, `developer`, `billing`, `auditor`, `viewer` among them. A tenant-wide role granted through the admin API is never changed by sync, and neither is a tenant-wide `owner` membership, even one sync created before an owner raised it to `owner`. Setting a mapping needs what granting its roles would.
 
 ### What a SCIM token can never do
 

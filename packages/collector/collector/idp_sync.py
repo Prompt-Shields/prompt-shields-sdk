@@ -14,7 +14,8 @@ TENANT_ROLE_RANK wins.
 
 Sync only ever creates, changes or removes a tenant-wide membership that
 sync created (``created_by = 'scim'``): one granted through the admin API
-(an owner, say) is never touched. ``owner`` can never come from a group (a
+(an owner, say) is never touched, and neither is any tenant-wide owner
+membership. ``owner`` can never come from a group (a
 CHECK constraint on ``idp_group_roles`` and the API both refuse it).
 
 Deprovisioning
@@ -37,6 +38,7 @@ from db.models import AdminToken, IdpGroupRole, Membership
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from collector import rbac
 from collector.admin_auth import revoke_descendants
 
 # Membership.created_by for rows SCIM manages.
@@ -88,8 +90,13 @@ async def recompute_tenant_role(
             )
         )
     ).scalar_one_or_none()
-    if existing is not None and existing.created_by != SCIM_SOURCE:
-        return  # granted through the admin API: never touched by sync
+    if existing is not None and (existing.created_by != SCIM_SOURCE or existing.role == rbac.OWNER):
+        # Granted through the admin API: never touched by sync. Nor is an
+        # owner: a membership sync created and an owner later raised to
+        # owner through the admin API (PATCH keeps created_by) is out of
+        # sync's reach, or removing someone from a group would demote or
+        # drop an owner, the last one included.
+        return
     if best is None:
         if existing is not None:
             await db.delete(existing)

@@ -219,6 +219,9 @@ async def test_refusals_are_audited(env, setup, status, reason):
     assert "token" not in resp.json()
     [row] = await _audit(engine, tid, "sso.login")
     assert row.outcome == "failure" and row.details["reason"] == reason
+    if reason == "invalid_id_token":
+        # Visible, not redacted as a secret-looking key.
+        assert row.details["verification_error"] in ("wrong_nonce", "wrong_audience")
     async with _admin(engine)() as s:
         assert (await s.execute(select(AdminToken).where(AdminToken.created_by == "sso"))).first() is None
 
@@ -251,6 +254,11 @@ async def test_idp_error_and_missing_config(env):
     _, state = await _login(c, tid, idp)
     resp = await c.get("/api/v1/sso/callback", params={"state": state, "error": "access_denied"})
     assert resp.status_code == 400
+    _, state = await _login(c, tid, idp)
+    resp = await c.get("/api/v1/sso/callback", params={"state": state, "error": "<b>free text</b>"})
+    assert resp.status_code == 400
+    rows = await _audit(env["engine"], tid, "sso.login")
+    assert [r.details["idp_error"] for r in rows] == ["access_denied", "other"]
     idp.discovery_overrides = {"issuer": "https://evil.example.com"}
     oidc.cache.clear()
     assert (await c.get(f"/api/v1/sso/{tid}/login")).status_code == 502
@@ -305,6 +313,11 @@ async def test_configuration_needs_an_owner_and_valid_values(env):
         {"session_ttl_seconds": 60},
         {"session_ttl_seconds": 99999},
         {"subject_claim": "a b"},
+        {"subject_claim": "email"},
+        {"subject_claim": "preferred_username"},
+        {"subject_claim": "UPN"},
+        {"subject_claim": "iss"},
+        {"subject_claim": "nonce"},
         {"unknown": 1},
     ):
         resp = await c.put(f"{A}/sso/oidc", headers=H(boot), json=_cfg(**bad))
@@ -324,6 +337,24 @@ async def test_pending_logins_are_capped(env, monkeypatch):
     for _ in range(3):
         assert (await c.get(f"/api/v1/sso/{tid}/login")).status_code == 302
     assert (await c.get(f"/api/v1/sso/{tid}/login")).status_code == 429
+
+
+async def test_login_starts_and_failed_callbacks_are_limited_per_client(env, monkeypatch):
+    from collector import auth_cache
+
+    # Fixed-window limiters: pin the clock so the test never spans two.
+    for limiter in (auth_cache.get_sso_login_limiter(), auth_cache.get_failed_auth_limiter()):
+        monkeypatch.setattr(limiter, "clock", lambda: 1_000_000.0)
+    c, boot, tid = env["c"], env["boot"], env["tid"]
+    await _configure(c, boot)
+    for _ in range(auth_cache.SSO_LOGIN_STARTS_PER_MINUTE):
+        assert (await c.get(f"/api/v1/sso/{tid}/login")).status_code == 302
+    resp = await c.get(f"/api/v1/sso/{tid}/login")
+    assert resp.status_code == 429 and int(resp.headers["retry-after"]) >= 1
+    # Unknown states count as failed authentications for this address.
+    for _ in range(settings.auth_failure_limit_per_minute):
+        assert (await _callback(c, "made-up")).status_code == 400
+    assert (await _callback(c, "made-up")).status_code == 429
 
 
 async def test_tenants_are_isolated_under_rls(env):

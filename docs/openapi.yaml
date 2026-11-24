@@ -3942,6 +3942,11 @@ components:
         subject_claim:
           type: string
           default: sub
+          pattern: '^[A-Za-z0-9_:.-]{1,64}$'
+          description: >-
+            ID token claim matched against principals' `external_id`: `sub`, or a
+            stable identifier such as `oid`. Mutable or shared claims (`email`,
+            `preferred_username`, `upn`, names, `iss`, `aud`, `nonce`, ...) are refused.
         session_ttl_seconds:
           type: integer
           minimum: 300
@@ -8436,7 +8441,7 @@ paths:
         '404':
           description: SSO is not configured or not enabled for this tenant
         '429':
-          description: Too many logins in progress for the tenant
+          description: Too many logins started from this address, or in progress for the tenant
         '502':
           description: The identity provider could not be reached
 
@@ -8482,6 +8487,8 @@ paths:
           description: The ID token was refused
         '403':
           description: No enabled user principal has this subject, or its roles grant no admin scope
+        '429':
+          description: Too many failed authentications from this address
         '502':
           description: The code could not be exchanged
 

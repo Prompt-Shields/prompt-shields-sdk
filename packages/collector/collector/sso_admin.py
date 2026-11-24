@@ -38,7 +38,7 @@ from uuid import UUID, uuid4
 
 from db.models import IdpGroupRole, Membership, ScimToken, Team, TenantOidcConfig
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
 from collector import idp_sync, oidc, secret_keyring
@@ -62,6 +62,21 @@ _MEMBERS = Depends(require_admin("admin:members"))
 GroupRole = Literal["admin", "developer", "viewer", "auditor", "billing"]
 Algorithm = Literal["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"]
 MIN_SESSION_TTL = 300
+# Claims that cannot name the account: ones the user or a directory admin
+# can change or reuse (an email address, a display name, a login name;
+# Microsoft's "nOAuth" class of account takeover) and ones every token of
+# the issuer or client shares (iss, aud) or that change per token. The
+# subject must be the IdP's stable, never-reassigned identifier: ``sub``,
+# or e.g. ``oid`` for Microsoft Entra ID.
+UNSUITABLE_SUBJECT_CLAIMS = frozenset(
+    {
+        "email", "email_verified", "preferred_username", "upn", "unique_name",
+        "name", "given_name", "family_name", "middle_name", "nickname",
+        "phone_number", "phone_number_verified", "address", "profile", "picture",
+        "website", "groups", "roles", "iss", "aud", "azp", "exp", "iat", "nbf",
+        "nonce", "jti", "sid", "auth_time", "acr", "amr", "at_hash", "c_hash",
+    }
+)
 MAX_SESSION_TTL = 12 * 3600
 
 
@@ -104,6 +119,16 @@ class OidcConfigBody(BaseModel):
     subject_claim: str = Field(default="sub", pattern=r"^[A-Za-z0-9_:.-]{1,64}$")
     session_ttl_seconds: int = Field(default=3600, ge=MIN_SESSION_TTL, le=MAX_SESSION_TTL)
     enabled: bool = True
+
+    @field_validator("subject_claim")
+    @classmethod
+    def _stable_subject(cls, value: str) -> str:
+        if value.lower() in UNSUITABLE_SUBJECT_CLAIMS:
+            raise ValueError(
+                f"{value!r} does not identify an account for good; use sub, or a "
+                "stable identifier claim such as oid"
+            )
+        return value
 
 
 def serialize_oidc_config(cfg: TenantOidcConfig) -> dict:
