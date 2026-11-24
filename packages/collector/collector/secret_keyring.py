@@ -69,12 +69,15 @@ def derive(key: str, info: bytes) -> AESGCM:
     return AESGCM(derived)
 
 
-def keyring() -> list[tuple[str, str]]:
-    """(key id, key) pairs from PS_WEBHOOK_SECRET_KEYS, active key first.
+def parse_keyring(raw: str, env_name: str) -> list[tuple[str, str]]:
+    """(key id, key) pairs from a ``"kid:key,kid:key,..."`` keyring, first
+    entry first. ``env_name`` names the setting in error messages, which
+    never contain key material. Raises KeyringNotConfigured if malformed.
 
-    Raises KeyringNotConfigured if the keyring is malformed.
+    Shared by PS_WEBHOOK_SECRET_KEYS and the inference credential vault's
+    local KEK keyring (PS_CREDENTIAL_KEK_KEYS, collector.kms).
     """
-    raw = settings.webhook_secret_keys.strip()
+    raw = raw.strip()
     if not raw:
         return []
     ring: list[tuple[str, str]] = []
@@ -82,18 +85,25 @@ def keyring() -> list[tuple[str, str]]:
         kid, sep, key = (part.strip() for part in entry.partition(":"))
         if not sep or not KEY_ID_RE.fullmatch(kid):
             raise KeyringNotConfigured(
-                f"PS_WEBHOOK_SECRET_KEYS entry {position} must be <key id>:<key>, "
+                f"{env_name} entry {position} must be <key id>:<key>, "
                 "with a key id of 1-32 characters from A-Z a-z 0-9 _ -"
             )
         if any(kid == seen for seen, _ in ring):
-            raise KeyringNotConfigured(f"PS_WEBHOOK_SECRET_KEYS repeats key id {kid!r}")
+            raise KeyringNotConfigured(f"{env_name} repeats key id {kid!r}")
         if len(key) < MIN_KEY_LENGTH:
             raise KeyringNotConfigured(
-                f"PS_WEBHOOK_SECRET_KEYS key {kid!r} must be at least "
-                f"{MIN_KEY_LENGTH} characters"
+                f"{env_name} key {kid!r} must be at least {MIN_KEY_LENGTH} characters"
             )
         ring.append((kid, key))
     return ring
+
+
+def keyring() -> list[tuple[str, str]]:
+    """(key id, key) pairs from PS_WEBHOOK_SECRET_KEYS, active key first.
+
+    Raises KeyringNotConfigured if the keyring is malformed.
+    """
+    return parse_keyring(settings.webhook_secret_keys, "PS_WEBHOOK_SECRET_KEYS")
 
 
 def _aad(binding: bytes, kid: str) -> bytes:
