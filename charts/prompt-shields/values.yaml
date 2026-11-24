@@ -298,6 +298,8 @@ gateway:
   #   PS_POLICY_PULL_ENABLED: "true"         # central policy from the collector (#340);
   #   PS_POLICY_PULL_INTERVAL_SECONDS: "30"  # the key (policy:read) is PS_API_KEY or
   #                                          # PS_POLICY_PULL_API_KEY in the Secret
+  #   PS_PSEUDONYMISE: "true"                # reversible pseudonymisation (#350), off by
+  #                                          # default; a central policy section overrides
   config:
     NODE_ENV: production
     # Hosts exempt from the gateway's SSRF checks (provider custom hosts,
