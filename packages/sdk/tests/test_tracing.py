@@ -446,3 +446,148 @@ def test_propagates_to(url, expected):
     assert tracing.propagates_to(url) is expected
     assert tracing.propagates_to(url, True) is True
     assert tracing.propagates_to(url, False) is False
+
+
+# ── OTLP export (#386) next to the SDK spans: one span per call ─────────
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, url, body, headers, timeout):
+        self.calls.append(body)
+        return 200, {}
+
+
+def _otlp_spans(rec):
+    return [s for body in rec.calls for rs in json.loads(body)["resourceSpans"]
+            for ss in rs["scopeSpans"] for s in ss["spans"]]
+
+
+@pytest.fixture
+def otlp_exporter(monkeypatch):
+    from prompt_shields import otlp
+
+    monkeypatch.delenv("PS_OTLP_SDK_SPANS", raising=False)
+    otlp.shutdown_otlp(timeout=0)
+    otlp._env_checked = True
+    rec = _Recorder()
+
+    def configure(**kw):
+        return otlp.configure_otlp(
+            otlp.OTLPConfig(endpoint="http://otel.test/v1/traces",
+                            protocol="http/json", **kw),
+            transport=rec, start_thread=False)
+
+    yield configure, rec
+    otlp.shutdown_otlp(timeout=0)
+
+
+def test_otlp_export_attaches_to_the_sdk_span_instead_of_a_second_span(
+        spans, otlp_exporter):
+    configure, rec = otlp_exporter
+    exporter = configure(capture_content=True)
+    seen: list[httpx.Request] = []
+    client = _client("http://gateway.internal:8787/v1", seen)
+    with _app_tracer().start_as_current_span("app turn"):
+        client.chat.completions.create(
+            model="gpt-4o", messages=[{"role": "user", "content": SECRET}],
+            ps_metadata={"session_id": "sess-1", "user_id": "alice"})
+    exporter.flush()
+    assert _otlp_spans(rec) == []  # no second span for the call
+    assert exporter.stats()["attached_to_sdk_spans"] == 1
+    chats = [s for s in spans.get_finished_spans() if s.name == "chat gpt-4o"]
+    assert len(chats) == 1
+    a = dict(chats[0].attributes)
+    assert a["session.id"] == "sess-1"
+    assert len(a["user.id"]) == 64 and "alice" not in json.dumps(a)
+    assert "gen_ai.usage.cost" in a
+    # Content capture never puts text on an SDK span.
+    assert "gen_ai.input.messages" not in a
+    assert SECRET not in json.dumps(a)
+
+
+def test_otlp_export_mode_still_exports_its_own_span(spans, otlp_exporter):
+    from prompt_shields import otlp
+
+    _, rec = otlp_exporter
+
+    exporter = otlp.configure_otlp(
+        otlp.OTLPConfig.from_env({"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://o/v1/traces",
+                                  "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+                                  "PS_OTLP_SDK_SPANS": "export"}),
+        transport=rec, start_thread=False)
+    client = _client("http://gateway.internal:8787/v1", [])
+    client.chat.completions.create(model="gpt-4o",
+                                   messages=[{"role": "user", "content": "hi"}])
+    exporter.flush()
+    assert len(_otlp_spans(rec)) == 1
+    chat = _finished(spans)["chat gpt-4o"]
+    assert "ps.cost.usd" not in dict(chat.attributes)
+    with pytest.raises(ValueError):
+        otlp.OTLPConfig(endpoint="http://o", sdk_spans="both")
+
+
+def test_otlp_export_without_a_recording_sdk_span_exports_its_own(otlp_exporter):
+    from prompt_shields import otlp
+
+    configure, rec = otlp_exporter
+    exporter = configure()
+    # A span from another tracer (not an SDK chat span) is only the parent.
+    with _app_tracer().start_as_current_span("app turn") as app_span:
+        otlp.export_event({"model": "gpt-4o", "vendor": "openai", "latency_ms": 5}, [])
+    exporter.flush()
+    (span,) = _otlp_spans(rec)
+    assert span["parentSpanId"] == f"{app_span.get_span_context().span_id:016x}"
+
+
+def test_instrument_inside_a_langchain_run_attaches_to_its_chat_span(
+        spans, otlp_exporter):
+    pytest.importorskip("langchain_core")
+    from prompt_shields import instrumentation
+    from prompt_shields.integrations.langchain import PromptShieldsCallbackHandler
+
+    configure, rec = otlp_exporter
+    exporter = configure()
+    state = MagicMock()
+    state.atlas = None
+    h = PromptShieldsCallbackHandler()
+    run = uuid.uuid4()
+    h.on_chat_model_start({}, [[]], run_id=run, parent_run_id=None,
+                          metadata={"ls_provider": "openai", "ls_model_name": "gpt-4o"})
+    # instrument() records the model call while the run's chat span is current.
+    instrumentation._send_later(
+        {"state": state, "messages": []},
+        {"model": "gpt-4o", "vendor": "openai", "cost": 0.01, "latency_ms": 5})
+    h.on_llm_end(MagicMock(generations=[], llm_output={}), run_id=run)
+    exporter.flush()
+    assert _otlp_spans(rec) == []
+    assert dict(_finished(spans)["chat gpt-4o"].attributes)["gen_ai.usage.cost"] == 0.01
+
+
+def test_langchain_emit_attaches_before_the_run_span_ends(
+        spans, otlp_exporter, monkeypatch):
+    pytest.importorskip("langchain_core")
+    from prompt_shields import instrumentation
+    from prompt_shields.integrations.langchain import PromptShieldsCallbackHandler
+
+    configure, rec = otlp_exporter
+    exporter = configure()
+    state = MagicMock()
+    state.atlas = None
+    monkeypatch.setattr(instrumentation, "_state", state)
+    monkeypatch.setattr(
+        instrumentation, "build_event",
+        lambda *a, **k: {"model": "gpt-4o", "vendor": "openai", "cost": 0.02,
+                         "latency_ms": 5})
+    h = PromptShieldsCallbackHandler()
+    run = uuid.uuid4()
+    h.on_chat_model_start({}, [[]], run_id=run, parent_run_id=None,
+                          metadata={"ls_provider": "openai", "ls_model_name": "gpt-4o"})
+    h.on_llm_end(MagicMock(generations=[], llm_output={}), run_id=run)
+    exporter.flush()
+    state.telemetry.enqueue.assert_called_once()
+    state.telemetry.flush_sync.assert_called_once()
+    assert _otlp_spans(rec) == []
+    assert dict(_finished(spans)["chat gpt-4o"].attributes)["gen_ai.usage.cost"] == 0.02

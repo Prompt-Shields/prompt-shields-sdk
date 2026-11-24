@@ -1,0 +1,192 @@
+---
+title: OTLP export and Langfuse
+description: Send Prompt Shields GenAI spans from the SDK and the gateway to Langfuse or any OTLP backend, next to the collector
+---
+
+# OTLP export and Langfuse
+
+The SDK and the gateway can send every LLM call as an OpenTelemetry GenAI span
+to any OTLP/HTTP backend: Langfuse, Grafana Tempo, Honeycomb, Datadog, an
+OpenTelemetry Collector. The Prompt Shields collector still receives its
+events: this is a second destination, not a replacement.
+
+Each span has the model (requested and served), input and output tokens, the
+cost in USD from the shared price table (the same number the collector
+stores), the session id and a hash of the user. It never has prompt or
+completion text unless you turn content capture on.
+
+## Langfuse in two minutes
+
+Take the project's public and secret keys from the Langfuse project settings.
+
+### SDK
+
+```bash
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+export LANGFUSE_HOST=https://cloud.langfuse.com   # or https://us.cloud.langfuse.com, or your own
+export PS_LANGFUSE_EXPORT=true
+```
+
+or in code:
+
+```python
+import prompt_shields
+from prompt_shields import ShieldsOpenAI
+
+prompt_shields.configure_langfuse()  # reads the LANGFUSE_* variables
+
+client = ShieldsOpenAI(api_key="sk-...", ps_api_key="ps-...")
+client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello"}],
+    ps_metadata={"session_id": "chat-123", "user_id": "alice@example.com"},
+)
+```
+
+This covers `ShieldsClient`, `AsyncShieldsClient`, `ShieldsRouter`,
+`prompt_shields.instrument()` and the LangChain, LiteLLM and LlamaIndex
+integrations: every call the SDK records becomes one span.
+
+### Gateway
+
+```bash
+PS_OTEL_LANGFUSE=true
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+Callers group calls into sessions and users with two headers:
+
+```
+X-PS-Session-Id: chat-123
+X-PS-User-Id: alice@example.com
+```
+
+The gateway sends only the SHA-256 hash of `X-PS-User-Id` (with gateway OIDC,
+the subject hash instead; nothing with `PS_OIDC_TELEMETRY_SUBJECT=off`).
+`X-PS-User-Id` is caller-declared: the gateway does not verify it, so any
+caller can put any value there. It only labels spans for grouping in the
+backend; budgets, rate limits and access policy never read it. When a
+request carries a verified OIDC identity, the header is ignored and cannot
+replace the subject hash. The SHA-256 of a guessable id (an email address)
+can be reversed by guessing, so prefer an opaque id. The
+endpoint must pass the gateway's egress check: a self-hosted Langfuse on a
+private address needs its host in `TRUSTED_CUSTOM_HOSTS`. On Kubernetes, put
+`LANGFUSE_SECRET_KEY` in the gateway's secret, not in `values.yaml`.
+
+### What you see in Langfuse
+
+| Langfuse | Span attribute |
+|---|---|
+| Observation type `generation` | `langfuse.observation.type` |
+| Model | `langfuse.observation.model.name` (served model), `gen_ai.request.model`, `gen_ai.response.model` |
+| Usage | `langfuse.observation.usage_details` (`{"input", "output"}`), `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| Cost | `langfuse.observation.cost_details` (`{"total"}`), `gen_ai.usage.cost` (USD) |
+| Session | `langfuse.session.id`, `session.id`, `gen_ai.conversation.id` |
+| User | `langfuse.user.id`, `user.id` (a SHA-256 hash, never the raw id) |
+| Environment | `langfuse.environment` (`environment=` / `X-PS-Environment`) |
+| Trace name | `langfuse.trace.name` (`chat <model>`) |
+| Where it ran (SDK, Claude on Vertex AI / Bedrock) | `cloud.region`, `cloud.provider`, `ps.served_jurisdiction`, `ps.endpoint_scope`, `ps.cloud_project` / `cloud.account.id` (metadata) |
+| Cost tags (SDK) | `ps.tag.<key>`, e.g. `ps.tag.langgraph_node` (metadata) |
+
+An SDK span joins the app's active OpenTelemetry span when
+`opentelemetry-api` is installed, so a call inside your own trace shows up
+inside it. A gateway span joins the caller's `traceparent`.
+
+### Apps that already export the SDK's own spans
+
+With the `opentelemetry` extra and a `TracerProvider` of your own, the SDK
+already makes a `chat {model}` span per call ([Agent traces](/guides/agent-traces)).
+To keep one span per call, an exporter configured here then puts its
+attributes (cost, session, user hash, `ps.*`, and the `langfuse.*` keys for
+`configure_langfuse()`) on that span instead of sending a second one, and
+your `TracerProvider` exports it (`attached_to_sdk_spans` in
+`otlp_stats()`). Point your provider's exporter at the backend you want
+(Langfuse included). Captured content is never put on those spans: the SDK
+spans stay text-free, so with content capture on, input reaches Langfuse
+only for calls without a recording SDK span. Calls without one (no
+`TracerProvider`, `instrument()` outside a LangChain run) are sent by the
+exporter as before.
+
+`PS_OTLP_SDK_SPANS=export` (or `configure_otlp(sdk_spans="export")`) makes
+an exporter send its own span for every call regardless, for an exporter
+whose backend your `TracerProvider` does not reach. If both reach the same
+backend, each call then appears twice.
+
+Langfuse computes its own cost for models it knows; the span's
+`cost_details` carries the Prompt Shields price, so Langfuse shows the same
+cost as the Prompt Shields dashboards.
+
+## Any OTLP backend (SDK)
+
+`prompt_shields.configure_otlp()` (or `PS_OTLP_EXPORT=true`) reads the
+standard variables:
+
+| Variable | Default | |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | | Used as is |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | | `/v1/traces` appended |
+| `OTEL_EXPORTER_OTLP_[TRACES_]HEADERS` | | `k=v,k2=v2`, values percent-decoded |
+| `OTEL_EXPORTER_OTLP_[TRACES_]PROTOCOL` | `http/protobuf` | or `http/json`; gRPC is not supported |
+| `OTEL_EXPORTER_OTLP_[TRACES_]TIMEOUT` | `10000` | ms per request |
+| `OTEL_EXPORTER_OTLP_[TRACES_]COMPRESSION` | `none` | or `gzip` |
+| `OTEL_BSP_MAX_QUEUE_SIZE` | `2048` | spans held at most |
+| `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | `512` | spans per request |
+| `OTEL_BSP_SCHEDULE_DELAY` | `5000` | ms between sends |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | | resource attributes |
+| `OTEL_SDK_DISABLED` | | `true` turns the export off |
+| `PS_OTLP_CAPTURE_CONTENT` / `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | off | see below |
+| `PS_OTLP_USER_HASH_SALT` | | key for an HMAC-SHA-256 user hash |
+| `PS_OTLP_SDK_SPANS` | `attach` | `export`: send a span even when the call has a recording SDK span (see above) |
+
+Keyword arguments override the environment:
+`configure_otlp(endpoint="https://otel.example.com/v1/traces", headers={...}, protocol="http/json")`.
+Each `configure_otlp` / `configure_langfuse` call adds an exporter, so the
+spans can go to several backends at once (and the collector still gets its
+events). `prompt_shields.otlp_stats()` shows each exporter's queue,
+exported, failed and dropped counts; `prompt_shields.shutdown_otlp()` flushes
+and removes them.
+
+The gateway's own OTLP settings (`PS_OTEL_ENDPOINT`, `PS_OTEL_HEADERS`,
+`PS_OTEL_MAX_QUEUE`, ...) are on [Observability](/guides/observability).
+
+## Delivery: batched, bounded, fail-open
+
+The SDK only appends the span to an in-memory queue on the caller's thread;
+a background thread sends batches. A backend that is down or slow never
+raises into, or slows, the LLM call. Connection errors, 408, 429 and 5xx
+keep the batch queued and back off (1 s doubling to 30 s, or `Retry-After`).
+The queue never holds more than `OTEL_BSP_MAX_QUEUE_SIZE` spans: when it is
+full, the oldest are dropped and counted (`dropped.queue_full`). Other 4xx
+answers (a wrong key, say) drop the batch (`dropped.rejected`). Spans still
+queued at interpreter exit get a best-effort send within the SDK's exit flush
+budget (`PS_EXIT_FLUSH_TIMEOUT`, 2 s).
+
+## Content capture
+
+Off by default: no prompt or completion text leaves the process, whatever
+`send_prompt_text` says for the collector. With
+`PS_OTLP_CAPTURE_CONTENT=true` (SDK) or `PS_OTEL_CAPTURE_CONTENT=true`
+(gateway), the messages are sent as `gen_ai.input.messages` (the gateway also
+sends `gen_ai.output.messages`; the SDK never has the completion text) and
+as Langfuse input/output, after the same PII redaction the gateway's
+`/log/stream` applies: each email, card, phone, SSN, IP address, IBAN and
+national id is replaced by `[EMAIL]`, `[CREDIT_CARD]`, `[PHONE]`, `[SSN]`,
+`[IP_ADDRESS]`, `[IBAN]` or `[NATIONAL_ID]`. Names and free-text secrets are
+not detected: turn capture on only where the backend may hold prompts.
+
+## Tests
+
+- `packages/sdk/tests/test_otlp.py`: environment parsing, the protobuf
+  encoding against the OTLP schema, the recorded Langfuse payloads
+  (`packages/sdk/tests/fixtures/otlp/`), a 30 s outage (calls keep succeeding,
+  the queue stays at its bound, it drains on recovery), no text in the
+  exported bytes with capture off (JSON and protobuf), dual export.
+- `packages/sdk/tests/test_tracing.py`: with a recording SDK span (client,
+  LangChain run, `instrument()` inside a LangChain run) the attributes go on
+  it and no second span is exported; `PS_OTLP_SDK_SPANS=export`.
+- `gateway/src/middlewares/psOtel.langfuse.test.ts`: the gateway's recorded
+  Langfuse payload, cost from the price table, session and user hash, and the
+  redaction of captured content.

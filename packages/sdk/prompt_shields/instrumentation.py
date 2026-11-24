@@ -82,7 +82,7 @@ import weakref
 from types import SimpleNamespace
 from typing import Any
 
-from prompt_shields import cloud_platforms, mcp_instrumentation
+from prompt_shields import cloud_platforms, mcp_instrumentation, otlp
 from prompt_shields.feedback import attach_call_id, new_call_id
 from prompt_shields.outcome_signals import attach_outcome_signals, record_failure
 from prompt_shields.providers import (
@@ -1598,6 +1598,7 @@ def _stream_event(call: dict, adapter_fields: dict, stream_fields: dict,
 def _send_sync(call: dict, event: dict) -> None:
     state = call["state"]
     state.telemetry.enqueue(event)
+    otlp.export_event(event, call["messages"])
     state.telemetry.flush_sync()
     if state.atlas is not None:
         state.atlas.enqueue(build_atlas_event(event, call["messages"]))
@@ -1608,6 +1609,7 @@ def _send_later(call: dict, event: dict) -> None:
     """Enqueue without sending (no I/O): it goes out with the next flush."""
     state = call["state"]
     state.telemetry.enqueue(event)
+    otlp.export_event(event, call["messages"])
     if state.atlas is not None:
         state.atlas.enqueue(build_atlas_event(event, call["messages"]))
 
@@ -1615,6 +1617,7 @@ def _send_later(call: dict, event: dict) -> None:
 async def _send_async(call: dict, event: dict, flush: bool = True) -> None:
     state = call["state"]
     state.telemetry.enqueue(event)
+    otlp.export_event(event, call["messages"])
     if flush:
         await state.telemetry.flush()
     if state.atlas is not None:
