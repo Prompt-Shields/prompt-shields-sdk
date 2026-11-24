@@ -84,6 +84,16 @@ export interface GuardrailFields {
   'ps.guardrail.check_id': string;
   'ps.guardrail.stage': GuardrailStage;
   'ps.guardrail.verdict': GuardrailVerdict;
+  /** Central-policy guardrails (#349, hook_id `ps.policy`): the rule that applied. */
+  'ps.guardrail.rule_id'?: string;
+  /** Central-policy guardrails: what the rule did with the findings. */
+  'ps.guardrail.action'?: 'deny' | 'redact' | 'log';
+  /** Central-policy guardrails: PII category, secret kind or `prompt_injection`. */
+  'ps.guardrail.category'?: string;
+  /** Central-policy guardrails: findings of this rule and category. */
+  'ps.guardrail.count'?: number;
+  /** The central policy version the rule came from (`default@3+team-eu@2`). */
+  'ps.policy_version'?: string;
 }
 
 export interface GuardrailVerdictEvent

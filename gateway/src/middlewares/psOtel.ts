@@ -42,6 +42,7 @@ import {
 import { telemetryDroppedTotal } from './psMetrics/security';
 import { isSafeUpstreamURL } from './requestValidator';
 import { guardedUpstreamFetch } from '../utils/egressFetch';
+import { scrubOutput } from './psGuardrails/scrub';
 
 export interface OtelConfig {
   endpoint: string;
@@ -396,6 +397,12 @@ export interface SpanInput {
   endMs: number;
   requestBody?: any;
   responseBody?: any;
+  /**
+   * The response body for content capture when it differs from
+   * responseBody (PS fork #349: redacted by the output guardrails;
+   * undefined when they denied it). Absent: responseBody.
+   */
+  contentResponseBody?: any;
   stream?: StreamSummary;
   route?: {
     requestedModel?: string;
@@ -490,7 +497,13 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
       attrs[k] = undefined;
   }
   if (input.captureContent && !input.stream) {
-    Object.assign(attrs, contentAttributes(req, res));
+    Object.assign(
+      attrs,
+      contentAttributes(
+        req,
+        'contentResponseBody' in input ? input.contentResponseBody : res
+      )
+    );
   }
 
   const parent = parseTraceparent(input.headers['traceparent']);
@@ -706,6 +719,19 @@ export function psOtel(
           responseBody = undefined;
         }
       }
+      // PS fork (#349): captured content follows the output guardrails (the
+      // client gets the response redacted after this point); a denied
+      // response's output is not captured at all.
+      let contentResponse = responseBody;
+      if (
+        config.captureContent &&
+        responseBody &&
+        typeof responseBody === 'object'
+      ) {
+        contentResponse = structuredClone(responseBody);
+        if (scrubOutput(c, contentResponse) === 'denied')
+          contentResponse = undefined;
+      }
       // Multipart uploads yield only their `model`; the form is not re-read.
       const requestBody = await requestBodyForTelemetry(c);
       let waitUntil: ((p: Promise<unknown>) => void) | undefined;
@@ -724,6 +750,7 @@ export function psOtel(
         endMs: Date.now(),
         requestBody,
         responseBody,
+        contentResponseBody: contentResponse,
         route: c.get('psRoute'),
         captureContent: config.captureContent,
       };

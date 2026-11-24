@@ -3389,10 +3389,12 @@ components:
         A `ps-policy.v1` document. Each section is `{"version": N, ...}`;
         known sections: `route` v1 (`{"version": 1, "policy": <route-policy.v1>}`),
         `access` v1 (`{"version": 1, "default": "deny"|"allow", "groups": [...]}`,
-        the gateway's PS_OIDC_POLICY format) and `rate_limits` v1
+        the gateway's PS_OIDC_POLICY format), `rate_limits` v1
         (`{"version": 1, "on_store_error": "open"|"closed", "rules": [...]}`,
-        the gateway's PS_RATE_LIMITS format). Reserved for later: `prices`,
-        `guardrails`, `pseudonymisation`, `budgets`.
+        the gateway's PS_RATE_LIMITS format) and `guardrails` v1
+        (`{"version": 1, "rules": [...], "stream_window_chars": N}`, see
+        docs/guides/guardrails.mdx). Reserved for later: `prices`,
+        `pseudonymisation`, `budgets`.
         See docs/guides/central-policy.mdx.
       properties:
         schema:
