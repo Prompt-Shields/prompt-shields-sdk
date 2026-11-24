@@ -119,6 +119,9 @@ class TeardownRecord:
     tokens_audio_out: int | None = None
     web_search_requests: int | None = None
     service_tier: str | None = None
+    #: Where a cloud platform (Vertex AI, Bedrock) served the call:
+    #: "global" or "regional" (pricing.REGIONAL_ENDPOINT_PREMIUM).
+    endpoint_scope: str | None = None
     usage_units: float | None = None
     usage_unit_type: str | None = None
     image_quality: str | None = None
@@ -232,6 +235,7 @@ _USAGE_FIELDS = (
     "tokens_audio_out",
     "web_search_requests",
     "service_tier",
+    "endpoint_scope",
     "provider_cost",
     "usage_units",
     "usage_unit_type",
@@ -635,6 +639,7 @@ def _ps_event_record(e: Mapping[str, Any], file: str) -> TeardownRecord:
         tokens_audio_out=_int(e.get("tokens_audio_out")),
         web_search_requests=_int(e.get("web_search_requests")),
         service_tier=_str(e.get("service_tier")),
+        endpoint_scope=_str(e.get("endpoint_scope")),
         usage_units=_float(e.get("usage_units")),
         usage_unit_type=_str(e.get("usage_unit_type")),
         image_quality=_str(e.get("image_quality")),

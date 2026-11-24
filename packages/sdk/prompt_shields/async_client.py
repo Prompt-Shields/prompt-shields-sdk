@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from prompt_shields import tracing
+from prompt_shields import cloud_platforms, tracing
 from prompt_shields.budgets import (
     BudgetStore,
     budget_attributes,
@@ -140,6 +140,8 @@ class AsyncShieldsClient:
         }
 
         self._upstream = self._make_upstream(api_key, **provider_kwargs)
+        # Claude on Vertex AI / Bedrock (#388): region, jurisdiction, pricing.
+        self._platform = cloud_platforms.detect(self._upstream)
         self._propagate_trace = tracing.propagates_to(
             getattr(self._upstream, "base_url", None), propagate_trace
         )
@@ -152,6 +154,10 @@ class AsyncShieldsClient:
         if self._vendor == "anthropic":
             from anthropic import AsyncAnthropic
             return AsyncAnthropic(api_key=api_key, **provider_kwargs)
+        if self._vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS:
+            return cloud_platforms.make_client(
+                self._vendor, api_key, is_async=True, **provider_kwargs
+            )
         raise ValueError(f"No async upstream factory for vendor {self._vendor!r}")
 
     def _build_event(
@@ -167,6 +173,12 @@ class AsyncShieldsClient:
         # Streams pass fields accumulated from their chunks instead.
         if adapter_fields is None:
             adapter_fields = self._adapter.extract(response)
+        # Claude on Vertex AI / Bedrock: where it ran prices it (#388). The
+        # requested id carries a Bedrock profile prefix the served one lacks.
+        platform = getattr(self, "_platform", None)
+        adapter_fields = cloud_platforms.with_endpoint_scope(
+            adapter_fields, platform, model
+        )
         tokens_in = adapter_fields.get("tokens_in")
         tokens_out = adapter_fields.get("tokens_out")
 
@@ -225,6 +237,7 @@ class AsyncShieldsClient:
             if categories:
                 event["detected_pii_types"] = categories
 
+        cloud_platforms.apply_platform(event, platform, model)
         return event
 
     async def feedback(self, call_id: str, score: float | bool,
@@ -485,7 +498,9 @@ class _AsyncCompletionsNamespace:
         try:
             return AsyncShieldsStream(
                 response,
-                StreamAccumulator(self._parent._vendor, messages),
+                StreamAccumulator(
+                    cloud_platforms.stream_vendor(self._parent._vendor), messages
+                ),
                 on_finish,
                 start,
                 hide_usage_chunk=hide_usage_chunk,
@@ -511,7 +526,7 @@ class _AsyncCompletionsNamespace:
             return await upstream.chat.completions.create(
                 model=model, messages=messages, **kwargs
             )
-        if vendor == "anthropic":
+        if vendor == "anthropic" or vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS:
             return await upstream.messages.create(
                 model=model, messages=messages,
                 max_tokens=max_tokens if max_tokens is not None else 1024,
@@ -529,4 +544,24 @@ class AsyncShieldsOpenAI(AsyncShieldsClient):
 class AsyncShieldsAnthropic(AsyncShieldsClient):
     def __init__(self, **kwargs):
         kwargs.setdefault("vendor", "anthropic")
+        super().__init__(**kwargs)
+
+
+class AsyncShieldsAnthropicVertex(AsyncShieldsClient):
+    """Claude on Google Vertex AI through `anthropic.AsyncAnthropicVertex`
+    (#388): pass `project_id=` and `region=`; Google credentials."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("vendor", cloud_platforms.VERTEX_VENDOR)
+        kwargs.setdefault("api_key", None)
+        super().__init__(**kwargs)
+
+
+class AsyncShieldsAnthropicBedrock(AsyncShieldsClient):
+    """Claude on Amazon Bedrock through `anthropic.AsyncAnthropicBedrock`
+    (#388): pass `aws_region=`; AWS credentials or a Bedrock API key."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("vendor", cloud_platforms.BEDROCK_VENDOR)
+        kwargs.setdefault("api_key", None)
         super().__init__(**kwargs)

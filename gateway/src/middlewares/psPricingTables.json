@@ -560,5 +560,12 @@
         "1536x1024": 0.25
       }
     }
+  },
+  "regionalEndpointPremium": {
+    "anthropic/claude-opus-4-7": 0.1,
+    "anthropic/claude-sonnet-4-6": 0.1,
+    "anthropic/claude-opus-4-5": 0.1,
+    "anthropic/claude-sonnet-4-5": 0.1,
+    "anthropic/claude-haiku-4-5": 0.1
   }
 }
