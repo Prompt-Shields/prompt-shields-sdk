@@ -66,7 +66,7 @@ For long-term and per-user, per-project or per-API-surface spend, use the collec
 
 | File | UID | Panels |
 |---|---|---|
-| `prompt-shields-gateway-traffic.json` | `ps-gateway-traffic` | Request rate, 5xx and 446 ratios, latency percentiles by provider, requests by status / provider / route / business unit, tokens by direction / model / business unit, cost by provider / model / team, stream outcomes |
+| `prompt-shields-gateway-traffic.json` | `ps-gateway-traffic` | Request rate, 5xx and 446 ratios, latency percentiles by provider, requests by status / provider / route / business unit, 5xx and 4xx ratio by route, tokens by direction / model / business unit, cost by provider / model / team, stream outcomes, budget used against limit, MCP tool calls by server / tool / outcome, tool-call errors, error ratio and p50/p95 duration by server (an `mcp_server` variable filters the MCP row) |
 | `prompt-shields-guardrails-security.json` | `ps-guardrails-security` | Deny ratio, verdicts by outcome / check / stage, top denying hooks, 446s by business unit, PII entities by category, 429s by source and provider, telemetry drops by sink |
 | `prompt-shields-collector-health.json` | `ps-collector-health` | Scrape targets up, `/readyz` success, ingest by endpoint and outcome, assets created, readiness by instance, request rate, latency percentiles, 5xx by route |
 
@@ -100,8 +100,57 @@ collector:
 | `PromptShieldsCollector5xxRateHigh` | Over 5% of collector requests (probes excluded) are 5xx for 10 minutes | warning |
 | `PromptShieldsIngestStalled` | The gateway serves traffic but the collector accepted no events for 15 minutes; only while the collector's metrics are scraped | critical |
 | `PromptShieldsIngestFailing` | Over 10% of ingested events are rate limited, rejected or fail to write, with at least 60 events in 10 minutes | warning |
+| `PromptShieldsProviderLatencyP95High` | p95 request duration for a provider is over 20 s for 15 minutes (with more than 0.05 req/s) | warning |
+| `PromptShieldsRouteLatencyP95High` | p95 request duration on a route is over 20 s for 15 minutes (with more than 0.05 req/s) | warning |
+| `PromptShieldsProvider5xxRatioHigh` | Over 5% of a provider's requests are 5xx for 10 minutes | warning |
+| `PromptShieldsProvider4xxRatioHigh` | Over 25% of a provider's requests are 4xx other than 429 and 446 for 15 minutes | warning |
+| `PromptShieldsRoute5xxRatioHigh` | Over 5% of a route's requests are 5xx for 10 minutes | warning |
+| `PromptShieldsRoute4xxRatioHigh` | Over 25% of a route's requests are 4xx other than 429 and 446 for 15 minutes | warning |
+| `PromptShieldsRateLimitedRatioHigh` | Over 10% of all requests get a 429 from one source (`upstream`, `gateway`, `budget`) for 10 minutes | warning |
+| `PromptShieldsBudgetNearLimit` | A budget's spend reaches 80% of its limit (no `for`: on the first evaluation) | warning |
+| `PromptShieldsBudgetExhausted` | A budget's spend reaches its limit | critical |
+| `PromptShieldsCostSpike` | Spend in the last hour is over 3x the average hourly spend of the 7 days before, and over $1, for 10 minutes (quiet until there are 24 hours of history) | warning |
+
+The provider rules leave out `provider="unknown"` (requests with no provider, such as health, MCP and admin routes); the route rules cover every route. The ratio and latency rules need more than 0.05 requests/s, so an idle provider or route does not page. Every rule from `PromptShieldsProviderLatencyP95High` on has a `runbook_url` annotation pointing at [Alert runbooks](/guides/alert-runbooks).
 
 `PromptShieldsIngestStalled` assumes the gateway sends telemetry to this collector (`PS_API_KEY`); drop it otherwise. Thresholds are starting points.
+
+With both budget alerts firing at 100%, an Alertmanager inhibit rule keeps only the critical one:
+
+```yaml
+inhibit_rules:
+  - source_matchers: [alertname="PromptShieldsBudgetExhausted"]
+    target_matchers: [alertname="PromptShieldsBudgetNearLimit"]
+    equal: [budget, window]
+```
+
+### Tuning thresholds with the chart
+
+In `deploy/prometheus/alerts.yaml`, the number on an expression line ending in `# threshold` is the alert threshold, and the number on a line ending in `# minimum` is the traffic (or spend) floor. With plain Prometheus, edit them in the file. With the chart, override them per alert in `prometheusRule.rules`, without copying the file:
+
+```yaml
+prometheusRule:
+  enabled: true
+  runbookBaseUrl: https://docs.example.internal/prompt-shields/alert-runbooks   # optional
+  rules:
+    PromptShieldsRouteLatencyP95High:
+      threshold: 30        # seconds
+      for: 20m
+    PromptShieldsBudgetNearLimit:
+      threshold: 0.9       # 90% of the limit
+      labels: { team: finops }
+    PromptShieldsCostSpike:
+      minimum: 25          # USD in the hour
+      severity: critical
+    PromptShieldsIngestStalled:
+      enabled: false
+```
+
+Each entry takes `enabled`, `threshold`, `minimum`, `for`, `severity` and `labels`. An unknown alert name, or a `threshold` / `minimum` for an alert without that line, fails the render. `values.yaml` lists the tunable alerts and their defaults. `runbookBaseUrl` replaces the GitHub address of the runbook page in every `runbook_url` and keeps each alert's `#anchor`.
+
+### Budget and cost webhooks
+
+These alerts reach people through Alertmanager receivers (Slack, PagerDuty, a generic webhook). A webhook from the platform itself for deployments without Prometheus is tracked in #29, not shipped here; the collector's daily [spend anomaly alerts](/guides/spend-anomaly-alerts) already send signed webhooks.
 
 Plain Prometheus: add the file to `rule_files:` in `prometheus.yml`. Prometheus Operator: set `prometheusRule.enabled: true` in the chart and put the label your Prometheus `ruleSelector` matches in `prometheusRule.labels` (kube-prometheus-stack: `release: <its release name>`).
 
