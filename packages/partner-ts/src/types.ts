@@ -1472,6 +1472,92 @@ export interface CallPayload {
   response: unknown;
 }
 
+// ── Agent traces (client.traces) ─────────────────────────────────────────
+
+/** One stored span of an agent trace. Metadata only, never content. */
+export interface TraceSpan {
+  /** 16 lowercase hex characters. */
+  spanId: string;
+  /** The parent span's id (it may not be stored). */
+  parentSpanId: string | null;
+  name: string;
+  /** `internal`, `server`, `client`, `producer` or `consumer`. */
+  kind: string | null;
+  /** `unset`, `ok` or `error`. */
+  status: string;
+  /** The span's `error.type`. */
+  errorType: string | null;
+  startTime: string;
+  endTime: string | null;
+  durationMs: number | null;
+  serviceName: string | null;
+  environment: string | null;
+  /** `gen_ai.operation.name`: `chat`, `execute_tool`, `invoke_agent`, ... */
+  operation: string | null;
+  provider: string | null;
+  requestModel: string | null;
+  responseModel: string | null;
+  toolName: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  /** `gen_ai.conversation.id`; cleared by user erasure. */
+  sessionId: string | null;
+  /** The user id hashed with the tenant's salt; cleared by user erasure. */
+  userIdHash: string | null;
+}
+
+/** One trace in `GET /partner/v1/traces`. */
+export interface TraceSummary {
+  /** 32 lowercase hex characters (W3C trace id). */
+  traceId: string;
+  rootName: string | null;
+  rootServiceName: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  durationMs: number | null;
+  spanCount: number;
+  errorCount: number;
+  /** `error` when any stored span errored, else `ok`. */
+  status: string;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  sessionId: string | null;
+  userIdHash: string | null;
+}
+
+/** `GET /partner/v1/traces/{trace_id}`: the summary and every stored span. */
+export interface Trace extends TraceSummary {
+  spans: TraceSpan[];
+}
+
+export interface TracePageMeta {
+  hasMore: boolean;
+  /** Opaque; pass as `cursor` for the next page. */
+  nextCursor: string | null;
+}
+
+export interface TracePage {
+  data: TraceSummary[];
+  meta: TracePageMeta;
+}
+
+export interface ListTracesParams {
+  /** `meta.nextCursor` of the previous page. */
+  cursor?: string | null;
+  /** First span start to include (server default: 24 hours before `until`). */
+  since?: Timestamp;
+  /** Span start before which to stop (exclusive; server default: now). */
+  until?: Timestamp;
+  /** Only traces with a span of this `gen_ai.conversation.id`. */
+  sessionId?: string;
+  /** Only traces with a span of this user (the salted hash). */
+  userIdHash?: string;
+  /** `error`: traces with an errored span; `ok`: the others. */
+  status?: 'ok' | 'error';
+  /** Traces per page, 1 to 200. Server default is 50. */
+  limit?: number;
+}
+
 export interface SiemAuditParams {
   /** `cursor` of the previous batch (the `seq` of its last row). */
   cursor?: string | number | null;

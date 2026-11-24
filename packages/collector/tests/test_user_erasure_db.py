@@ -129,7 +129,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         assert body["user_id_hash"] == hash_a and body["input"] == "user_id"
         assert body["rows_erased"] == {
             "ai_usage_events": 3, "usage_rollups": 2, "call_feedback": 1, "mcp_tool_usage": 2,
-            "gateway_security_events": 1,
+            "gateway_security_events": 1, "trace_spans": 0, "call_payloads": 0,
         }
         assert body["audit_event_id"]
 
@@ -173,7 +173,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         resp = await c.delete(f"/api/v1/admin/users/{hash_b}/data", headers=_head(KEY_B))
         assert resp.status_code == 200, resp.text
         assert resp.json()["rows_erased"] == {
-            "ai_usage_events": 3, "usage_rollups": 0, "gateway_security_events": 1,
+            "ai_usage_events": 3, "usage_rollups": 0, "gateway_security_events": 1, "trace_spans": 0, "call_payloads": 0,
         }
         # The hash route reaches the security event too (salted user.hash).
         assert (await _state(plain, b))["security"] == [
@@ -184,6 +184,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
         resp = await c.delete(f"/api/v1/admin/users/{other_hash}/data", headers=_head(KEY_B))
         assert resp.json()["rows_erased"] == {
             "ai_usage_events": 0, "usage_rollups": 0, "gateway_security_events": 0,
+            "trace_spans": 0, "call_payloads": 0,
         }
 
         resp = await c.delete("/api/v1/admin/users/NOT-A-HASH/data", headers=_head(KEY_B))
@@ -205,7 +206,7 @@ async def test_erase_user_is_tenant_scoped_audited_and_idempotent(rls_db, monkey
             "input": "user_id",
             "rows_erased": {
                 "ai_usage_events": 3, "usage_rollups": 2, "call_feedback": 1, "mcp_tool_usage": 2,
-                "gateway_security_events": 1,
+                "gateway_security_events": 1, "trace_spans": 0, "call_payloads": 0,
             },
         }
         assert first["tenant_id"] == str(a) and first["row_hash"] and first["prev_hash"]
@@ -252,7 +253,7 @@ async def test_erase_without_a_salt_creates_none(rls_db):  # noqa: F811
     assert resp.json()["user_id_hash"] is None
     assert resp.json()["rows_erased"] == {
         "ai_usage_events": 1, "call_feedback": 0, "mcp_tool_usage": 0,
-        "gateway_security_events": 0,
+        "gateway_security_events": 0, "trace_spans": 0, "call_payloads": 0,
     }
     async with rls_db["plain"]() as s:
         await rls.set_tenant(s, a)

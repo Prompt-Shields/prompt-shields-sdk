@@ -47,6 +47,7 @@ from collector import (
     sso_admin,
     tenant_keys,
     tenant_limits,
+    traces,
     user_erasure,
     webhook_admin,
     webhooks,
@@ -888,3 +889,23 @@ def test_payload_logging_schemas_match_serializers():
     op = SPEC["paths"]["/partner/v1/calls/{call_id}"]["get"]
     assert op["security"][0] == {"OAuth2": [payload_logging.READ_SCOPE]}
     assert "/ingest/payloads" in SPEC["paths"]
+
+
+def test_trace_schemas_match_serializers():
+    now = datetime.now(UTC)
+    row = SimpleNamespace(
+        **dict.fromkeys(traces.SPAN_FIELDS),
+        start_time=now,
+        end_time=now,
+    )
+    row.span_id, row.name, row.status = "00f067aa0ba902b7", "chat", "ok"
+    span = traces.span_payload(row)
+    assert _props("TraceSpan") == set(span) == set(SCHEMAS["TraceSpan"]["required"])
+    summary = traces.summarize("4bf92f3577b34da6a3ce929d0e0e4736", [row])
+    assert _props("TraceSummary") == set(summary) == set(SCHEMAS["TraceSummary"]["required"])
+    trace = traces.trace_payload("4bf92f3577b34da6a3ce929d0e0e4736", [row])
+    assert _props("Trace") == set(trace)
+    for path in ("/partner/v1/traces", "/partner/v1/traces/{trace_id}"):
+        assert SPEC["paths"][path]["get"]["security"][0] == {"OAuth2": ["traces:read"]}
+    scopes = SPEC["components"]["securitySchemes"]["OAuth2"]["flows"]["clientCredentials"]["scopes"]
+    assert "traces:read" in scopes

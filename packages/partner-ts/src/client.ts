@@ -43,8 +43,12 @@ import type {
   ListMcpToolsParams,
   ListSecurityEventsParams,
   CallPayload,
+  ListTracesParams,
   SecurityEventPage,
   SecurityEventRow,
+  Trace,
+  TracePage,
+  TraceSummary,
   ListMcpUsageParams,
   ListProjectsParams,
   ListRiskReviewsParams,
@@ -251,6 +255,8 @@ export class PartnerClient {
   readonly securityEvents: SecurityEventsResource;
   /** Logged request/response payloads (payload logging). Needs `logs:read`. */
   readonly calls: CallsResource;
+  /** Agent traces stored by the collector. Needs `traces:read`. */
+  readonly traces: TracesResource;
   /** Stored provider admin keys (write-only, masked). Needs `provider-credentials:manage`. */
   readonly providerCredentials: ProviderCredentialsResource;
   /** Provider key id to SDK `api_key_fingerprint` links. Needs `provider-credentials:manage`. */
@@ -317,6 +323,7 @@ export class PartnerClient {
     this.audit = new AuditResource(this);
     this.securityEvents = new SecurityEventsResource(this);
     this.calls = new CallsResource(this);
+    this.traces = new TracesResource(this);
     this.providerCredentials = new ProviderCredentialsResource(this);
     this.providerKeyFingerprints = new ProviderKeyFingerprintsResource(this);
     this.webhooks = new WebhooksResource(this);
@@ -931,6 +938,31 @@ export class CallsResource {
    */
   get(callId: string): Promise<CallPayload> {
     return this.client.get<CallPayload>(`/partner/v1/calls/${requireId(callId, 'callId')}`);
+  }
+}
+
+/**
+ * `/partner/v1/traces`: agent traces (the spans of model calls, tools and
+ * agents, from the SDK, the gateway and any OTel GenAI exporter) stored for
+ * the tenant. Metadata only. Needs `traces:read`.
+ */
+export class TracesResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** One page of trace summaries (up to 200), newest first. */
+  listPage(params: ListTracesParams = {}): Promise<TracePage> {
+    return this.client.get<TracePage>('/partner/v1/traces', { ...params });
+  }
+
+  /** Every trace matching the filters, page by page as you iterate. */
+  list(params: ListTracesParams = {}): PageIterator<TraceSummary, TracePage> {
+    const { cursor, ...rest } = params;
+    return new PageIterator((next) => this.listPage({ ...rest, cursor: next }), cursor ?? undefined);
+  }
+
+  /** One trace with every stored span, in start order. */
+  get(traceId: string): Promise<Trace> {
+    return this.client.get<Trace>(`/partner/v1/traces/${requireId(traceId, 'traceId')}`);
   }
 }
 

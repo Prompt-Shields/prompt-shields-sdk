@@ -8,9 +8,10 @@ Retention
     same period are purged with the events: such a row only summarises calls
     older than the cutoff. So are ``mcp_tool_usage_daily`` rows (MCP
     metering, #77) for days before the cutoff's day, ``call_feedback`` rows
-    (explicit feedback on a call, #43) last updated before the cutoff, and
-    ``spend_alerts`` (spend anomaly alerts, #30) for days before the cutoff.
-    Logged payloads (``call_payloads``, #352) have their own period,
+    (explicit feedback on a call, #43) last updated before the cutoff,
+    ``spend_alerts`` (spend anomaly alerts, #30) for days before the cutoff,
+    and ``trace_spans`` (agent traces, #385) that started or arrived before
+    it. Logged payloads (``call_payloads``, #352) have their own period,
     ``payload_logging.retention_days`` (default 30 days). A tenant on legal
     hold (``settings["legal_hold"]``, collector.payload_policy) is skipped
     by every purge until the hold is lifted.
@@ -90,6 +91,7 @@ from db.models import (
     TenantApiKey,
     TenantOidcConfig,
     TenantSecret,
+    TraceSpan,
     UsageRollupDaily,
     UsageRollupHourly,
     UsageRollupState,
@@ -142,6 +144,7 @@ ERASE_ORDER: tuple[type, ...] = (
     CallFeedback,
     SpendAlert,
     GatewaySecurityEvent,
+    TraceSpan,
     TenantApiKey,
     AdminToken,
     TenantSecret,
@@ -189,6 +192,7 @@ class PurgeResult:
     payload_retention_days: int | None = None
     # A tenant on legal hold (#352) is skipped: nothing is deleted.
     legal_hold: bool = False
+    trace_spans_deleted: int = 0
 
 
 @dataclass
@@ -404,8 +408,9 @@ async def purge_tenant_events(
 ) -> PurgeResult | None:
     """Delete one tenant's usage events older than its retention cutoff,
     its MCP tool usage rows last seen before it, its call feedback last
-    updated before it, its spend alerts for days before it and its gateway
-    security events that happened or arrived before it.
+    updated before it, its spend alerts for days before it, its gateway
+    security events that happened or arrived before it and its agent trace
+    spans that started or arrived before it.
 
     Returns None if the tenant does not exist. With ``dry_run`` the matching
     rows are counted, not deleted, and nothing is audited.
@@ -460,6 +465,18 @@ async def purge_tenant_events(
         se.c.tenant_id == tenant_id,
         or_(se.c.occurred_at < cutoff, se.c.received_at < cutoff),
     ]
+    ts = TraceSpan.__table__
+    # Agent trace spans (#385) follow the usage events. start_time is the
+    # sender's clock; received_at also catches spans sent with an old one.
+    # Pending spans whose trace never gained a GenAI span go too.
+    ts_conditions = [
+        ts.c.tenant_id == tenant_id,
+        or_(
+            ts.c.start_time < cutoff,
+            ts.c.received_at < cutoff,
+            ts.c.pending_until < (now or _utcnow()),
+        ),
+    ]
     # Usage rollups (#346) have their own, longer retention.
     r_cutoff = rollup_cutoff(tenant_settings, now)
     rollups = [
@@ -480,6 +497,7 @@ async def purge_tenant_events(
         fb_deleted = await _count(db, fb, fb_conditions)
         sa_deleted = await _count(db, sa, sa_conditions)
         se_deleted = await _count(db, se, se_conditions)
+        ts_deleted = await _count(db, ts, ts_conditions)
         rollups_deleted = sum([await _count(db, t, c) for t, c in rollups])
         payloads_deleted = await _count(db, cp, cp_conditions)
     else:
@@ -489,6 +507,7 @@ async def purge_tenant_events(
         fb_deleted = await _delete_in_batches(db, fb, fb_conditions, size)
         sa_deleted = await _delete_in_batches(db, sa, sa_conditions, size)
         se_deleted = await _delete_in_batches(db, se, se_conditions, size)
+        ts_deleted = await _delete_in_batches(db, ts, ts_conditions, size)
         rollups_deleted = sum([await _delete_in_batches(db, t, c, size) for t, c in rollups])
         payloads_deleted = await _delete_in_batches(db, cp, cp_conditions, size)
         if (
@@ -498,6 +517,7 @@ async def purge_tenant_events(
             or fb_deleted
             or sa_deleted
             or se_deleted
+            or ts_deleted
             or rollups_deleted
             or payloads_deleted
         ):
@@ -512,6 +532,8 @@ async def purge_tenant_events(
                 details[SpendAlert.__tablename__] = sa_deleted
             if se_deleted:
                 details[GatewaySecurityEvent.__tablename__] = se_deleted
+            if ts_deleted:
+                details[TraceSpan.__tablename__] = ts_deleted
             if rollups_deleted:
                 details["usage_rollups"] = rollups_deleted
             if payloads_deleted:
@@ -546,6 +568,7 @@ async def purge_tenant_events(
         usage_rollups_deleted=rollups_deleted,
         payloads_deleted=payloads_deleted,
         payload_retention_days=payload_days,
+        trace_spans_deleted=ts_deleted,
     )
 
 

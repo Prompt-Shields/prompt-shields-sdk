@@ -43,7 +43,7 @@ class FakeSession:
 
     async def execute(self, stmt):
         self.executed.append(stmt)
-        return SimpleNamespace(rowcount=self.rowcount)
+        return SimpleNamespace(rowcount=self.rowcount, all=list)
 
 
 def make_request(
@@ -229,7 +229,9 @@ class TestPurge:
         db = FakeSession(rowcount=7)
         now = datetime(2026, 10, 13, tzinfo=UTC)
         assert await audit.purge_expired(db, 30, now=now) == 7
-        (stmt,) = db.executed
+        # The legal-hold lookup (#352: no tenant on hold here), then the delete.
+        lookup, stmt = db.executed
+        assert "tenants" in str(lookup)
         assert stmt.table.name == "partner_audit_log"
         cutoff = stmt.whereclause.right.value
         assert cutoff == now - timedelta(days=30)
