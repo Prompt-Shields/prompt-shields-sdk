@@ -1,0 +1,69 @@
+---
+title: Payload Logging
+description: Opt-in logging of request and response payloads, redacted before they are written, with its own retention and an audited read API
+---
+
+# Payload Logging
+
+By default the collector stores no prompt or response. Payload logging lets a tenant keep the request and response of model calls for debugging, in one of three levels, with PII replaced before anything is written. It is **off** until a tenant admin turns it on.
+
+## Modes
+
+| Mode | What is stored |
+|------|----------------|
+| `off` (default) | Nothing |
+| `metadata` | Route, status, error flag, request and response sizes |
+| `redacted` | The above, plus the request and response with every PII span replaced by a category placeholder (`[EMAIL]`, `[CARD]`, `[IBAN]`, `[SSN]`, `[PHONE]`, `[IP_ADDRESS]`) |
+| `full` | The above, with the request and response as sent |
+
+Redaction runs in the collector before the payload is encrypted or written, whatever the sender did. It is pattern based and eager: email addresses, card numbers (13-19 digits, grouped or not, Luhn checked; also when sent as a JSON number), IBANs (mod-97 checked), US SSNs, phone numbers in common layouts and IPv4 addresses, in string values and object keys. Only the count per category is kept, never the value.
+
+**`full` needs an owner.** Only a tenant owner can turn it on: an admin token issued for a principal with the tenant-wide `owner` role, or an unbound token holding every admin scope (such as the one the operator bootstraps). Anyone with `admin:privacy` can turn logging down or off. While `full` is on, the ingest response carries `x-ps-logging: full`.
+
+## Turning it on
+
+```bash
+curl -X PUT "$COLLECTOR/api/v1/admin/payload-logging" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"mode": "redacted", "sample_rate": 0.1, "on_error_only": false,
+       "routes": ["/v1/chat/completions", "/v1/responses*"], "retention_days": 14}'
+```
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | `off`, `metadata`, `redacted` or `full` |
+| `sample_rate` | Share of calls kept, 0 to 1 (default 1). Decided from a hash of tenant and call id, so a resent call gets the same answer |
+| `on_error_only` | Keep only calls sent with `error: true` or a status of 400 or more |
+| `routes` | Routes to log: exact, or a prefix ending in `*`. Empty logs every route |
+| `retention_days` | Days payloads are kept (default `PS_PAYLOAD_RETENTION_DAYS_DEFAULT`, 30) |
+
+`GET /api/v1/admin/payload-logging` reads the setting. Every change writes a `payload_logging.set` row (mode before and after, sample rate, route count, retention) to the tenant's [audit trail](/guides/audit-trail). The operator tenants API cannot set it.
+
+Payloads are encrypted with AES-256-GCM under a key derived per tenant from the collector's keyring `PS_WEBHOOK_SECRET_KEYS` and bound to the tenant and call id. `redacted` and `full` cannot be turned on without it (409).
+
+## Sending payloads
+
+The sender (the gateway or your own code) posts one call per request with a tenant ingest key holding `ingest:write`:
+
+```bash
+curl -X POST "$COLLECTOR/ingest/payloads" \
+  -H "Authorization: Bearer $INGEST_KEY" -H "Content-Type: application/json" \
+  -d '{"call_id": "call-123", "route": "/v1/chat/completions", "status_code": 200,
+       "user_id": "u-42", "request": {...}, "response": {...}}'
+```
+
+The answer (`202`) says whether it was stored and, if not, why (`off`, `route_not_logged`, `not_error`, `not_sampled`, `duplicate`, `encryption_unavailable`), with the redaction counts. The setting is read on every request, so turning logging off stops writes at once. `user_id` is stored only as the tenant-salted hash, as on usage events. The route counts against the tenant's `events` ingest rate limit, apart from `/ingest/events`.
+
+## Reading a payload
+
+`GET /partner/v1/calls/{call_id}` with a partner credential holding `logs:read` (the TypeScript SDK: `client.calls.get(callId)`). Every read, found or not, writes a `payload.read` row to the tenant's audit trail before the payload is returned; if that write fails, the read fails (503) and returns nothing.
+
+## Retention, legal hold and erasure
+
+Payloads are purged by the retention purge after the tenant's payload retention, and are not readable past it. A tenant on legal hold (`PUT /api/v1/admin/legal-hold`) is skipped by every purge. Tenant erasure deletes the tenant's payloads; erasure by end user deletes the user's. See [Data retention](/guides/data-retention#logged-payloads-and-legal-hold).
+
+## Not yet covered
+
+- The gateway does not post payloads or set `x-ps-logging` on its own responses yet; payloads come from your own sender.
+- Payloads are stored in the collector database (encrypted); object storage (S3, GCS, Azure Blob) and keys from the credential vault are planned.
+- Per-project settings.

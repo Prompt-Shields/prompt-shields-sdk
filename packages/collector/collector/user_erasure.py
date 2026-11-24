@@ -37,6 +37,10 @@ What is erased, in the caller's tenant only:
   salted hash (``user_id_hash``, stored at ingest) equal to the user's:
   both are set to NULL (the event is kept). Both forms reach them.
 
+* ``call_payloads`` (logged request/response payloads, #352) of the user:
+  deleted, found by the stored hash and by the call ids of the user's
+  usage events (looked up before those events lose the user's hash).
+
 The feedback and MCP tables store the id as the gateway sent it (a hex
 hash), not the collector's salted hash, so only the POST form, which
 carries that id, reaches them.
@@ -71,13 +75,14 @@ from uuid import UUID
 from db.models import (
     AIUsageEvent,
     CallFeedback,
+    CallPayload,
     GatewaySecurityEvent,
     McpToolUsage,
     RetentionAuditLog,
 )
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import audit_trail, usage_rollups, user_identity
@@ -137,6 +142,21 @@ async def _null_in_batches(db: AsyncSession, model, conditions: list, values: di
         changed = result.rowcount or 0
         total += changed
         if changed < size:
+            return total
+
+
+async def _delete_in_batches(db: AsyncSession, model, conditions: list, size: int) -> int:
+    """``DELETE ... WHERE id IN (SELECT id ... LIMIT n)`` until nothing
+    matches, committing each batch."""
+    table = model.__table__
+    total = 0
+    while True:
+        ids = select(table.c.id).where(*conditions).limit(size)
+        result = await db.execute(delete(table).where(table.c.id.in_(ids)))
+        await db.commit()
+        deleted = result.rowcount or 0
+        total += deleted
+        if deleted < size:
             return total
 
 
@@ -272,6 +292,18 @@ async def erase_user(
         match = ev.user_id_hash == user_id_hash
     else:
         match = ev.user_id_raw == user_id
+    # Logged payloads (#352) first, while the user's events still name them:
+    # deleted, by the stored hash and by the call ids of the user's events.
+    cp = CallPayload
+    user_calls = select(ev.call_id).where(
+        ev.tenant_id == tenant_id, match, ev.call_id.is_not(None)
+    )
+    cp_match = [cp.call_id.in_(user_calls)]
+    if user_id_hash is not None:
+        cp_match.append(cp.user_id_hash == user_id_hash)
+    rows[cp.__tablename__] = await _delete_in_batches(
+        db, cp, [cp.tenant_id == tenant_id, or_(*cp_match)], size
+    )
     rows[ev.__tablename__] = await _null_in_batches(
         db, ev, [ev.tenant_id == tenant_id, match], dict.fromkeys(EVENT_COLUMNS), size
     )

@@ -255,7 +255,12 @@ async def erase(
 # under "api_key" before migration 004. "user_id_salt" is refused so no one
 # believes they set the #334 salt: it lives in tenant_secrets, which no API
 # reads or writes.
-_FORBIDDEN_SETTINGS = frozenset({"api_key"}) | user_identity.PROTECTED_SETTINGS
+# Payload logging and legal hold (#352) are set through the tenant admin API
+# only, where full logging needs an owner and every change is audited.
+_FORBIDDEN_SETTINGS = (
+    frozenset({"api_key", "payload_logging", "legal_hold"})
+    | user_identity.PROTECTED_SETTINGS
+)
 
 
 def _tenant_dict(t: Tenant) -> dict:

@@ -255,6 +255,16 @@ from collector.user_erasure import router as user_erasure_router
 app.include_router(user_erasure_router)
 app.include_router(audit_partner_router)
 
+# Opt-in payload logging (#352): ingest (ingest:write), the tenant setting
+# and legal hold (admin:privacy) and the audited read (logs:read)
+from collector.payload_logging import admin_router as payload_admin_router
+from collector.payload_logging import partner_router as payload_partner_router
+from collector.payload_logging import router as payload_ingest_router
+
+app.include_router(payload_ingest_router)
+app.include_router(payload_admin_router)
+app.include_router(payload_partner_router)
+
 # RBAC: principals, teams, projects and role memberships (collector/rbac.py)
 from collector.rbac_admin import partner_router as rbac_partner_router
 from collector.rbac_admin import router as rbac_admin_router

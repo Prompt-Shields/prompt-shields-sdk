@@ -31,6 +31,7 @@ from collector import (
     operator_admin,
     operator_auth,
     partner_admin,
+    payload_logging,
     policies_api,
     provider_credentials_api,
     provider_usage_admin,
@@ -181,6 +182,8 @@ def test_webhook_schemas_match_serializers():
         ("UpdatePolicyRequest", policies_api.UpdatePolicyBody),
         ("CreatePolicyVersionRequest", policies_api.CreateVersionBody),
         ("ActivatePolicyRequest", policies_api.ActivateBody),
+        ("PutPayloadLoggingRequest", payload_logging.PayloadLoggingBody),
+        ("PutLegalHoldRequest", payload_logging.LegalHoldBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -361,6 +364,7 @@ ADMIN_ROUTERS = (
     user_erasure.router,
     sso_admin.router,
     policies_api.router,
+    payload_logging.admin_router,
 )
 
 
@@ -856,3 +860,31 @@ def test_otel_traces_ingest_documents_its_rate_limit():
     assert "Retry-After" in op["responses"]["429"]["headers"]
     limits = SCHEMAS["IngestRateLimitSettings"]["properties"]
     assert set(limits) == set(tenant_limits.ENV_DEFAULTS)
+
+
+def test_payload_logging_schemas_match_serializers():
+    from collector import payload_policy
+
+    settings_out = payload_policy.OFF.as_dict()
+    assert _props("PayloadLoggingSettings") == set(settings_out)
+    assert set(SCHEMAS["PayloadLoggingSettings"]["required"]) == set(settings_out)
+    assert SCHEMAS["PayloadLoggingMode"]["enum"] == list(payload_policy.MODES)
+    hold = payload_logging._legal_hold_dict({})
+    assert _props("LegalHold") == set(hold) == set(SCHEMAS["LegalHold"]["required"])
+    result = payload_logging.IngestResult(call_id="c").as_dict()
+    assert _props("PayloadIngestResult") == set(result)
+    assert set(SCHEMAS["PayloadIngestResult"]["required"]) == set(result)
+    reasons = SCHEMAS["PayloadIngestResult"]["properties"]["reason"]["enum"]
+    assert [r for r in reasons if r is not None] == list(payload_logging.Reason.__args__)
+    row = SimpleNamespace(
+        call_id="c", mode="full", received_at=datetime.now(UTC), route=None,
+        status_code=200, is_error=False, request_bytes=1, response_bytes=2, redactions={},
+    )
+    out = payload_logging.call_payload_dict(row, {"request": 1, "response": 2})
+    assert _props("CallPayload") == set(out) == set(SCHEMAS["CallPayload"]["required"])
+    assert _props("PayloadIngestRequest") == {
+        "call_id", "route", "status_code", "error", "user_id", "request", "response"
+    }
+    op = SPEC["paths"]["/partner/v1/calls/{call_id}"]["get"]
+    assert op["security"][0] == {"OAuth2": [payload_logging.READ_SCOPE]}
+    assert "/ingest/payloads" in SPEC["paths"]

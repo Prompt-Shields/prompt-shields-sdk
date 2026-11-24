@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     # /api/v1/operator endpoints).
     retention_days_default: int = 365
     retention_batch_size: int = 5000
+    # Logged request/response payloads (#352): days kept unless the tenant's
+    # settings["payload_logging"]["retention_days"] says otherwise. Payload
+    # logging itself is off until a tenant admin turns it on.
+    payload_retention_days_default: int = 30
     # Operator token for /api/v1/operator/*. Empty disables those endpoints.
     admin_token: str = ""
     # Tenant admin routes (/api/v1/admin/*): refuse tenant ingest keys and

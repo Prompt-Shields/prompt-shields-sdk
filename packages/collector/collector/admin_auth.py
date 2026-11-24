@@ -93,7 +93,8 @@ ADMIN_SCOPES: dict[str, str] = {
     ),
     "admin:privacy": (
         "Erase an end user's identifiers from usage events, call feedback and "
-        "MCP usage (erasure by user)"
+        "MCP usage (erasure by user); set payload logging (full mode needs an "
+        "owner) and the tenant's legal hold"
     ),
     "admin:members": (
         "Manage principals, teams, projects and role memberships (granting a "

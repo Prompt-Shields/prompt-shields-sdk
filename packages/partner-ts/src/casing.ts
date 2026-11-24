@@ -27,6 +27,13 @@ const MAP_KEYS = new Set(['attestation', 'current', 'outcome_signal_counts', 'ar
  */
 const RAW_KEYS = new Set(['snapshot', 'details', 'event']);
 
+/**
+ * Response keys kept exactly as sent whatever their value (object, array,
+ * string): a logged call payload's `request` and `response` (the bodies as
+ * the caller sent them) and its `redactions` (counts keyed by category).
+ */
+const VERBATIM_KEYS = new Set(['request', 'response', 'redactions']);
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -37,7 +44,7 @@ export function camelizeKeys<T = unknown>(value: unknown): T {
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      if (RAW_KEYS.has(k) && isPlainObject(v)) {
+      if (VERBATIM_KEYS.has(k) || (RAW_KEYS.has(k) && isPlainObject(v))) {
         out[camelKey(k)] = v;
       } else if (MAP_KEYS.has(k) && isPlainObject(v)) {
         const map: Record<string, unknown> = {};

@@ -42,6 +42,7 @@ import type {
   ListAuditParams,
   ListMcpToolsParams,
   ListSecurityEventsParams,
+  CallPayload,
   SecurityEventPage,
   SecurityEventRow,
   ListMcpUsageParams,
@@ -248,6 +249,8 @@ export class PartnerClient {
   readonly audit: AuditResource;
   /** Gateway security events stored by the collector. Needs `security-events:read`. */
   readonly securityEvents: SecurityEventsResource;
+  /** Logged request/response payloads (payload logging). Needs `logs:read`. */
+  readonly calls: CallsResource;
   /** Stored provider admin keys (write-only, masked). Needs `provider-credentials:manage`. */
   readonly providerCredentials: ProviderCredentialsResource;
   /** Provider key id to SDK `api_key_fingerprint` links. Needs `provider-credentials:manage`. */
@@ -313,6 +316,7 @@ export class PartnerClient {
     this.siem = new SiemResource(this);
     this.audit = new AuditResource(this);
     this.securityEvents = new SecurityEventsResource(this);
+    this.calls = new CallsResource(this);
     this.providerCredentials = new ProviderCredentialsResource(this);
     this.providerKeyFingerprints = new ProviderKeyFingerprintsResource(this);
     this.webhooks = new WebhooksResource(this);
@@ -909,6 +913,24 @@ export class SecurityEventsResource {
   list(params: ListSecurityEventsParams = {}): PageIterator<SecurityEventRow, SecurityEventPage> {
     const { cursor, ...rest } = params;
     return new PageIterator((next) => this.listPage({ ...rest, cursor: next }), cursor ?? undefined);
+  }
+}
+
+/**
+ * `/partner/v1/calls`: request and response payloads the collector logged
+ * when the tenant turned payload logging on (it is off by default). Needs
+ * `logs:read`. Every read, found or not, is written to the tenant's audit
+ * trail.
+ */
+export class CallsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /**
+   * One call's logged payload. Throws `NotFoundError` when nothing is
+   * stored for the call (never logged, purged or past retention).
+   */
+  get(callId: string): Promise<CallPayload> {
+    return this.client.get<CallPayload>(`/partner/v1/calls/${requireId(callId, 'callId')}`);
   }
 }
 
