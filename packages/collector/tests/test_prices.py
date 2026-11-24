@@ -66,6 +66,10 @@ def test_valid_section():
             "multiplier must be",
         ),
         ({"overrides": [RATE, {**RATE, "valid_from": "2027-01-01"}]}, "overlap"),
+        (
+            {"overrides": [{**RATE, "provider": "azure-openai"}, {**RATE, "provider": "azure_openai"}]},
+            "overlap",
+        ),
         ({"overrides": "x"}, "must be an array"),
     ],
 )
@@ -211,7 +215,7 @@ def test_cache_multipliers_match_the_gateway():
 
 def test_collector_list_prices_are_the_catalog_standard_rates():
     gateway = json.loads((ROOT / "gateway/src/middlewares/psPricingTables.json").read_text())
-    assert cost_reconciliation.list_prices() == {
+    assert {k: tuple(map(float, v)) for k, v in cost_reconciliation.list_prices().items()} == {
         k: tuple(v[:2]) for k, v in gateway["tokenPricing"].items()
     }
 
@@ -243,3 +247,52 @@ def test_month_helpers():
     assert (start.month, end.year, end.month) == (12, 2027, 1)
     with pytest.raises(ValueError):
         cost_reconciliation.parse_month("2026-13")
+
+
+# Shared with the SDK (packages/sdk/tests/test_negotiated_prices_fixture.py)
+# and the gateway (gateway/src/middlewares/policyPull/prices.test.ts).
+SHARED = json.loads((ROOT / "schemas/pricing/negotiated-vectors.v1.json").read_text())
+
+
+@pytest.mark.parametrize("case", SHARED["cases"], ids=[c["name"] for c in SHARED["cases"]])
+def test_shared_fixture_negotiated_cost(case):
+    book = prices.parse_section(SHARED["section"])
+    usage = {k: case["usage"].get(k) for k in prices._USAGE_FIELDS}
+    e = SimpleNamespace(
+        **usage,
+        served_model=case["served_model"],
+        requested_model=case["model"],
+        cost=case["list_cost"],
+        cost_source=case["list_cost_source"],
+    )
+    at = policy_doc.parse_instant(case["at"])
+    prices.reprice(book, e, case["vendor"], case["model"], at)
+    assert (e.cost, e.cost_source) == (case["cost"], case["cost_source"])
+
+
+def test_shared_fixture_section_is_valid():
+    assert policy_doc.validate_document(
+        {"schema": "ps-policy.v1", "sections": {"prices": SHARED["section"]}}, "tenant"
+    )
+
+
+def test_bedrock_profile_matches_the_base_model_override():
+    book = _book({**RATE, "provider": "bedrock", "model": "anthropic.claude-x-v1:0"})
+    e = _event(served_model="eu.anthropic.claude-x-v1:0")
+    assert prices.reprice(book, e, "bedrock", None, NOV) and e.cost == 0.01
+    # Only for bedrock.
+    other = _book({**RATE, "model": "anthropic.claude-x-v1:0"})
+    assert not prices.reprice(other, _event(served_model="eu.anthropic.claude-x-v1:0"), "openai", None, NOV)
+
+
+def test_costs_are_decimal_rounded_half_up_to_six_places():
+    # 0.0000005 exactly: binary float rounding would give 0.0 or drift.
+    book = _book({**RATE, "input_per_1k": 0.0005, "output_per_1k": 0})
+    e = _event(tokens_in=1, tokens_out=0)
+    assert prices.reprice(book, e, "openai", "gpt-4o", NOV) and e.cost == 0.000001
+    # The multiplier is applied to the stored Decimal cost.
+    from decimal import Decimal
+
+    m = _book({"provider": "openai", "model": "*", "valid_from": "2026-11-01", "multiplier": 0.3})
+    e = _event(cost=Decimal("0.000005"))
+    assert prices.reprice(m, e, "openai", "gpt-4o", NOV) and e.cost == 0.000002

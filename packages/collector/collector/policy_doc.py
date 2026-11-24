@@ -337,7 +337,8 @@ def _prices_v1(at: str, body: dict, problems: list[str]) -> None:
                 if not (_number(o[k]) and o[k] >= 0):
                     problems.append(f"{where}.{k} must be a number of at least 0")
         if ok:
-            windows.setdefault((provider, model), []).append((start, end, i))
+            # Keyed as matched: "azure-openai" and "azure_openai" are one vendor.
+            windows.setdefault((provider.replace("-", "_"), model), []).append((start, end, i))
     for (provider, model), spans in windows.items():
         spans.sort(key=lambda s: s[0])
         for (_s1, e1, i1), (s2, _e2, i2) in itertools.pairwise(spans):

@@ -433,10 +433,16 @@ async def refresh_tenant(db: AsyncSession, tenant_id: UUID) -> RefreshResult:
     return result
 
 
-async def rebuild_tenant(db: AsyncSession, tenant_id: UUID) -> RefreshResult:
-    """Recompute every rollup bucket still in raw retention; commits."""
+async def rebuild_tenant(
+    db: AsyncSession, tenant_id: UUID, *, wait: bool = False
+) -> RefreshResult:
+    """Recompute every rollup bucket still in raw retention; commits. With
+    ``wait``, waits for the tenant's rollup lock instead of skipping when
+    another run holds it (collector.prices reprice needs the rebuild)."""
     result = RefreshResult(tenant_id=str(tenant_id))
-    if not await _try_lock(db, tenant_id):
+    if wait:
+        await lock_tenant(db, tenant_id)
+    elif not await _try_lock(db, tenant_id):
         await db.rollback()
         result.skipped = True
         return result

@@ -8,6 +8,12 @@ OpenAI and Anthropic). Each (month, provider, model) becomes a
 ``cost_reconciliations`` row; a gap over the tenant's threshold
 (default 5%) is ``flagged``: the alert.
 
+What it is not: an invoice reconciliation. It compares metered usage with
+metered usage, both priced at the same rates, so it finds usage gaps
+(calls nobody reported, or reported calls the provider did not meter). It
+does not compare against the provider's invoice or cost report and cannot
+catch a provider billing a different price than the contract.
+
 Valuing
     Both sides are valued at the same prices, day by day: the tenant's
     negotiated price in force that day (collector/prices.py; per-1k rates,
@@ -23,14 +29,14 @@ Valuing
     cache discounts included), for reference.
 
     ``variance_pct`` = (estimated - provider) / provider x 100: positive
-    when the SDK and gateway reported more than the provider bills (e.g.
+    when the SDK and gateway reported more than the provider metered (e.g.
     calls through another organisation's key), negative when the provider
-    bills usage nobody reported (uninstrumented callers, a leaked key). It
+    metered usage nobody reported (uninstrumented callers, a leaked key). It
     is NULL when the provider side is 0; such a row is flagged when its
     estimated side is over the minimum.
 
 Models are matched by vendor (``openai``, ``anthropic``; other vendors,
-Azure OpenAI included, are not on these invoices) and model id without a
+Azure OpenAI included, are not in these usage pulls) and model id without a
 ``-latest``, ``-YYYY-MM-DD`` or ``-YYYYMMDD`` suffix, so ``gpt-4o`` and
 ``gpt-4o-2024-08-06`` are one row. A provider with no pulled usage in the
 month (no admin key, or the pull did not run) is reported as
@@ -65,6 +71,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -135,10 +142,11 @@ def config_for(tenant_settings: Mapping[str, Any] | None) -> ReconciliationConfi
 
 
 @lru_cache(maxsize=1)
-def list_prices() -> dict[str, tuple[float, float]]:
-    """``"<provider>/<model>"`` -> (input, output) USD per 1k tokens."""
-    data = json.loads(LIST_PRICES.read_text())
-    return {k: (float(v[0]), float(v[1])) for k, v in data["tokenPricing"].items()}
+def list_prices() -> dict[str, tuple[Decimal, Decimal]]:
+    """``"<provider>/<model>"`` -> (input, output) USD per 1k tokens, as
+    Decimal (parsed from the JSON text, so no binary float drift)."""
+    data = json.loads(LIST_PRICES.read_text(), parse_float=Decimal, parse_int=Decimal)
+    return {k: (v[0], v[1]) for k, v in data["tokenPricing"].items()}
 
 
 def model_key(model: str | None) -> str:
@@ -166,7 +174,7 @@ def previous_month(now: datetime) -> date:
 class _Side:
     tokens_in: int = 0
     tokens_out: int = 0
-    cost: float | None = None
+    cost: Decimal | None = None
     # day -> (tokens_in, tokens_out)
     days: dict[date, tuple[int, int]] = field(default_factory=dict)
 
@@ -211,7 +219,7 @@ async def _usage(db: AsyncSession, tenant_id: UUID, start: datetime, end: dateti
 
 def _rates(
     book: prices.PriceBook, provider: str, raw_models: set[str], key: str, at: datetime
-) -> tuple[float, float] | None:
+) -> tuple[Decimal, Decimal] | None:
     """(input, output) USD per 1k for the model on the day ``at``."""
     candidates = [key, *sorted(raw_models)]
     table = list_prices()
@@ -223,7 +231,7 @@ def _rates(
         return listed
     if o.multiplier is not None:
         return None if listed is None else (listed[0] * o.multiplier, listed[1] * o.multiplier)
-    return (o.input_per_1k or 0.0, o.output_per_1k or 0.0)
+    return (o.input_per_1k or Decimal(0), o.output_per_1k or Decimal(0))
 
 
 @dataclass
@@ -236,12 +244,12 @@ class TenantRun:
     skipped: str | None = None
 
 
-def _value(side: _Side, day_rates: Mapping[date, tuple[float, float]] | None) -> float:
+def _value(side: _Side, day_rates: Mapping[date, tuple[Decimal, Decimal]] | None) -> Decimal:
     if day_rates is None:
-        return float(side.tokens_in + side.tokens_out)
+        return Decimal(side.tokens_in + side.tokens_out)
     return sum(
-        (tin * day_rates[d][0] + tout * day_rates[d][1]) / 1000.0
-        for d, (tin, tout) in side.days.items()
+        ((tin * day_rates[d][0] + tout * day_rates[d][1]) / 1000 for d, (tin, tout) in side.days.items()),
+        Decimal(0),
     )
 
 
@@ -285,7 +293,7 @@ async def reconcile_month(
         prev = side.days.get(r.day, (0, 0))
         side.days[r.day] = (prev[0] + tin, prev[1] + tout)
         if r.cost is not None:
-            side.cost = (side.cost or 0.0) + float(r.cost)
+            side.cost = (side.cost or Decimal(0)) + Decimal(r.cost)
     for provider in SUPPORTED_PROVIDERS:
         run.providers[provider] = "ok" if provider in pulled else "no_provider_data"
 
@@ -293,7 +301,7 @@ async def reconcile_month(
     for (provider, model), g in sorted(groups.items()):
         if provider not in pulled:
             continue
-        day_rates: dict[date, tuple[float, float]] | None = {}
+        day_rates: dict[date, tuple[Decimal, Decimal]] | None = {}
         for d in set(g.estimated.days) | set(g.provider_side.days):
             rates = _rates(
                 book, provider, g.raw_models, model, datetime(d.year, d.month, d.day, tzinfo=UTC)
@@ -305,8 +313,8 @@ async def reconcile_month(
         basis = "tokens" if day_rates is None else "price"
         est = _value(g.estimated, day_rates)
         prov = _value(g.provider_side, day_rates)
-        variance = None if prov == 0 else (est - prov) / prov * 100.0
-        minimum = cfg.min_tokens if basis == "tokens" else cfg.min_usd
+        variance = None if prov == 0 else float((est - prov) / prov * 100)
+        minimum = Decimal(str(cfg.min_tokens if basis == "tokens" else cfg.min_usd))
         material = max(est, prov) >= minimum
         flagged = material and (variance is None or abs(variance) > cfg.threshold_pct)
         month_rows.append(

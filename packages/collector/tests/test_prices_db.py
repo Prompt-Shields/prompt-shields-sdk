@@ -10,12 +10,13 @@ Row-level security is covered in test_rls_db.py.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from collector import cost_reconciliation, prices, rls
+from collector import cost_reconciliation, prices, rls, usage_rollups
 from collector.admin_auth import ADMIN_SCOPES
 from collector.app import app
 from collector.config import settings
@@ -29,9 +30,10 @@ from db.models import (
     PolicyVersion,
     Team,
     Tenant,
+    UsageRollupDaily,
 )
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 pytestmark = pytest.mark.scoped_admin_default
@@ -197,14 +199,30 @@ async def test_reprice_stored_events_and_rebuild(seeded_db):
         await s.commit()
     await _set_prices(factory, tid, {"overrides": [
         {"provider": "anthropic", "model": "*", "valid_from": "2026-10-01", "multiplier": 0.8}]})
-    result = await prices.reprice_and_rebuild(
-        factory, tid, datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 11, 1, tzinfo=UTC))
-    assert result["events_repriced"] == 1 and result["rollups"] is not None
+    window = (datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 11, 1, tzinfo=UTC))
+    # Another rollup run holds the tenant's lock: the rebuild waits for it
+    # (a skipped rebuild would leave the rollups at the old cost).
+    async with factory() as holder:
+        await usage_rollups.lock_tenant(holder, tid)
+        task = asyncio.create_task(prices.reprice_and_rebuild(factory, tid, *window, batch=1))
+        await asyncio.sleep(1.0)
+        assert not task.done()
+        await holder.commit()
+    result = await asyncio.wait_for(task, 30)
+    assert result["events_repriced"] == 1
+    assert result["rollups"] is not None and not result["rollups"]["skipped"]
     async with factory() as s:
         rows = {e.session_id: e.cost for e in (await s.execute(select(AIUsageEvent))).scalars()}
     # Before valid_from: kept; in the window: discounted; already negotiated: kept.
     assert rows == {"old": Decimal("1.000000"), "in": Decimal("0.800000"),
                     "done": Decimal("0.500000")}
+    # Idempotent: a re-run changes nothing but still rebuilds the rollups.
+    again = await prices.reprice_and_rebuild(factory, tid, *window)
+    assert again["events_repriced"] == 0 and not again["rollups"]["skipped"]
+    async with factory() as s:
+        rollup = (await s.execute(select(func.sum(UsageRollupDaily.cost)).where(
+            UsageRollupDaily.tenant_id == tid))).scalar_one()
+    assert rollup == Decimal("2.300000")
 
 
 # ──────────────────────────────────────────────────────────────────────

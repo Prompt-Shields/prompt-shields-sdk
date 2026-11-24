@@ -9,11 +9,20 @@ import {
   parsePricesSection,
 } from './prices';
 import {
+  centralPriceBook,
   parsePolicyBundle,
   PolicyBundleError,
   setCentralPolicy,
 } from './state';
+import { startPolicyPull } from './puller';
 import { withCost } from '../ps-telemetry';
+import {
+  costFields,
+  pricingCandidates,
+  withBedrockBaseModels,
+} from '../psPricing';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const RATE = {
   provider: 'openai',
@@ -258,5 +267,87 @@ describe('withCost', () => {
     const out = withCost({ ...event }, 'gpt-4o-2024-08-06');
     expect(out.cost).toBe(0.01);
     expect(out.cost_source).toBe('negotiated');
+  });
+});
+
+// Shared with the SDK (packages/sdk/tests/test_negotiated_prices_fixture.py)
+// and the collector (packages/collector/tests/test_prices.py): the same call
+// gets the same list price and the same negotiated cost everywhere.
+describe('shared negotiated-price fixture', () => {
+  const shared = JSON.parse(
+    fs.readFileSync(
+      path.resolve(
+        __dirname,
+        '../../../../schemas/pricing/negotiated-vectors.v1.json'
+      ),
+      'utf8'
+    )
+  );
+  const book = parsePricesSection(shared.section);
+  const cases: Array<[string, any]> = shared.cases.map((c: any) => [c.name, c]);
+  test.each(cases)('%s', (_name: string, c: any) => {
+    const model = c.model ?? undefined;
+    const served = c.served_model ?? undefined;
+    const list = costFields(c.vendor, model, served, c.usage);
+    // The SDK strips Bedrock profile prefixes before pricing; the gateway
+    // prices the profile at its base model, so only compare known list prices.
+    if (c.list_cost !== null) {
+      expect(list.cost).toBe(c.list_cost);
+      expect(list.cost_source).toBe(c.list_cost_source);
+    }
+    const negotiated = negotiatedCost(
+      book,
+      c.vendor,
+      withBedrockBaseModels(c.vendor, pricingCandidates(model, served)),
+      c.usage,
+      list.cost,
+      list.cost_source,
+      Date.parse(c.at)
+    );
+    if (c.cost_source === 'negotiated') {
+      expect(negotiated).toBe(c.cost);
+    } else {
+      expect(negotiated).toBeNull();
+    }
+  });
+});
+
+describe('a malformed prices section from the puller', () => {
+  test('refuses the whole bundle and keeps the last good one', async () => {
+    const good = bundle({ version: 1, overrides: [RATE] });
+    const bad = {
+      ...bundle({ version: 1, overrides: [{ ...RATE, multiplier: -1 }] }),
+    };
+    const responses = [
+      new Response(JSON.stringify(good), {
+        status: 200,
+        headers: { etag: '"v1"' },
+      }),
+      new Response(JSON.stringify(bad), {
+        status: 200,
+        headers: { etag: '"v2"' },
+      }),
+    ];
+    const fetch = jest.fn(async () => responses.shift()!);
+    const log = { log: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const puller = await startPolicyPull(
+      {
+        url: 'https://collector.example.com/api/v1/policy/effective',
+        apiKey: 'ps-ik-policy',
+        intervalMs: 3_600_000,
+      },
+      { fetch: fetch as any, log }
+    );
+    try {
+      const first = centralPriceBook();
+      expect(first?.overrides).toHaveLength(1);
+      expect(await puller.pull()).toBe('rejected');
+      expect(centralPriceBook()).toBe(first);
+      expect(log.error.mock.calls[0][0]).toContain(
+        'keeping the last good central policy'
+      );
+    } finally {
+      puller.stop();
+    }
   });
 });

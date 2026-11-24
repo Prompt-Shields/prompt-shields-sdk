@@ -63,7 +63,17 @@ History: overrides apply going forward, at ingest. Events already stored
 keep the cost they were stored with; a contract signed retroactively is
 applied by `reprice_stored` (``python -m collector.prices reprice``), which
 re-prices the stored list-priced raw events in a window and then rebuilds
-the tenant's rollups (buckets still in raw retention only).
+the tenant's rollups (buckets still in raw retention only). It runs under
+the tenant's RLS context, commits every batch under the tenant's rollup
+lock (usage_rollups.lock_tenant, so no rollup run reads a half-repriced
+batch), and waits for that lock to rebuild. Re-running it is safe: events
+already ``negotiated`` are never re-priced, and the rollups are rebuilt on
+every run that has prices (so a run interrupted before its rebuild is
+completed by the next one).
+
+Arithmetic is Decimal, rounded half-up to 6 places (the ``cost`` column's
+scale); the result is handed back as the float of that exact 6-place value,
+like the SDK's and gateway's catalog costs.
 """
 
 from __future__ import annotations
@@ -75,6 +85,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from uuid import UUID
 
@@ -100,6 +111,19 @@ SERVICE_TIER_MULTIPLIER = {
     "google": {"batch": 0.5},
 }
 _DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+# Bedrock cross-region inference profile prefix (`us.anthropic.claude-...`),
+# as psPricing.ts BEDROCK_PROFILE_PREFIX: a profile matches its base model.
+_BEDROCK_PROFILE_PREFIX = re.compile(r"^(?:us|us-gov|eu|apac|au|ca|jp|in|global)\.(?=[a-z0-9-]+\.)")
+_SIX = Decimal("0.000001")
+
+
+def _d(x: float | int | Decimal | None) -> Decimal:
+    """Decimal of a JSON number as written (str(), not the binary float)."""
+    return x if isinstance(x, Decimal) else Decimal(str(x or 0))
+
+
+def _r6(x: Decimal) -> float:
+    return float(x.quantize(_SIX, rounding=ROUND_HALF_UP))
 
 
 def normalize_provider(value: str | None) -> str:
@@ -112,12 +136,12 @@ class Override:
     model: str
     valid_from: datetime
     valid_to: datetime | None
-    multiplier: float | None = None
+    multiplier: Decimal | None = None
     # USD per 1k tokens (already converted from the section's currency).
-    input_per_1k: float | None = None
-    output_per_1k: float | None = None
-    cached_input_per_1k: float | None = None
-    cache_write_per_1k: float | None = None
+    input_per_1k: Decimal | None = None
+    output_per_1k: Decimal | None = None
+    cached_input_per_1k: Decimal | None = None
+    cache_write_per_1k: Decimal | None = None
 
     def active_at(self, at: datetime) -> bool:
         return self.valid_from <= at and (self.valid_to is None or at < self.valid_to)
@@ -150,13 +174,13 @@ def parse_section(section: Mapping[str, Any] | None) -> PriceBook:
     """A PriceBook from a validated ``prices`` v1 section (empty if None)."""
     if not section:
         return PriceBook()
-    fx = float(section.get("usd_per_unit", 1) or 1)
+    fx = _d(section.get("usd_per_unit", 1) or 1)
     out = []
     for o in section.get("overrides") or []:
 
-        def rate(key: str, o=o) -> float | None:
+        def rate(key: str, o=o) -> Decimal | None:
             v = o.get(key)
-            return None if v is None else float(v) * fx
+            return None if v is None else _d(v) * fx
 
         out.append(
             Override(
@@ -164,7 +188,7 @@ def parse_section(section: Mapping[str, Any] | None) -> PriceBook:
                 model=o["model"],
                 valid_from=policy_doc.parse_instant(o["valid_from"]),
                 valid_to=policy_doc.parse_instant(o["valid_to"]) if o.get("valid_to") else None,
-                multiplier=float(o["multiplier"]) if "multiplier" in o else None,
+                multiplier=_d(o["multiplier"]) if "multiplier" in o else None,
                 input_per_1k=rate("input_per_1k"),
                 output_per_1k=rate("output_per_1k"),
                 cached_input_per_1k=rate("cached_input_per_1k"),
@@ -192,9 +216,11 @@ async def load_price_book(db: AsyncSession, tenant_id: UUID) -> PriceBook:
     return parse_section(((document or {}).get("sections") or {}).get(SECTION))
 
 
-def pricing_candidates(*models: str | None) -> list[str]:
+def pricing_candidates(*models: str | None, vendor: str | None = None) -> list[str]:
     """Model ids to match, best first: each given id, the first one also
-    without an OpenAI-style date suffix (``gpt-4o-2024-08-06`` -> ``gpt-4o``)."""
+    without an OpenAI-style date suffix (``gpt-4o-2024-08-06`` -> ``gpt-4o``);
+    for ``bedrock``, then each without its cross-region profile prefix
+    (psPricing.ts pricingCandidates + withBedrockBaseModels)."""
     out: list[str] = []
     for i, m in enumerate(models):
         if not m:
@@ -202,11 +228,12 @@ def pricing_candidates(*models: str | None) -> list[str]:
         for name in (m, _DATE_SUFFIX.sub("", m)) if i == 0 else (m,):
             if name not in out:
                 out.append(name)
+    if normalize_provider(vendor) == "bedrock":
+        for c in list(out):
+            base = _BEDROCK_PROFILE_PREFIX.sub("", c)
+            if base != c and base not in out:
+                out.append(base)
     return out
-
-
-def _r6(x: float) -> float:
-    return round(x, 6)
 
 
 def token_cost(o: Override, vendor: str, usage: Mapping[str, Any]) -> float | None:
@@ -216,24 +243,24 @@ def token_cost(o: Override, vendor: str, usage: Mapping[str, Any]) -> float | No
     if tokens_in is None or tokens_out is None or usage.get("usage_unit_type"):
         return None
     tier = usage.get("service_tier")
-    scale = 1.0
+    scale = Decimal(1)
     if tier is not None and tier not in STANDARD_SERVICE_TIERS:
         found = SERVICE_TIER_MULTIPLIER.get(vendor, {}).get(tier)
         if found is None:
             return None
-        scale = found
-    in_rate, out_rate = o.input_per_1k or 0.0, o.output_per_1k or 0.0
+        scale = _d(found)
+    in_rate, out_rate = _d(o.input_per_1k), _d(o.output_per_1k)
     cached_rate = (
         o.cached_input_per_1k
         if o.cached_input_per_1k is not None
-        else in_rate * CACHE_READ_MULTIPLIER.get(vendor, 1.0)
+        else in_rate * _d(CACHE_READ_MULTIPLIER.get(vendor, 1.0))
     )
-    write_mult = CACHE_WRITE_MULTIPLIER.get(vendor, 1.0)
+    write_mult = _d(CACHE_WRITE_MULTIPLIER.get(vendor, 1.0))
     write_rate = o.cache_write_per_1k if o.cache_write_per_1k is not None else in_rate * write_mult
     write_1h_rate = (
         o.cache_write_per_1k
         if o.cache_write_per_1k is not None
-        else in_rate * CACHE_WRITE_1H_MULTIPLIER.get(vendor, write_mult)
+        else in_rate * _d(CACHE_WRITE_1H_MULTIPLIER.get(vendor, write_mult))
     )
     cached = usage.get("tokens_cached") or 0
     write = usage.get("tokens_cache_write") or 0
@@ -245,7 +272,7 @@ def token_cost(o: Override, vendor: str, usage: Mapping[str, Any]) -> float | No
         + (write - write_1h) * write_rate
         + write_1h * write_1h_rate
         + tokens_out * out_rate
-    ) / 1000.0
+    ) / 1000
     return _r6(cost * scale)
 
 
@@ -254,7 +281,7 @@ def negotiated_cost(
     vendor: str | None,
     models: Iterable[str | None],
     usage: Mapping[str, Any],
-    cost: float | None,
+    cost: float | Decimal | None,
     cost_source: str | None,
     at: datetime,
 ) -> float | None:
@@ -271,7 +298,7 @@ def negotiated_cost(
     if o is None:
         return None
     if o.multiplier is not None:
-        return _r6(float(cost) * o.multiplier) if list_priced else None
+        return _r6(_d(cost) * o.multiplier) if list_priced else None
     return token_cost(o, normalize_provider(vendor), usage)
 
 
@@ -294,7 +321,10 @@ def reprice(
     True if it did."""
     usage = {k: getattr(event, k, None) for k in _USAGE_FIELDS}
     models = pricing_candidates(
-        getattr(event, "served_model", None), getattr(event, "requested_model", None), asset_model
+        getattr(event, "served_model", None),
+        getattr(event, "requested_model", None),
+        asset_model,
+        vendor=vendor,
     )
     cost = event.cost
     new = negotiated_cost(
@@ -302,7 +332,7 @@ def reprice(
         vendor,
         models,
         usage,
-        None if cost is None else float(cost),
+        cost,
         event.cost_source,
         at,
     )
@@ -319,25 +349,34 @@ def reprice(
 
 
 async def reprice_stored(
-    db: AsyncSession, tenant_id: UUID, start: datetime, end: datetime, *, batch: int = 5000
+    db: AsyncSession, tenant_id: UUID, start: datetime, end: datetime, *, batch: int = 1000
 ) -> int:
     """Re-price the tenant's stored list-priced (or unpriced) events with
     ``start <= timestamp < end`` at the negotiated prices of its active
-    policy. Does not commit. Events already ``negotiated`` keep their cost
-    (their list price is not stored, so it cannot be re-discounted).
-    Returns the number of events changed."""
+    policy. Works in batches of ``batch`` events by id, each committed in
+    its own transaction under the tenant's rollup lock (a rollup run never
+    reads a half-repriced batch; no long transaction). Events already
+    ``negotiated`` keep their cost (their list price is not stored, so it
+    cannot be re-discounted), which also makes a re-run, or a run resumed
+    after a failure, change nothing twice. The session must be scoped to
+    the tenant (rls.set_tenant). Returns the number of events changed."""
+    from collector import usage_rollups
+
     book = await load_price_book(db, tenant_id)
+    await db.rollback()
     if not book:
         return 0
     providers = {o.provider for o in book.overrides}
     changed = 0
     last_id = None
     while True:
+        await usage_rollups.lock_tenant(db, tenant_id)
         stmt = (
             select(AIUsageEvent, AIAsset.vendor, AIAsset.model)
             .join(AIAsset, AIAsset.id == AIUsageEvent.asset_id)
             .where(
                 AIUsageEvent.tenant_id == tenant_id,
+                AIAsset.tenant_id == tenant_id,
                 AIUsageEvent.timestamp >= start,
                 AIUsageEvent.timestamp < end,
                 or_(
@@ -352,6 +391,7 @@ async def reprice_stored(
             stmt = stmt.where(AIUsageEvent.id > last_id)
         rows = (await db.execute(stmt)).all()
         if not rows:
+            await db.commit()
             return changed
         for event, vendor, model in rows:
             last_id = event.id
@@ -362,25 +402,34 @@ async def reprice_stored(
                 ts = ts.replace(tzinfo=UTC)
             if reprice(book, event, vendor, model, ts):
                 changed += 1
-        await db.flush()
+        # Releases the rollup lock; the next batch takes it again.
+        await db.commit()
+        if len(rows) < batch:
+            return changed
 
 
 async def reprice_and_rebuild(
-    session_factory, tenant: UUID, start: datetime, end: datetime
+    session_factory, tenant: UUID, start: datetime, end: datetime, *, batch: int = 1000
 ) -> dict:
-    """`reprice_stored`, committed, then a rollup rebuild when anything
-    changed (rollups only follow new ingest on their own)."""
+    """`reprice_stored`, then a rollup rebuild that waits for the tenant's
+    rollup lock (rollups only follow new ingest on their own, so a skipped
+    rebuild would leave them stale). The rebuild runs whenever the tenant
+    has prices, even when nothing changed this time, so a run interrupted
+    after re-pricing is completed by the next one."""
     from collector import rls, usage_rollups
 
     async with session_factory() as db:
         await rls.set_tenant(db, tenant)
-        changed = await reprice_stored(db, tenant, start, end)
-        await db.commit()
-    rebuilt = None
-    if changed:
-        async with session_factory() as db:
-            await rls.set_tenant(db, tenant)
-            rebuilt = asdict(await usage_rollups.rebuild_tenant(db, tenant))
+        has_prices = bool(await load_price_book(db, tenant))
+        await db.rollback()
+    if not has_prices:
+        return {"tenant_id": str(tenant), "events_repriced": 0, "rollups": None}
+    async with session_factory() as db:
+        await rls.set_tenant(db, tenant)
+        changed = await reprice_stored(db, tenant, start, end, batch=batch)
+    async with session_factory() as db:
+        await rls.set_tenant(db, tenant)
+        rebuilt = asdict(await usage_rollups.rebuild_tenant(db, tenant, wait=True))
     return {"tenant_id": str(tenant), "events_repriced": changed, "rollups": rebuilt}
 
 

@@ -1,6 +1,6 @@
 ---
 title: Negotiated Prices and Cost Reconciliation
-description: Per-tenant contract prices applied by the gateway and collector, and a monthly check of reported usage against the provider's own usage reports
+description: Per-tenant contract prices applied by the gateway and collector, and a monthly check of reported usage against the provider's own usage reports (not invoices)
 ---
 
 # Negotiated Prices and Cost Reconciliation
@@ -9,8 +9,9 @@ By default every cost Prompt Shields reports is a **list price** from the model
 catalog. If you have a contract with a provider (a discount, or your own
 per-token rates), put it in the `prices` section of your tenant's
 [central policy](/guides/central-policy). The gateway and the collector then
-report your negotiated cost, and a monthly reconciliation compares what the
-SDK and gateway reported with what the provider says you used.
+report your negotiated cost, and a monthly reconciliation compares the usage
+the SDK and gateway reported with the usage the provider metered (a usage
+check, not an invoice check: see [below](#monthly-reconciliation)).
 
 ## The `prices` section
 
@@ -49,6 +50,13 @@ with it is refused with 422): a contract belongs to the tenant.
 
 Give either `multiplier` or rates, not both.
 
+A `prices` section that is invalid is refused when the policy version is
+saved (422 listing every problem). A gateway that nevertheless receives a
+malformed one (an older collector, a bundle edited in transit) refuses the
+**whole** bundle, as for every other section: it keeps the last good central
+policy (route, access and prices alike) and logs the refusal once; it never
+applies the other sections without `prices`.
+
 ## Where it applies
 
 - **Gateway**: with the [policy pull](/guides/central-policy) on, telemetry
@@ -76,8 +84,15 @@ python -m collector.prices reprice --tenant <uuid> --since 2026-10-01 [--until 2
 
 It re-prices list-priced (or unpriced) raw events in the window that an
 override covers, then rebuilds the tenant's rollups for the buckets still in
-raw retention. Events already `negotiated` are not re-priced, and events
-already purged from raw retention cannot be.
+raw retention. It only touches that tenant's rows (it runs under the
+tenant's row-level security context). Events are re-priced in batches of
+1,000, each committed on its own under the tenant's rollup lock, so no long
+transaction is held and no rollup run sees a half-repriced batch; the
+rebuild then waits for that lock rather than skipping. It is safe to re-run:
+events already `negotiated` are never re-priced (so a contract changed
+after a re-price does not re-discount them), and every run rebuilds the
+rollups, so a run interrupted before its rebuild is completed by the next.
+Events already purged from raw retention cannot be re-priced.
 
 ## Monthly reconciliation
 
@@ -92,6 +107,14 @@ or `POST /partner/v1/cost-reconciliations/run` with `{"month": "2026-10"}`
 (scope `usage:reconcile`; the `billing` role has it). Results are listed by
 `GET /partner/v1/cost-reconciliations` (`usage:read`).
 
+**This is a usage reconciliation, not an invoice reconciliation.** It
+compares metered usage with metered usage: the tokens the SDK and gateway
+reported against the tokens the provider's usage API reports, both priced at
+the same rates. It finds **usage gaps** (calls nobody reported, or reported
+calls the provider did not meter). It does not read the provider's invoice
+or cost report, so it cannot catch the provider charging a different price
+than your contract; check the invoice for that.
+
 For each provider (OpenAI, Anthropic) and model, it compares the tokens the
 SDK and gateway reported with the provider's usage report, both valued at the
 **same** prices day by day: your negotiated price that day, else the catalog
@@ -99,9 +122,9 @@ list price; standard input and output rates on both sides, because the
 provider report folds cache tokens into input. A model with no price is
 compared in tokens. `variance_pct` is (reported - provider) / provider x 100:
 
-- positive: you reported more than the provider bills (calls through a key of
-  another organisation, or duplicate telemetry);
-- negative: the provider bills usage nobody reported (an uninstrumented
+- positive: you reported more usage than the provider metered (calls through
+  a key of another organisation, or duplicate telemetry);
+- negative: the provider metered usage nobody reported (an uninstrumented
   caller, a leaked key).
 
 A row whose gap is over the threshold is `flagged` (the alert), and logged as
@@ -114,7 +137,7 @@ the month leaves raw retention.
 
 ## Not done yet
 
-- Reconciliation against provider **cost** (invoice) reports rather than
-  usage reports, and a `cost.reconciliation_gap` webhook event.
+- Reconciliation against provider **cost** (invoice) reports, which would
+  catch price differences, and a `cost.reconciliation_gap` webhook event.
 - Storing the list price next to the negotiated cost (FOCUS `ListCost`).
 - Budget pre-checks in the gateway still estimate at list price.
