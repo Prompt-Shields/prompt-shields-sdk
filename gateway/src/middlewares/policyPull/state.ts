@@ -17,14 +17,19 @@
  *   - `route` v1: the router's route policy; replaces PS_ROUTE_POLICY_FILE.
  *   - `access` v1: the OIDC group policy; replaces PS_OIDC_POLICY (needs
  *     PS_OIDC_ENABLED).
+ *   - `rate_limits` v1 (#344): request and token rate limits; replaces
+ *     PS_RATE_LIMITS / PS_RATE_LIMITS_FILE (../psRateLimit).
  * A section the central policy does not have falls back to the local
  * setting. Team and project entries are validated (so a bad one never
- * becomes active later) but not applied yet: the gateway does not know a
- * caller's team.
+ * becomes active later). Only their `rate_limits` sections are applied, to
+ * calls that name the team or project in X-PS-Team / X-PS-Project, and only
+ * on top of the tenant's (a header can add limits, never remove one): the
+ * gateway does not otherwise know a caller's team.
  */
 import { parsePolicy, OidcPolicy } from '../psOidc/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
 import { RoutePolicy } from '../router/types';
+import { parseRateLimitSection, RateLimitConfig } from '../psRateLimit/config';
 
 export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 
@@ -32,6 +37,7 @@ export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
+  rate_limits: [1],
 };
 
 export class PolicyBundleError extends Error {
@@ -41,6 +47,23 @@ export class PolicyBundleError extends Error {
   }
 }
 
+/** A `rate_limits` section with its canonical JSON (to tell inherited ones apart). */
+export interface RateLimitLayer {
+  config: RateLimitConfig;
+  canon: string;
+}
+
+export interface CentralRateLimits {
+  tenant?: RateLimitLayer;
+  /** Team id -> its name and effective `rate_limits` section. */
+  teams: Record<string, { name?: string; layer?: RateLimitLayer }>;
+  /** Project id -> its name, team and effective `rate_limits` section. */
+  projects: Record<
+    string,
+    { name?: string; teamId?: string; layer?: RateLimitLayer }
+  >;
+}
+
 export interface CentralPolicy {
   /** The tenant-wide effective policy's version (`default@3`), if any. */
   version?: string;
@@ -48,6 +71,8 @@ export interface CentralPolicy {
   etag?: string;
   route?: RoutePolicy;
   access?: OidcPolicy;
+  /** `rate_limits` of the tenant, its teams and projects. */
+  rateLimits?: CentralRateLimits;
   /** Sections present but not enforced by this gateway. */
   ignored: string[];
   teams: number;
@@ -60,7 +85,19 @@ const isObject = (v: unknown): v is Record<string, any> =>
 interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
+  rateLimits?: RateLimitLayer;
   ignored: string[];
+}
+
+/** Key-sorted JSON, so equal sections compare equal. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (isObject(v))
+    return `{${Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`)
+      .join(',')}}`;
+  return JSON.stringify(v);
 }
 
 function parseEffective(at: string, raw: unknown): ParsedSections {
@@ -91,6 +128,11 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
       } else if (name === 'access') {
         const { version: _v, ...rest } = body;
         out.access = parsePolicy(rest);
+      } else if (name === 'rate_limits') {
+        out.rateLimits = {
+          config: parseRateLimitSection(body),
+          canon: canonical(body),
+        };
       }
     } catch (err) {
       throw new PolicyBundleError(`${where}: ${(err as Error).message}`);
@@ -106,6 +148,12 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
   const tenant = parseEffective('$.tenant', raw.tenant);
   let teams = 0;
   let projects = 0;
+  const rateLimits: CentralRateLimits = {
+    ...(tenant.rateLimits ? { tenant: tenant.rateLimits } : {}),
+    teams: {},
+    projects: {},
+  };
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
   for (const [key, label] of [
     ['teams', 'team'],
     ['projects', 'project'],
@@ -114,9 +162,19 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     if (!isObject(entries))
       throw new PolicyBundleError(`$.${key} must be an object`);
     for (const [id, eff] of Object.entries(entries)) {
-      parseEffective(`$.${key}.${id}`, eff);
-      if (label === 'team') teams++;
-      else projects++;
+      const parsed = parseEffective(`$.${key}.${id}`, eff);
+      const layer = parsed.rateLimits ? { layer: parsed.rateLimits } : {};
+      if (label === 'team') {
+        teams++;
+        rateLimits.teams[id] = { name: str((eff as any).name), ...layer };
+      } else {
+        projects++;
+        rateLimits.projects[id] = {
+          name: str((eff as any).name),
+          teamId: str((eff as any).team_id),
+          ...layer,
+        };
+      }
     }
   }
   return {
@@ -124,6 +182,7 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     etag,
     route: tenant.route,
     access: tenant.access,
+    rateLimits,
     ignored: tenant.ignored,
     teams,
     projects,
@@ -160,4 +219,14 @@ export function activeRoutePolicy(): RoutePolicy | undefined {
  */
 export function activePolicyVersion(): string | undefined {
   return active?.version ?? loadedRoutePolicy()?.policyVersion;
+}
+
+/** The central `rate_limits` sections, if the active policy has any. */
+export function centralRateLimits(): CentralRateLimits | undefined {
+  const rl = active?.rateLimits;
+  if (!rl) return undefined;
+  if (rl.tenant) return rl;
+  for (const t of Object.values(rl.teams)) if (t.layer) return rl;
+  for (const p of Object.values(rl.projects)) if (p.layer) return rl;
+  return undefined;
 }

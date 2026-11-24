@@ -30,4 +30,6 @@ export const integrationTests = [
   '/plugins/promptsecurity/promptsecurity\\.test\\.ts$',
   // Budget store against a real Redis (PS_TEST_REDIS_URL).
   '/src/middlewares/psBudget/psBudget\\.redis\\.test\\.ts$',
+  // Rate-limit store against a real Redis (PS_TEST_REDIS_URL).
+  '/src/middlewares/psRateLimit/psRateLimit\\.redis\\.test\\.ts$',
 ];

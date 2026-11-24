@@ -76,7 +76,8 @@ spec:
             {{- end }}
           {{- $tokenEnv := include "ps.metricsTokenEnv" (dict "ctx" $ "component" "gateway") }}
           {{- $redisSecret := and $g.budgets.enabled $g.budgets.redis.existingSecret }}
-          {{- if or $tokenEnv $g.extraEnv $redisSecret }}
+          {{- $rlRedisSecret := and $g.rateLimits.enabled $g.rateLimits.redis.existingSecret }}
+          {{- if or $tokenEnv $g.extraEnv $redisSecret $rlRedisSecret }}
           env:
             {{- with $tokenEnv }}
             {{- . | nindent 12 }}
@@ -87,6 +88,13 @@ spec:
                 secretKeyRef:
                   name: {{ required "gateway.budgets.redis.existingSecret.name is required" $redisSecret.name }}
                   key: {{ required "gateway.budgets.redis.existingSecret.key is required" $redisSecret.key }}
+            {{- end }}
+            {{- if $rlRedisSecret }}
+            - name: PS_RATELIMIT_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "gateway.rateLimits.redis.existingSecret.name is required" $rlRedisSecret.name }}
+                  key: {{ required "gateway.rateLimits.redis.existingSecret.key is required" $rlRedisSecret.key }}
             {{- end }}
             {{- with $g.extraEnv }}
             {{- toYaml . | nindent 12 }}

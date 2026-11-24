@@ -22,6 +22,7 @@ import { createDrain, shutdownTimeoutMs } from './psShutdown';
 import { loadMcpServersFromEnv } from './mcp/loadConfig';
 import { loadBaselineFromEnv } from './middlewares/router/baselineLoader';
 import { loadBudgetsFromEnv } from './middlewares/psBudget/loader';
+import { loadRateLimitsFromEnv } from './middlewares/psRateLimit/loader';
 import { loadRoutePolicyFromEnv } from './middlewares/router/policyFileLoader';
 import {
   policyPullConfig,
@@ -65,6 +66,22 @@ try {
     );
 } catch (err) {
   console.error(`Budget configuration error: ${(err as Error).message}`);
+  process.exit(1);
+}
+// PS fork (#344): local rate limits (PS_RATE_LIMITS / PS_RATE_LIMITS_FILE)
+// and the shared Redis store. An invalid document stops the gateway rather
+// than serving without the limits the operator set.
+try {
+  const rateLimits = await loadRateLimitsFromEnv();
+  if (rateLimits.config)
+    console.log(
+      `Rate limits: ${rateLimits.config.rules.length} rule(s), ` +
+        (rateLimits.store === 'redis'
+          ? 'shared through Redis'
+          : 'counted per replica (no PS_RATELIMIT_REDIS_URL or REDIS_CONNECTION_STRING)')
+    );
+} catch (err) {
+  console.error(`Rate limit configuration error: ${(err as Error).message}`);
   process.exit(1);
 }
 // PS fork (#336): the route policy file. An invalid file stops the gateway
