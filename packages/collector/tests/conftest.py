@@ -22,6 +22,7 @@ def _reset_auth_cache():
 
     auth_cache.get_key_cache().clear()
     auth_cache.get_failed_auth_limiter().reset()
+    auth_cache.get_sso_login_limiter().reset()
     yield
 
 
