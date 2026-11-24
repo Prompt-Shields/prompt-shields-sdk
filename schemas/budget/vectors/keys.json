@@ -1,5 +1,5 @@
 {
-  "description": "Counter keys and TTLs every BudgetStore implementation must produce (SDK and gateway), per schemas/budget/README.md. 'now' is the call time in UTC; 'subject' is the attribute value ('_' for a global budget).",
+  "description": "Counter keys and TTLs every BudgetStore implementation must produce (SDK and gateway), per schemas/budget/README.md. 'now' is the call time in UTC; 'subject' is the attribute value ('_' for a global budget); 'unit' is usd when absent.",
   "vectors": [
     {
       "id": "day-use-case",
@@ -31,6 +31,17 @@
       "id": "global-february",
       "input": { "namespace": "acme", "scope": "global", "subject": "_", "window": "month", "now": "2026-02-14T12:00:00Z" },
       "expected": { "key": "ps:budget:v1:acme:global:_:month:2026-02", "ttl_seconds": 1339200 }
+    },
+    {
+      "id": "team-scope",
+      "input": { "namespace": "acme", "scope": "team", "subject": "Data Science", "window": "day", "now": "2026-11-06T13:45:30Z" },
+      "expected": { "key": "ps:budget:v1:acme:team:Data%20Science:day:2026-11-06", "ttl_seconds": 123270 }
+    },
+    {
+      "id": "token-counter-suffix",
+      "description": "A token budget (limit_tokens) counts tokens under the USD key with ':tokens' appended.",
+      "input": { "namespace": "acme", "scope": "project", "subject": "chatbot", "window": "month", "unit": "tokens", "now": "2026-02-14T12:00:00Z" },
+      "expected": { "key": "ps:budget:v1:acme:project:chatbot:month:2026-02:tokens", "ttl_seconds": 1339200 }
     }
   ]
 }

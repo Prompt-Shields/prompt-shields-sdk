@@ -18,7 +18,7 @@ export const cacheResponsesTotal = defaultRegistry.register(
 export const cacheWritesTotal = defaultRegistry.register(
   new Counter(
     'ps_gateway_cache_writes_total',
-    'Cache write-backs by mode (simple, semantic) and outcome: stored, or skipped as refusal, incomplete, too_large or error.',
+    'Cache write-backs by mode (simple, semantic) and outcome: stored, or skipped as refusal, incomplete, too_large, guardrail_denied or error.',
     ['mode', 'outcome']
   )
 );

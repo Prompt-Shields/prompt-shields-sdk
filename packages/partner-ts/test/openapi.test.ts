@@ -383,6 +383,12 @@ const SCHEMAS: Record<string, string> = {
   SecurityEventRow: 'SecurityEventRow',
   SecurityEventPageMeta: 'SecurityEventPageMeta',
   SecurityEventPage: 'SecurityEventPage',
+  // Agent traces (client.traces).
+  TraceSpan: 'TraceSpan',
+  TraceSummary: 'TraceSummary',
+  Trace: 'Trace',
+  TracePageMeta: 'TracePageMeta',
+  TracePage: 'TracePage',
 };
 /**
  * Schemas whose property names the SDK keeps as sent (not camelCased):
@@ -690,6 +696,9 @@ const OPERATIONS: Record<string, Operation> = {
     methods: ['securityEvents.list', 'securityEvents.listPage'],
     params: 'ListSecurityEventsParams',
   },
+  // Agent traces (#385): client.traces.
+  'GET /partner/v1/traces': { methods: ['traces.list', 'traces.listPage'], params: 'ListTracesParams' },
+  'GET /partner/v1/traces/{trace_id}': { methods: ['traces.get'] },
   'POST /ingest/security-events': NOT_WRAPPED,
   'POST /ingest/otel/v1/logs': NOT_WRAPPED,
   'POST /ingest/otel/v1/traces': NOT_WRAPPED,

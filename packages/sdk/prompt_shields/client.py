@@ -19,9 +19,12 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from prompt_shields import tracing
 from prompt_shields.budgets import (
     BudgetStore,
+    budget_attributes,
     budget_event_hook,
+    estimate_call,
     make_enforcer,
     plain_client_model,
     warn_unapplied_downgrade,
@@ -144,6 +147,11 @@ class ShieldsClient:
         # the SDK detects with placeholders before each call and restore the
         # answer (prompt_shields.pseudonymise). Not for calls to the gateway.
         pseudonymise: bool = False,
+        # OpenTelemetry (#385, `opentelemetry` extra): each call is a
+        # `chat {model}` span. Its traceparent is sent with the request when
+        # base_url is an internal host (a gateway in the same network); True
+        # sends it to any base_url, False never (prompt_shields.tracing).
+        propagate_trace: bool | None = None,
         **provider_kwargs,
     ):
         self._vendor = vendor
@@ -188,6 +196,9 @@ class ShieldsClient:
 
         # Lazy provider client construction — only import what we need
         self._upstream = self._make_upstream(api_key, **provider_kwargs)
+        self._propagate_trace = tracing.propagates_to(
+            getattr(self._upstream, "base_url", None), propagate_trace
+        )
         self.chat = _ChatNamespace(self)
 
     # --- provider construction --------------------------------------------
@@ -437,13 +448,21 @@ class _CompletionsNamespace:
         # is sent; the cost is recorded from the telemetry event.
         budgets = self._parent._budgets
         if budgets is not None:
-            attrs = {k: self._parent._metadata.get(k)
-                     for k in ("business_unit", "use_case", "owner")}
+            attrs = budget_attributes(self._parent._metadata, ps_metadata, model)
             check = budgets.check(attrs)
             budgets.raise_if_blocked(check)
             model, requested, budget_action = plain_client_model(
                 check, model, self._parent._allow_budget_downgrade
             )
+            # Hold the pre-call estimate (an atomic check for block
+            # budgets); the event hook settles it with the actual usage.
+            est_cost, est_tokens = estimate_call(
+                self._parent._vendor, model, messages,
+                max_tokens if max_tokens is not None
+                else kwargs.get("max_completion_tokens"),
+            )
+            check = budgets.reserve(check, est_cost, est_tokens)
+            budgets.raise_if_blocked(check)
             _event_hook = budget_event_hook(
                 _event_hook, budgets, check, budget_action, requested
             )
@@ -454,14 +473,31 @@ class _CompletionsNamespace:
             self._parent._metadata.get("use_case"),
         )
 
+        # OpenTelemetry chat span (#385): current while the provider call
+        # runs; its traceparent goes to a gateway.
+        span = tracing.start_chat_span(
+            self._parent._vendor, model,
+            session_id=(ps_metadata or {}).get("session_id"),
+        )
+        if span is not None and self._parent._propagate_trace:
+            trace_headers = span.inject({})
+            if trace_headers:
+                kwargs["extra_headers"] = {**(kwargs.get("extra_headers") or {}),
+                                           **trace_headers}
+
         start = time.monotonic()
         # This client emits its own event; keep instrument() from adding one.
-        with suppress_instrumentation():
+        with suppress_instrumentation(), tracing.activate(span, http=False):
             try:
                 response = self._call_upstream(model=model, messages=messages,
                                                 max_tokens=max_tokens, **kwargs)
-            except Exception:
+            except Exception as exc:
                 record_failure(model, messages, (ps_metadata or {}).get("session_id"))
+                if budgets is not None:
+                    budgets.release(check)
+                if span is not None:
+                    span.fail(exc)
+                    span.finish()
                 raise
 
         if streaming:
@@ -469,7 +505,7 @@ class _CompletionsNamespace:
                 response, model=model, messages=messages,
                 ps_metadata=ps_metadata, start=start,
                 hide_usage_chunk=hide_usage_chunk, event_hook=_event_hook,
-                call_id=call_id, lazy_start=_stream_lazy_start,
+                call_id=call_id, lazy_start=_stream_lazy_start, span=span,
             ), call_id)
             if pseudo is not None:
                 stream = attach_call_id(pseudo.stream(stream), call_id)
@@ -487,6 +523,8 @@ class _CompletionsNamespace:
         )
         if _event_hook is not None:
             _event_hook(event)
+        if span is not None:
+            span.finish(event)
         attach_outcome_signals(event, model=model, messages=messages,
                                response=response, request=kwargs)
         self._send(event, messages)
@@ -510,7 +548,8 @@ class _CompletionsNamespace:
                      hide_usage_chunk: bool,
                      event_hook: Callable[[dict], None] | None = None,
                      call_id: str | None = None,
-                     lazy_start: bool = False) -> Any:
+                     lazy_start: bool = False,
+                     span: tracing.ChatSpan | None = None) -> Any:
         """Wrap a stream so one event is emitted when it ends. Fail-open.
 
         ``lazy_start`` (ShieldsRouter): an error before the first chunk is a
@@ -521,6 +560,8 @@ class _CompletionsNamespace:
         if lazy_start:
             def failed_start() -> None:
                 record_failure(model, messages, (ps_metadata or {}).get("session_id"))
+                if span is not None:
+                    span.finish()
 
         def on_finish(adapter_fields: dict, stream_fields: dict,
                       latency_ms: int, flush: bool = True) -> None:
@@ -534,6 +575,8 @@ class _CompletionsNamespace:
                 event["tokens_estimated"] = True
             if event_hook is not None:
                 event_hook(event)
+            if span is not None:
+                span.finish({**event, "finish_reasons": adapter_fields.get("finish_reasons")})
             attach_outcome_signals(
                 event, model=model, messages=messages,
                 reasons=adapter_fields.get("finish_reasons") or [])
@@ -552,6 +595,8 @@ class _CompletionsNamespace:
                 on_abandon=lambda *args: on_finish(*args, flush=False),
             )
         except Exception:  # noqa: BLE001 - fail-open: return the raw stream
+            if span is not None:
+                span.finish()
             return response
 
     def _call_upstream(self, *, model: str, messages: list,
@@ -574,3 +619,4 @@ class _CompletionsNamespace:
                 **kwargs,
             )
         raise ValueError(f"No upstream dispatch for vendor {vendor!r}")
+

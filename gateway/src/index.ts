@@ -24,6 +24,7 @@ import { psRateLimit, rateLimitHealth } from './middlewares/psRateLimit';
 import { psTelemetry } from './middlewares/ps-telemetry';
 import { psFeedbackHandler } from './middlewares/psFeedback';
 import { otelConfig, psOtel } from './middlewares/psOtel';
+import { psTraceContext } from './middlewares/psTraceContext';
 
 // Handlers
 import { proxyHandler } from './handlers/proxyHandler';
@@ -35,6 +36,7 @@ import { logHandler } from './middlewares/log';
 import { metricsHandler, psMetrics } from './middlewares/psMetrics';
 import { psSecurityEvents } from './middlewares/psSecurityEvents';
 import { psOidc } from './middlewares/psOidc';
+import { psGuardrails } from './middlewares/psGuardrails';
 import { version } from '../package.json';
 import { payloadSizeValidatorMiddleware } from './middlewares/payloadSizeValidator';
 import { redactSecrets, redactString } from './utils/redact';
@@ -105,6 +107,11 @@ if (runtime === 'node') {
   });
 }
 
+// W3C trace context (#385): one gateway span id per request, joined to the
+// caller's inbound traceparent; `traceparent` on every response. Upstream
+// propagation only with PS_OTEL_PROPAGATE_UPSTREAM=true.
+app.use('*', psTraceContext());
+
 /**
  * GET route for the root path.
  * Returns a greeting message.
@@ -153,6 +160,14 @@ app.use('*', prettyJSON());
 if (getRuntimeKey() === 'node') {
   app.use(logHandler());
 }
+
+// PS fork (#349): guardrails from the central policy's `guardrails` section
+// (PS_POLICY_PULL_ENABLED), enforced whatever guardrails the caller sends.
+// Before the router, budgets, telemetry, OTel, hooks and cache, so they and
+// the provider only see redacted input; on the way out it is the last of
+// them, so the client receives redacted output (they see the provider's).
+// A no-op without guardrails.
+app.use('*', psGuardrails());
 
 // Support the /v1/models endpoint
 app.get('/v1/models', modelsHandler);

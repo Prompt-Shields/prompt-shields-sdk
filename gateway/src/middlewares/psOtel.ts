@@ -42,6 +42,8 @@ import {
 import { telemetryDroppedTotal } from './psMetrics/security';
 import { isSafeUpstreamURL } from './requestValidator';
 import { guardedUpstreamFetch } from '../utils/egressFetch';
+import { traceContextOf } from './psTraceContext';
+import { scrubOutput } from './psGuardrails/scrub';
 
 export interface OtelConfig {
   endpoint: string;
@@ -396,6 +398,12 @@ export interface SpanInput {
   endMs: number;
   requestBody?: any;
   responseBody?: any;
+  /**
+   * The response body for content capture when it differs from
+   * responseBody (PS fork #349: redacted by the output guardrails;
+   * undefined when they denied it). Absent: responseBody.
+   */
+  contentResponseBody?: any;
   stream?: StreamSummary;
   route?: {
     requestedModel?: string;
@@ -405,6 +413,8 @@ export interface SpanInput {
     sensitivitySource?: string;
   };
   captureContent?: boolean;
+  /** The request's trace context (psTraceContext.ts); else from headers. */
+  trace?: { traceId: string; spanId: string; parentSpanId?: string };
 }
 
 export interface BuiltSpan {
@@ -490,13 +500,23 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
       attrs[k] = undefined;
   }
   if (input.captureContent && !input.stream) {
-    Object.assign(attrs, contentAttributes(req, res));
+    Object.assign(
+      attrs,
+      contentAttributes(
+        req,
+        'contentResponseBody' in input ? input.contentResponseBody : res
+      )
+    );
   }
 
-  const parent = parseTraceparent(input.headers['traceparent']);
+  const parent = input.trace
+    ? input.trace.parentSpanId
+      ? { traceId: input.trace.traceId, parentSpanId: input.trace.parentSpanId }
+      : undefined
+    : parseTraceparent(input.headers['traceparent']);
   const span: any = {
-    traceId: parent?.traceId ?? hex(16),
-    spanId: hex(8),
+    traceId: input.trace?.traceId ?? parent?.traceId ?? hex(16),
+    spanId: input.trace?.spanId ?? hex(8),
     name: requestModel ? `${operation} ${requestModel}` : operation,
     kind: 3, // SPAN_KIND_CLIENT
     startTimeUnixNano: nanos(input.startMs),
@@ -706,6 +726,19 @@ export function psOtel(
           responseBody = undefined;
         }
       }
+      // PS fork (#349): captured content follows the output guardrails (the
+      // client gets the response redacted after this point); a denied
+      // response's output is not captured at all.
+      let contentResponse = responseBody;
+      if (
+        config.captureContent &&
+        responseBody &&
+        typeof responseBody === 'object'
+      ) {
+        contentResponse = structuredClone(responseBody);
+        if (scrubOutput(c, contentResponse) === 'denied')
+          contentResponse = undefined;
+      }
       // Multipart uploads yield only their `model`; the form is not re-read.
       const requestBody = await requestBodyForTelemetry(c);
       let waitUntil: ((p: Promise<unknown>) => void) | undefined;
@@ -724,8 +757,10 @@ export function psOtel(
         endMs: Date.now(),
         requestBody,
         responseBody,
+        contentResponseBody: contentResponse,
         route: c.get('psRoute'),
         captureContent: config.captureContent,
+        trace: traceContextOf(c),
       };
       const emit = (input: SpanInput) => {
         const built = buildGenAISpan(input);
