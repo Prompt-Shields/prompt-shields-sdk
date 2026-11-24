@@ -97,6 +97,9 @@ from prompt_shields.budgets import (
     BudgetCheck,
     BudgetError,
     BudgetStore,
+    budget_attributes,
+    estimate_call,
+    event_tokens,
     make_enforcer,
 )
 from prompt_shields.failover import (
@@ -1069,18 +1072,50 @@ class _RouterCore:
 
     # --- budgets --------------------------------------------------------------
 
-    def _budget_attributes(self, use_case: str | None) -> dict:
-        return {**self._budget_attrs, "use_case": use_case or self._use_case}
+    def _budget_attributes(self, use_case: str | None,
+                           ps_metadata: PSMetadata | None = None,
+                           model: str | None = None) -> dict:
+        return budget_attributes(
+            {**self._budget_attrs, "use_case": use_case or self._use_case},
+            ps_metadata, model,
+        )
 
-    def _budget_check(self, use_case: str | None) -> BudgetCheck | None:
+    def _budget_check(self, use_case: str | None,
+                      ps_metadata: PSMetadata | None = None,
+                      model: str | None = None) -> BudgetCheck | None:
         if self.budgets is None:
             return None
-        return self.budgets.check(self._budget_attributes(use_case))
+        return self.budgets.check(self._budget_attributes(use_case, ps_metadata, model))
 
-    async def _abudget_check(self, use_case: str | None) -> BudgetCheck | None:
+    async def _abudget_check(self, use_case: str | None,
+                             ps_metadata: PSMetadata | None = None,
+                             model: str | None = None) -> BudgetCheck | None:
         if self.budgets is None:
             return None
-        return await self.budgets.acheck(self._budget_attributes(use_case))
+        return await self.budgets.acheck(
+            self._budget_attributes(use_case, ps_metadata, model))
+
+    def _plan_estimate(self, plan: _Plan, max_tokens: int | None) -> tuple[float, int]:
+        _, tokens = estimate_call(None, None, plan.messages, max_tokens)
+        return plan.decision.est_cost, tokens
+
+    def _reserve_budget(self, plan: _Plan, max_tokens: int | None) -> _Plan:
+        """Hold the routed call's estimate on its budget counters (an atomic
+        check for block budgets, so concurrent calls see each other); raises
+        ``BudgetExceeded`` when another call used the budget up first."""
+        if plan.budget is None or self.budgets is None:
+            return plan
+        check = self.budgets.reserve(plan.budget, *self._plan_estimate(plan, max_tokens))
+        self.budgets.raise_if_blocked(check)
+        return replace(plan, budget=check)
+
+    async def _areserve_budget(self, plan: _Plan, max_tokens: int | None) -> _Plan:
+        if plan.budget is None or self.budgets is None:
+            return plan
+        check = await self.budgets.areserve(
+            plan.budget, *self._plan_estimate(plan, max_tokens))
+        self.budgets.raise_if_blocked(check)
+        return replace(plan, budget=check)
 
     def _apply_budget(
         self, decision: RouteDecision, req: RouteRequest, check: BudgetCheck
@@ -1656,11 +1691,13 @@ class _RouterCore:
         """Records the cost of the attempt that served the call (``plan`` is
         that candidate's), once; failed attempts are never recorded."""
         if plan.budget is not None and self.budgets is not None:
-            self.budgets.commit(plan.budget, self._budget_cost(plan, captured))
+            self.budgets.commit(plan.budget, self._budget_cost(plan, captured),
+                                event_tokens(captured))
 
     async def _arecord_spend(self, plan: _Plan, captured: dict) -> None:
         if plan.budget is not None and self.budgets is not None:
-            await self.budgets.acommit(plan.budget, self._budget_cost(plan, captured))
+            await self.budgets.acommit(plan.budget, self._budget_cost(plan, captured),
+                                       event_tokens(captured))
 
     # --- streaming (local mode) ----------------------------------------------
 
@@ -1694,7 +1731,8 @@ class _RouterCore:
                 return
             recorded = True
             if plan.budget is not None and self.budgets is not None:
-                self.budgets.commit_soon(plan.budget, self._budget_cost(plan, event))
+                self.budgets.commit_soon(plan.budget, self._budget_cost(plan, event),
+                                         event_tokens(event))
 
         return hook
 
@@ -2166,12 +2204,18 @@ class _RouterCompletions:
             max_tokens if max_tokens is not None
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
-            budget=r._budget_check(use_case),
+            budget=r._budget_check(use_case, ps_metadata, model),
         )
         streaming = kwargs.get("stream") is True
+        reserved = None
         try:
+            plan = reserved = r._reserve_budget(
+                plan, max_tokens if max_tokens is not None
+                else kwargs.get("max_completion_tokens"))
             result = self._send(plan, max_tokens, kwargs, ps_metadata, captured)
         except BaseException:
+            if reserved is not None and reserved.budget is not None and r.budgets:
+                r.budgets.release(reserved.budget)
             if plan.pseudo is not None:
                 plan.pseudo.clear()
             raise
@@ -2326,12 +2370,18 @@ class _AsyncRouterCompletions:
             max_tokens if max_tokens is not None
             else kwargs.get("max_completion_tokens"),
             data_classification, use_case,
-            budget=await r._abudget_check(use_case),
+            budget=await r._abudget_check(use_case, ps_metadata, model),
         )
         streaming = kwargs.get("stream") is True
+        reserved = None
         try:
+            plan = reserved = await r._areserve_budget(
+                plan, max_tokens if max_tokens is not None
+                else kwargs.get("max_completion_tokens"))
             result = await self._send(plan, max_tokens, kwargs, ps_metadata, captured)
         except BaseException:
+            if reserved is not None and reserved.budget is not None and r.budgets:
+                await r.budgets.arelease(reserved.budget)
             if plan.pseudo is not None:
                 plan.pseudo.clear()
             raise

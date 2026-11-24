@@ -31,7 +31,7 @@ rely on routing for compliance.
 | Failover between models | Yes, between models the data policy allows (see [Failover](#failover)) | Yes, to the next compliant model in the routed group on a 5xx, 429 or timeout, with the request's own provider credentials. A gateway config with its own fallback or retry settings takes over instead |
 | Streaming | Yes. Failover only before the first chunk; chunks keep the serving provider's shape (see [Streaming](#streaming)) | Yes. Failover only before the stream starts |
 | Circuit breakers | Per process, shared by the routers in it unless you pass `breakers=` or `breaker_config=` | Per gateway replica |
-| [Spend budgets](#spend-budgets) | `budgets=` (`budget.v1`). Counters are in-process unless you pass `budget_store=` | `PS_BUDGETS` or `PS_BUDGETS_FILE`. Counters are per replica unless Redis is configured |
+| [Spend budgets](#spend-budgets) | `budgets=` (`budget.v1`). Counters are in-process unless you pass `budget_store=` | `PS_BUDGETS`, `PS_BUDGETS_FILE` or the central policy's `budgets` section. Counters are per replica unless Redis is configured |
 | [Savings baseline](#savings) | `baseline=` (`baseline.v1`) | `PS_BASELINE_FILE` |
 | [Pseudonymisation](/guides/pseudonymisation) | `pseudonymise=True`, off by default (the instrumented clients take it too) | No |
 | [Learner auto mode](/guides/routing-learner#auto-mode) | `learner=AutoLearner(...)`, off by default | No |
@@ -405,8 +405,11 @@ at once: those retries stay on the same provider.
 
 `budgets=` takes a `budget.v1` document
 ([`schemas/budget/`](https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/schemas/budget/README.md)):
-a USD limit per business unit, use case, owner or everything, per UTC day,
-ISO week or month. Each budget has a mode:
+a USD or token limit per team, project, user, calling service, requested
+model, business unit, use case, owner or everything, per UTC day, ISO week
+or month (`ps_metadata={"team": ..., "project": ..., "user_id": ...}` on a
+call feeds the team, project and user scopes; the user id is hashed). Each
+budget has a mode:
 
 - `warn` never changes the call.
 - `downgrade` uses the remaining amount as a cost ceiling, like `max_cost`,
@@ -452,7 +455,9 @@ d.model, d.reason
 ```
 
 `route()` only reads the counters. A call sent with
-`chat.completions.create` adds the cost of the attempt that served it, and
+`chat.completions.create` reserves its estimate before it is sent (an atomic
+check for block budgets, so concurrent calls see each other), then settles
+it at the cost and tokens of the attempt that served it, and
 its event and `resp.ps.budget` carry `budget_state` (`ok`, `warn`,
 `unknown`, `exceeded`), `budget_id` and `budget_action`.
 
@@ -462,8 +467,11 @@ its own, and a restart resets them. `budget_store=RedisBudgetStore(url=...)`
 processes, and with a gateway that uses the same Redis and namespace. If the
 store cannot be read, calls go ahead with `budget_state: "unknown"`
 (`on_store_error: "open"`, the default). Set `"closed"` to block or downgrade
-instead. The gateway reads the same document from `PS_BUDGETS` or
-`PS_BUDGETS_FILE`; see `gateway/src/middlewares/PS_README.md`.
+instead. `BudgetEnforcer(doc, store, on_threshold=callback)` calls `callback`
+with a `BudgetThreshold` when a budget crosses its `warn_at` share or its
+limit. The gateway reads the same document from `PS_BUDGETS`,
+`PS_BUDGETS_FILE` or the central policy's `budgets` section; see
+`gateway/src/middlewares/PS_README.md`.
 
 ## Savings
 

@@ -19,6 +19,9 @@
  *     PS_OIDC_ENABLED).
  *   - `pseudonymisation` v1 (#350): reversible pseudonymisation of model
  *     calls; replaces PS_PSEUDONYMISE* (psPseudonymise/config.ts).
+ *   - `budgets` v1: spend budgets (budget.v1 budgets, #29); replace the
+ *     budgets and on_store_error of PS_BUDGETS / PS_BUDGETS_FILE (the
+ *     namespace and store stay the gateway's, ../psBudget/runtime.ts).
  *   - `rate_limits` v1 (#344): request and token rate limits; replaces
  *     PS_RATE_LIMITS / PS_RATE_LIMITS_FILE (../psRateLimit).
  *   - `guardrails` v1 (#349): checks the gateway runs on every model call
@@ -32,6 +35,7 @@
  * otherwise know a caller's team.
  */
 import { parsePolicy, OidcPolicy } from '../psOidc/config';
+import { CentralBudgets, parseBudgetsSection } from '../psBudget/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
 import { RoutePolicy } from '../router/types';
 import {
@@ -52,6 +56,7 @@ export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
   pseudonymisation: [1],
+  budgets: [1],
   guardrails: [1],
   rate_limits: [1],
 };
@@ -88,6 +93,7 @@ export interface CentralPolicy {
   route?: RoutePolicy;
   access?: OidcPolicy;
   pseudonymisation?: PseudonymisationSettings;
+  budgets?: CentralBudgets;
   /** The tenant-wide guardrails (#349). */
   guardrails?: GuardrailsSection;
   /** Team guardrails (the tenant's included) by team id and by team name. */
@@ -109,6 +115,7 @@ interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
   pseudonymisation?: PseudonymisationSettings;
+  budgets?: CentralBudgets;
   guardrails?: GuardrailsSection;
   rateLimits?: RateLimitLayer;
   ignored: string[];
@@ -173,6 +180,8 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
         out.access = parsePolicy(rest);
       } else if (name === 'pseudonymisation') {
         out.pseudonymisation = parsePseudonymisationSection(body);
+      } else if (name === 'budgets') {
+        out.budgets = parseBudgetsSection(body);
       } else if (name === 'guardrails') {
         out.guardrails = parseGuardrailsSection(body, version ?? undefined);
       } else if (name === 'rate_limits') {
@@ -244,6 +253,7 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     route: tenant.route,
     access: tenant.access,
     pseudonymisation: tenant.pseudonymisation,
+    ...(tenant.budgets ? { budgets: tenant.budgets } : {}),
     rateLimits,
     guardrails: tenant.guardrails,
     teamGuardrails: teamGuardrails.size ? teamGuardrails : undefined,
@@ -263,6 +273,11 @@ export function setCentralPolicy(policy: CentralPolicy | undefined): void {
 
 export function centralPolicy(): CentralPolicy | undefined {
   return active;
+}
+
+/** The central `budgets` section, if the active policy has one. */
+export function centralBudgets(): CentralBudgets | undefined {
+  return active?.budgets;
 }
 
 /** The OIDC group policy from the central `access` section, if any. */
