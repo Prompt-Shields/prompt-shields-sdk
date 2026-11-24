@@ -98,7 +98,8 @@ what is left after pseudonymisation:
 
 The route reason ends with `+anonymise-then-route` when the level went down.
 The field is empty by default, so no level is lowered unless the policy author
-lists it. The gateway does not pseudonymise and ignores the field.
+lists it. The gateway ignores the field: it always routes on the original
+prompt (see [At the gateway](#at-the-gateway)).
 
 ## With the instrumented clients
 
@@ -153,6 +154,62 @@ resp.ps_pseudonymisation    # counts only: entities, restored, unknown
   because the gateway would classify the placeholders instead of the original
   prompt. Don't point a client with `pseudonymise=True` at the gateway with
   `base_url` either.
+
+## At the gateway
+
+The gateway can pseudonymise calls itself (#350), for every client, with the
+same placeholders the SDK mints: the same detector, numbering and tool-argument
+JSON, checked against shared vectors (`schemas/pseudonymisation/vectors.v1.json`)
+by both. It is **off by default**. Turn it on with the central policy's
+`pseudonymisation` section (see [Central policy](/guides/central-policy)):
+
+```json
+"pseudonymisation": {"version": 1, "enabled": true}
+```
+
+or, without a central policy, with `PS_PSEUDONYMISE=true` on the gateway. A
+central section replaces the local settings whole. Optional fields (env vars
+in brackets):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `categories` (`PS_PSEUDONYMISE_CATEGORIES`, comma separated) | all | Which of `national_id`, `email`, `iban`, `ssn`, `credit_card`, `ip_address`, `phone` are replaced |
+| `on_unsupported` (`PS_PSEUDONYMISE_ON_UNSUPPORTED`) | `refuse` | What happens to model calls the gateway cannot pseudonymise |
+
+- **Covered:** `POST /v1/chat/completions`, `/v1/messages` (and
+  `count_tokens`) and `/v1/responses` (and `input_tokens`), JSON and streamed.
+  Sent: what the instrumented clients send (above), plus Responses
+  `instructions`, `input` text, `function_call` arguments,
+  `function_call_output` and custom tool calls, and `prompt.variables`.
+  Restored: the answer's text, refusals and tool-call arguments, in JSON and in
+  stream events, including placeholders split across chunks (a held-back tail
+  is released in an extra event, a copy of the field's last event).
+  Responses `*.done`, `output_item` and `response.completed` events are
+  restored too.
+- **Refused** with a 400 (`code: pseudonymisation_unsupported`) before any
+  upstream call, unless `on_unsupported` is `passthrough`: every other model
+  call (embeddings, completions, images, audio, files, batches, realtime,
+  proxied paths), a non-JSON body, and Responses calls with
+  `previous_response_id` or `conversation`. The provider holds earlier turns
+  with placeholders minted by an earlier request, so `⟦EMAIL_1⟧` could mean
+  two people: send the conversation in `input` instead. Reads, deletes,
+  `/v1/feedback` and MCP proxy traffic are not affected.
+- **Where:** after the router and budgets, so the data policy classifies and
+  routes on the original prompt (a pseudonymised call is never routed lower);
+  before telemetry, OpenTelemetry, guardrail hooks and the response cache, so
+  they see placeholders only, in the request and in the answer. Cached answers
+  hold placeholders and are restored for each caller.
+- **Mapping:** in the request's memory only, never logged or stored, and
+  dropped when the response or stream ends. No key is involved because
+  nothing is persisted.
+- The response carries `x-ps-pseudonymised: <n>`, the number of distinct
+  values replaced (a count only). Error responses and responses fetched later
+  (`GET /v1/responses/{id}`) keep the placeholders.
+- **Upgrade gateways first.** A gateway older than this ignores the section
+  and forwards original values.
+
+Enabling it in production is gated on the security sign-off of the detector's
+recall (#35).
 
 ## Without the router
 
@@ -230,9 +287,10 @@ are numbered per call, so they do not identify a person across calls.
 - **Not anonymisation.** The provider still sees the context around each
   placeholder, which can identify a person. The mapping exists in your process
   while the call runs.
-- **Local mode only.** `ShieldsRouter` streams in local mode
+- **Local mode only in the SDK.** `ShieldsRouter` streams in local mode
   (`stream=True`): chunks are restored on the way through, and the mapping is
-  dropped when the stream ends, fails or is closed. The gateway does not
-  pseudonymise.
-- **Not yet per tenant.** It is a client setting. A per-tenant switch, gated on
-  the #35 recall benchmark, is not built yet.
+  dropped when the stream ends, fails or is closed. For gateway calls, turn it
+  on at the gateway instead ([At the gateway](#at-the-gateway)).
+- **Per tenant at the gateway.** In the SDK it is a client setting; at the
+  gateway it is the tenant's central policy (team and project policies are
+  not applied by the gateway yet).

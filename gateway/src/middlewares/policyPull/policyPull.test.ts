@@ -6,6 +6,7 @@ import {
   activeRoutePolicy,
   centralAccessPolicy,
   centralPolicy,
+  centralPseudonymisation,
   parsePolicyBundle,
   PolicyBundleError,
   setCentralPolicy,
@@ -119,6 +120,30 @@ describe('parsePolicyBundle', () => {
     ],
   ])('refuses the whole bundle: %s', (_name, raw) => {
     expect(() => parsePolicyBundle(raw)).toThrow(PolicyBundleError);
+  });
+
+  test('pseudonymisation v1 (#350) is enforced, and validated whole', () => {
+    const p = parsePolicyBundle(
+      bundle({
+        pseudonymisation: { version: 1, enabled: true, categories: ['email'] },
+      })
+    );
+    expect(p.pseudonymisation).toEqual({
+      enabled: true,
+      categories: ['email'],
+      onUnsupported: 'refuse',
+    });
+    expect(p.ignored).toEqual([]);
+    setCentralPolicy(p);
+    expect(centralPseudonymisation()?.enabled).toBe(true);
+    for (const bad of [
+      { version: 2, enabled: true },
+      { version: 1 },
+      { version: 1, enabled: true, categories: ['person_name'] },
+    ])
+      expect(() =>
+        parsePolicyBundle(bundle({ pseudonymisation: bad }))
+      ).toThrow(PolicyBundleError);
   });
 
   test('team and project entries are validated and counted', () => {

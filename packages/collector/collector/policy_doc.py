@@ -40,6 +40,13 @@ Sections today:
     rate limit, by identity-provider group. Same format as the gateway's
     PS_OIDC_POLICY (docs/guides/gateway-oidc.mdx) and enforced by the gateway's
     OIDC authentication, so it needs PS_OIDC_ENABLED there.
+``pseudonymisation`` v1
+    ``{"version": 1, "enabled": bool, "categories": [...], "on_unsupported":
+    "refuse"|"passthrough"}``: the gateway's reversible pseudonymisation
+    (#350; docs/guides/pseudonymisation.mdx). ``categories`` (optional, default
+    all) are entity categories of the SDK's ``SPAN_CATEGORIES``;
+    ``on_unsupported`` (default ``refuse``) says what happens to model calls
+    the gateway cannot pseudonymise. Mirrors gateway psPseudonymise/config.ts.
 
 Inheritance
 -----------
@@ -88,7 +95,6 @@ RESERVED_SECTIONS: dict[str, str] = {
     "rate_limits": "rate-limit policies (#344)",
     "prices": "model prices (#348)",
     "guardrails": "guardrail settings (#349)",
-    "pseudonymisation": "pseudonymisation settings (#350)",
     "budgets": "budget references",
 }
 
@@ -101,6 +107,12 @@ QUALITY_KEYS = ("draft", "balanced", "critical")
 ACCESS_GROUP_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 ACCESS_GROUP_KEYS = frozenset({"name", "match", "providers", "models", "rate_limit", "mcp"})
 MCP_SERVER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+# The SDK's prompt_shields.pii.SPAN_CATEGORIES (the gateway's
+# ENTITY_CATEGORIES): what the pseudonymiser can replace.
+PSEUDONYMISATION_CATEGORIES = (
+    "national_id", "email", "iban", "ssn", "credit_card", "ip_address", "phone",
+)
 
 
 class PolicyDocumentError(ValueError):
@@ -215,6 +227,27 @@ def _access_v1(at: str, body: dict, problems: list[str]) -> None:
             _mcp(f"{where}.mcp", g["mcp"], problems)
 
 
+def _pseudonymisation_v1(at: str, body: dict, problems: list[str]) -> None:
+    extra = sorted(set(body) - {"version", "enabled", "categories", "on_unsupported"})
+    if extra:
+        problems.append(f"{at}: unknown keys {extra}")
+    if not isinstance(body.get("enabled"), bool):
+        problems.append(f"{at}.enabled must be true or false")
+    if "categories" in body:
+        cats = body["categories"]
+        if not (isinstance(cats, list) and cats and all(isinstance(c, str) for c in cats)):
+            problems.append(f"{at}.categories must be a non-empty array of category names")
+        else:
+            unknown = sorted(set(cats) - set(PSEUDONYMISATION_CATEGORIES))
+            if unknown:
+                problems.append(
+                    f"{at}.categories: unknown {unknown} "
+                    f"(known: {list(PSEUDONYMISATION_CATEGORIES)})"
+                )
+    if body.get("on_unsupported", "refuse") not in ("refuse", "passthrough"):
+        problems.append(f'{at}.on_unsupported must be "refuse" or "passthrough"')
+
+
 @dataclass(frozen=True)
 class Section:
     description: str
@@ -232,6 +265,11 @@ SECTIONS: dict[str, Section] = {
         "Providers, models, MCP servers/tools and rate limits by identity-provider "
         "group (the gateway's PS_OIDC_POLICY format)",
         {1: _access_v1},
+    ),
+    "pseudonymisation": Section(
+        "Reversible pseudonymisation of model calls at the gateway (off unless "
+        "enabled; categories; what happens to calls it cannot pseudonymise)",
+        {1: _pseudonymisation_v1},
     ),
 }
 

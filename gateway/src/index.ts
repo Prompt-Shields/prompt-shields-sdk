@@ -21,6 +21,7 @@ import { activeRoutePolicy } from './middlewares/policyPull/state';
 import { psBudget } from './middlewares/psBudget';
 import { budgetsRequested } from './middlewares/psBudget/config';
 import { psTelemetry } from './middlewares/ps-telemetry';
+import { psPseudonymise } from './middlewares/psPseudonymise';
 import { psFeedbackHandler } from './middlewares/psFeedback';
 import { otelConfig, psOtel } from './middlewares/psOtel';
 
@@ -188,6 +189,13 @@ if (process.env.PS_ROUTE_POLICY_FILE) {
 if (budgetsRequested(process.env)) {
   app.use('*', psBudget());
 }
+
+// Reversible pseudonymisation (#350), off by default (central policy
+// `pseudonymisation` section or PS_PSEUDONYMISE). After the router and
+// budgets, which classify and price the original prompt; before telemetry,
+// OTel, hooks and cache, which then see placeholders only (as does the
+// provider). Disabled, it only calls next().
+app.use('*', psPseudonymise());
 
 // Prompt Shields discovery telemetry (opt-in). Mounted after psRouter so it can
 // fold the routing decision (c.get('psRoute')) into requested_model/served_model.
