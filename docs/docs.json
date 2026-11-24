@@ -75,6 +75,7 @@
         "guides/gateway-oidc",
         "guides/central-policy",
         "guides/guardrails",
+        "guides/gateway-rate-limits",
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",

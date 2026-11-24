@@ -60,10 +60,11 @@ section has its own format version:
 |---|---|---|---|
 | `route` | 1 | `policy`: a [`route-policy.v1`](/guides/routing) document, the same as `PS_ROUTE_POLICY_FILE` | The gateway router: model groups, sensitivity levels and the fail-closed data policy |
 | `access` | 1 | `default` and `groups`, the [`PS_OIDC_POLICY`](/guides/gateway-oidc) format: providers, models, MCP servers and tools, and rate limits per identity-provider group | Gateway OIDC authentication (needs `PS_OIDC_ENABLED=true`) |
+| `rate_limits` | 1 | `on_store_error` and `rules`, the [`PS_RATE_LIMITS`](/guides/gateway-rate-limits) format: requests, tokens, daily tokens and concurrency per tenant, virtual key, team, project or user | The gateway's rate limiter. A team's or project's `rate_limits` apply on top of the tenant's, never instead of them |
 | `guardrails` | 1 | `rules`: PII, secret and prompt-injection checks on input and output with `deny`, `redact` or `log`; see [Policy Guardrails](/guides/guardrails). Added up across tenant, team and project rather than replaced | The gateway on every model call, whatever guardrails the caller sends |
 
 Sections planned by other work items are reserved and refused until they ship:
-`rate_limits`, `prices`, `pseudonymisation`, `budgets`. Unknown
+`prices`, `pseudonymisation`, `budgets`. Unknown
 sections are refused too, so nothing is stored that nothing enforces.
 
 **Extending it.** A section changes incompatibly only by adding a new version

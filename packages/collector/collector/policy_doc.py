@@ -40,6 +40,29 @@ Sections today:
     rate limit, by identity-provider group. Same format as the gateway's
     PS_OIDC_POLICY (docs/guides/gateway-oidc.mdx) and enforced by the gateway's
     OIDC authentication, so it needs PS_OIDC_ENABLED there.
+``rate_limits`` v1 (#344)
+    ``{"version": 1, "on_store_error": "open"|"closed", "rules": [...]}``:
+    request and token rate limits, enforced by the gateway (the same format
+    as its PS_RATE_LIMITS; gateway/src/middlewares/psRateLimit/config.ts).
+    Each rule::
+
+        {"id": "team-chat",                 # [A-Za-z0-9_.:-]{1,64}, unique
+         "scope": "global"|"virtual_key"|"team"|"project"|"user",
+         "subjects": ["team-a"],            # optional, not with global; user: OIDC
+                                            # sub, virtual_key: the virtual-key id
+         "match": {"model": "gpt-4o*", "provider": [...], "route": [...]},
+         "rpm": 600, "tpm": 200000, "tpd": 5000000, "concurrency": 20}
+
+    ``match`` values are a string or an array of strings, ``*`` is a
+    wildcard; every given key must match. At least one of rpm (requests per
+    minute), tpm (input + output tokens per minute), tpd (tokens per UTC
+    day) and concurrency (calls in flight) is needed. Every rule that applies
+    to a call is enforced, so the strictest wins. ``on_store_error`` (default
+    ``open``) is what the gateway does when its shared Redis store fails:
+    count in the replica's memory, or refuse with 503. At most 200 rules.
+    Unlike other sections, the ``rate_limits`` of a team or project are
+    applied on top of the tenant's (to calls that name it in X-PS-Team /
+    X-PS-Project), never instead of them.
 ``guardrails`` v1
     ``{"version": 1, "rules": [...], "stream_window_chars": 256}``: checks
     the gateway runs itself on every model call's input and output,
@@ -98,7 +121,6 @@ MAX_DOCUMENT_BYTES = 256 * 1024
 
 # Planned sections, refused until the issue that enforces them adds them.
 RESERVED_SECTIONS: dict[str, str] = {
-    "rate_limits": "rate-limit policies (#344)",
     "prices": "model prices (#348)",
     "pseudonymisation": "pseudonymisation settings (#350)",
     "budgets": "budget references",
@@ -113,6 +135,14 @@ QUALITY_KEYS = ("draft", "balanced", "critical")
 ACCESS_GROUP_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 ACCESS_GROUP_KEYS = frozenset({"name", "match", "providers", "models", "rate_limit", "mcp"})
 MCP_SERVER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+# psRateLimit/config.ts parseRateLimitSection, mirrored.
+RATE_LIMIT_RULE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+RATE_LIMIT_SCOPES = ("global", "virtual_key", "team", "project", "user")
+RATE_LIMIT_KINDS = ("rpm", "tpm", "tpd", "concurrency")
+RATE_LIMIT_MATCH_KEYS = ("model", "provider", "route")
+RATE_LIMIT_MAX_RULES = 200
+RATE_LIMIT_MAX_VALUES = 50
 
 
 class PolicyDocumentError(ValueError):
@@ -225,6 +255,77 @@ def _access_v1(at: str, body: dict, problems: list[str]) -> None:
                 problems.append(f'{where}.rate_limit.per must be "user" or "group"')
         if "mcp" in g:
             _mcp(f"{where}.mcp", g["mcp"], problems)
+
+
+def _match_values(at: str, v: Any, problems: list[str]) -> None:
+    values = [v] if isinstance(v, str) else v
+    if not (
+        isinstance(values, list)
+        and 0 < len(values) <= RATE_LIMIT_MAX_VALUES
+        and all(isinstance(s, str) and s.strip() and len(s) <= 256 for s in values)
+    ):
+        problems.append(
+            f"{at} must be a non-empty string or array of up to "
+            f"{RATE_LIMIT_MAX_VALUES} non-empty strings"
+        )
+
+
+def _rate_limits_v1(at: str, body: dict, problems: list[str]) -> None:
+    extra = sorted(set(body) - {"version", "on_store_error", "rules"})
+    if extra:
+        problems.append(f"{at}: unknown keys {extra}")
+    if body.get("on_store_error", "open") not in ("open", "closed"):
+        problems.append(f'{at}.on_store_error must be "open" or "closed"')
+    rules = body.get("rules")
+    if not isinstance(rules, list):
+        problems.append(f"{at}.rules must be an array")
+        return
+    if len(rules) > RATE_LIMIT_MAX_RULES:
+        problems.append(f"{at}.rules: at most {RATE_LIMIT_MAX_RULES} rules")
+    seen: set[str] = set()
+    for i, r in enumerate(rules):
+        where = f"{at}.rules[{i}]"
+        if not _is_obj(r):
+            problems.append(f"{where} must be an object")
+            continue
+        unknown = sorted(set(r) - {"id", "scope", "subjects", "match", *RATE_LIMIT_KINDS})
+        if unknown:
+            problems.append(f"{where}: unknown keys {unknown}")
+        rid = r.get("id")
+        if not (isinstance(rid, str) and RATE_LIMIT_RULE_ID.match(rid)):
+            problems.append(f"{where}.id must be 1-64 characters of [A-Za-z0-9_.:-]")
+        elif rid in seen:
+            problems.append(f'{where}.id "{rid}" is used twice')
+        else:
+            seen.add(rid)
+        scope = r.get("scope")
+        if scope not in RATE_LIMIT_SCOPES:
+            problems.append(f"{where}.scope must be one of {list(RATE_LIMIT_SCOPES)}")
+        if "subjects" in r:
+            if scope == "global":
+                problems.append(f'{where}.subjects is not allowed with scope "global"')
+            else:
+                _match_values(f"{where}.subjects", r["subjects"], problems)
+        if "match" in r:
+            m = r["match"]
+            if not _is_obj(m):
+                problems.append(f"{where}.match must be an object")
+            else:
+                bad = sorted(set(m) - set(RATE_LIMIT_MATCH_KEYS))
+                if bad:
+                    problems.append(
+                        f"{where}.match: unknown keys {bad} (known: {list(RATE_LIMIT_MATCH_KEYS)})"
+                    )
+                for k in RATE_LIMIT_MATCH_KEYS:
+                    if k in m:
+                        _match_values(f"{where}.match.{k}", m[k], problems)
+        limits = [k for k in RATE_LIMIT_KINDS if k in r]
+        if not limits:
+            problems.append(f"{where} needs at least one of {list(RATE_LIMIT_KINDS)}")
+        for k in limits:
+            v = r[k]
+            if not (isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 2**53 - 1):
+                problems.append(f"{where}.{k} must be a positive integer")
 
 
 # Guardrails v1 (#349); mirrored by gateway/src/middlewares/psGuardrails/config.ts.
@@ -361,6 +462,11 @@ SECTIONS: dict[str, Section] = {
         "Providers, models, MCP servers/tools and rate limits by identity-provider "
         "group (the gateway's PS_OIDC_POLICY format)",
         {1: _access_v1},
+    ),
+    "rate_limits": Section(
+        "Request and token rate limits (rpm, tpm, tpd, concurrency) per tenant, "
+        "virtual key, team, project or user, enforced by the gateway",
+        {1: _rate_limits_v1},
     ),
     "guardrails": Section(
         "Checks the gateway enforces on every model call's input and output "

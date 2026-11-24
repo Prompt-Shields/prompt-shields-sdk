@@ -8,7 +8,7 @@ import { Context, Hono } from 'hono';
 import { prettyJSON } from 'hono/pretty-json';
 import { HTTPException } from 'hono/http-exception';
 import { compress } from 'hono/compress';
-import { getRuntimeKey } from 'hono/adapter';
+import { env, getRuntimeKey } from 'hono/adapter';
 // import { env } from 'hono/adapter' // Have to set this up for multi-environment deployment
 
 // Middlewares
@@ -20,6 +20,7 @@ import { defaultPolicy } from './middlewares/router/policy';
 import { activeRoutePolicy } from './middlewares/policyPull/state';
 import { psBudget } from './middlewares/psBudget';
 import { budgetsRequested } from './middlewares/psBudget/config';
+import { psRateLimit, rateLimitHealth } from './middlewares/psRateLimit';
 import { psTelemetry } from './middlewares/ps-telemetry';
 import { psFeedbackHandler } from './middlewares/psFeedback';
 import { otelConfig, psOtel } from './middlewares/psOtel';
@@ -116,7 +117,14 @@ app.get('/', (c) => c.text('AI Gateway says hey!'));
  * upstream calls: it only proves the process is serving.
  */
 app.get('/v1/health', (c) =>
-  c.json({ status: 'success', message: 'Server is healthy', version })
+  c.json({
+    status: 'success',
+    message: 'Server is healthy',
+    version,
+    // PS fork (#344): where rate limits come from and whether replicas
+    // share them; absent without rules.
+    ...rateLimitHealth(env(c)),
+  })
 );
 
 // Security events (schema v1): 429s here; guardrail verdicts in the hooks
@@ -190,6 +198,12 @@ if (process.env.PS_ROUTE_POLICY_FILE) {
 } else if (process.env.PS_ROUTER_ENABLED === 'true') {
   app.use('*', psRouter());
 }
+
+// Request and token rate limits (#344): the central policy's `rate_limits`
+// section, else PS_RATE_LIMITS / PS_RATE_LIMITS_FILE. After psOidc (user
+// scope) and the router (the routed model), before budgets (a refused call
+// reserves no spend). Without rules it passes every call through untouched.
+app.use('*', psRateLimit());
 
 // Spend budgets (#28, opt-in via PS_BUDGETS / PS_BUDGETS_FILE). After the
 // router (it reserves the routed model's estimate and downgrades within the

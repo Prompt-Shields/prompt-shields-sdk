@@ -180,6 +180,15 @@ export interface RateLimitHitEvent extends SecurityEventBase {
   'event.name': 'rate_limit.hit';
   /** `upstream`: a provider answered 429; `gateway`: the gateway did. */
   'ps.rate_limit.source': 'upstream' | 'gateway';
+  /** The rate-limit policy rule that refused the call (#344), if one did. */
+  'ps.rate_limit.rule'?: string;
+  'ps.rate_limit.scope'?:
+    | 'global'
+    | 'virtual_key'
+    | 'team'
+    | 'project'
+    | 'user';
+  'ps.rate_limit.limit'?: 'rpm' | 'tpm' | 'tpd' | 'concurrency';
   'http.response.status_code': 429;
 }
 

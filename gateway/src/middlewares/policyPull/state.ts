@@ -17,15 +17,17 @@
  *   - `route` v1: the router's route policy; replaces PS_ROUTE_POLICY_FILE.
  *   - `access` v1: the OIDC group policy; replaces PS_OIDC_POLICY (needs
  *     PS_OIDC_ENABLED).
+ *   - `rate_limits` v1 (#344): request and token rate limits; replaces
+ *     PS_RATE_LIMITS / PS_RATE_LIMITS_FILE (../psRateLimit).
  *   - `guardrails` v1 (#349): checks the gateway runs on every model call
- *     (../psGuardrails). Unlike the other sections, the guardrails of the
- *     team and project a call names (X-PS-Team / X-PS-Project) are applied
- *     too, on top of the tenant's: guardrails only add up, so a caller
- *     naming another team (or none) can never drop the tenant's rules.
+ *     (../psGuardrails).
  * A section the central policy does not have falls back to the local
  * setting. Team and project entries are validated (so a bad one never
- * becomes active later); apart from guardrails they are not applied yet:
- * the gateway does not know a caller's team.
+ * becomes active later). Only their `rate_limits` and `guardrails`
+ * sections are applied, to calls that name the team or project in
+ * X-PS-Team / X-PS-Project, and only on top of the tenant's (a header can
+ * add limits or guardrails, never remove one): the gateway does not
+ * otherwise know a caller's team.
  */
 import { parsePolicy, OidcPolicy } from '../psOidc/config';
 import { loadedRoutePolicy, parseRoutePolicyDoc } from '../router/policyDoc';
@@ -35,6 +37,7 @@ import {
   GuardrailsSection,
   parseGuardrailsSection,
 } from '../psGuardrails/config';
+import { parseRateLimitSection, RateLimitConfig } from '../psRateLimit/config';
 
 export const BUNDLE_SCHEMA = 'ps-policy-bundle.v1';
 
@@ -43,6 +46,7 @@ export const ENFORCED_SECTIONS: Record<string, number[]> = {
   route: [1],
   access: [1],
   guardrails: [1],
+  rate_limits: [1],
 };
 
 export class PolicyBundleError extends Error {
@@ -50,6 +54,23 @@ export class PolicyBundleError extends Error {
     super(message);
     this.name = 'PolicyBundleError';
   }
+}
+
+/** A `rate_limits` section with its canonical JSON (to tell inherited ones apart). */
+export interface RateLimitLayer {
+  config: RateLimitConfig;
+  canon: string;
+}
+
+export interface CentralRateLimits {
+  tenant?: RateLimitLayer;
+  /** Team id -> its name and effective `rate_limits` section. */
+  teams: Record<string, { name?: string; layer?: RateLimitLayer }>;
+  /** Project id -> its name, team and effective `rate_limits` section. */
+  projects: Record<
+    string,
+    { name?: string; teamId?: string; layer?: RateLimitLayer }
+  >;
 }
 
 export interface CentralPolicy {
@@ -65,6 +86,8 @@ export interface CentralPolicy {
   teamGuardrails?: Map<string, GuardrailsSection>;
   /** Project guardrails (its team's included) by project id and name. */
   projectGuardrails?: Map<string, GuardrailsSection>;
+  /** `rate_limits` of the tenant, its teams and projects. */
+  rateLimits?: CentralRateLimits;
   /** Sections present but not enforced by this gateway. */
   ignored: string[];
   teams: number;
@@ -78,7 +101,19 @@ interface ParsedSections {
   route?: RoutePolicy;
   access?: OidcPolicy;
   guardrails?: GuardrailsSection;
+  rateLimits?: RateLimitLayer;
   ignored: string[];
+}
+
+/** Key-sorted JSON, so equal sections compare equal. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (isObject(v))
+    return `{${Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`)
+      .join(',')}}`;
+  return JSON.stringify(v);
 }
 
 function parseEffective(at: string, raw: unknown): ParsedSections {
@@ -111,6 +146,11 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
         out.access = parsePolicy(rest);
       } else if (name === 'guardrails') {
         out.guardrails = parseGuardrailsSection(body, version ?? undefined);
+      } else if (name === 'rate_limits') {
+        out.rateLimits = {
+          config: parseRateLimitSection(body),
+          canon: canonical(body),
+        };
       }
     } catch (err) {
       throw new PolicyBundleError(`${where}: ${(err as Error).message}`);
@@ -128,6 +168,12 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
   let projects = 0;
   const teamGuardrails = new Map<string, GuardrailsSection>();
   const projectGuardrails = new Map<string, GuardrailsSection>();
+  const rateLimits: CentralRateLimits = {
+    ...(tenant.rateLimits ? { tenant: tenant.rateLimits } : {}),
+    teams: {},
+    projects: {},
+  };
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
   for (const [key, label] of [
     ['teams', 'team'],
     ['projects', 'project'],
@@ -135,21 +181,32 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     const entries = raw[key] ?? {};
     if (!isObject(entries))
       throw new PolicyBundleError(`$.${key} must be an object`);
-    const index = label === 'team' ? teamGuardrails : projectGuardrails;
     for (const [id, eff] of Object.entries(entries)) {
       const parsed = parseEffective(`$.${key}.${id}`, eff);
-      if (label === 'team') teams++;
-      else projects++;
-      if (!parsed.guardrails) continue;
-      const name = (eff as any).name;
-      for (const ref of typeof name === 'string' && name ? [id, name] : [id])
-        index.set(
-          ref,
-          combineSections([
-            index.get(ref),
-            parsed.guardrails,
-          ]) as GuardrailsSection
-        );
+      const layer = parsed.rateLimits ? { layer: parsed.rateLimits } : {};
+      if (label === 'team') {
+        teams++;
+        rateLimits.teams[id] = { name: str((eff as any).name), ...layer };
+      } else {
+        projects++;
+        rateLimits.projects[id] = {
+          name: str((eff as any).name),
+          teamId: str((eff as any).team_id),
+          ...layer,
+        };
+      }
+      if (parsed.guardrails) {
+        const index = label === 'team' ? teamGuardrails : projectGuardrails;
+        const name = (eff as any).name;
+        for (const ref of typeof name === 'string' && name ? [id, name] : [id])
+          index.set(
+            ref,
+            combineSections([
+              index.get(ref),
+              parsed.guardrails,
+            ]) as GuardrailsSection
+          );
+      }
     }
   }
   return {
@@ -157,6 +214,7 @@ export function parsePolicyBundle(raw: unknown, etag?: string): CentralPolicy {
     etag,
     route: tenant.route,
     access: tenant.access,
+    rateLimits,
     guardrails: tenant.guardrails,
     teamGuardrails: teamGuardrails.size ? teamGuardrails : undefined,
     projectGuardrails: projectGuardrails.size ? projectGuardrails : undefined,
@@ -221,4 +279,14 @@ export function activeRoutePolicy(): RoutePolicy | undefined {
  */
 export function activePolicyVersion(): string | undefined {
   return active?.version ?? loadedRoutePolicy()?.policyVersion;
+}
+
+/** The central `rate_limits` sections, if the active policy has any. */
+export function centralRateLimits(): CentralRateLimits | undefined {
+  const rl = active?.rateLimits;
+  if (!rl) return undefined;
+  if (rl.tenant) return rl;
+  for (const t of Object.values(rl.teams)) if (t.layer) return rl;
+  for (const p of Object.values(rl.projects)) if (p.layer) return rl;
+  return undefined;
 }
