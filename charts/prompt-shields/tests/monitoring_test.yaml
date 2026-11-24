@@ -194,6 +194,28 @@ tests:
       - failedTemplate:
           errorPattern: "prometheusRule.rules.PromptShieldsBudgetNearLimit.minimum: this alert has no"
 
+  - it: fails on a threshold that is not a number
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.rules:
+        PromptShieldsCostSpike:
+          threshold: "3 or vector(1)"
+    asserts:
+      - failedTemplate:
+          errorPattern: "prometheusRule.rules.PromptShieldsCostSpike.threshold: .* is not a non-negative number"
+
+  - it: fails on an unknown override setting
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.rules:
+        PromptShieldsCostSpike:
+          treshold: 5
+    asserts:
+      - failedTemplate:
+          errorPattern: "prometheusRule.rules.PromptShieldsCostSpike.treshold: unknown setting"
+
   - it: ships the three dashboards with the sidecar label
     template: templates/grafana-dashboards.yaml
     set:

@@ -14,7 +14,20 @@ with the per-alert overrides of prometheusRule.rules applied. */ -}}
     {{- $o := dict }}
     {{- if $r.alert }}
       {{- $_ := set $known $r.alert true }}
-      {{- $o = get $overrides $r.alert | default dict }}
+      {{- if hasKey $overrides $r.alert }}
+        {{- $o = index $overrides $r.alert }}
+      {{- end }}
+      {{- if kindIs "invalid" $o }}
+        {{- $o = dict }}
+      {{- end }}
+      {{- if not (kindIs "map" $o) }}
+        {{- fail (printf "prometheusRule.rules.%s: expected a map of overrides (enabled, threshold, minimum, for, severity, labels)" $r.alert) }}
+      {{- end }}
+      {{- range $k, $_ := $o }}
+        {{- if not (has $k (list "enabled" "threshold" "minimum" "for" "severity" "labels")) }}
+          {{- fail (printf "prometheusRule.rules.%s.%s: unknown setting (enabled, threshold, minimum, for, severity, labels)" $r.alert $k) }}
+        {{- end }}
+      {{- end }}
     {{- end }}
     {{- if not (and (hasKey $o "enabled") (not $o.enabled)) }}
       {{- /* `> 20  # threshold` and `> 0.05  # minimum` lines in the expression. */ -}}
@@ -24,11 +37,15 @@ with the per-alert overrides of prometheusRule.rules applied. */ -}}
           {{- if not (regexMatch $pattern $r.expr) }}
             {{- fail (printf "prometheusRule.rules.%s.%s: this alert has no `# %s` line to override" $r.alert $param $param) }}
           {{- end }}
-          {{- $_ := set $r "expr" (regexReplaceAll $pattern $r.expr (printf "${1} %v${2}" (get $o $param))) }}
+          {{- $v := toString (get $o $param) }}
+          {{- if not (regexMatch `^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$` $v) }}
+            {{- fail (printf "prometheusRule.rules.%s.%s: %q is not a non-negative number" $r.alert $param $v) }}
+          {{- end }}
+          {{- $_ := set $r "expr" (regexReplaceAll $pattern $r.expr (printf "${1} %s${2}" $v)) }}
         {{- end }}
       {{- end }}
-      {{- with $o.for }}
-        {{- $_ := set $r "for" . }}
+      {{- if and (hasKey $o "for") (not (kindIs "invalid" (index $o "for"))) }}
+        {{- $_ := set $r "for" (toString (index $o "for")) }}
       {{- end }}
       {{- if or $o.severity $o.labels }}
         {{- $labels := $r.labels | default dict }}

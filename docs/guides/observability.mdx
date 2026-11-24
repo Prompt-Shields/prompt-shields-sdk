@@ -109,7 +109,7 @@ collector:
 | `PromptShieldsRateLimitedRatioHigh` | Over 10% of all requests get a 429 from one source (`upstream`, `gateway`, `budget`) for 10 minutes | warning |
 | `PromptShieldsBudgetNearLimit` | A budget's spend reaches 80% of its limit (no `for`: on the first evaluation) | warning |
 | `PromptShieldsBudgetExhausted` | A budget's spend reaches its limit | critical |
-| `PromptShieldsCostSpike` | Spend in the last hour is over 3x the average hourly spend of the 7 days before, and over $1, for 10 minutes | warning |
+| `PromptShieldsCostSpike` | Spend in the last hour is over 3x the average hourly spend of the 7 days before, and over $1, for 10 minutes (quiet until there are 24 hours of history) | warning |
 
 The provider rules leave out `provider="unknown"` (requests with no provider, such as health, MCP and admin routes); the route rules cover every route. The ratio and latency rules need more than 0.05 requests/s, so an idle provider or route does not page. Every rule from `PromptShieldsProviderLatencyP95High` on has a `runbook_url` annotation pointing at [Alert runbooks](/guides/alert-runbooks).
 

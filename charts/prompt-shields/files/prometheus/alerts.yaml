@@ -429,7 +429,9 @@ groups:
       - alert: PromptShieldsCostSpike
         # Spend in the last hour against the average hourly spend over the
         # 7 days before it (fewer days while less history exists). Quiet
-        # below the minimum hourly spend (USD), so cents do not page.
+        # below the minimum hourly spend (USD), so cents do not page, and
+        # until there are 24 hourly baseline points, so a new deployment's
+        # first day (traffic still ramping up) does not page.
         expr: |
           (
             sum(increase(ps_gateway_cost_usd_total[1h]))
@@ -440,6 +442,9 @@ groups:
           and on ()
           sum(increase(ps_gateway_cost_usd_total[1h]))
             > 1  # minimum
+          and on ()
+          count_over_time(sum(increase(ps_gateway_cost_usd_total[1h]))[7d:1h] offset 1h)
+            >= 24
         for: 10m
         labels:
           severity: warning

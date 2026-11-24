@@ -118,6 +118,7 @@ Labels used throughout: `provider` is the provider the caller asked for (`unknow
   `max by (budget, window) (ps_gateway_budget_spend_usd{budget="<budget>"})` over the last day.
 - Who is spending: the Cost row of the traffic dashboard (`ps_gateway_cost_usd_total` by provider, model and team), or the collector's [showback](/guides/cost-attribution).
 - Whether the spend matches planned work (a batch job, a launch) or looks like a runaway loop.
+- Still firing just after the window rolled over: each replica updates its spend gauge only when it checks a call against the budget, so a replica that has not seen such a call since keeps reporting the old window's spend. `ps_gateway_budget_spend_usd{budget="<budget>"}` by `instance` shows which one; it clears on that replica's next covered call or restart.
 
 **Mitigate.** If planned, raise the limit in the budget configuration before it is reached. If not, find and stop the caller. When the budget reaches its limit, its action (block or downgrade) applies to the calls it covers.
 
@@ -134,7 +135,7 @@ Labels used throughout: `provider` is the provider the caller asked for (`unknow
 
 ## PromptShieldsCostSpike
 
-**Meaning.** For 10 minutes, estimated gateway spend over the last hour was more than 3 times the average hourly spend of the 7 days before it, and more than $1. With less than 7 days of history, the average covers the history there is. A jump from no spend at all to over $1 an hour also fires. Spend is the estimate the gateway puts on each call's telemetry event (provider-reported cost, else the pricing table), not an invoice.
+**Meaning.** For 10 minutes, estimated gateway spend over the last hour was more than 3 times the average hourly spend of the 7 days before it, and more than $1. With less than 7 days of history, the average covers the history there is, and the alert stays quiet until there are 24 hours of it, so a new deployment's first day does not page. After that, a jump from no spend at all to over $1 an hour also fires. Spend is the estimate the gateway puts on each call's telemetry event (provider-reported cost, else the pricing table), not an invoice.
 
 **Check first.**
 

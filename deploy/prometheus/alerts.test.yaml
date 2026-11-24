@@ -492,14 +492,14 @@ tests:
   - name: hourly spend spike
     interval: 1m
     input_series:
-      # $6 an hour for 3 hours, then $60 an hour.
+      # $6 an hour for 26 hours, then $60 an hour.
       - series: 'ps_gateway_cost_usd_total{provider="openai",model="gpt-4o",team="none"}'
-        values: "0+0.1x180 19+1x89"
+        values: "0+0.1x1560 156+1x89"
     alert_rule_test:
-      - eval_time: 3h
+      - eval_time: 26h
         alertname: PromptShieldsCostSpike
         exp_alerts: []
-      - eval_time: 4h
+      - eval_time: 27h
         alertname: PromptShieldsCostSpike
         exp_alerts:
           - exp_labels:
@@ -515,8 +515,23 @@ tests:
     input_series:
       # Ten times the usual rate, but $0.60 an hour.
       - series: 'ps_gateway_cost_usd_total{provider="openai",model="gpt-4o-mini",team="none"}'
-        values: "0+0.001x180 0.19+0.01x89"
+        values: "0+0.001x1560 1.56+0.01x89"
     alert_rule_test:
-      - eval_time: 4h
+      - eval_time: 27h
+        alertname: PromptShieldsCostSpike
+        exp_alerts: []
+
+  - name: hourly spend on a new deployment's first day
+    interval: 1m
+    input_series:
+      # Fresh series: $1 in the first hour, then $5 an hour (5x, over $1),
+      # and later $50 an hour, all within the first day.
+      - series: 'ps_gateway_cost_usd_total{provider="openai",model="gpt-4o",team="none"}'
+        values: "0+0.0167x60 1+0.0833x300 26+0.833x120"
+    alert_rule_test:
+      - eval_time: 2h30m
+        alertname: PromptShieldsCostSpike
+        exp_alerts: []
+      - eval_time: 8h
         alertname: PromptShieldsCostSpike
         exp_alerts: []
