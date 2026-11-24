@@ -139,6 +139,20 @@ prometheusRule:
   enabled: true
   labels:
     release: kube-prometheus-stack
+  runbookBaseUrl: https://docs.example.internal/prompt-shields/alert-runbooks
+  rules:
+    PromptShieldsRouteLatencyP95High:
+      threshold: 30
+      for: 20m
+    PromptShieldsBudgetNearLimit:
+      threshold: 0.9
+      labels:
+        team: finops
+    PromptShieldsCostSpike:
+      minimum: 25
+      severity: critical
+    PromptShieldsIngestStalled:
+      enabled: false
 networkPolicy:
   gateway:
     ingressFrom:

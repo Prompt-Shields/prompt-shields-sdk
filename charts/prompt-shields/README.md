@@ -414,6 +414,8 @@ Even then an ingest key never reaches member management (`admin:members`).
   Grafana sidecar (`grafana_dashboard: "1"` by default).
 - `prometheusRule.enabled` renders the alert rules as a PrometheusRule; add
   the label your Prometheus `ruleSelector` matches to `prometheusRule.labels`.
+  `prometheusRule.rules` overrides an alert's threshold, traffic floor,
+  `for`, severity or labels, or drops it, by alert name.
 - Both are copies of `deploy/grafana/dashboards` and
   `deploy/prometheus/alerts.yaml`; see `docs/guides/observability.mdx`.
 
@@ -535,6 +537,8 @@ can follow the images if those change.
 | `networkPolicy.egress.dns` / `.database.cidrs` / `.database.port` / `.allowExternal` / `.extra` | `true` / `[]` / `5432` / `true` / `[]` | Egress |
 | `grafanaDashboards.enabled` / `.labels` / `.annotations` / `.namespace` | `false` / `grafana_dashboard: "1"` / `{}` / release namespace | Dashboards ConfigMap for the Grafana sidecar |
 | `prometheusRule.enabled` / `.labels` | `false` / `{}` | Alert rules as a PrometheusRule |
+| `prometheusRule.rules` | `{}` | Per-alert overrides by alert name: `enabled`, `threshold`, `minimum`, `for`, `severity`, `labels` (see values.yaml) |
+| `prometheusRule.runbookBaseUrl` | `""` | Where `runbook_url` annotations point (default: the runbooks on GitHub) |
 | `extraObjects` | `[]` | Extra manifests (templated) |
 
 ## Environment variables

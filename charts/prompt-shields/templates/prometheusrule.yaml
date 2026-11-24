@@ -1,6 +1,64 @@
-{{- /* Prometheus Operator alert rules: files/prometheus/alerts.yaml (a copy of deploy/prometheus/alerts.yaml). */ -}}
+{{- /* Prometheus Operator alert rules: files/prometheus/alerts.yaml (a copy of deploy/prometheus/alerts.yaml),
+with the per-alert overrides of prometheusRule.rules applied. */ -}}
 {{- if .Values.prometheusRule.enabled }}
 {{- $rules := .Files.Get "files/prometheus/alerts.yaml" | fromYaml }}
+{{- $overrides := .Values.prometheusRule.rules | default dict }}
+{{- $runbookBase := .Values.prometheusRule.runbookBaseUrl | default "" }}
+{{- $defaultRunbookBase := "https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx" }}
+{{- $known := dict }}
+{{- $groups := list }}
+{{- range $group := $rules.groups }}
+  {{- $out := list }}
+  {{- range $rule := $group.rules }}
+    {{- $r := deepCopy $rule }}
+    {{- $o := dict }}
+    {{- if $r.alert }}
+      {{- $_ := set $known $r.alert true }}
+      {{- $o = get $overrides $r.alert | default dict }}
+    {{- end }}
+    {{- if not (and (hasKey $o "enabled") (not $o.enabled)) }}
+      {{- /* `> 20  # threshold` and `> 0.05  # minimum` lines in the expression. */ -}}
+      {{- range $param := list "threshold" "minimum" }}
+        {{- if hasKey $o $param }}
+          {{- $pattern := printf `([<>]=?)[ \t]*[0-9][0-9.eE+-]*([ \t]*#[ \t]*%s\b)` $param }}
+          {{- if not (regexMatch $pattern $r.expr) }}
+            {{- fail (printf "prometheusRule.rules.%s.%s: this alert has no `# %s` line to override" $r.alert $param $param) }}
+          {{- end }}
+          {{- $_ := set $r "expr" (regexReplaceAll $pattern $r.expr (printf "${1} %v${2}" (get $o $param))) }}
+        {{- end }}
+      {{- end }}
+      {{- with $o.for }}
+        {{- $_ := set $r "for" . }}
+      {{- end }}
+      {{- if or $o.severity $o.labels }}
+        {{- $labels := $r.labels | default dict }}
+        {{- with $o.labels }}
+          {{- $labels = merge (deepCopy .) $labels }}
+        {{- end }}
+        {{- with $o.severity }}
+          {{- $_ := set $labels "severity" . }}
+        {{- end }}
+        {{- $_ := set $r "labels" $labels }}
+      {{- end }}
+      {{- if and $runbookBase $r.annotations }}
+        {{- with $r.annotations.runbook_url }}
+          {{- $_ := set $r.annotations "runbook_url" (replace $defaultRunbookBase (trimSuffix "/" $runbookBase) .) }}
+        {{- end }}
+      {{- end }}
+      {{- $out = append $out $r }}
+    {{- end }}
+  {{- end }}
+  {{- if $out }}
+    {{- $g := deepCopy $group }}
+    {{- $_ := set $g "rules" $out }}
+    {{- $groups = append $groups $g }}
+  {{- end }}
+{{- end }}
+{{- range $name, $_ := $overrides }}
+  {{- if not (hasKey $known $name) }}
+    {{- fail (printf "prometheusRule.rules.%s: no alert with that name in files/prometheus/alerts.yaml" $name) }}
+  {{- end }}
+{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -12,5 +70,5 @@ metadata:
     {{- end }}
 spec:
   groups:
-    {{- toYaml $rules.groups | nindent 4 }}
+    {{- toYaml $groups | nindent 4 }}
 {{- end }}

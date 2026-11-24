@@ -1,0 +1,148 @@
+---
+title: Alert Runbooks
+description: What each latency, error, rate-limit, budget and cost alert of the gateway means, what to check first and how to stop it
+---
+
+# Alert Runbooks
+
+These runbooks cover the gateway alerts in `deploy/prometheus/alerts.yaml` that carry a `runbook_url` annotation. Each alert's heading is its anchor, so `runbook_url` links straight to it. Thresholds are defaults; the chart can change them per alert (see [Observability](/guides/observability#tuning-thresholds-with-the-chart)).
+
+The queries below run in Prometheus or Grafana Explore. The [gateway traffic dashboard](/guides/observability#grafana-dashboards) (`ps-gateway-traffic`) shows the same series: the Requests, Errors by route, Latency, Cost, Budgets and MCP tools rows.
+
+Labels used throughout: `provider` is the provider the caller asked for (`unknown` when the request names none), `route` is the gateway route pattern that handled the request (for example `/v1/chat/completions`), and `status` is the HTTP status the gateway returned.
+
+## PromptShieldsProviderLatencyP95High
+
+**Meaning.** For 15 minutes, the 95th percentile of gateway request duration for one provider was above 20 s, with more than 0.05 requests/s. Duration runs from the request reaching the gateway to the response headers, including guardrails, retries and failover attempts. For a streamed call it is the time to the first byte.
+
+**Check first.**
+
+- The provider's status page, and whether only some models are slow:
+  `histogram_quantile(0.95, sum by (le, route) (rate(ps_gateway_request_duration_seconds_bucket{provider="<provider>"}[10m])))`
+- Whether failover or retries are adding attempts: the circuit breaker transitions (`ps_gateway_circuit_breaker_transitions_total`) and the retry settings of the route policy.
+- Whether guardrails are slow: guardrail checks that call out (an LLM-based check, a remote PII service) add their own latency to every request.
+- Whether larger requests (long contexts, high `max_tokens` without streaming) are now the norm: `rate(ps_gateway_tokens_total{provider="<provider>"}[10m])`.
+
+**Mitigate.** Route latency-sensitive traffic to another provider or a faster model with the route policy, lower retry counts and timeouts so callers fail fast, or move long non-streamed calls to streaming. If the slowness is expected (a new reasoning model), raise the threshold for this alert.
+
+## PromptShieldsRouteLatencyP95High
+
+**Meaning.** For 15 minutes, the 95th percentile of request duration on one gateway route was above 20 s, with more than 0.05 requests/s. Unlike the provider alert, this covers every route, including MCP proxy and admin routes.
+
+**Check first.**
+
+- Which providers serve the route:
+  `histogram_quantile(0.95, sum by (le, provider) (rate(ps_gateway_request_duration_seconds_bucket{route="<route>"}[10m])))`.
+  If one provider stands out, follow [PromptShieldsProviderLatencyP95High](#promptshieldsproviderlatencyp95high).
+- For an MCP route, the MCP tools row of the dashboard: tool calls are as slow as the tool behind them.
+- Gateway CPU and memory: a saturated replica slows every route at once. Check the HPA and pod resource usage.
+
+**Mitigate.** Scale the gateway out if it is saturated. Otherwise mitigate per provider, or raise the threshold for routes that are slow by design (batch, long tool calls).
+
+## PromptShieldsProvider5xxRatioHigh
+
+**Meaning.** For 10 minutes, more than 5% of the requests for one provider returned a 5xx, with more than 0.05 requests/s. 5xx covers upstream failures the gateway passes through (such as 500, 502, 503) and errors the gateway returns itself.
+
+**Check first.**
+
+- Which statuses and routes:
+  `sum by (status, route) (rate(ps_gateway_requests_total{provider="<provider>",status=~"5.."}[10m]))`
+- The provider's status page and the circuit breaker transitions (`ps_gateway_circuit_breaker_transitions_total`): a circuit that keeps opening points at a failing target.
+- Gateway logs for upstream connection errors, TLS errors or egress refusals (a custom host that resolves to a refused address answers 400, not 5xx).
+
+**Mitigate.** Add or enable a fallback provider in the route policy, or move traffic away from the failing provider until it recovers. When the overall 5xx ratio also fires (`PromptShieldsGateway5xxRateHigh`), the problem is usually broader than one provider.
+
+## PromptShieldsProvider4xxRatioHigh
+
+**Meaning.** For 15 minutes, more than 25% of the requests for one provider returned a 4xx other than 429 (rate limited, see [PromptShieldsRateLimitedRatioHigh](#promptshieldsratelimitedratiohigh)) and 446 (guardrail block, `PromptShieldsGuardrailDenyRateHigh`). The status label does not record whether the provider or the gateway produced the 4xx, but with those two excluded most are provider refusals.
+
+**Check first.**
+
+- Which statuses:
+  `sum by (status, route) (rate(ps_gateway_requests_total{provider="<provider>",status=~"4..",status!~"429|446"}[10m]))`
+- 401 or 403: a revoked, expired or rotated provider key, or the gateway's own authentication (OIDC) refusing callers.
+- 404: a model that was renamed or retired, or a route the provider does not support.
+- 400: a client release sending a parameter the provider now rejects, or requests over the context limit.
+
+**Mitigate.** Rotate the provider key, update the model catalog or route policy for retired models, or contact the team whose client started failing (`business_unit` on `ps_gateway_requests_total`).
+
+## PromptShieldsRoute5xxRatioHigh
+
+**Meaning.** For 10 minutes, more than 5% of the requests on one route returned a 5xx, with more than 0.05 requests/s.
+
+**Check first.**
+
+- Which providers:
+  `sum by (provider, status) (rate(ps_gateway_requests_total{route="<route>",status=~"5.."}[10m]))`.
+  If one provider dominates, follow [PromptShieldsProvider5xxRatioHigh](#promptshieldsprovider5xxratiohigh).
+- With `provider="unknown"` (no provider), the failure is in the gateway or a dependency of the route: the collector for telemetry-backed routes, Redis for budgets and caches, an MCP server for MCP routes. Check the gateway logs.
+
+**Mitigate.** Depends on the cause: fail over the provider, restore the dependency, or roll back a gateway release that broke the route.
+
+## PromptShieldsRoute4xxRatioHigh
+
+**Meaning.** For 15 minutes, more than 25% of the requests on one route returned a 4xx other than 429 and 446, with more than 0.05 requests/s.
+
+**Check first.**
+
+- Which statuses and callers:
+  `sum by (status, provider, business_unit) (rate(ps_gateway_requests_total{route="<route>",status=~"4..",status!~"429|446"}[10m]))`
+- A new client release or integration that calls the route wrongly (400, 404, 405), or callers whose credentials stopped working (401, 403).
+
+**Mitigate.** Usually a caller fix. If the route is expected to refuse many calls (for example a validation endpoint), raise the threshold or drop the alert for it with an Alertmanager silence or route.
+
+## PromptShieldsRateLimitedRatioHigh
+
+**Meaning.** For 10 minutes, more than 10% of all gateway requests were answered with 429 by one source, with more than 0.05 requests/s. The `source` label says who refused:
+
+- `upstream`: the provider rate limited the gateway;
+- `gateway`: the gateway's own limits;
+- `budget`: a spend budget refused the call (see the budget alerts below).
+
+**Check first.**
+
+- Which providers return the 429s:
+  `sum by (provider) (rate(ps_gateway_requests_total{status="429"}[10m]))`
+- For `upstream`: your quota (requests and tokens per minute) at the provider, and whether one caller is bursting (`business_unit`).
+- For `budget`: `ps_gateway_budget_decisions_total{action="block"}` by `budget`.
+
+**Mitigate.** For `upstream`, raise the provider quota, spread load across keys or providers, or slow the bursting caller down. For `budget`, raise or reset the budget if the spend is legitimate. Per-rule gateway rate limits (#344) add a per-rule metric; a per-rule breakdown of this alert is a follow-up.
+
+## PromptShieldsBudgetNearLimit
+
+**Meaning.** A budget's spend in its current window reached 80% of its limit. The rule takes the highest spend any gateway replica reports, and has no `for`, so it fires on the first evaluation after a scrape sees the crossing (about a minute with the usual 30 s scrape and 1 min evaluation interval).
+
+**Check first.**
+
+- The budget, its window and how fast it is moving:
+  `max by (budget, window) (ps_gateway_budget_spend_usd{budget="<budget>"})` over the last day.
+- Who is spending: the Cost row of the traffic dashboard (`ps_gateway_cost_usd_total` by provider, model and team), or the collector's [showback](/guides/cost-attribution).
+- Whether the spend matches planned work (a batch job, a launch) or looks like a runaway loop.
+
+**Mitigate.** If planned, raise the limit in the budget configuration before it is reached. If not, find and stop the caller. When the budget reaches its limit, its action (block or downgrade) applies to the calls it covers.
+
+## PromptShieldsBudgetExhausted
+
+**Meaning.** A budget's spend reached its limit. Calls the budget covers are now blocked (429, `source="budget"`) or downgraded to a cheaper model, as the budget's action says, until the window rolls over or the limit is raised.
+
+**Check first.**
+
+- The same checks as [PromptShieldsBudgetNearLimit](#promptshieldsbudgetnearlimit).
+- `ps_gateway_budget_decisions_total{budget="<budget>"}` by `action`: how many calls are being blocked or downgraded.
+
+**Mitigate.** Raise the limit if the spend is legitimate and the business agrees; otherwise leave the budget doing its job and tell the affected team. To keep only this alert when both budget alerts fire, add the inhibit rule shown in [Observability](/guides/observability#prometheus-alerts).
+
+## PromptShieldsCostSpike
+
+**Meaning.** For 10 minutes, estimated gateway spend over the last hour was more than 3 times the average hourly spend of the 7 days before it, and more than $1. With less than 7 days of history, the average covers the history there is. A jump from no spend at all to over $1 an hour also fires. Spend is the estimate the gateway puts on each call's telemetry event (provider-reported cost, else the pricing table), not an invoice.
+
+**Check first.**
+
+- Where the extra spend comes from:
+  `topk(10, sum by (provider, model, team) (increase(ps_gateway_cost_usd_total[1h])))`
+  against the same query with `offset 1d`.
+- Token volume (`ps_gateway_tokens_total` by model and business unit): more calls, or bigger ones.
+- A model or price change: a route policy now sending traffic to a more expensive model, or a pricing table update.
+- Cache hit rate (`ps_gateway_cache_responses_total`): a cache that stopped hitting raises spend without more traffic.
+
+**Mitigate.** Stop or throttle the runaway caller, revert the route policy change, or put a budget on the team or project. For spend patterns that are spiky by design (a nightly batch), raise the threshold or the minimum, or rely on budgets and the collector's daily [spend anomaly alerts](/guides/spend-anomaly-alerts) instead.
