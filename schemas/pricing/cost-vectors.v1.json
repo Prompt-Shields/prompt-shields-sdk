@@ -515,6 +515,86 @@
       },
       "expected_cost": null,
       "derivation": "Quality and size 'auto' resolve server-side, so there is no per-image price to apply"
+    },
+    {
+      "id": "vertex-ai-claude-global-base",
+      "dimension": "base",
+      "vendor": "vertex-ai",
+      "model": "claude-sonnet-4-5",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "endpoint_scope": "global"
+      },
+      "expected_cost": 0.033,
+      "expected_cost_source": "pricing_table",
+      "derivation": "Claude on Vertex AI's global endpoint (the gateway's vertex-ai slug) at Anthropic list prices: 1000 x $3.00 + 2000 x $15.00"
+    },
+    {
+      "id": "google-vertex-ai-claude-regional",
+      "dimension": "regional_endpoint",
+      "vendor": "google-vertex-ai",
+      "model": "claude-sonnet-4-5",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "endpoint_scope": "regional"
+      },
+      "expected_cost": 0.0363,
+      "derivation": "A Vertex AI regional endpoint adds the model's 10% premium: (1000 x $3.00 + 2000 x $15.00) x 1.1"
+    },
+    {
+      "id": "aws-bedrock-claude-regional-cache-read",
+      "dimension": "regional_endpoint",
+      "vendor": "aws-bedrock",
+      "model": "claude-haiku-4-5",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 500,
+        "tokens_cached": 400,
+        "endpoint_scope": "regional"
+      },
+      "expected_cost": 0.003454,
+      "derivation": "aws-bedrock -> bedrock -> anthropic list prices, regional premium on every token rate: (600 x $1.00 + 400 x $0.10 + 500 x $5.00) x 1.1"
+    },
+    {
+      "id": "bedrock-claude-global-profile",
+      "dimension": "regional_endpoint",
+      "vendor": "bedrock",
+      "model": "claude-sonnet-4-5",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "endpoint_scope": "global"
+      },
+      "expected_cost": 0.033,
+      "derivation": "A Bedrock global inference profile has no premium: 1000 x $3.00 + 2000 x $15.00"
+    },
+    {
+      "id": "vertex-ai-claude-regional-no-premium",
+      "dimension": "regional_endpoint",
+      "vendor": "vertex-ai",
+      "model": "claude-3-5-haiku-20241022",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "endpoint_scope": "regional"
+      },
+      "expected_cost": 0.0088,
+      "derivation": "A model with no regional premium in the catalog costs the same on any endpoint: 1000 x $0.80 + 2000 x $4.00"
+    },
+    {
+      "id": "vertex-ai-claude-unknown-model",
+      "dimension": "regional_endpoint",
+      "vendor": "vertex-ai",
+      "model": "claude-unknown-9",
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 2000,
+        "endpoint_scope": "regional"
+      },
+      "expected_cost": null,
+      "derivation": "A Claude id with no price is unmetered (null), never zero"
     }
   ]
 }

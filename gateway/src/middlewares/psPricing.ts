@@ -31,6 +31,8 @@ const generatedTables = generatedJson as unknown as {
   // USD per unit and per image, not per 1k.
   unitPricing: Record<string, Record<string, number>>;
   imagePricing: Record<string, Record<string, Record<string, number>>>;
+  // Fraction a cloud platform's regional endpoint costs above its global one.
+  regionalEndpointPremium: Record<string, number>;
 };
 
 const key = (...parts: string[]) => parts.join('\u0000');
@@ -83,12 +85,48 @@ const AUDIO_PRICING = catalogMap(generatedTables.audioPricing);
 const SERVICE_TIER_PRICING = catalogMap(generatedTables.serviceTierPricing);
 
 // Vendors priced at another vendor's list prices when they have no entry.
+// Fallbacks chain (Claude on Bedrock: aws-bedrock -> bedrock -> anthropic),
+// as pricing.py's; Claude on Vertex AI and Bedrock is billed at Anthropic
+// list prices on the global endpoint (#388).
 const PRICING_VENDOR_FALLBACK: Record<string, string> = {
   azure_openai: 'openai',
   // The gateway's provider slugs.
   'azure-openai': 'openai',
   'mistral-ai': 'mistral',
+  // The SDK's AnthropicVertex / AnthropicBedrock vendors and the gateway's
+  // provider slugs.
+  'google-vertex-ai': 'anthropic',
+  'vertex-ai': 'anthropic',
+  'aws-bedrock': 'bedrock',
+  bedrock: 'anthropic',
 };
+
+/** `vendor`, then each vendor it falls back to (pricing.py _fallback_chain). */
+function fallbackChain(vendor: string): string[] {
+  const out: string[] = [];
+  let v: string | undefined = vendor;
+  while (v !== undefined && !out.includes(v)) {
+    out.push(v);
+    v = Object.prototype.hasOwnProperty.call(PRICING_VENDOR_FALLBACK, v)
+      ? PRICING_VENDOR_FALLBACK[v]
+      : undefined;
+  }
+  return out;
+}
+
+// Fraction a regional endpoint costs above the global one, key(vendor,
+// model) of the rates the call is priced at (catalog
+// regional_endpoint_premium), applied for these vendors when the call's
+// endpoint_scope is "regional" (pricing.py REGIONAL_ENDPOINT_PREMIUM).
+const REGIONAL_ENDPOINT_PREMIUM = catalogMap(
+  generatedTables.regionalEndpointPremium
+);
+const REGIONAL_PREMIUM_VENDORS = [
+  'aws-bedrock',
+  'bedrock',
+  'google-vertex-ai',
+  'vertex-ai',
+];
 
 export const USAGE_UNIT_TYPES = new Set([
   'seconds',
@@ -148,6 +186,8 @@ export interface PricingUsage {
   usage_unit_type?: string;
   image_quality?: string;
   image_size?: string;
+  // Where a cloud platform served the call: "global" or "regional" (#388).
+  endpoint_scope?: string;
 }
 
 /** Python's `round(x, 6)`: no float is an exact tie at 7 decimals. */
@@ -155,12 +195,11 @@ const round6 = (x: number) => Number(x.toFixed(6));
 
 /** `[pricingVendor, rates]` for a model, or null when it has no price. */
 function lookupRates(vendor: string, model: string): [string, Rates] | null {
-  let rates = DEFAULT_PRICING.get(key(vendor, model));
-  if (rates === undefined && vendor in PRICING_VENDOR_FALLBACK) {
-    vendor = PRICING_VENDOR_FALLBACK[vendor];
-    rates = DEFAULT_PRICING.get(key(vendor, model));
+  for (const v of fallbackChain(vendor)) {
+    const rates = DEFAULT_PRICING.get(key(v, model));
+    if (rates !== undefined) return [v, rates];
   }
-  return rates === undefined ? null : [vendor, rates];
+  return null;
 }
 
 /** True when (vendor, model) has token or per-unit prices. */
@@ -325,7 +364,15 @@ export function estimateCost(
     1000.0;
   const fees =
     (u.web_search_requests || 0) * (WEB_SEARCH_FEE[pricingVendor] ?? 0.0);
-  return round6(tokenCost * tier + fees);
+  let regional = 1.0;
+  if (
+    u.endpoint_scope === 'regional' &&
+    REGIONAL_PREMIUM_VENDORS.includes(vendor)
+  ) {
+    regional =
+      1.0 + (REGIONAL_ENDPOINT_PREMIUM.get(key(pricingVendor, model)) ?? 0.0);
+  }
+  return round6(tokenCost * tier * regional + fees);
 }
 
 function unitRate(
@@ -355,15 +402,10 @@ export function estimateUnitCost(
   if (typeof units !== 'number' || !Number.isFinite(units) || units < 0) {
     return null;
   }
-  let rate = unitRate(vendor, model, unitType, u.image_quality, u.image_size);
-  if (rate === null && vendor in PRICING_VENDOR_FALLBACK) {
-    rate = unitRate(
-      PRICING_VENDOR_FALLBACK[vendor],
-      model,
-      unitType,
-      u.image_quality,
-      u.image_size
-    );
+  let rate: number | null = null;
+  for (const v of fallbackChain(vendor)) {
+    rate = unitRate(v, model, unitType, u.image_quality, u.image_size);
+    if (rate !== null) break;
   }
   if (rate === null) return null;
   // Unit prices are standard-tier list prices.
@@ -423,6 +465,91 @@ export function withBedrockBaseModels(
   return out;
 }
 
+// Claude model ids on Vertex AI and Bedrock -> Anthropic's (pricing.py
+// normalise_claude_model): `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+// `claude-sonnet-4-5@20250929`, `claude-haiku-4-5@latest`, inference
+// profile ARNs.
+const CLAUDE_PROFILE_PREFIX = /^(?:us|us-gov|eu|apac|au|ca|jp|in|global)\./;
+const CLAUDE_VERSION_SUFFIX = /-v\d+(?::\d+)?$/;
+const CLAUDE_AT_DATE = /@(\d{8})$/;
+const CLAUDE_AT_ALIAS = /@[A-Za-z][A-Za-z0-9_-]*$/;
+const CLAUDE_DATE = /-\d{8}$/;
+
+/** Anthropic's id for a Vertex AI / Bedrock Claude model id, else null. */
+export function normaliseClaudeModel(model: string | undefined): string | null {
+  if (typeof model !== 'string' || !model) return null;
+  let name = model.startsWith('arn:')
+    ? model.slice(model.lastIndexOf('/') + 1)
+    : model;
+  name = name.replace(CLAUDE_PROFILE_PREFIX, '');
+  if (name.startsWith('anthropic.')) name = name.slice('anthropic.'.length);
+  if (!name.startsWith('claude-')) return null;
+  name = name.replace(CLAUDE_AT_DATE, '-$1').replace(CLAUDE_AT_ALIAS, '');
+  return name.replace(CLAUDE_VERSION_SUFFIX, '');
+}
+
+// Vendors whose Claude ids are priced normalised (the SDK's BedrockAdapter
+// and ClaudePlatformAdapter), by their SDK and gateway names.
+const CLAUDE_PLATFORM_VENDORS = new Set([
+  'bedrock',
+  'aws-bedrock',
+  'vertex-ai',
+  'google-vertex-ai',
+]);
+
+/**
+ * For Claude platform vendors, `candidates` then, for each Claude id among
+ * them, the id without its Bedrock profile prefix (or ARN), normalised to
+ * Anthropic's, and without its snapshot date (pricing.py
+ * claude_pricing_candidates). Other vendors are returned unchanged.
+ */
+export function withClaudeBaseModels(
+  vendor: string,
+  candidates: string[]
+): string[] {
+  if (!CLAUDE_PLATFORM_VENDORS.has(vendor)) return candidates;
+  const out = [...candidates];
+  for (const c of candidates) {
+    const base = normaliseClaudeModel(c);
+    if (base === null) continue;
+    const profile = c.startsWith('arn:') ? c.slice(c.lastIndexOf('/') + 1) : c;
+    for (const extra of [
+      profile.replace(CLAUDE_PROFILE_PREFIX, ''),
+      base,
+      base.replace(CLAUDE_DATE, ''),
+    ]) {
+      if (!out.includes(extra)) out.push(extra);
+    }
+  }
+  return out;
+}
+
+/**
+ * `endpoint_scope` of a gateway call to Claude on a cloud platform (#388):
+ * Vertex AI `global` region -> "global", any other known region ->
+ * "regional"; Bedrock `global.` inference profiles -> "global", other
+ * Claude ids (in-region, or `us.` / `eu.` / ... profiles) -> "regional".
+ * Undefined when unknown or not a Claude platform call (no premium).
+ */
+export function endpointScopeOf(
+  vendor: string,
+  model: string | undefined,
+  region: string | undefined
+): string | undefined {
+  if (vendor === 'vertex-ai' || vendor === 'google-vertex-ai') {
+    if (!region || normaliseClaudeModel(model) === null) return undefined;
+    return region.toLowerCase() === 'global' ? 'global' : 'regional';
+  }
+  if (vendor === 'bedrock' || vendor === 'aws-bedrock') {
+    if (normaliseClaudeModel(model) === null) return undefined;
+    const id = (model as string).startsWith('arn:')
+      ? (model as string).slice((model as string).lastIndexOf('/') + 1)
+      : (model as string);
+    return id.startsWith('global.') ? 'global' : 'regional';
+  }
+  return undefined;
+}
+
 /**
  * `cost` and `cost_source` for a telemetry event, as the SDK's `_build_event`
  * and `add_usage_detail_fields` set them: priced at the served model when it
@@ -437,7 +564,10 @@ export function costFields(
 ): { cost?: number; cost_source?: string } {
   const pricingModel = resolvePricingModel(
     vendor,
-    withBedrockBaseModels(vendor, pricingCandidates(model, servedModel))
+    withClaudeBaseModels(
+      vendor,
+      withBedrockBaseModels(vendor, pricingCandidates(model, servedModel))
+    )
   );
   const cost = usageCost(vendor, pricingModel, u);
   if (cost === null) return {};
@@ -465,6 +595,8 @@ export const PRICE_TABLES = {
   AUDIO_PRICING,
   SERVICE_TIER_PRICING,
   PRICING_VENDOR_FALLBACK,
+  REGIONAL_ENDPOINT_PREMIUM,
+  REGIONAL_PREMIUM_VENDORS,
   UNIT_PRICING,
   IMAGE_PRICING,
   DEFAULT_PRICING,
