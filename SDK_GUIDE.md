@@ -312,7 +312,16 @@ The response is in the OpenAI chat-completions shape whichever provider served i
 
 ### Spend budgets
 
-`ShieldsRouter` (local mode) and the plain clients take `budgets=`, a `budget.v1` document ([`schemas/budget/`](schemas/budget/README.md)): a USD limit per business unit, use case, owner (team) or everything, per UTC day, ISO week or month, with mode `warn`, `downgrade` or `block`.
+`ShieldsRouter` (local mode) and the plain clients take `budgets=`, a `budget.v1` document ([`schemas/budget/`](schemas/budget/README.md)): a USD (`limit_usd`) or token (`limit_tokens`) limit per tenant, team, project, user, calling service, requested model, business unit, use case, owner or everything, per UTC day, ISO week or month, with mode `warn`, `downgrade` (USD budgets only) or `block`.
+
+| `scope` | Matched on |
+|---|---|
+| `global` | Every call (with one `namespace` per tenant, the tenant's budget) |
+| `team`, `project` | `ps_metadata={"team": ..., "project": ...}` on the call (else the client's metadata) |
+| `user` | `ps_metadata["user_id"]`, hashed as `hash_user_id` does (the counter never holds the raw id) |
+| `service` | the client's `calling_service` |
+| `model` | the model the call asked for (`"auto"` for a router choosing) |
+| `business_unit`, `use_case`, `owner` | the client's metadata (a router's `use_case=` per call) |
 
 ```python
 from prompt_shields import BudgetExceeded, RedisBudgetStore, ShieldsRouter
@@ -328,11 +337,33 @@ client = ShieldsRouter(
 )
 ```
 
+Token budgets and per-team limits, with a callback when a budget crosses its warning share (`warn_at`, default 0.8) or its limit:
+
+```python
+from prompt_shields import BudgetEnforcer, RedisBudgetStore, ShieldsOpenAI
+
+budgets = BudgetEnforcer(
+    {"schema_version": "budget.v1", "namespace": "acme", "budgets": [
+        {"id": "data-team-tokens", "scope": "team", "subject": "data",
+         "window": "month", "limit_tokens": 50_000_000, "mode": "block"},
+        {"id": "per-user-daily", "scope": "user", "subject": "*",
+         "window": "day", "limit_usd": 5, "mode": "block"},
+    ]},
+    RedisBudgetStore(url="redis://redis:6379/0"),
+    on_threshold=lambda ev: pager.notify(ev.as_dict()),  # BudgetThreshold
+)
+client = ShieldsOpenAI(api_key=..., ps_api_key=..., budgets=budgets)
+client.chat.completions.create(model="gpt-4o-mini", messages=msgs,
+                               ps_metadata={"team": "data", "user_id": "alice"})
+```
+
 - **block**: once spend reaches the limit, calls raise `BudgetExceeded` and nothing is sent (no failover attempt either).
 - **downgrade**: the router clamps each call to the remaining budget, like `max_cost` and within the data policy, and the same ceiling narrows the failover candidates; once exhausted, it serves the cheapest allowed model and fails over only to models that cost no more. Only the attempt that served the call is counted. A plain client switches to the budget's `downgrade_model` only when built with `allow_budget_downgrade=True`: it runs no data policy, so that switch is not policy-checked (and on a multi-vendor OpenAI-compatible endpoint the model id can pick another provider); without the opt-in the call goes unchanged and a warning is logged.
 - **warn**: the call is never changed.
 
-Events carry `budget_state` (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`; `resp.ps.budget` has the same. **The default store is per process**: each worker, replica or pod counts on its own and a restart resets it, so N processes can together spend N times a limit. `RedisBudgetStore` (`pip install 'prompt-shields[optimizer-redis]'`) shares counters across processes, and with the gateway when it uses the same Redis and namespace. If the store cannot be read, calls go ahead (`on_store_error: "open"`, the default) with `budget_state: "unknown"`; set `"closed"` to refuse or downgrade instead. Spend is recorded after each call, so calls running when the limit is reached can overshoot it, and a plain client's call with no known price (`cost: null`) is not counted.
+Events carry `budget_state` (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`; `resp.ps.budget` has the same. **The default store is per process**: each worker, replica or pod counts on its own and a restart resets it, so N processes can together spend N times a limit. `RedisBudgetStore` (`pip install 'prompt-shields[optimizer-redis]'`) shares counters across processes, and with the gateway when it uses the same Redis and namespace. If the store cannot be read, calls go ahead (`on_store_error: "open"`, the default) with `budget_state: "unknown"`; set `"closed"` to refuse or downgrade instead.
+
+Enforcement follows the gateway's: before a call the client checks the matching counters (settled spend plus calls in flight), then **reserves the call's pre-call estimate** (the router's `est_cost`, or the pricing table for about 4 characters per input token plus `max_tokens` output, and the same tokens for token budgets). For block budgets the reservation is an atomic check, so concurrent calls, in any process or gateway replica on the same Redis, see each other and cannot all pass the last of a budget. After the call the reservation is settled at the actual cost and tokens (the estimate when the call was not priced); a failed call releases it, and one that is never settled lapses after `reservation_ttl_seconds` (15 minutes). A limit can still be passed by the difference between a call's estimate and its actual usage. `BudgetEnforcer(on_threshold=...)` is called with a `BudgetThreshold` (budget, `warn` or `exceeded`, scope, subject, window, period, unit, limit, spend) once per crossing, and a warning is logged; with a shared Redis exactly one process sees each crossing. The enforcer and both stores are thread-safe, and async clients run Redis calls off the event loop.
 
 ### What routing does not do yet
 

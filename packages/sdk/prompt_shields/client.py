@@ -22,7 +22,9 @@ from typing import Any
 from prompt_shields import otlp
 from prompt_shields.budgets import (
     BudgetStore,
+    budget_attributes,
     budget_event_hook,
+    estimate_call,
     make_enforcer,
     plain_client_model,
     warn_unapplied_downgrade,
@@ -438,13 +440,21 @@ class _CompletionsNamespace:
         # is sent; the cost is recorded from the telemetry event.
         budgets = self._parent._budgets
         if budgets is not None:
-            attrs = {k: self._parent._metadata.get(k)
-                     for k in ("business_unit", "use_case", "owner")}
+            attrs = budget_attributes(self._parent._metadata, ps_metadata, model)
             check = budgets.check(attrs)
             budgets.raise_if_blocked(check)
             model, requested, budget_action = plain_client_model(
                 check, model, self._parent._allow_budget_downgrade
             )
+            # Hold the pre-call estimate (an atomic check for block
+            # budgets); the event hook settles it with the actual usage.
+            est_cost, est_tokens = estimate_call(
+                self._parent._vendor, model, messages,
+                max_tokens if max_tokens is not None
+                else kwargs.get("max_completion_tokens"),
+            )
+            check = budgets.reserve(check, est_cost, est_tokens)
+            budgets.raise_if_blocked(check)
             _event_hook = budget_event_hook(
                 _event_hook, budgets, check, budget_action, requested
             )
@@ -463,6 +473,8 @@ class _CompletionsNamespace:
                                                 max_tokens=max_tokens, **kwargs)
             except Exception:
                 record_failure(model, messages, (ps_metadata or {}).get("session_id"))
+                if budgets is not None:
+                    budgets.release(check)
                 raise
 
         if streaming:

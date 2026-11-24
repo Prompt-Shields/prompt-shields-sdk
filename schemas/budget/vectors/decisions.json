@@ -8,7 +8,9 @@
       { "id": "support-daily", "scope": "use_case", "subject": "support-bot", "window": "day", "limit_usd": 10, "mode": "downgrade", "warn_at": 0.5, "downgrade_model": "gpt-4o-mini" },
       { "id": "per-use-case-daily", "scope": "use_case", "subject": "*", "window": "day", "limit_usd": 50, "mode": "block" },
       { "id": "finance-weekly", "scope": "business_unit", "subject": "finance", "window": "week", "limit_usd": 100, "mode": "block" },
-      { "id": "ml-team-monthly", "scope": "owner", "subject": "ml-team@example.com", "window": "month", "limit_usd": 200, "mode": "downgrade" }
+      { "id": "ml-team-monthly", "scope": "owner", "subject": "ml-team@example.com", "window": "month", "limit_usd": 200, "mode": "downgrade" },
+      { "id": "data-team-tokens-daily", "scope": "team", "subject": "data", "window": "day", "limit_tokens": 1000000, "mode": "block" },
+      { "id": "per-project-monthly", "scope": "project", "subject": "*", "window": "month", "limit_usd": 500, "mode": "warn" }
     ]
   },
   "vectors": [
@@ -60,6 +62,19 @@
       "attributes": { "use_case": "support-bot" },
       "spent": { "org-monthly": null, "support-daily": null, "per-use-case-daily": null },
       "expected": { "state": "unknown", "budget_id": "org-monthly", "action": "block", "ceiling_usd": 0 }
+    },
+    {
+      "id": "team-token-budget-blocks",
+      "description": "A token budget (limit_tokens) compares its token counter with its limit like a USD budget.",
+      "attributes": { "team": "data" },
+      "spent": { "org-monthly": 10, "data-team-tokens-daily": 1000000 },
+      "expected": { "matched": ["org-monthly", "data-team-tokens-daily"], "state": "exceeded", "budget_id": "data-team-tokens-daily", "action": "block", "ceiling_usd": null }
+    },
+    {
+      "id": "team-and-project-warn",
+      "attributes": { "team": "data", "project": "chatbot" },
+      "spent": { "org-monthly": 10, "data-team-tokens-daily": 800000, "per-project-monthly": 450 },
+      "expected": { "matched": ["org-monthly", "data-team-tokens-daily", "per-project-monthly"], "state": "warn", "budget_id": "data-team-tokens-daily", "action": "none", "ceiling_usd": null }
     }
   ]
 }
