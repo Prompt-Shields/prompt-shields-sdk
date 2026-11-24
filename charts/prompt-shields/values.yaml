@@ -226,6 +226,30 @@ gateway:
     #    limit_usd: 500
     #    mode: downgrade           # warn, downgrade, block
     #    warn_at: 0.8
+  # Request and token rate limits (#344), rendered into PS_RATE_LIMITS as a
+  # `rate_limits` v1 section (docs/guides/gateway-rate-limits.mdx). A central
+  # policy's `rate_limits` section replaces it while active. Replicas share
+  # counters through Redis (redis.url / existingSecret, else
+  # REDIS_CONNECTION_STRING); without one each replica counts on its own.
+  rateLimits:
+    enabled: false
+    # When Redis fails: open (count in the replica's memory) or closed (503).
+    onStoreError: open
+    # PS_RATELIMIT_NAMESPACE: key prefix in Redis.
+    namespace: default
+    redis:
+      # PS_RATELIMIT_REDIS_URL, e.g. redis://redis-master:6379/1. Only for a
+      # URL without a password; otherwise use existingSecret.
+      url: ""
+      # A Secret key holding the Redis URL, rendered as PS_RATELIMIT_REDIS_URL.
+      existingSecret: {}
+      #  name: gateway-redis
+      #  key: url
+    rules: []
+    #  - id: per-key
+    #    scope: virtual_key        # global, virtual_key, team, project, user
+    #    match: {model: "gpt-4o*"} # optional: model, provider, route
+    #    rpm: 600                  # and/or tpm, tpd, concurrency
   # Route policy (#336): a route-policy.v1 document (schemas/route-policy/,
   # shared with the SDK) as YAML. When set, the chart renders it into a
   # ConfigMap mounted at /etc/prompt-shields/route-policy and sets
