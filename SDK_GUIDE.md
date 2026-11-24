@@ -876,7 +876,7 @@ prompt_shields.configure_langfuse()  # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
 prompt_shields.configure_otlp()      # OTEL_EXPORTER_OTLP_* (Tempo, Honeycomb, an OTel Collector, ...)
 ```
 
-or `PS_LANGFUSE_EXPORT=true` / `PS_OTLP_EXPORT=true` without code. Export is batched from a background thread, bounded (`OTEL_BSP_MAX_QUEUE_SIZE`) and fail-open. See [OTLP export and Langfuse](docs/guides/otlp-langfuse.mdx).
+or `PS_LANGFUSE_EXPORT=true` / `PS_OTLP_EXPORT=true` without code. Export is batched from a background thread, bounded (`OTEL_BSP_MAX_QUEUE_SIZE`) and fail-open. If your own `TracerProvider` already exports the SDK's `chat {model}` spans, the attributes go on those spans instead of a second span per call (`PS_OTLP_SDK_SPANS=export` to send both). See [OTLP export and Langfuse](docs/guides/otlp-langfuse.mdx).
 
 ---
 

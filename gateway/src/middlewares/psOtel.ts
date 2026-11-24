@@ -30,7 +30,8 @@
  * cost from the shared price table (`gen_ai.usage.cost`, `ps.cost.usd`), the
  * caller's `X-PS-Session-Id` (`gen_ai.conversation.id`, `session.id`) and a
  * SHA-256 hash of the user (`ps.user.hash`, `user.id`: the OIDC subject hash,
- * else the hash of `X-PS-User-Id`; the raw id is never sent). With
+ * else the hash of the caller-declared, unverified `X-PS-User-Id`, which never
+ * replaces a verified subject; the raw id is never sent). With
  * `PS_OTEL_LANGFUSE=true` the `langfuse.*` attributes Langfuse maps are added,
  * and the endpoint and Basic auth can come from `LANGFUSE_PUBLIC_KEY`,
  * `LANGFUSE_SECRET_KEY` and `LANGFUSE_HOST`. Captured content (opt-in) goes

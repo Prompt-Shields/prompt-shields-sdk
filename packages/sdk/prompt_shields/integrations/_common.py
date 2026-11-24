@@ -82,15 +82,19 @@ def claim_outer_call(framework: str) -> FrameworkCall | None:
 
 def emit(fc: FrameworkCall, *, vendor: str, model: Any, messages: list,
          latency_ms: int, adapter_fields: dict,
-         cost_fallback: Any = None) -> None:
+         cost_fallback: Any = None, sdk_span: Any = otlp._CURRENT,
+         flush: bool = True) -> bool:
     """Build and send one event for a call `instrument()` did not capture.
 
     `cost_fallback` is the framework's own cost, used (with `cost_source`
     set to the framework name) only when the pricing table has no price.
+    `sdk_span`: the call's SDK chat span, for the OTLP export (#386).
+    `flush=False` only enqueues; call `flush_telemetry()` afterwards.
+    Returns whether an event was enqueued.
     """
     state = instrumentation._state
     if state is None or fc.captured:
-        return
+        return False
     event = instrumentation.build_event(
         state, vendor=vendor, model=model, messages=messages,
         latency_ms=latency_ms, adapter_fields=adapter_fields,
@@ -101,10 +105,19 @@ def emit(fc: FrameworkCall, *, vendor: str, model: Any, messages: list,
         event["cost_source"] = fc.framework
     apply_framework_fields(event, fc)
     state.telemetry.enqueue(event)
-    otlp.export_event(event, messages)
+    otlp.export_event(event, messages, sdk_span=sdk_span)
     if state.atlas is not None:
         state.atlas.enqueue(build_atlas_event(event, messages))
-    _flush(state)
+    if flush:
+        _flush(state)
+    return True
+
+
+def flush_telemetry() -> None:
+    """Send what `emit(..., flush=False)` enqueued."""
+    state = instrumentation._state
+    if state is not None:
+        _flush(state)
 
 
 def _flush(state: Any) -> None:

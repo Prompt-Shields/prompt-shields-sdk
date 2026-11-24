@@ -49,6 +49,12 @@ Spans follow the attribute names of the SDK spans in ``prompt_shields.tracing``
 ``ps.user.hash``) and join the caller's active OpenTelemetry span when
 ``opentelemetry-api`` is installed. Cost (``gen_ai.usage.cost``, USD) is the
 event's cost from the shared price table (``prompt_shields.pricing``).
+
+One span per call: when the call already has a recording SDK span (the app's
+own ``TracerProvider`` exports ``prompt_shields.tracing`` spans), an exporter
+puts its attributes, never content, on that span instead of exporting a
+second one (``sdk_spans="attach"``, the default; ``PS_OTLP_SDK_SPANS=export``
+sends its own span anyway).
 """
 
 from __future__ import annotations
@@ -87,6 +93,18 @@ logger = logging.getLogger("prompt_shields.otlp")
 PROTOCOL_PROTOBUF = "http/protobuf"
 PROTOCOL_JSON = "http/json"
 PROTOCOLS = (PROTOCOL_PROTOBUF, PROTOCOL_JSON)
+
+# What an exporter does for a call that already has a recording SDK span
+# (prompt_shields.tracing, #385): put its attributes on that span, which the
+# app's TracerProvider exports (default; one span per call), or export its own
+# span as well (two spans per call if both go to the same backend).
+SDK_SPANS_ATTACH = "attach"
+SDK_SPANS_EXPORT = "export"
+SDK_SPANS_MODES = (SDK_SPANS_ATTACH, SDK_SPANS_EXPORT)
+
+# Attributes never put on an SDK span: #385 keeps prompt and completion text
+# off them, whatever this exporter's content capture says.
+_CONTENT_ATTRIBUTES = frozenset({"gen_ai.input.messages", "langfuse.observation.input"})
 
 PROFILE_DEFAULT = "default"
 PROFILE_LANGFUSE = "langfuse"
@@ -199,8 +217,13 @@ class OTLPConfig:
     capture_content: bool = False
     profile: str = PROFILE_DEFAULT
     user_hash_salt: str | None = None
+    sdk_spans: str = SDK_SPANS_ATTACH
 
     def __post_init__(self) -> None:
+        if self.sdk_spans not in SDK_SPANS_MODES:
+            raise ValueError(
+                f"sdk_spans must be one of {SDK_SPANS_MODES}, not {self.sdk_spans!r}"
+            )
         if self.protocol not in PROTOCOLS:
             raise ValueError(
                 f"OTLP protocol must be one of {PROTOCOLS}, not {self.protocol!r}"
@@ -255,6 +278,8 @@ class OTLPConfig:
             "capture_content": _truthy(env.get("PS_OTLP_CAPTURE_CONTENT"))
             or _truthy(env.get("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")),
             "user_hash_salt": env.get("PS_OTLP_USER_HASH_SALT") or None,
+            "sdk_spans": (env.get("PS_OTLP_SDK_SPANS") or "").strip().lower()
+            or SDK_SPANS_ATTACH,
         }
         values.update({k: v for k, v in overrides.items() if v is not None})
         return cls(**values)
@@ -663,6 +688,7 @@ class OTLPSpanExporter:
         self._retry_at = 0.0
         self._backoff = 0.0
         self._exported = 0
+        self._attached = 0
         self._failed_requests = 0
         self._dropped = dict.fromkeys(DROP_REASONS, 0)
         self._warned = False
@@ -685,6 +711,25 @@ class OTLPSpanExporter:
             with self._lock:
                 self._dropped["build_failed"] += 1
             logger.debug("OTLP span not built: %s", e)
+
+    def attach_to(self, sdk_span: Any, event: Mapping[str, Any],
+                  messages: Iterable[Any] = ()) -> bool:
+        """Put this exporter's attributes (never content) on ``sdk_span``, a
+        recording SDK span, instead of queueing a span of its own. False
+        (nothing done) when this exporter exports its own spans."""
+        if self.config.sdk_spans != SDK_SPANS_ATTACH:
+            return False
+        try:
+            attrs = span_attributes(event, messages, self.config)
+            for key, value in attrs.items():
+                if key not in _CONTENT_ATTRIBUTES:
+                    sdk_span.set_attribute(key, value)
+        except Exception as e:  # noqa: BLE001 - fail-open: export it instead
+            logger.debug("OTLP attributes not attached: %s", e)
+            return False
+        with self._lock:
+            self._attached += 1
+        return True
 
     def _enqueue(self, span: dict, environment: str | None) -> None:
         with self._lock:
@@ -723,6 +768,7 @@ class OTLPSpanExporter:
                 "endpoint": self.config.endpoint,
                 "queued": len(self._queue),
                 "exported": self._exported,
+                "attached_to_sdk_spans": self._attached,
                 "failed_requests": self._failed_requests,
                 "dropped": dropped,
                 "dropped_total": sum(dropped.values()),
@@ -943,12 +989,31 @@ def configure_from_env() -> None:
         logger.warning("PS_LANGFUSE_EXPORT is set but Langfuse export is off: %s", e)
 
 
-def export_event(event: Mapping[str, Any], messages: Iterable[Any] = ()) -> None:
+_CURRENT: Any = object()
+
+
+def export_event(event: Mapping[str, Any], messages: Iterable[Any] = (), *,
+                 sdk_span: Any = _CURRENT) -> None:
     """Hand one SDK telemetry event to every configured exporter. Called by
-    the clients and ``instrument()`` next to the collector send; no I/O."""
+    the clients and ``instrument()`` next to the collector send; no I/O.
+
+    ``sdk_span``: the call's SDK chat span (``prompt_shields.tracing``,
+    #385), by default the current span if it is one. While it is recording,
+    exporters in ``sdk_spans="attach"`` mode put their attributes on it
+    instead of exporting a second span for the same call."""
     if not _env_checked:
         configure_from_env()
     if not _exporters:
         return
+    live = None
+    if sdk_span is not None:
+        try:
+            from prompt_shields import tracing
+
+            live = tracing.live_chat_span(None if sdk_span is _CURRENT else sdk_span)
+        except Exception:  # noqa: BLE001 - fail-open
+            live = None
     for exporter in exporters():
+        if live is not None and exporter.attach_to(live, event, messages):
+            continue
         exporter.export_event(event, messages)

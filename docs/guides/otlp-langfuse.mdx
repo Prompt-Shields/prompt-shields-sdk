@@ -65,7 +65,13 @@ X-PS-User-Id: alice@example.com
 ```
 
 The gateway sends only the SHA-256 hash of `X-PS-User-Id` (with gateway OIDC,
-the subject hash instead; nothing with `PS_OIDC_TELEMETRY_SUBJECT=off`). The
+the subject hash instead; nothing with `PS_OIDC_TELEMETRY_SUBJECT=off`).
+`X-PS-User-Id` is caller-declared: the gateway does not verify it, so any
+caller can put any value there. It only labels spans for grouping in the
+backend; budgets, rate limits and access policy never read it. When a
+request carries a verified OIDC identity, the header is ignored and cannot
+replace the subject hash. The SHA-256 of a guessable id (an email address)
+can be reversed by guessing, so prefer an opaque id. The
 endpoint must pass the gateway's egress check: a self-hosted Langfuse on a
 private address needs its host in `TRUSTED_CUSTOM_HOSTS`. On Kubernetes, put
 `LANGFUSE_SECRET_KEY` in the gateway's secret, not in `values.yaml`.
@@ -86,6 +92,26 @@ private address needs its host in `TRUSTED_CUSTOM_HOSTS`. On Kubernetes, put
 An SDK span joins the app's active OpenTelemetry span when
 `opentelemetry-api` is installed, so a call inside your own trace shows up
 inside it. A gateway span joins the caller's `traceparent`.
+
+### Apps that already export the SDK's own spans
+
+With the `opentelemetry` extra and a `TracerProvider` of your own, the SDK
+already makes a `chat {model}` span per call ([Agent traces](/guides/agent-traces)).
+To keep one span per call, an exporter configured here then puts its
+attributes (cost, session, user hash, `ps.*`, and the `langfuse.*` keys for
+`configure_langfuse()`) on that span instead of sending a second one, and
+your `TracerProvider` exports it (`attached_to_sdk_spans` in
+`otlp_stats()`). Point your provider's exporter at the backend you want
+(Langfuse included). Captured content is never put on those spans: the SDK
+spans stay text-free, so with content capture on, input reaches Langfuse
+only for calls without a recording SDK span. Calls without one (no
+`TracerProvider`, `instrument()` outside a LangChain run) are sent by the
+exporter as before.
+
+`PS_OTLP_SDK_SPANS=export` (or `configure_otlp(sdk_spans="export")`) makes
+an exporter send its own span for every call regardless, for an exporter
+whose backend your `TracerProvider` does not reach. If both reach the same
+backend, each call then appears twice.
 
 Langfuse computes its own cost for models it knows; the span's
 `cost_details` carries the Prompt Shields price, so Langfuse shows the same
@@ -111,6 +137,7 @@ standard variables:
 | `OTEL_SDK_DISABLED` | | `true` turns the export off |
 | `PS_OTLP_CAPTURE_CONTENT` / `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | off | see below |
 | `PS_OTLP_USER_HASH_SALT` | | key for an HMAC-SHA-256 user hash |
+| `PS_OTLP_SDK_SPANS` | `attach` | `export`: send a span even when the call has a recording SDK span (see above) |
 
 Keyword arguments override the environment:
 `configure_otlp(endpoint="https://otel.example.com/v1/traces", headers={...}, protocol="http/json")`.
@@ -155,6 +182,9 @@ not detected: turn capture on only where the backend may hold prompts.
   (`packages/sdk/tests/fixtures/otlp/`), a 30 s outage (calls keep succeeding,
   the queue stays at its bound, it drains on recovery), no text in the
   exported bytes with capture off (JSON and protobuf), dual export.
+- `packages/sdk/tests/test_tracing.py`: with a recording SDK span (client,
+  LangChain run, `instrument()` inside a LangChain run) the attributes go on
+  it and no second span is exported; `PS_OTLP_SDK_SPANS=export`.
 - `gateway/src/middlewares/psOtel.langfuse.test.ts`: the gateway's recorded
   Langfuse payload, cost from the price table, session and user hash, and the
   redaction of captured content.
