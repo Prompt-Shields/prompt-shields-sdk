@@ -45,7 +45,8 @@ describe('shared key format (schemas/budget/vectors/keys.json)', () => {
       input.scope,
       input.subject,
       input.window,
-      periodOf(input.window, nowMs)
+      periodOf(input.window, nowMs),
+      input.unit ?? 'usd'
     );
     expect(key).toBe(expected.key);
     expect(counterTtl(input.window, nowMs)).toBe(expected.ttl_seconds);

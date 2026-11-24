@@ -120,6 +120,9 @@ interface TelemetryEvent {
   // (`default@3+team-eu@2`) when the collector's policy is active, else the
   // route policy file's policy_version.
   policy_version?: string;
+  // PII categories the central policy's input guardrails found (#349),
+  // as the SDK reports them.
+  detected_pii_types?: string[];
   // Response cache (#33): the call's lookup, see cacheLookupFields.
   cache_status?: string;
   est_tokens_saved?: number;
@@ -890,6 +893,10 @@ export function psTelemetry() {
         if (route.sensitivitySource)
           event.route_sensitivity_source = route.sensitivitySource;
       }
+
+      const guardrailPii = c.get('psGuardrailPii');
+      if (Array.isArray(guardrailPii) && guardrailPii.length)
+        event.detected_pii_types = guardrailPii;
 
       const budget = c.get('psBudget');
       if (budget) {

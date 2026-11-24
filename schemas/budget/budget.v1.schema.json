@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://promptshields.com/schemas/budget/budget.v1.schema.json",
   "title": "Prompt Shields spend budgets (budget.v1)",
-  "description": "Spend budgets shared by the SDK (ShieldsRouter, the plain clients) and the gateway. A budget caps the USD spend of one attribution subject (business unit, use case, owner, or everything) per UTC day, ISO week or calendar month. Spend counters live in a BudgetStore under the key format in schemas/budget/README.md, so every enforcement point that shares a store and a namespace shares the counters. Cross-field rules JSON Schema cannot express: budget ids are unique; a 'global' budget has no subject; every other scope needs one.",
+  "description": "Spend budgets shared by the SDK (ShieldsRouter, the plain clients), the gateway and the central policy's budgets section. A budget caps the USD spend, or the tokens, of one attribution subject (business unit, use case, owner, team, project, user, calling service, requested model, or everything) per UTC day, ISO week or calendar month. Spend counters live in a BudgetStore under the key format in schemas/budget/README.md, so every enforcement point that shares a store and a namespace shares the counters. Cross-field rules JSON Schema cannot express: budget ids are unique; a 'global' budget has no subject; every other scope needs one.",
   "type": "object",
   "required": ["schema_version", "budgets"],
   "additionalProperties": false,
@@ -36,7 +36,15 @@
     },
     "budget": {
       "type": "object",
-      "required": ["id", "scope", "window", "limit_usd", "mode"],
+      "required": ["id", "scope", "window", "mode"],
+      "oneOf": [
+        { "required": ["limit_usd"], "not": { "required": ["limit_tokens"] } },
+        {
+          "required": ["limit_tokens"],
+          "not": { "required": ["limit_usd"] },
+          "properties": { "mode": { "enum": ["warn", "block"] } }
+        }
+      ],
       "additionalProperties": false,
       "properties": {
         "id": {
@@ -44,8 +52,8 @@
           "description": "Unique id, reported as budget_id in telemetry."
         },
         "scope": {
-          "enum": ["global", "business_unit", "use_case", "owner"],
-          "description": "The attribution attribute the budget is keyed on: business_unit (X-PS-Business-Unit), use_case (X-PS-Use-Case), owner (X-PS-Owner; use it for team budgets), or global (every call)."
+          "enum": ["global", "business_unit", "use_case", "owner", "team", "project", "user", "service", "model"],
+          "description": "The attribution attribute the budget is keyed on: business_unit (X-PS-Business-Unit), use_case (X-PS-Use-Case), owner (X-PS-Owner), team (X-PS-Team / ps_metadata.team), project (X-PS-Project / ps_metadata.project), user (a hashed user id: the gateway's verified OIDC subject hash, the SDK's hash of ps_metadata.user_id; never a raw id), service (X-PS-Service / the client's calling_service), model (the model the caller requested), or global (every call in the namespace; with one namespace per tenant, the tenant's budget)."
         },
         "subject": {
           "type": "string",
@@ -58,7 +66,13 @@
         },
         "limit_usd": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "description": "USD limit. A budget has exactly one of limit_usd and limit_tokens."
+        },
+        "limit_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Token limit: input plus output tokens, as the provider reports them. The counter is the USD key with ':tokens' appended. Mode warn or block only (downgrade clamps a USD cost)."
         },
         "mode": {
           "enum": ["warn", "downgrade", "block"],

@@ -3,9 +3,10 @@
  * and the SDK BudgetStore write the same keys, so a budget counts spend from
  * both; schemas/budget/vectors/keys.json pins the format for both.
  *
- *   ps:budget:v1:{namespace}:{scope}:{subject}:{window}:{period}
+ *   ps:budget:v1:{namespace}:{scope}:{subject}:{window}:{period}[:tokens]
  *
- * The key is a Redis string holding the subject's USD spend in the window,
+ * The key is a Redis string holding the subject's USD spend in the window
+ * (a token budget's counter, with `:tokens` appended, holds tokens),
  * changed only with INCRBYFLOAT; its TTL is set on the first write in the
  * window (seconds to the window's end, rounded up, plus a day) and never
  * extended.
@@ -17,7 +18,19 @@
  */
 
 export type BudgetWindow = 'day' | 'week' | 'month';
-export type BudgetScope = 'global' | 'business_unit' | 'use_case' | 'owner';
+export type BudgetScope =
+  | 'global'
+  | 'business_unit'
+  | 'use_case'
+  | 'owner'
+  | 'team'
+  | 'project'
+  | 'user'
+  | 'service'
+  | 'model';
+export type BudgetUnit = 'usd' | 'tokens';
+/** Appended to a token budget's counter key. */
+export const TOKENS_SUFFIX = ':tokens';
 
 export const KEY_PREFIX = 'ps:budget:v1';
 export const GRACE_SECONDS = 86_400;
@@ -82,9 +95,10 @@ export function counterKey(
   scope: BudgetScope,
   subject: string,
   window: BudgetWindow,
-  period: string
+  period: string,
+  unit: BudgetUnit = 'usd'
 ): string {
-  return [
+  const key = [
     KEY_PREFIX,
     encodeSegment(namespace),
     scope,
@@ -92,6 +106,7 @@ export function counterKey(
     window,
     period,
   ].join(':');
+  return unit === 'tokens' ? key + TOKENS_SUFFIX : key;
 }
 
 /** The gateway's reservation set for a counter (same Cluster slot). */
