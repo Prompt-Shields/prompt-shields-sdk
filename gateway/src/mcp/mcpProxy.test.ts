@@ -243,6 +243,24 @@ describe('MCP proxy', () => {
       expect(sent.headers['mcp-method']).toBe('tools/list');
     });
 
+    test('trace context goes upstream only with PS_OTEL_PROPAGATE_UPSTREAM', async () => {
+      const traceparent =
+        '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+      await rpc('tools/list', undefined, { headers: { traceparent } });
+      expect(fake.requests[0].headers.traceparent).toBeUndefined();
+      process.env.PS_OTEL_PROPAGATE_UPSTREAM = 'true';
+      try {
+        await rpc('tools/list', undefined, { headers: { traceparent } });
+      } finally {
+        delete process.env.PS_OTEL_PROPAGATE_UPSTREAM;
+      }
+      const sent = fake.requests[1].headers.traceparent;
+      expect(sent).toMatch(
+        /^00-0af7651916cd43dd8448eb211c80319c-[0-9a-f]{16}-01$/
+      );
+      expect(sent).not.toBe(traceparent);
+    });
+
     test('an allowed tools/call is forwarded with the checked body', async () => {
       const res = await rpc('tools/call', {
         name: 'echo',

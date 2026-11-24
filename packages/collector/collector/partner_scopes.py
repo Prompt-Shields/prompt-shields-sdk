@@ -96,6 +96,11 @@ SCOPES: dict[str, str] = {
         "verdicts, PII and injection detections, auth failures, policy "
         "denials, rate limits, payload rejections) from /security-events"
     ),
+    "traces:read": (
+        "List the tenant's agent traces and read one trace's spans (ids, "
+        "timings, status, models, tools and token counts; never content) "
+        "from /traces"
+    ),
 }
 
 # What `registry:read` meant in Phase 1: every read route. Frozen on
