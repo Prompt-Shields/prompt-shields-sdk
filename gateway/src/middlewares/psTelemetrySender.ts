@@ -45,7 +45,7 @@
 
 import { telemetryDroppedTotal } from './psMetrics/security';
 import { isSafeUpstreamURL } from './requestValidator';
-import { upstreamFetch } from '../utils/fetch';
+import { guardedUpstreamFetch } from '../utils/egressFetch';
 
 // Drop reasons (a superset of the SDK's DROP_REASONS):
 //   buffer_overflow       too many events already waiting to be delivered
@@ -94,8 +94,9 @@ export interface SenderOptions {
   /** Default wait in shutdown() before pending events count as `shutdown`. */
   shutdownTimeoutMs?: number;
   /**
-   * Defaults to `upstreamFetch` (the global fetch at call time, so tests can
-   * replace it), which never follows a redirect.
+   * Defaults to `guardedUpstreamFetch` (the global fetch at call time, so
+   * tests can replace it), which never follows a redirect and refuses a host
+   * resolving to a link-local or metadata address (#377).
    */
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
@@ -490,7 +491,8 @@ export class PSTelemetrySender {
       return { ok: false, reason: 'serialization_failed', final: true };
     }
     try {
-      const doFetch = this.opts.fetch ?? upstreamFetch;
+      // #377: resolve-and-check (no link-local / metadata address), pinned.
+      const doFetch = this.opts.fetch ?? guardedUpstreamFetch;
       const resp = await doFetch(this.opts.url, {
         method: 'POST',
         headers: {

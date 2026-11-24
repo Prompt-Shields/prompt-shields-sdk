@@ -245,9 +245,13 @@ async def test_local_backend_backs_off_after_failed_model_load(monkeypatch):
 
 async def test_openai_backend_honours_base_url_and_model(monkeypatch):
     seen = {}
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv(var.lower(), raising=False)
 
     def handler(request):
         seen["url"] = str(request.url)
+        seen["host"] = request.headers["host"]
         seen["body"] = request.content
         return httpx.Response(200, json={"data": [{"embedding": [0.5] * 8}]})
 
@@ -255,8 +259,14 @@ async def test_openai_backend_honours_base_url_and_model(monkeypatch):
     monkeypatch.setattr(
         embeddings.httpx,
         "AsyncClient",
-        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
     )
+
+    async def resolve(host, port):
+        assert (host, port) == ("eu.example.test", 443)
+        return ["203.0.113.9"]
+
+    monkeypatch.setattr(embeddings.egress, "resolve_host", resolve)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(settings, "embeddings_backend", "openai")
     monkeypatch.setattr(settings, "embeddings_model", "eu-embed-small")
@@ -265,7 +275,9 @@ async def test_openai_backend_honours_base_url_and_model(monkeypatch):
     )
 
     vec = await get_embedding("hello")
-    assert seen["url"] == "https://eu.example.test/v1/embeddings"
+    # Sent to the checked address, with the configured host name kept.
+    assert seen["url"] == "https://203.0.113.9/v1/embeddings"
+    assert seen["host"] == "eu.example.test"
     assert b'"eu-embed-small"' in seen["body"]
     assert vec[:8] == [0.5] * 8
     assert len(vec) == EMBEDDING_DIM
