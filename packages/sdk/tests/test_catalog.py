@@ -343,6 +343,9 @@ def test_check_mode_fails_on_drift_and_regenerates(tmp_path, monkeypatch, capsys
     pricing_tables = tmp_path / "psPricingTables.json"
     pricing_tables.write_text(build_catalog.GATEWAY_PRICING.read_text())
     monkeypatch.setattr(build_catalog, "GATEWAY_PRICING", pricing_tables)
+    collector_prices = tmp_path / "list_prices.json"
+    collector_prices.write_text(build_catalog.COLLECTOR_PRICES.read_text())
+    monkeypatch.setattr(build_catalog, "COLLECTOR_PRICES", collector_prices)
 
     assert build_catalog.main(["--check"]) == 1
     assert "defaultPolicy.json is out of date" in capsys.readouterr().err

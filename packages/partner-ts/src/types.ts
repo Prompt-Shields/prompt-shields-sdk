@@ -708,6 +708,74 @@ export interface ListSpendAlertsParams {
   limit?: number;
 }
 
+// Monthly cost reconciliation (/partner/v1/cost-reconciliations).
+
+export type CostReconciliationBasis = OpenString<'price' | 'tokens'>;
+
+/**
+ * One month's comparison, for one provider and model, of the usage the SDK
+ * and gateway reported with the provider's own usage report, both valued
+ * at the same prices (`basis: price`, USD) or in tokens (`basis: tokens`).
+ */
+export interface CostReconciliation {
+  id: string;
+  /** `YYYY-MM` (UTC). */
+  month: string;
+  provider: OpenString<'openai' | 'anthropic'>;
+  /** Model id without a `-latest` or date suffix. */
+  model: string;
+  estimatedTokensIn: number;
+  estimatedTokensOut: number;
+  /** The cost the SDK and gateway events reported (negotiated or list), USD. */
+  estimatedCostUsd: number | null;
+  providerTokensIn: number;
+  providerTokensOut: number;
+  basis: CostReconciliationBasis;
+  estimatedValue: number;
+  providerValue: number;
+  /** (estimated - provider) / provider x 100; null when the provider side is 0. */
+  variancePct: number | null;
+  thresholdPct: number;
+  /** The gap is over the threshold: the alert. */
+  flagged: boolean;
+  /** ISO 8601 timestamp. */
+  updatedAt: string;
+}
+
+export interface CostReconciliationListMeta {
+  /** Rows in `data`. */
+  total: number;
+}
+
+export interface CostReconciliationList {
+  data: CostReconciliation[];
+  meta: CostReconciliationListMeta;
+}
+
+export interface ListCostReconciliationsParams {
+  /** `YYYY-MM`. */
+  month?: string;
+  provider?: string;
+  flagged?: boolean;
+  /** 1 to 1000. Server default is 500. */
+  limit?: number;
+}
+
+export interface RunCostReconciliationParams {
+  /** `YYYY-MM` (UTC). */
+  month: string;
+}
+
+export interface CostReconciliationRun {
+  month: string;
+  /** Provider -> `ok` or `no_provider_data`. */
+  providers: Record<string, OpenString<'ok' | 'no_provider_data'>>;
+  /** `disabled` when the tenant turned reconciliation off. */
+  skipped: string | null;
+  flagged: number;
+  data: CostReconciliation[];
+}
+
 /**
  * Per-tenant spend anomaly thresholds (tenant `settings.spend_anomaly`).
  * An operator setting: the Partner API does not read or change it. Every

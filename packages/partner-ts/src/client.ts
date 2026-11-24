@@ -48,6 +48,10 @@ import type {
   ListProjectsParams,
   ListRiskReviewsParams,
   ListSpendAlertsParams,
+  CostReconciliationList,
+  CostReconciliationRun,
+  ListCostReconciliationsParams,
+  RunCostReconciliationParams,
   ListWebhookDeliveriesParams,
   ListWebhookSubscriptionsParams,
   McpTool,
@@ -237,6 +241,7 @@ export class PartnerClient {
   readonly telemetry: TelemetryResource;
   readonly usage: UsageResource;
   readonly spendAlerts: SpendAlertsResource;
+  readonly costReconciliations: CostReconciliationsResource;
   /** The tenant's teams. Needs `members:read`. */
   readonly teams: TeamsResource;
   /** The tenant's projects. Needs `members:read`. */
@@ -306,6 +311,7 @@ export class PartnerClient {
     this.telemetry = new TelemetryResource(this);
     this.usage = new UsageResource(this);
     this.spendAlerts = new SpendAlertsResource(this);
+    this.costReconciliations = new CostReconciliationsResource(this);
     this.teams = new TeamsResource(this);
     this.projects = new ProjectsResource(this);
     this.mcp = new McpResource(this);
@@ -834,6 +840,28 @@ export class SpendAlertsResource {
       { retrySafe: true },
     );
     return res.data;
+  }
+}
+
+/** `/partner/v1/cost-reconciliations`: monthly cost reconciliation against provider usage. */
+export class CostReconciliationsResource {
+  constructor(private readonly client: PartnerClient) {}
+
+  /** Stored rows, newest month first (`flagged` rows are the alerts). Needs `usage:read`. */
+  list(params: ListCostReconciliationsParams = {}): Promise<CostReconciliationList> {
+    return this.client.get<CostReconciliationList>('/partner/v1/cost-reconciliations', { ...params });
+  }
+
+  /**
+   * Recompute a month (replacing its rows) and return them. Re-running
+   * gives the same result, so it is retried like a GET. Needs
+   * `usage:reconcile`.
+   */
+  run(params: RunCostReconciliationParams): Promise<CostReconciliationRun> {
+    return this.client.send<CostReconciliationRun>('POST', '/partner/v1/cost-reconciliations/run', {
+      body: params,
+      retrySafe: true,
+    });
   }
 }
 

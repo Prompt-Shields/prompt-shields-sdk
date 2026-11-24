@@ -352,6 +352,8 @@ const SCHEMAS: Record<string, string> = {
   // tenant setting, typed for convenience.
   SpendAlert: 'SpendAlert',
   SpendAnomalySettings: 'SpendAnomalySettings',
+  // Monthly cost reconciliation (client.costReconciliations).
+  CostReconciliation: 'CostReconciliation',
   // MCP observability (client.mcp).
   McpTool: 'McpTool',
   McpUsageDay: 'McpUsageDay',
@@ -458,6 +460,8 @@ const UNMAPPED_SCHEMAS = new Set([
   'UpdatePolicyRequest',
   'CreatePolicyVersionRequest',
   'ActivatePolicyRequest',
+  'PriceSection',
+  'PriceOverride',
   'EffectivePolicy',
   'PolicyBundle',
 ]);
@@ -588,6 +592,14 @@ const OPERATIONS: Record<string, Operation> = {
     body: 'RiskReviewRequest',
   },
   'GET /partner/v1/spend-alerts': { methods: ['spendAlerts.list'], params: 'ListSpendAlertsParams' },
+  'GET /partner/v1/cost-reconciliations': {
+    methods: ['costReconciliations.list'],
+    params: 'ListCostReconciliationsParams',
+  },
+  'POST /partner/v1/cost-reconciliations/run': {
+    methods: ['costReconciliations.run'],
+    body: 'RunCostReconciliationParams',
+  },
   'GET /partner/v1/teams': { methods: ['teams.list'] },
   'GET /partner/v1/projects': { methods: ['projects.list'], params: 'ListProjectsParams' },
   'GET /api/v1/admin/roles': NOT_WRAPPED,
