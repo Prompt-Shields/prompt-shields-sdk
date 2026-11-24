@@ -268,10 +268,26 @@ context as `c.get('psRoute')` for a telemetry middleware to read.
 
 - parses token usage + served model from a non-streaming JSON body; for a
   streamed response it reads them from the stream's final events and sends the
-  event once the stream has ended (`psStreamObserver.ts`);
+  event once the stream has ended (`psStreamObserver.ts`). Counts the stream
+  did not report (no usage sent, or the stream was cut before it) are
+  estimated (`psUsageEstimate.ts`) and the event says `usage_source:
+  "estimated"` (else `"provider"`);
 - merges business `X-PS-*` headers (`extractPSHeaders`);
 - folds in the routing decision from `c.get('psRoute')` →
   `requested_model` / `served_model` / `route_group` / `route_reason` / `route_est_cost`.
+
+Stream usage (#389, `psStreamUsage.ts`): for streamed Chat Completions and
+Completions requests to `openai` and `azure-openai` (API version 2024-07-01 or
+later, or `v1`), the gateway sets `stream_options.include_usage` when the client
+did not set `include_usage`, and removes what that adds from the client stream
+(the usage-only chunk, `"usage":null`), so the client gets the same bytes.
+
+- `PS_STREAM_INCLUDE_USAGE` — `false` turns injection off.
+- `PS_STREAM_INCLUDE_USAGE_PROVIDERS` — comma-separated provider ids replacing
+  the default list (`openai,azure-openai`). Only add providers that forward
+  `stream_options` and pass the OpenAI chunk stream through unchanged.
+- `PS_STREAM_INCLUDE_USAGE_HOSTS` — exact hostnames of custom hosts (e.g. a
+  vLLM server) that accept the parameter; other custom hosts are left alone.
 
 Fire-and-forget and fail-open — never affects the response. Only POST traffic is
 reported. The original `psTelemetryMiddleware` (`beforeRequest`/`afterResponse`)

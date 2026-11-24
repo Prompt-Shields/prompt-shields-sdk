@@ -228,7 +228,7 @@ class ChatSpan:
     def record(self, fields: Mapping[str, Any] | None) -> None:
         """Response attributes from an SDK telemetry event or adapter fields
         (``tokens_in``, ``tokens_out``, ``served_model``,
-        ``finish_reasons``)."""
+        ``finish_reasons``, ``usage_source``)."""
         if not fields:
             return
         reasons = fields.get("finish_reasons")
@@ -242,6 +242,10 @@ class ChatSpan:
                 else None,
                 "gen_ai.response.finish_reasons": [r for r in reasons if isinstance(r, str)]
                 if isinstance(reasons, (list, tuple))
+                else None,
+                # #389: a stream's counts are the provider's or estimated.
+                "ps.usage_source": fields.get("usage_source")
+                if isinstance(fields.get("usage_source"), str)
                 else None,
             },
         )

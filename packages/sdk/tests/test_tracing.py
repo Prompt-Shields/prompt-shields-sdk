@@ -117,6 +117,31 @@ def test_chat_span_joins_the_active_trace_and_goes_to_the_gateway(spans):
         assert SECRET not in json.dumps(dict(span.attributes or {}))
 
 
+def test_streamed_chat_span_carries_the_usage_source(spans):
+    """#389: a stream whose provider sent no usage is estimated, and the span
+    says so (the gateway's spans carry the same attribute)."""
+    chunk = {"id": "c", "object": "chat.completion.chunk", "created": 0,
+             "model": "gpt-4o-2024-08-06",
+             "choices": [{"index": 0, "delta": {"content": "hello there"}}]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n",
+                              headers={"content-type": "text/event-stream"})
+
+    client = ShieldsOpenAI(
+        api_key="sk-test", ps_api_key="ps-test",
+        base_url="http://gateway.internal:8787/v1", max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client._telemetry = MagicMock()
+    stream = client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": "hi"}], stream=True)
+    list(stream)
+    a = dict(_finished(spans)["chat gpt-4o"].attributes)
+    assert a["ps.usage_source"] == "estimated"
+    assert a["gen_ai.usage.output_tokens"] == 2
+
+
 def test_no_traceparent_to_a_provider_unless_asked(spans):
     seen: list[httpx.Request] = []
     _client("https://api.openai.com/v1", seen).chat.completions.create(
