@@ -219,40 +219,358 @@ tests:
         alertname: PromptShieldsIngestFailing
         exp_alerts: []
 
-  - name: budget exceeded
+  # ── Latency and errors per provider and route (#387) ──────────────────
+  - name: p95 latency per provider and route
     interval: 1m
     input_series:
-      # Registered at 0 when the budget is loaded, crossed at minute 10.
-      - series: 'ps_gateway_budget_threshold_crossings_total{budget="team-data",window="month",threshold="exceeded",instance="gw-1"}'
-        values: "0x9 1x80"
-      - series: 'ps_gateway_budget_threshold_crossings_total{budget="team-data",window="month",threshold="warn",instance="gw-2"}'
-        values: "0x4 1x80"
+      # openai on /v1/chat/completions: every call between 10 s and 30 s.
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/chat/completions",status="200",provider="openai",le="1"}'
+        values: "0x40"
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/chat/completions",status="200",provider="openai",le="10"}'
+        values: "0x40"
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/chat/completions",status="200",provider="openai",le="30"}'
+        values: "0+6x40"
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/chat/completions",status="200",provider="openai",le="+Inf"}'
+        values: "0+6x40"
+      - series: 'ps_gateway_request_duration_seconds_count{route="/v1/chat/completions",status="200",provider="openai"}'
+        values: "0+6x40"
+      # anthropic on /v1/messages: every call under 1 s.
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/messages",status="200",provider="anthropic",le="1"}'
+        values: "0+6x40"
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/messages",status="200",provider="anthropic",le="10"}'
+        values: "0+6x40"
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/messages",status="200",provider="anthropic",le="30"}'
+        values: "0+6x40"
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/messages",status="200",provider="anthropic",le="+Inf"}'
+        values: "0+6x40"
+      - series: 'ps_gateway_request_duration_seconds_count{route="/v1/messages",status="200",provider="anthropic"}'
+        values: "0+6x40"
     alert_rule_test:
-      - eval_time: 8m
-        alertname: PromptShieldsBudgetExceeded
+      # Slow, but not yet for 15 minutes.
+      - eval_time: 10m
+        alertname: PromptShieldsProviderLatencyP95High
         exp_alerts: []
-      - eval_time: 15m
-        alertname: PromptShieldsBudgetExceeded
+      - eval_time: 10m
+        alertname: PromptShieldsRouteLatencyP95High
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsProviderLatencyP95High
         exp_alerts:
           - exp_labels:
               severity: warning
               service: prompt-shields-gateway
-              budget: team-data
-              window: month
+              provider: openai
             exp_annotations:
-              summary: Budget team-data reached its limit
-              description: "Budget team-data (per month) reached its limit in the last hour. Block budgets refuse calls until the window resets; downgrade budgets serve cheaper models. See ps_gateway_budget_decisions_total and the ps.budget log lines."
-      - eval_time: 75m
-        alertname: PromptShieldsBudgetExceeded
-        exp_alerts: []
-      - eval_time: 6m
-        alertname: PromptShieldsBudgetWarning
+              summary: "p95 latency through openai is high"
+              description: "The 95th percentile of gateway request duration for provider openai was 29s over the last 10 minutes."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsproviderlatencyp95high
+      - eval_time: 30m
+        alertname: PromptShieldsRouteLatencyP95High
         exp_alerts:
           - exp_labels:
-              severity: info
+              severity: warning
               service: prompt-shields-gateway
-              budget: team-data
+              route: /v1/chat/completions
+            exp_annotations:
+              summary: "p95 latency on /v1/chat/completions is high"
+              description: "The 95th percentile of gateway request duration on route /v1/chat/completions was 29s over the last 10 minutes."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsroutelatencyp95high
+
+  - name: p95 latency needs real traffic
+    interval: 1m
+    input_series:
+      # One slow call a minute: under the 0.05/s floor.
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/chat/completions",status="200",provider="openai",le="10"}'
+        values: "0x40"
+      - series: 'ps_gateway_request_duration_seconds_bucket{route="/v1/chat/completions",status="200",provider="openai",le="+Inf"}'
+        values: "0+1x40"
+      - series: 'ps_gateway_request_duration_seconds_count{route="/v1/chat/completions",status="200",provider="openai"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PromptShieldsProviderLatencyP95High
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsRouteLatencyP95High
+        exp_alerts: []
+
+  - name: 4xx and 5xx ratio per provider and route
+    interval: 1m
+    input_series:
+      # openai on /v1/chat/completions: 60 ok, 12 bad gateway, 30 revoked key a minute.
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="200",provider="openai",business_unit="none",environment="none"}'
+        values: "0+60x40"
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="502",provider="openai",business_unit="none",environment="none"}'
+        values: "0+12x40"
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="401",provider="openai",business_unit="none",environment="none"}'
+        values: "0+30x40"
+      # anthropic on /v1/messages: many 429 and 446, which the 4xx rules leave out.
+      - series: 'ps_gateway_requests_total{route="/v1/messages",method="POST",status="200",provider="anthropic",business_unit="none",environment="none"}'
+        values: "0+60x40"
+      - series: 'ps_gateway_requests_total{route="/v1/messages",method="POST",status="429",provider="anthropic",business_unit="none",environment="none"}'
+        values: "0+60x40"
+      - series: 'ps_gateway_requests_total{route="/v1/messages",method="POST",status="446",provider="anthropic",business_unit="none",environment="none"}'
+        values: "0+60x40"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PromptShieldsProvider5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PromptShieldsProvider4xxRatioHigh
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PromptShieldsRoute5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PromptShieldsRoute4xxRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsProvider5xxRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              provider: openai
+            exp_annotations:
+              summary: "5xx ratio through openai is high"
+              description: "11.76% of requests to provider openai returned a 5xx over the last 10 minutes."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsprovider5xxratiohigh
+      - eval_time: 30m
+        alertname: PromptShieldsProvider4xxRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              provider: openai
+            exp_annotations:
+              summary: "4xx ratio through openai is high"
+              description: "29.41% of requests to provider openai returned a 4xx (429 and 446 excluded) over the last 10 minutes."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsprovider4xxratiohigh
+      - eval_time: 30m
+        alertname: PromptShieldsRoute5xxRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              route: /v1/chat/completions
+            exp_annotations:
+              summary: "5xx ratio on /v1/chat/completions is high"
+              description: "11.76% of requests on route /v1/chat/completions returned a 5xx over the last 10 minutes."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsroute5xxratiohigh
+      - eval_time: 30m
+        alertname: PromptShieldsRoute4xxRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              route: /v1/chat/completions
+            exp_annotations:
+              summary: "4xx ratio on /v1/chat/completions is high"
+              description: "29.41% of requests on route /v1/chat/completions returned a 4xx (429 and 446 excluded) over the last 10 minutes."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsroute4xxratiohigh
+
+  - name: error ratios need real traffic
+    interval: 1m
+    input_series:
+      # Every call fails, but there is one a minute.
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="502",provider="openai",business_unit="none",environment="none"}'
+        values: "0+1x40"
+      - series: 'ps_gateway_requests_total{route="/v1/embeddings",method="POST",status="400",provider="openai",business_unit="none",environment="none"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PromptShieldsProvider5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsProvider4xxRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsRoute5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsRoute4xxRatioHigh
+        exp_alerts: []
+
+  - name: rate-limited share
+    interval: 1m
+    input_series:
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="200",provider="openai",business_unit="none",environment="none"}'
+        values: "0+60x40"
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="429",provider="openai",business_unit="none",environment="none"}'
+        values: "0+13x40"
+      # 12 of 73 a minute come from the provider, 1 from a budget (under 10%).
+      - series: 'ps_gateway_rate_limited_total{source="upstream"}'
+        values: "0+12x40"
+      - series: 'ps_gateway_rate_limited_total{source="budget"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PromptShieldsRateLimitedRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PromptShieldsRateLimitedRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              source: upstream
+            exp_annotations:
+              summary: "Many requests are rate limited (upstream)"
+              description: "16.44% of gateway requests were answered with 429 by source upstream over the last 10 minutes."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsratelimitedratiohigh
+
+  - name: rate-limited share needs real traffic
+    interval: 1m
+    input_series:
+      - series: 'ps_gateway_requests_total{route="/v1/chat/completions",method="POST",status="429",provider="openai",business_unit="none",environment="none"}'
+        values: "0+1x40"
+      - series: 'ps_gateway_rate_limited_total{source="upstream"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PromptShieldsRateLimitedRatioHigh
+        exp_alerts: []
+
+  # ── Budgets and spend (#387) ───────────────────────────────────────────
+  - name: budget at 80% and 100%
+    interval: 1m
+    input_series:
+      # Two replicas see team-a's spend; the rules use the higher one.
+      - series: 'ps_gateway_budget_spend_usd{budget="team-a",window="month",instance="gw-1"}'
+        values: "50 60 70 80 90 100 110"
+      - series: 'ps_gateway_budget_spend_usd{budget="team-a",window="month",instance="gw-2"}'
+        values: "40 50 60 70 80 90 100"
+      - series: 'ps_gateway_budget_limit_usd{budget="team-a",window="month",instance="gw-1"}'
+        values: "100x6"
+      - series: 'ps_gateway_budget_limit_usd{budget="team-a",window="month",instance="gw-2"}'
+        values: "100x6"
+      # team-b is far from its limit; a zero limit is ignored.
+      - series: 'ps_gateway_budget_spend_usd{budget="team-b",window="day",instance="gw-1"}'
+        values: "5x6"
+      - series: 'ps_gateway_budget_limit_usd{budget="team-b",window="day",instance="gw-1"}'
+        values: "50x6"
+      - series: 'ps_gateway_budget_spend_usd{budget="unset",window="day",instance="gw-1"}'
+        values: "5x6"
+      - series: 'ps_gateway_budget_limit_usd{budget="unset",window="day",instance="gw-1"}'
+        values: "0x6"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PromptShieldsBudgetNearLimit
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: PromptShieldsBudgetExhausted
+        exp_alerts: []
+      # Crosses 80% at minute 3 and alerts on that evaluation.
+      - eval_time: 3m
+        alertname: PromptShieldsBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              budget: team-a
               window: month
             exp_annotations:
-              summary: Budget team-data crossed its warning threshold
-              description: "Budget team-data (per month) crossed its warn_at share of the limit in the last hour."
+              summary: "Budget team-a is near its limit"
+              description: "Budget team-a has used 80% of its month limit."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetnearlimit
+      - eval_time: 3m
+        alertname: PromptShieldsBudgetExhausted
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PromptShieldsBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: prompt-shields-gateway
+              budget: team-a
+              window: month
+            exp_annotations:
+              summary: "Budget team-a is exhausted"
+              description: "Budget team-a has used 100% of its month limit; calls it covers are now blocked or downgraded, as the budget's action says."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetexhausted
+
+  - name: token budget at 80% and 100% (#29)
+    interval: 1m
+    input_series:
+      - series: 'ps_gateway_budget_spend_tokens{budget="tok-a",window="day",instance="gw-1"}'
+        values: "500000 800000 1000000"
+      - series: 'ps_gateway_budget_limit_tokens{budget="tok-a",window="day",instance="gw-1"}'
+        values: "1000000x2"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: PromptShieldsBudgetNearLimit
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: PromptShieldsBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+              budget: tok-a
+              window: day
+            exp_annotations:
+              summary: "Budget tok-a is near its limit"
+              description: "Budget tok-a has used 80% of its day limit."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetnearlimit
+      - eval_time: 1m
+        alertname: PromptShieldsBudgetExhausted
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: PromptShieldsBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: prompt-shields-gateway
+              budget: tok-a
+              window: day
+            exp_annotations:
+              summary: "Budget tok-a is exhausted"
+              description: "Budget tok-a has used 100% of its day limit; calls it covers are now blocked or downgraded, as the budget's action says."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsbudgetexhausted
+
+  - name: hourly spend spike
+    interval: 1m
+    input_series:
+      # $6 an hour for 26 hours, then $60 an hour.
+      - series: 'ps_gateway_cost_usd_total{provider="openai",model="gpt-4o",team="none"}'
+        values: "0+0.1x1560 156+1x89"
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: PromptShieldsCostSpike
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: PromptShieldsCostSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: prompt-shields-gateway
+            exp_annotations:
+              summary: Gateway spend this hour is far above its usual rate
+              description: "Estimated gateway spend over the last hour is 10x the average hourly spend of the previous 7 days."
+              runbook_url: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldscostspike
+
+  - name: hourly spend spike under the minimum spend
+    interval: 1m
+    input_series:
+      # Ten times the usual rate, but $0.60 an hour.
+      - series: 'ps_gateway_cost_usd_total{provider="openai",model="gpt-4o-mini",team="none"}'
+        values: "0+0.001x1560 1.56+0.01x89"
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: PromptShieldsCostSpike
+        exp_alerts: []
+
+  - name: hourly spend on a new deployment's first day
+    interval: 1m
+    input_series:
+      # Fresh series: $1 in the first hour, then $5 an hour (5x, over $1),
+      # and later $50 an hour, all within the first day.
+      - series: 'ps_gateway_cost_usd_total{provider="openai",model="gpt-4o",team="none"}'
+        values: "0+0.0167x60 1+0.0833x300 26+0.833x120"
+    alert_rule_test:
+      - eval_time: 2h30m
+        alertname: PromptShieldsCostSpike
+        exp_alerts: []
+      - eval_time: 8h
+        alertname: PromptShieldsCostSpike
+        exp_alerts: []

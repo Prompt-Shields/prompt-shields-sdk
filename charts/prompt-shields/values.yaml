@@ -197,7 +197,8 @@ gateway:
   # and, with gateway.oidc, owner and user budgets (the verified subject
   # hash) hold against a caller that changes its headers. Threshold
   # crossings count in ps_gateway_budget_threshold_crossings_total (the
-  # PromptShieldsBudget* alert rules); set PS_BUDGET_WEBHOOK_URL in
+  # PromptShieldsBudgetNearLimit / PromptShieldsBudgetExhausted rules alert
+  # on the spend gauges); set PS_BUDGET_WEBHOOK_URL in
   # gateway.extraEnv (and PS_BUDGET_WEBHOOK_SECRET in the gateway Secret)
   # for a signed webhook per crossing. Rendered into
   # PS_BUDGETS as a budget.v1 document (schemas/budget/, shared with the
@@ -715,6 +716,39 @@ prometheusRule:
   enabled: false
   # Labels your Prometheus ruleSelector matches, e.g. release: kube-prometheus-stack.
   labels: {}
+  # Where the `runbook_url` annotations point. Empty: the runbooks in the
+  # GitHub repository (docs/guides/alert-runbooks.mdx). Set it to the same
+  # page on your docs mirror; each alert's `#anchor` is kept.
+  runbookBaseUrl: ""
+  # Per-alert overrides, keyed by alert name (an unknown name fails the
+  # render):
+  #   enabled: false     drop the alert
+  #   threshold: <n>     the number on the expression's `# threshold` line
+  #   minimum: <n>       the traffic or spend floor on its `# minimum` line
+  #   for: <duration>    how long the condition must hold
+  #   severity: <s>      the severity label
+  #   labels: {}         extra labels, e.g. for Alertmanager routing
+  # Tunable alerts and their defaults (deploy/prometheus/alerts.yaml):
+  #   PromptShieldsProviderLatencyP95High  threshold 20 (s)    minimum 0.05 (req/s)  for 15m  warning
+  #   PromptShieldsRouteLatencyP95High     threshold 20 (s)    minimum 0.05 (req/s)  for 15m  warning
+  #   PromptShieldsProvider5xxRatioHigh    threshold 0.05      minimum 0.05 (req/s)  for 10m  warning
+  #   PromptShieldsProvider4xxRatioHigh    threshold 0.25      minimum 0.05 (req/s)  for 15m  warning
+  #   PromptShieldsRoute5xxRatioHigh       threshold 0.05      minimum 0.05 (req/s)  for 10m  warning
+  #   PromptShieldsRoute4xxRatioHigh       threshold 0.25      minimum 0.05 (req/s)  for 15m  warning
+  #   PromptShieldsRateLimitedRatioHigh    threshold 0.1       minimum 0.05 (req/s)  for 10m  warning
+  #   PromptShieldsBudgetNearLimit         threshold 0.8 (of the limit)              for 0    warning
+  #   PromptShieldsBudgetExhausted         threshold 1   (of the limit)              for 0    critical
+  #   PromptShieldsCostSpike               threshold 3 (x 7-day hourly average)  minimum 1 (USD/h)  for 10m  warning
+  # The other alerts take enabled, for, severity and labels. Example:
+  #   rules:
+  #     PromptShieldsRouteLatencyP95High:
+  #       threshold: 30
+  #       for: 20m
+  #     PromptShieldsBudgetNearLimit:
+  #       threshold: 0.9
+  #       labels:
+  #         team: finops
+  rules: {}
 
 # ──────────────────────────────────────────────────────────────────────
 # NetworkPolicy

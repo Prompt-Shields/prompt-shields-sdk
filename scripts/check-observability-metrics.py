@@ -2,8 +2,10 @@
 """Check that the shipped dashboards and alert rules use real metric names.
 
 Collects the metric names the code registers (gateway psMetrics registry,
+including the budget and MCP metrics registered elsewhere in gateway/src,
 collector prometheus_client), expands them to the series Prometheus scrapes
-(`_total`, `_bucket`/`_sum`/`_count`), then fails when a `ps_*` name in
+(`_total`, `_bucket`/`_sum`/`_count`; a histogram's own name is also
+accepted, for prose), then fails when a `ps_*` name in
 deploy/grafana, deploy/prometheus or the Helm chart's copies is not one of
 them. Also fails when the chart's copies differ from deploy/.
 
@@ -19,8 +21,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GATEWAY = ROOT / "gateway" / "src" / "middlewares" / "psMetrics"
-# Budget metrics live with the budget middleware (#28, #29).
-GATEWAY_EXTRA = [ROOT / "gateway" / "src" / "middlewares" / "psBudget" / "metrics.ts"]
+# Metrics registered in the same registry outside psMetrics/.
+GATEWAY_EXTRA = [
+    ROOT / "gateway" / "src" / "middlewares" / "psBudget" / "metrics.ts",
+    ROOT / "gateway" / "src" / "mcp" / "telemetry.ts",
+]
 COLLECTOR = ROOT / "packages" / "collector" / "collector" / "metrics.py"
 CHECKED = [ROOT / "deploy" / "grafana", ROOT / "deploy" / "prometheus"]
 CHART_FILES = ROOT / "charts" / "prompt-shields" / "files"
@@ -39,7 +44,7 @@ USED_RE = re.compile(r"\b(ps_(?:gateway|collector)_[a-z0-9_]+)")
 
 def series(kind: str, name: str, prometheus_client: bool) -> set[str]:
     if kind == "Histogram":
-        return {f"{name}_bucket", f"{name}_sum", f"{name}_count"}
+        return {name, f"{name}_bucket", f"{name}_sum", f"{name}_count"}
     if prometheus_client:
         base = name.removesuffix("_total")
         return {f"{base}_total"}

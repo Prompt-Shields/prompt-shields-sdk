@@ -3,8 +3,8 @@
  * across a budget's warn share (`warn_at` x limit) or its limit, the gateway:
  *
  * - counts it in `ps_gateway_budget_threshold_crossings_total{budget,
- *   window,threshold}` (the Prometheus alert rules in
- *   deploy/prometheus/alerts.yaml page on it);
+ *   window,threshold}` (deploy/prometheus/alerts.yaml alerts on the
+ *   spend and limit gauges instead);
  * - writes one JSON line, `"log.logger":"ps.budget"`, with the event;
  * - with PS_BUDGET_WEBHOOK_URL, POSTs the event there, signed like the
  *   collector's webhooks when PS_BUDGET_WEBHOOK_SECRET is set

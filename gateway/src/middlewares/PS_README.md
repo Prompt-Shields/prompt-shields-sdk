@@ -436,9 +436,9 @@ period, unit, limit, spend, namespace) and, with `PS_BUDGET_WEBHOOK_URL`,
 POSTs that event there (one attempt, 5 s timeout, never failing the call).
 The write is atomic, so with a shared Redis exactly one replica (or SDK
 process, through its `on_threshold` callback) reports each crossing. The
-alert rules `PromptShieldsBudgetExceeded` and `PromptShieldsBudgetWarning`
-(`deploy/prometheus/alerts.yaml`, also in the Helm chart) fire on the
-counter.
+alert rules `PromptShieldsBudgetNearLimit` and `PromptShieldsBudgetExhausted`
+(`deploy/prometheus/alerts.yaml`, also in the Helm chart) fire on the spend
+and limit gauges (USD and token budgets) at 80 % and 100 %.
 
 Responses carry `x-ps-budget-state`; telemetry events carry `budget_state`
 (`ok`, `warn`, `unknown`, `exceeded`), `budget_id` and `budget_action`
