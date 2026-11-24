@@ -65,6 +65,18 @@ params, `gen_ai.response.model`/`id`/`finish_reasons` (normalised to `stop`,
 `X-PS-Environment` to the `deployment.environment.name` resource attribute.
 An inbound `traceparent` makes the span a child of the caller's span.
 
+Trace context (`psTraceContext.ts`, #385, always on): every request gets one
+gateway span id in the caller's trace (inbound `traceparent`, else a new
+trace), the gateway's spans use it, and every response carries
+`traceparent: 00-<trace id>-<gateway span id>-<flags>`.
+
+- `PS_OTEL_PROPAGATE_UPSTREAM` — `true` also sends `traceparent` (the gateway
+  span as parent) and the caller's `tracestate` to the provider and to MCP
+  servers. Off by default: a trace id lets a provider correlate a tenant's
+  calls, and most providers do not trace. Off, the gateway adds nothing;
+  headers a caller forwards itself (`forward_headers`, the `/v1/proxy`
+  pass-through) behave as before.
+
 - `PS_OTEL_ENDPOINT` — full traces URL, e.g. `http://collector:8000/ingest/otel/v1/traces`
 - `PS_OTEL_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` — `k=v,k2=v2`; when the endpoint comes from `PS_OTEL_ENDPOINT`, `PS_API_KEY` is sent as a bearer token unless an `Authorization` header is given. It is never added for an endpoint taken from `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
 - `OTEL_SERVICE_NAME` — default `prompt-shields-gateway`

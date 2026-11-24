@@ -32,6 +32,7 @@ import {
 } from '../middlewares/psOtel';
 import { getMcpServer } from './config';
 import { isValidToolName } from './policy';
+import { traceContextOf } from '../middlewares/psTraceContext';
 
 /** What the handler learned about one MCP request, for spans and metering. */
 export interface McpCallState {
@@ -80,6 +81,8 @@ export interface McpSpanInput {
   endMs: number;
   headers: Headers;
   user?: { user_id?: string; user_group?: string };
+  /** The request's trace context (psTraceContext.ts); else from headers. */
+  trace?: { traceId: string; spanId: string; parentSpanId?: string };
 }
 
 const hex = (bytes: number) => {
@@ -143,7 +146,11 @@ export function buildMcpSpan(input: McpSpanInput): any | undefined {
     'ps.user.hash': input.user?.user_id,
     'ps.user.group': input.user?.user_group,
   };
-  const parent = parseTraceparent(input.headers.get('traceparent') ?? '');
+  const parent = input.trace
+    ? input.trace.parentSpanId
+      ? { traceId: input.trace.traceId, parentSpanId: input.trace.parentSpanId }
+      : undefined
+    : parseTraceparent(input.headers.get('traceparent') ?? '');
   // A name the policy refused is client-chosen: kept as an attribute, but
   // out of the span name so it cannot grow span-name cardinality.
   const target =
@@ -151,8 +158,8 @@ export function buildMcpSpan(input: McpSpanInput): any | undefined {
       ? undefined
       : tool ?? prompt;
   const span: any = {
-    traceId: parent?.traceId ?? hex(16),
-    spanId: hex(8),
+    traceId: input.trace?.traceId ?? parent?.traceId ?? hex(16),
+    spanId: input.trace?.spanId ?? hex(8),
     name: target ? `${method} ${target}` : method,
     kind: 3, // SPAN_KIND_CLIENT: the gateway calls the MCP server
     startTimeUnixNano: nanos(state.startMs),
@@ -205,6 +212,7 @@ export function emitMcpSpan(
       endMs: Date.now(),
       headers: c.req.raw.headers,
       user,
+      trace: traceContextOf(c),
     });
     if (!span) return;
     state.emitted = true;

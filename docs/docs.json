@@ -74,6 +74,7 @@
         "guides/security-events",
         "guides/observability",
         "guides/otlp-langfuse",
+        "guides/agent-traces",
         "guides/alert-runbooks",
         "guides/gateway-oidc",
         "guides/central-policy",

@@ -15,6 +15,8 @@ event: names, outcome and duration only. Tool arguments and results
 
 from __future__ import annotations
 
+import base64
+import binascii
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -63,6 +65,9 @@ class GenAISpan:
     calling_service: str | None
     environment: str | None
     session_id: str | None
+    # The span's W3C trace id (lowercase hex), stored as the usage event's
+    # trace_id so the event links to its trace (#385).
+    trace_id: str | None = None
 
     @property
     def model(self) -> str | None:
@@ -148,6 +153,30 @@ def _count(value: Any) -> int | None:
     return n if n is not None and 0 <= n <= _PG_INT_MAX else None
 
 
+def normalize_id(value: Any, nbytes: int) -> str | None:
+    """An OTLP trace (16 bytes) or span (8 bytes) id as lowercase hex.
+
+    OTLP/JSON sends hex; a protobuf body decoded with ``MessageToDict``
+    (collector.otlp_protobuf) has base64. Anything else, and the invalid
+    all-zero id, is None."""
+    if not isinstance(value, str) or not value:
+        return None
+    raw: bytes | None = None
+    if len(value) == nbytes * 2:
+        try:
+            raw = bytes.fromhex(value)
+        except ValueError:
+            raw = None
+    if raw is None and len(value) <= nbytes * 2:
+        try:
+            raw = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+    if raw is None or len(raw) != nbytes or not any(raw):
+        return None
+    return raw.hex()
+
+
 def _duration_ms(span: dict) -> int | None:
     start = _int(span.get("startTimeUnixNano"))
     end = _int(span.get("endTimeUnixNano"))
@@ -198,6 +227,7 @@ def map_span(span: dict, resource_attrs: dict[str, Any]) -> GenAISpan | None:
         calling_service=_str(resource_attrs.get("service.name")),
         environment=environment,
         session_id=_str(attrs.get("gen_ai.conversation.id")),
+        trace_id=normalize_id(span.get("traceId"), 16),
     )
 
 

@@ -36,6 +36,9 @@ What is erased, in the caller's tenant only:
   sent (the gateway's OIDC subject hash on policy denials), or with its
   salted hash (``user_id_hash``, stored at ingest) equal to the user's:
   both are set to NULL (the event is kept). Both forms reach them.
+* ``trace_spans`` (agent traces, #385) with the user's salted hash
+  (``user_id_hash``): ``user_id_hash`` and ``session_id`` are set to NULL
+  (the span, its timings and its token counts are kept).
 
 The feedback and MCP tables store the id as the gateway sent it (a hex
 hash), not the collector's salted hash, so only the POST form, which
@@ -74,6 +77,7 @@ from db.models import (
     GatewaySecurityEvent,
     McpToolUsage,
     RetentionAuditLog,
+    TraceSpan,
 )
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -303,6 +307,20 @@ async def erase_user(
         [se.tenant_id == tenant_id, or_(*se_match)],
         {"user_hash": None, "user_id_hash": None},
         size,
+    )
+
+    # Agent trace spans (#385) hold only the salted hash.
+    ts = TraceSpan
+    rows[ts.__tablename__] = (
+        await _null_in_batches(
+            db,
+            ts,
+            [ts.tenant_id == tenant_id, ts.user_id_hash == user_id_hash],
+            {"user_id_hash": None, "session_id": None},
+            size,
+        )
+        if user_id_hash is not None
+        else 0
     )
 
     result = UserEraseResult(user_id_hash=user_id_hash, input=input_, rows_erased=rows)

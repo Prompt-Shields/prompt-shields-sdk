@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector import metrics, tenant_keys, tenant_limits
 from collector.auth import resolve_tenant
+from collector.config import settings
 from collector.data_flows import record_event_flows
 from collector.dedup import AssetKey, find_or_create_asset, lock_asset_keys
 from collector.embeddings import build_asset_text, get_embedding
@@ -52,6 +53,7 @@ from collector.otlp_protobuf import (
 )
 from collector.partner_rate_limit import RateLimiter, get_otel_traces_rate_limiter
 from collector.sanitize import BodyTooDeep, loads_bounded, too_deep_problem
+from collector.traces import store_trace_spans
 from collector.webhooks import AssetChanges
 
 logger = logging.getLogger(__name__)
@@ -164,6 +166,7 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
             requested_model=_bounded_model(span.requested_model),
             served_model=_bounded_model(span.served_model),
             api_surface=_bounded_label(span.api_surface),
+            trace_id=span.trace_id,
         )
         db.add(usage_event)
         await record_event_flows(
@@ -265,6 +268,8 @@ async def ingest_otel_traces(
             raise
     if mcp_calls:
         await _register_mcp_assets(db, tenant_id, mcp_calls)
+    if settings.trace_store_enabled:
+        await _store_trace(db, tenant_id, payload)
     await record_otel(db, tenant_id, counts)
 
     # ExportTraceServiceResponse: an empty object means full success. Non-GenAI
@@ -313,7 +318,24 @@ async def _register_mcp_assets(db, tenant_id, calls: list[McpCall]) -> None:
             await db.rollback()
 
 
+async def _store_trace(db, tenant_id, payload: dict) -> None:
+    """The span store (#385, collector.traces), in its own transaction after
+    the usage events are stored. A failure is logged and counted, not
+    raised: answering 5xx would make the exporter resend spans whose usage
+    events are already stored."""
+    try:
+        stored = await store_trace_spans(db, tenant_id, payload)
+        metrics.record_ingest("otel_trace_spans", "accepted", stored)
+    except Exception:
+        logger.warning("trace span store failed", exc_info=True)
+        metrics.record_ingest("otel_trace_spans", "write_failed", 1)
+        with contextlib.suppress(Exception):
+            await db.rollback()
+
+
 NO_VENDOR = "no_vendor"
+# gen_ai.operation.name values of agent spans (OTel GenAI agent spans).
+AGENT_OPERATIONS = frozenset({"invoke_agent", "create_agent"})
 
 
 def classify_spans(
@@ -327,7 +349,9 @@ def classify_spans(
 
     MCP ``tools/call`` spans are tool calls, not usage events: they are
     appended to ``mcp_calls`` (when given) and left out of the usage-event
-    counts. Other MCP spans are classified like any span."""
+    counts. Other MCP spans are classified like any span. ``execute_tool``
+    spans, and agent spans without a provider, are ignored (counted), not
+    rejected: they are not model calls (the span store keeps them)."""
     mapped: list[GenAISpan] = []
     counts: dict[str, OtelCounts] = {}
     for span, resource_attrs in iter_spans(payload):
@@ -343,9 +367,19 @@ def classify_spans(
         if not is_genai_span(attrs):
             c.ignore({"span:non_genai": 1})
             continue
+        if attrs.get("gen_ai.operation.name") == "execute_tool":
+            # A tool run (#385), not a model call: kept by the span store,
+            # never a usage event.
+            c.ignore({"span:execute_tool": 1})
+            continue
         result = map_span(span, resource_attrs)
         if result is None:
-            c.reject(NO_VENDOR)
+            if attrs.get("gen_ai.operation.name") in AGENT_OPERATIONS:
+                # An agent span without a provider (the SDK's invoke_agent)
+                # wraps model calls that have their own spans.
+                c.ignore({"span:agent": 1})
+            else:
+                c.reject(NO_VENDOR)
             continue
         invalid = invalid_attributes(span)
         for key, value in (
