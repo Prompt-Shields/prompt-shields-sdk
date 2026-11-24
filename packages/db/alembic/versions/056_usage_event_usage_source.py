@@ -11,7 +11,7 @@ is in the erasure order. Nullable with no default: existing rows and events
 without the field are unaffected.
 
 Revision ID: 056
-Revises: 055
+Revises: 057
 Create Date: 2026-11-24
 """
 
@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "056"
-down_revision: str | None = "055"
+down_revision: str | None = "057"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

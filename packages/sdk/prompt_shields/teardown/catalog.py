@@ -161,6 +161,7 @@ class SdkPriceSource:
             "tokens_audio_out": record.tokens_audio_out,
             "web_search_requests": record.web_search_requests,
             "service_tier": record.service_tier,
+            "endpoint_scope": record.endpoint_scope,
             "usage_units": record.usage_units,
             "usage_unit_type": record.usage_unit_type,
             "image_quality": record.image_quality,

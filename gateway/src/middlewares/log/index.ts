@@ -2,6 +2,7 @@ import { Context } from 'hono';
 import { getRuntimeKey } from 'hono/adapter';
 import { redactString } from '../../utils/redact';
 import { findPiiSpans, piiPlaceholder, redactPii } from '../router/pii';
+import { UNRESTORED_RESPONSE_KEY } from '../psPseudonymise/contextKeys';
 import { scrubOutput } from '../psGuardrails/scrub';
 
 let logId = 0;
@@ -243,9 +244,30 @@ async function processLog(c: Context, start: number) {
 
   let response: unknown;
   try {
-    response = requestOptionsArray[0].requestParams?.stream
-      ? { message: 'The response was a stream.' }
-      : await c.res.clone().json();
+    // PS fork (#350): with pseudonymisation on, c.res holds the restored
+    // answer (original values); the log gets the answer as the provider
+    // sent it (placeholders), kept by psPseudonymise.
+    // Order (#349 x #350): psGuardrails is outside psPseudonymise, so on the
+    // way out the answer is restored first and the output guardrails then
+    // scan the restored text the client gets (c.res). The unrestored copy
+    // never passed through them, so it goes through the call's output
+    // guardrails here (as scrubLogEntry does for the provider body):
+    // redacted, or withheld when they denied the response.
+    const unrestored = c.get(UNRESTORED_RESPONSE_KEY as any);
+    if (requestOptionsArray[0].requestParams?.stream) {
+      response = { message: 'The response was a stream.' };
+    } else if (typeof unrestored === 'string') {
+      const parsed = JSON.parse(unrestored);
+      response =
+        scrubOutput(c, parsed) === 'denied'
+          ? {
+              message:
+                'Withheld: the response was blocked by a guardrail policy.',
+            }
+          : parsed;
+    } else {
+      response = await c.res.clone().json();
+    }
   } catch (error) {
     console.error('Error processing log:', error);
   }

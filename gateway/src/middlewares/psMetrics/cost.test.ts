@@ -72,6 +72,41 @@ describe('ps_gateway_cost_usd_total', () => {
     }
   });
 
+  test('vertex-ai Claude adds the cost the SDK computes (#388)', async () => {
+    const origFetch = global.fetch;
+    global.fetch = jest.fn(async () => ({ ok: true }) as any) as any;
+    try {
+      const app = new Hono();
+      app.use('/v1/chat/completions', psTelemetry());
+      app.post('/v1/chat/completions', (c) =>
+        c.json({
+          model: 'claude-sonnet-4-5-20250929',
+          usage: { prompt_tokens: 1000, completion_tokens: 2000 },
+        })
+      );
+      const labels =
+        'provider="vertex-ai",model="anthropic.claude-sonnet-4-5@20250929",team="none"';
+      const before = value(labels);
+      await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-portkey-provider': 'vertex-ai',
+          'x-portkey-vertex-region': 'europe-west1',
+        },
+        body: JSON.stringify({
+          model: 'anthropic.claude-sonnet-4-5@20250929',
+          messages: [],
+        }),
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // The shared vector google-vertex-ai-claude-regional: $0.0363.
+      expect(value(labels) - before).toBeCloseTo(0.0363, 9);
+    } finally {
+      global.fetch = origFetch;
+    }
+  });
+
   test('labels the cost with the declared X-PS-Team', async () => {
     const origFetch = global.fetch;
     const sent: any[] = [];

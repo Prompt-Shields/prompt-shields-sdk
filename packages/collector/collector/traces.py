@@ -193,7 +193,13 @@ def map_trace_span(
     tokens_out = _count(attrs.get("gen_ai.usage.output_tokens"))
     if tokens_out is None:
         tokens_out = _count(attrs.get("gen_ai.usage.completion_tokens"))
-    provider = _label(attrs.get("gen_ai.provider.name")) or _label(attrs.get("gen_ai.system"))
+    # A gateway attempt span (#390) names its provider and model in
+    # ps.attempt.*: it has no gen_ai.* attribute, so it is never billed.
+    provider = (
+        _label(attrs.get("gen_ai.provider.name"))
+        or _label(attrs.get("gen_ai.system"))
+        or _label(attrs.get("ps.attempt.provider"))
+    )
     user_id = next(
         (v for v in (_str(attrs.get(k)) for k in USER_ID_ATTRIBUTES) if v is not None),
         None,
@@ -216,7 +222,8 @@ def map_trace_span(
         "environment": environment,
         "operation": _label(attrs.get("gen_ai.operation.name")),
         "provider": provider.lower() if provider else None,
-        "request_model": _label(attrs.get("gen_ai.request.model")),
+        "request_model": _label(attrs.get("gen_ai.request.model"))
+        or _label(attrs.get("ps.attempt.model")),
         "response_model": _label(attrs.get("gen_ai.response.model")),
         "tool_name": _label(attrs.get("gen_ai.tool.name")),
         "tokens_in": tokens_in,
