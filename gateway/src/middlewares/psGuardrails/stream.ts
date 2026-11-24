@@ -8,7 +8,9 @@
  * slot: its path in the event plus the event's `index` / `output_index` /
  * `content_index`, so all deltas of one choice or content block share one.
  * An event is forwarded once every slot it adds text to has at least
- * `windowChars` more characters after it, or the stream ends. Findings
+ * `windowChars` more characters after it, the provider has marked that
+ * text complete (Anthropic `content_block_stop`, a Responses `*.done`
+ * event, a chat choice's `finish_reason`), or the stream ends. Findings
  * are looked for in each slot's text (the held-back text plus the last
  * `windowChars` characters already forwarded, for context), and redacted
  * in the events that carry them: the placeholder goes where the finding
@@ -64,6 +66,8 @@ interface Slot {
   /** The last scan's hits, in absolute offsets. */
   hits: Hit[];
   contextSeen: Set<string>;
+  /** The provider said this text is complete: nothing more to wait for. */
+  closed: boolean;
 }
 
 interface Seg {
@@ -97,6 +101,39 @@ function visitEventText(
 
 const slotKey = (obj: any, path: string) =>
   `${obj.index ?? ''}|${obj.output_index ?? ''}|${obj.content_index ?? ''}|${path}`;
+
+/**
+ * Which slots an event marks complete: an Anthropic content block's
+ * (`content_block_stop`), a Responses output item's or content part's (a
+ * `*.done` event), a chat choice's (`finish_reason`). Without this, the
+ * last window of one block (thinking before text, text before a tool
+ * call, one Responses output item before the next) would wait for the end
+ * of the stream, and every event behind it with it.
+ */
+function closesSlot(obj: any): ((key: string) => boolean) | undefined {
+  const type = typeof obj.type === 'string' ? obj.type : '';
+  const tests: ((key: string) => boolean)[] = [];
+  if (type === 'content_block_stop' && obj.index !== undefined) {
+    const prefix = `${obj.index}|`;
+    tests.push((k) => k.startsWith(prefix));
+  }
+  if (type.endsWith('.done') && obj.output_index !== undefined) {
+    const out = String(obj.output_index);
+    const content =
+      obj.content_index === undefined ? undefined : String(obj.content_index);
+    tests.push((k) => {
+      const [, o, ci] = k.split('|');
+      return o === out && (content === undefined || ci === content);
+    });
+  }
+  if (Array.isArray(obj.choices))
+    for (const ch of obj.choices)
+      if (ch && ch.finish_reason && typeof ch.index === 'number') {
+        const prefix = `|||choices.${ch.index}.`;
+        tests.push((k) => k.startsWith(prefix));
+      }
+  return tests.length ? (k) => tests.some((t) => t(k)) : undefined;
+}
 
 /** The SSE error event that ends a denied stream. */
 export function errorEventLines(named: boolean, message: string): string[] {
@@ -250,6 +287,7 @@ export function guardEventStream(
             covered: 0,
             hits: [],
             contextSeen: new Set(),
+            closed: false,
           };
           slots.set(key, slot);
         }
@@ -266,6 +304,9 @@ export function guardEventStream(
       });
     }
     queue.push(ev);
+    const closes = obj && typeof obj === 'object' ? closesSlot(obj) : undefined;
+    if (closes)
+      for (const [k, slot] of slots) if (closes(k)) slot.closed = true;
     for (const slot of touched) {
       rescan(slot);
       const deny = denyIn(slot);
@@ -274,8 +315,13 @@ export function guardEventStream(
     return undefined;
   };
 
+  // An empty piece of text (Anthropic content_block_start `text: ""`,
+  // Responses content_part.added) carries nothing to hold back: waiting on
+  // its slot, which never grows, would hold the whole stream to the end.
   const ready = (ev: QueuedEvent) =>
-    ev.segs.every((s) => s.end <= s.slot.total - W);
+    ev.segs.every(
+      (s) => s.start === s.end || s.slot.closed || s.end <= s.slot.total - W
+    );
 
   /** Forwards the queued events that may go now (all of them when flushing). */
   const drain = (

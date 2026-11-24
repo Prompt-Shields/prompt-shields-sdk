@@ -13,7 +13,7 @@
  * Every pattern runs in linear time: no nested or overlapping
  * quantifiers, every repetition either bounded or over a class the next
  * token cannot match, so a match attempt never backtracks more than a
- * bounded amount (detectors.test.ts checks adversarial inputs).
+ * bounded amount (guardrails.test.ts checks 1 MB adversarial inputs).
  * Matched text is never logged or returned beyond its offsets.
  */
 import { detectKeywordCategories, findPiiSpans } from '../router/pii';

@@ -26,10 +26,21 @@
  * With no guardrails in the central policy this middleware does nothing:
  * it does not read the body or touch the response.
  *
+ * A request body is read as JSON whatever its Content-Type says (the
+ * handlers parse it that way too, so a missing or wrong header must not
+ * skip the input scan). GET responses on /v1 (a stored Responses object,
+ * stored chat completions, conversation items) get the output stage.
+ *
+ * The same output rules also scrub what the gateway keeps or exports of
+ * a response (GUARDRAIL_SCRUB_KEY): the cache write-back, OTel content
+ * capture and the /log/stream entries, which see the provider's response
+ * before this middleware rewrites it.
+ *
  * Not inspected (passed through): non-JSON request bodies (multipart
- * uploads), responses that are neither JSON nor SSE (audio, images),
- * error responses, JSON responses over MAX_SCAN_BYTES, realtime
- * WebSockets, and the MCP proxy, files, batches and fine-tuning routes.
+ * uploads, audio), responses that are neither JSON nor SSE (audio,
+ * images, JSONL), error responses, JSON responses over MAX_SCAN_BYTES,
+ * realtime WebSockets, and the MCP proxy, files, batches (batch input
+ * files and outputs) and fine-tuning routes.
  */
 import { Context, Next } from 'hono';
 import { mapRequestText } from '../router/pii';
@@ -48,6 +59,9 @@ import {
   Tally,
 } from './scan';
 import { guardEventStream } from './stream';
+import { GUARDRAIL_SCRUB_KEY, OutputScrub } from './scrub';
+
+export { GUARDRAIL_SCRUB_KEY } from './scrub';
 
 /** Context key: the PII categories input guardrails found (sorted). */
 export const GUARDRAIL_PII_KEY = 'psGuardrailPii';
@@ -66,9 +80,37 @@ const SKIPPED_PREFIXES = [
 ];
 
 const inScope = (c: Context) =>
-  c.req.method === 'POST' &&
+  (c.req.method === 'POST' || c.req.method === 'GET') &&
   c.req.path.startsWith('/v1/') &&
   !SKIPPED_PREFIXES.some((p) => c.req.path.startsWith(p));
+
+/** First non-whitespace byte: a JSON object or array starts the body. */
+function looksLikeJson(buf: ArrayBuffer): boolean {
+  const bytes = new Uint8Array(buf);
+  // Whitespace and a UTF-8 byte order mark may come first.
+  const skip = new Set([0x20, 0x09, 0x0a, 0x0d, 0xef, 0xbb, 0xbf]);
+  for (let i = 0; i < bytes.length && i < 1024; i++)
+    if (!skip.has(bytes[i])) return bytes[i] === 0x7b || bytes[i] === 0x5b;
+  return false;
+}
+
+/**
+ * The request body as JSON, whatever the Content-Type: the handlers call
+ * c.req.json() without checking it, so a call without the header (or with
+ * a wrong one) must be scanned like any other. Read as bytes, so a body
+ * that is not JSON (multipart, audio) reaches the handler unchanged.
+ */
+async function readJsonBody(c: Context): Promise<any> {
+  const type = (c.req.header('content-type') || '').toLowerCase();
+  try {
+    if (type.startsWith('application/json')) return await c.req.json();
+    const buf = await c.req.arrayBuffer();
+    if (!buf.byteLength || !looksLikeJson(buf)) return undefined;
+    return JSON.parse(new TextDecoder().decode(buf));
+  } catch {
+    return undefined; // not JSON: the handler rejects it
+  }
+}
 
 export function deniedBody(stage: 'input' | 'output') {
   return {
@@ -143,12 +185,8 @@ export function psGuardrails(
     const tally = new Tally();
     let body: any;
     let model: string | undefined;
-    if ((c.req.header('content-type') || '').includes('application/json')) {
-      try {
-        body = await c.req.json();
-      } catch {
-        body = undefined; // not JSON: the handler rejects it
-      }
+    if (c.req.method === 'POST') {
+      body = await readJsonBody(c);
       if (body && typeof body.model === 'string') model = body.model;
     }
     const models = [model, ...configModels(c.req.header('x-portkey-config'))];
@@ -172,14 +210,29 @@ export function psGuardrails(
     const pii = tally.piiCategories('input');
     if (pii.length) c.set(GUARDRAIL_PII_KEY as any, pii);
 
+    const outputStage = () =>
+      prepareStage(
+        'output',
+        rulesFor(set.rules, 'output', [
+          ...models,
+          c.get('psRoute')?.servedModel,
+        ])
+      );
+    if (set.rules.some((r) => r.stages.includes('output'))) {
+      const scrub: OutputScrub = (obj) => {
+        const stage = outputStage();
+        if (!stage || !obj || typeof obj !== 'object') return false;
+        const scratch = new Tally();
+        mapOutputText(obj, (_p, t) => scanText(t, stage, scratch));
+        return !!scratch.denied;
+      };
+      c.set(GUARDRAIL_SCRUB_KEY as any, scrub);
+    }
+
     await next();
 
     // Output.
-    const served = c.get('psRoute')?.servedModel;
-    const output = prepareStage(
-      'output',
-      rulesFor(set.rules, 'output', [...models, served])
-    );
+    const output = outputStage();
     const res = c.res;
     if (!output || !res || !res.ok || !res.body) return record();
     const type = res.headers.get('content-type') || '';

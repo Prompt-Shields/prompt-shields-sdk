@@ -71,10 +71,21 @@ adversarial input).
 | `log` | security event only | security event only | security event only |
 
 Input text is what the router's PII detection reads: messages, prompts,
-instructions, tool arguments and outputs, embeddings and rerank input.
+instructions, tool arguments and outputs, embeddings and rerank input, and
+Anthropic plain-text documents. A request body is read as JSON whatever its
+`Content-Type` says (the handlers parse it that way), so leaving the header
+out does not skip the input checks.
 Output text is the model's: message content, Anthropic/Gemini `text`,
 Responses `output_text` and deltas, tool-call arguments, refusals and
-reasoning text.
+reasoning text. Output rules also apply to responses read back later with
+GET (a stored or background Responses object, stored chat completions,
+conversation items).
+
+What the gateway keeps or exports of a response follows the output rules
+too: the response cache stores the redacted response (a denied one is not
+stored), OTel content capture records the redacted output (none for a
+denied one), and `/log/stream` entries show the provider response redacted
+(withheld when denied).
 
 ## Which rules apply
 
@@ -96,7 +107,10 @@ rule anyway.
 A finding can be split across SSE events (a card number over three
 deltas), so the gateway holds streamed text back: an event is forwarded once
 `stream_window_chars` more characters of the same choice or content block
-have arrived after it, or when the stream ends. Expect about that many
+have arrived after it, once the provider marks that text complete
+(Anthropic `content_block_stop`, a Responses `*.done` event, a chat choice's
+`finish_reason`), or when the stream ends. Events without model text (role,
+usage, tool-call starts) keep their place in the stream. Expect about that many
 characters (256 is about 60 tokens) of extra delay before text appears; the
 rest arrives at the end of the stream. Memory is about twice the window per
 choice; past 64 windows (at least 256 KB) of held-back text the oldest
@@ -119,12 +133,17 @@ input's PII categories are sent with the call's telemetry as
 
 ## Not inspected
 
-Request bodies that are not JSON (multipart uploads), responses that are
-neither JSON nor SSE (audio, images), error responses, JSON responses over
-16 MB, realtime WebSockets, and the MCP proxy, files, batches and
-fine-tuning routes. PII split across separate strings of a request (two
-messages) is not joined. OTel content capture (`PS_OTEL_CAPTURE_CONTENT`)
-records the provider's output before output redaction.
+Request bodies that are not JSON (multipart uploads such as audio
+transcriptions, raw audio), responses that are neither JSON nor SSE (audio,
+images, JSONL), error responses, JSON responses over 16 MB, realtime
+WebSockets, and the MCP proxy, files, batches (batch input files and batch
+outputs, including Anthropic message batches) and fine-tuning routes: a
+caller who can use those routes can reach a model without these checks, so
+restrict them where that matters. Base64 attachments (PDFs, images, OpenAI
+`file_data`) are not decoded. PII split across separate strings of a
+request (two messages) is not joined. When a `models` rule depends on the
+router changing the model, input rules are chosen from the requested model;
+output rules also see the routed one.
 
 ## Not done yet
 

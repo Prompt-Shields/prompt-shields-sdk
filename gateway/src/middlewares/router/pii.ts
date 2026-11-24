@@ -622,6 +622,23 @@ export function mapRequestText(
       : Object.entries(node as Record<string, unknown>);
     for (const [k, v] of entries) {
       const childKey = isArray ? key : (k as string);
+      // An Anthropic document given as plain text (`source: {type: "text",
+      // data}`) is request text, though `source` is otherwise binary.
+      if (
+        !isArray &&
+        childKey === 'source' &&
+        v &&
+        typeof v === 'object' &&
+        (v as any).type === 'text' &&
+        typeof (v as any).data === 'string'
+      ) {
+        const next = fn((v as any).data);
+        if (next !== (v as any).data) {
+          (v as any).data = next;
+          changed++;
+        }
+        continue;
+      }
       if (!isArray && SKIP_KEYS.has(childKey)) continue;
       if (typeof v === 'string') {
         if (all || TEXT_KEYS.has(childKey)) {

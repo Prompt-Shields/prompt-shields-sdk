@@ -10,7 +10,7 @@ import {
   parseGuardrailsSection,
   rulesFor,
 } from './config';
-import { findInjection, findSecrets } from './detectors';
+import { detect, findInjection, findSecrets } from './detectors';
 import { evaluate, prepareStage, redact, Tally } from './scan';
 import { guardEventStream } from './stream';
 import {
@@ -189,24 +189,65 @@ describe('detectors', () => {
     expect(findInjection('do not ignore the safety notes')).toEqual([]);
   });
 
-  // Adversarial inputs for every pattern: each must stay linear.
+  // Adversarial inputs for every pattern, 1 MB each: each must stay
+  // linear (a backtracking pattern takes minutes here, not milliseconds).
+  const MB = 1 << 20;
+  const fill = (unit: string) =>
+    unit.repeat(Math.ceil(MB / unit.length)).slice(0, MB);
   it.each([
-    ['sk-', 'sk-'.repeat(40_000)],
-    ['sk- tokens', ('sk-' + 'a'.repeat(19) + ' ').repeat(5_000)],
-    ['jwt dots', ('eyJ' + 'a'.repeat(9) + '.').repeat(10_000)],
-    ['jwt runs', 'eyJ' + 'a'.repeat(100_000) + '.eyJ' + 'b'.repeat(100_000)],
-    ['private key headers', '-----BEGIN PRIVATE KEY-----'.repeat(5_000)],
-    ['private key body', '-----BEGIN PRIVATE KEY-----' + 'A'.repeat(200_000)],
-    ['ignore spaces', ('ignore ' + 'the '.repeat(4) + 'x ').repeat(10_000)],
-    ['you are now', 'you are now '.repeat(20_000)],
-    ['spaces', ' '.repeat(200_000)],
-    ['github', 'ghp_'.repeat(50_000)],
-    ['template', '<|'.repeat(100_000)],
-  ])('stays linear on %s', (_name, text) => {
+    ['sk-', fill('sk-')],
+    ['sk- tokens', fill('sk-' + 'a'.repeat(19) + ' ')],
+    ['jwt dots', fill('eyJ' + 'a'.repeat(9) + '.')],
+    ['jwt runs', 'eyJ' + 'a'.repeat(MB / 2) + '.eyJ' + 'b'.repeat(MB / 2)],
+    ['private key headers', fill('-----BEGIN PRIVATE KEY-----')],
+    ['private key body', '-----BEGIN PRIVATE KEY-----' + 'A'.repeat(MB)],
+    [
+      'private key words',
+      fill('-----BEGIN AAAAAAAAAAAAAAAAAAAA AAAAAAAAAAAAAAAAAAAA '),
+    ],
+    ['ignore spaces', fill('ignore ' + 'the '.repeat(4) + 'x ')],
+    ['you are now', fill('you are now ')],
+    ['reveal', fill('reveal me your system ')],
+    ['spaces', ' '.repeat(MB)],
+    ['github', fill('ghp_')],
+    ['template', fill('<|')],
+    ['digits', fill('4111 ')],
+    ['emails', fill('a.b@c')],
+  ])('stays linear on 1 MB of %s', (_name, text) => {
+    const all = { pii: true, piiContext: true, secrets: true, injection: true };
     const t0 = Date.now();
-    findSecrets(text);
-    findInjection(text);
-    expect(Date.now() - t0).toBeLessThan(1500);
+    detect(text, all);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it('scales linearly (4x the input, well under 16x the time)', () => {
+    const all = { pii: true, piiContext: true, secrets: true, injection: true };
+    const unit = 'sk-' + 'a'.repeat(19) + ' ignore the 4111 a.b@c eyJx.';
+    const time = (n: number) => {
+      const text = unit.repeat(n);
+      const t0 = process.hrtime.bigint();
+      detect(text, all);
+      return Number(process.hrtime.bigint() - t0);
+    };
+    time(2_000); // warm up
+    const small = Math.max(time(10_000), 1);
+    const large = time(40_000);
+    expect(large / small).toBeLessThan(12);
+  });
+
+  it('does not flag ordinary code and prose', () => {
+    const benign = [
+      'const skLearn = require("sk-learn"); // scikit',
+      'import { createHash } from "crypto"; const id = uuid();',
+      'The task list: ignore case when sorting, then print the result.',
+      'curl -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com',
+      'AKIA is the prefix of an AWS access key id.',
+      'ssh-keygen -t ed25519 -C "deploy" && cat ~/.ssh/id_ed25519.pub',
+      'eyJhbGciOi is how a JWT header starts.',
+      'def forget_password(user): send_reset_mail(user)',
+    ].join('\n');
+    expect(findSecrets(benign)).toEqual([]);
+    expect(findInjection(benign)).toEqual([]);
   });
 });
 
@@ -450,6 +491,142 @@ describe('guardEventStream', () => {
     expect(tally.entries.size).toBe(0);
   });
 
+  /** Reads what the guard forwards while the upstream is still open. */
+  async function forwardedBeforeEnd(rules: any[], chunks: string[]) {
+    const s = section(rules, { stream_window_chars: 64 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let i = 0;
+    const src = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (i < chunks.length) controller.enqueue(enc.encode(chunks[i++]));
+        else {
+          await gate;
+          controller.close();
+        }
+      },
+    });
+    const reader = guardEventStream(src, {
+      stage: prepareStage('output', s.rules)!,
+      windowChars: 64,
+      tally: new Tally(),
+    }).getReader();
+    let early = '';
+    // Everything the guard can forward before the upstream ends.
+    for (;;) {
+      const r = await Promise.race([
+        reader.read(),
+        new Promise<'idle'>((r) => setTimeout(() => r('idle'), 50)),
+      ]);
+      if (r === 'idle' || r.done) break;
+      early += dec.decode(r.value);
+    }
+    release();
+    let rest = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      rest += dec.decode(value);
+    }
+    return { early, all: early + rest };
+  }
+
+  const anthropicEv = (type: string, body: object) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...body })}\n\n`;
+
+  it('streams an Anthropic text block after a thinking block without waiting for the end', async () => {
+    const long = 'z'.repeat(300);
+    const chunks = [
+      anthropicEv('message_start', { message: { id: 'm', content: [] } }),
+      anthropicEv('content_block_start', {
+        index: 0,
+        content_block: { type: 'thinking', thinking: '' },
+      }),
+      anthropicEv('content_block_delta', {
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'let me think' },
+      }),
+      anthropicEv('content_block_stop', { index: 0 }),
+      anthropicEv('content_block_start', {
+        index: 1,
+        content_block: { type: 'text', text: '' },
+      }),
+      anthropicEv('content_block_delta', {
+        index: 1,
+        delta: { type: 'text_delta', text: 'mail a@b.co ' + long },
+      }),
+      anthropicEv('content_block_delta', {
+        index: 1,
+        delta: { type: 'text_delta', text: long },
+      }),
+    ];
+    const { early, all } = await forwardedBeforeEnd(
+      [{ id: 'e', check: 'pii', categories: ['email'], action: 'redact' }],
+      chunks
+    );
+    expect(early).toContain('let me think');
+    expect(early).toContain('mail [EMAIL] ');
+    expect(all).not.toContain('a@b.co');
+  });
+
+  it('streams Responses text past content_part.added and a finished output item', async () => {
+    const ev = (type: string, body: object) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...body })}\n\n`;
+    const long = 'q'.repeat(300);
+    const chunks = [
+      ev('response.output_item.added', {
+        output_index: 0,
+        item: { type: 'reasoning', summary: [] },
+      }),
+      ev('response.reasoning_summary_text.delta', {
+        output_index: 0,
+        summary_index: 0,
+        delta: 'planning',
+      }),
+      ev('response.reasoning_summary_text.done', {
+        output_index: 0,
+        summary_index: 0,
+        text: 'planning',
+      }),
+      ev('response.output_item.done', {
+        output_index: 0,
+        item: { type: 'reasoning', summary: [{ text: 'planning' }] },
+      }),
+      ev('response.content_part.added', {
+        output_index: 1,
+        content_index: 0,
+        part: { type: 'output_text', text: '' },
+      }),
+      ev('response.output_text.delta', {
+        output_index: 1,
+        content_index: 0,
+        delta: 'card 4111 1111 1111 1111 ' + long,
+      }),
+      ev('response.output_text.delta', {
+        output_index: 1,
+        content_index: 0,
+        delta: long,
+      }),
+    ];
+    const { early, all } = await forwardedBeforeEnd([CARD_RULE], chunks);
+    expect(early).toContain('planning');
+    expect(early).toContain('card [CREDIT_CARD] ');
+    expect(all).not.toContain('1111');
+  });
+
+  it('forwards the last window of a chat choice once it has a finish_reason', async () => {
+    const chunks = [
+      chatChunk('short answer, card 4111 1111 1111 1111'),
+      `data: ${JSON.stringify({
+        id: 'c1',
+        object: 'chat.completion.chunk',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      })}\n\n`,
+    ];
+    const { early } = await forwardedBeforeEnd([CARD_RULE], chunks);
+    expect(contentOf(early)).toBe('short answer, card [CREDIT_CARD]');
+  });
+
   it('bounds held-back text', async () => {
     const chunks = Array.from({ length: 50 }, () => chatChunk('y'.repeat(100)));
     const s = section([CARD_RULE], { stream_window_chars: 64 });
@@ -578,5 +755,96 @@ describe('psGuardrails without guardrails', () => {
       );
     // Generous bound: the no-op path is one function call and a check.
     expect(perCallNs).toBeLessThan(50_000);
+  });
+});
+
+// --- What the gateway keeps or exports follows the output rules -----------
+
+describe('output guardrails on exported copies', () => {
+  const rules = section([
+    CARD_RULE,
+    { id: 'keys-out', check: 'secrets', stages: ['output'], action: 'deny' },
+  ]);
+  const chat = (content: string) => ({
+    id: 'c',
+    object: 'chat.completion',
+    model: 'gpt-4o',
+    choices: [{ index: 0, message: { role: 'assistant', content } }],
+  });
+
+  async function appWith(
+    inner: (c: any, next: any) => Promise<void>,
+    content: string
+  ) {
+    const { Hono } = await import('hono');
+    const { psGuardrails } = await import('./index');
+    const app = new Hono();
+    app.use(
+      '*',
+      psGuardrails(
+        () => rules,
+        () => true
+      )
+    );
+    app.use('*', inner);
+    app.post('/v1/chat/completions', (c) => c.json(chat(content)));
+    return app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+  }
+
+  it('OTel content capture records the redacted output, none when denied', async () => {
+    const { psOtel } = await import('../psOtel');
+    const spans: any[] = [];
+    const config = {
+      endpoint: 'http://otel.test/v1/traces',
+      headers: {},
+      serviceName: 't',
+      captureContent: true,
+      maxBatch: 1,
+      flushMs: 1000,
+      maxQueue: 10,
+    };
+    const otel = psOtel(config, { enqueue: (b: any) => spans.push(b) } as any);
+    const attrs = () =>
+      JSON.stringify(spans[spans.length - 1].span.attributes ?? []);
+
+    const res = await appWith(otel, 'card 4111 1111 1111 1111');
+    expect(((await res.json()) as any).choices[0].message.content).toBe(
+      'card [CREDIT_CARD]'
+    );
+    expect(attrs()).toContain('[CREDIT_CARD]');
+    expect(attrs()).not.toContain('4111');
+
+    const denied = await appWith(otel, 'key sk-' + 'a'.repeat(32));
+    expect(denied.status).toBe(446);
+    expect(attrs()).not.toContain('aaaaaaaa');
+    expect(attrs()).not.toContain('gen_ai.output.messages');
+  });
+
+  it('log stream entries carry the redacted provider response', async () => {
+    const { scrubLogEntry } = await import('../log');
+    const seen: any[] = [];
+    const capture = async (c: any, next: any) => {
+      await next();
+      for (const content of ['4111 1111 1111 1111', 'sk-' + 'b'.repeat(32)])
+        seen.push(
+          scrubLogEntry(c, {
+            originalResponse: { body: chat(content) },
+            requestParams: {},
+          })
+        );
+    };
+    await appWith(capture, 'ok');
+    expect(seen[0].originalResponse.body.choices[0].message.content).toBe(
+      '[CREDIT_CARD]'
+    );
+    expect(JSON.stringify(seen[1])).not.toContain('bbbbbbbb');
+    expect(seen[1].originalResponse.body.message).toMatch(/Withheld/);
   });
 });

@@ -194,7 +194,15 @@ export function mapOutputText(
       : Object.entries(n as Record<string, unknown>);
     for (const [k, v] of entries) {
       const childKey = isArray ? key : (k as string);
-      if (!isArray && OUTPUT_SKIP_KEYS.has(childKey)) continue;
+      // `data` holds base64 when it is a string (audio, inline images) but
+      // the items of a list response (stored completions, conversation
+      // items) when it is an array or object.
+      if (
+        !isArray &&
+        OUTPUT_SKIP_KEYS.has(childKey) &&
+        !(childKey === 'data' && v && typeof v === 'object')
+      )
+        continue;
       const step =
         isArray &&
         v &&

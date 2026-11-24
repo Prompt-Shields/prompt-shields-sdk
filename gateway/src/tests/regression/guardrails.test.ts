@@ -271,6 +271,145 @@ describe('central-policy guardrails', () => {
     });
   });
 
+  it.each([
+    ['no Content-Type', undefined],
+    ['an audio Content-Type', 'audio/wav'],
+  ])(
+    'denies input sent with %s (the handler parses it as JSON anyway)',
+    async (_name, type) => {
+      upstream(CHAT_URL, () => chatOk('done'));
+      const headers: Record<string, string> = { ...openai() };
+      if (type) headers['content-type'] = type;
+      const res = await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers,
+        // Bytes, so the Request does not add a text/plain Content-Type.
+        body: new TextEncoder().encode(
+          JSON.stringify(chatBody('key sk-' + 'a'.repeat(32)))
+        ),
+      });
+      expect(res.status).toBe(446);
+      expect(upstreamCalls).toHaveLength(0);
+    }
+  );
+
+  it('redacts input in an Anthropic plain-text document', async () => {
+    upstream(/api\.anthropic\.com\/v1\/messages$/, () =>
+      json({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-sonnet-4-5',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })
+    );
+    const res = await post(
+      app,
+      '/v1/messages',
+      {
+        model: 'claude-sonnet-4-5',
+        max_tokens: 10,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'document',
+                source: {
+                  type: 'text',
+                  media_type: 'text/plain',
+                  data: 'write to jane.doe@example.com',
+                },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        'x-portkey-provider': 'anthropic',
+        'x-portkey-api-key': 'sk-ant-regression',
+        'x-ps-team': 'payments',
+      }
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(upstreamCalls[0].body)).not.toContain('jane.doe');
+    expect(upstreamCalls[0].body.messages[0].content[0].source.data).toBe(
+      'write to [EMAIL]'
+    );
+  });
+
+  it('redacts output read back later (GET of a stored Responses object)', async () => {
+    upstream(/api\.openai\.com\/v1\/responses\/resp_1$/, () =>
+      json({
+        id: 'resp_1',
+        object: 'response',
+        status: 'completed',
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [
+              { type: 'output_text', text: 'card 4111 1111 1111 1111 ok' },
+            ],
+          },
+        ],
+      })
+    );
+    const res = await app.request('/v1/responses/resp_1', {
+      method: 'GET',
+      headers: openai(),
+    });
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.output[0].content[0].text).toBe('card [CREDIT_CARD] ok');
+  });
+
+  it('redacts output in a list of stored chat completions', async () => {
+    upstream(/api\.openai\.com\/v1\/chat\/completions\?limit=1$/, () =>
+      json({
+        object: 'list',
+        data: [
+          {
+            id: 'chatcmpl-1',
+            object: 'chat.completion',
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: '4111 1111 1111 1111' },
+              },
+            ],
+          },
+        ],
+      })
+    );
+    const res = await app.request('/v1/chat/completions?limit=1', {
+      method: 'GET',
+      headers: openai(),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).not.toContain('1111');
+  });
+
+  it('caches the redacted response, not the provider original', async () => {
+    const cached = openai({ cache: { mode: 'simple' } });
+    upstream(CHAT_URL, () => chatOk('card 4111 1111 1111 1111 ok'));
+    const miss = await post(
+      app,
+      '/v1/chat/completions',
+      chatBody('c1'),
+      cached
+    );
+    expect(miss.headers.get('x-portkey-cache-status')).toBe('MISS');
+    // Without the policy a hit returns what the cache holds, as stored.
+    setCentralPolicy(undefined);
+    const hit = await post(app, '/v1/chat/completions', chatBody('c1'), cached);
+    expect(hit.headers.get('x-portkey-cache-status')).toBe('HIT');
+    const body: any = await hit.json();
+    expect(body.choices[0].message.content).toBe('card [CREDIT_CARD] ok');
+  });
+
   it('leaves calls untouched without guardrails in the policy', async () => {
     setCentralPolicy(undefined);
     upstream(CHAT_URL, () => chatOk('card 4111 1111 1111 1111'));
