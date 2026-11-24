@@ -31,9 +31,11 @@ Sections today:
     ``{"version": 1, "policy": <route-policy.v1>}``: the gateway router's
     route policy (schemas/route-policy/route-policy.v1.schema.json), the same
     document as PS_ROUTE_POLICY_FILE: model groups, sensitivity levels and
-    the data policy. The collector checks its outline (the schema's required
-    keys and ``schema_version``); the gateway validates it in full before
-    applying it and refuses the whole bundle if it does not pass.
+    the data policy. The collector runs the gateway's checks before storing
+    a version (collector/route_policy_schema.py: the same JSON Schema and
+    cross-field rules), so a document the gateway would refuse is never
+    activated; the gateway still validates it in full before applying it
+    and refuses the whole bundle if it does not pass.
 ``access`` v1
     ``{"version": 1, "default": "deny"|"allow", "groups": [...]}``: who may
     call which providers, models and MCP tools, with an optional per-group
@@ -105,10 +107,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from collector import route_policy_schema
 
 SCHEMA = "ps-policy.v1"
 BUNDLE_SCHEMA = "ps-policy-bundle.v1"
@@ -123,14 +128,13 @@ RESERVED_SECTIONS: dict[str, str] = {
 }
 
 ROUTE_SCHEMA_VERSION = "route-policy.v1"
-# route-policy.v1's required keys (schemas/route-policy/route-policy.v1.schema.json).
-ROUTE_REQUIRED = ("schema_version", "default_group", "groups", "quality_to_group")
-QUALITY_KEYS = ("draft", "balanced", "critical")
 
-# psOidc/config.ts parsePolicy / parseMcpGroupPolicy, mirrored.
-ACCESS_GROUP_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+# psOidc/config.ts parsePolicy / parseMcpGroupPolicy, mirrored (the shared
+# vectors in schemas/central-policy/access-v1.vectors.json keep them equal).
+ACCESS_GROUP_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}\Z")
 ACCESS_GROUP_KEYS = frozenset({"name", "match", "providers", "models", "rate_limit", "mcp"})
-MCP_SERVER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+MCP_SERVER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}\Z")
+MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,128}\Z")
 
 # The SDK's prompt_shields.pii.SPAN_CATEGORIES (the gateway's
 # ENTITY_CATEGORIES): what the pseudonymiser can replace.
@@ -158,9 +162,21 @@ def _is_obj(v: Any) -> bool:
     return isinstance(v, dict)
 
 
+# What JavaScript's String.prototype.trim removes (WhiteSpace and
+# LineTerminator), which differs from str.strip(): it removes U+FEFF and
+# keeps U+001C-U+001F and U+0085.
+JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
 def _strings(at: str, v: Any, problems: list[str]) -> None:
+    # psOidc/config.ts stringList: `s.trim()` must leave something.
     if not (
-        isinstance(v, list) and v and all(isinstance(s, str) and s.strip() for s in v)
+        isinstance(v, list)
+        and v
+        and all(isinstance(s, str) and s.strip(JS_WHITESPACE) for s in v)
     ):
         problems.append(f"{at} must be a non-empty array of strings")
 
@@ -173,24 +189,10 @@ def _route_v1(at: str, body: dict, problems: list[str]) -> None:
     if not _is_obj(policy):
         problems.append(f"{at}.policy must be a route-policy.v1 object")
         return
-    missing = [k for k in ROUTE_REQUIRED if k not in policy]
-    if missing:
-        problems.append(f"{at}.policy is missing {missing}")
-    if policy.get("schema_version", ROUTE_SCHEMA_VERSION) != ROUTE_SCHEMA_VERSION:
-        problems.append(f'{at}.policy.schema_version must be "{ROUTE_SCHEMA_VERSION}"')
-    groups = policy.get("groups")
-    if groups is not None and not (_is_obj(groups) and groups):
-        problems.append(f"{at}.policy.groups must be a non-empty object")
-    elif _is_obj(groups):
-        for name, ref in [("default_group", policy.get("default_group"))] + [
-            (f"quality_to_group.{k}", v)
-            for k, v in (policy.get("quality_to_group") or {}).items()
-        ]:
-            if isinstance(ref, str) and ref not in groups:
-                problems.append(f'{at}.policy.{name}: "{ref}" is not a group')
-    qtg = policy.get("quality_to_group")
-    if qtg is not None and not (_is_obj(qtg) and set(qtg) == set(QUALITY_KEYS)):
-        problems.append(f"{at}.policy.quality_to_group must map exactly {list(QUALITY_KEYS)}")
+    # The gateway's own checks (schema + cross-field rules), so a document
+    # the gateway would refuse is never stored or activated.
+    for p in route_policy_schema.route_policy_problems(policy):
+        problems.append(f"{at}.policy{p[1:]}" if p.startswith("$") else f"{at}.policy: {p}")
 
 
 def _mcp(at: str, raw: Any, problems: list[str]) -> None:
@@ -204,22 +206,27 @@ def _mcp(at: str, raw: Any, problems: list[str]) -> None:
         if not _is_obj(rule) or set(rule) - {"tools"}:
             problems.append(f'{where} must be {{}} or {{"tools": {{...}}}}')
             continue
-        tools = rule.get("tools")
-        if tools is None:
+        if "tools" not in rule:
             continue
+        tools = rule["tools"]
         if not _is_obj(tools) or set(tools) - {"allow", "deny"}:
             problems.append(f'{where}.tools must be {{"allow": [...]}} and/or {{"deny": [...]}}')
             continue
         for k, names in tools.items():
             if not (isinstance(names, list) and all(isinstance(n, str) for n in names)):
                 problems.append(f"{where}.tools.{k} must be an array of tool names")
+                continue
+            for n in names:
+                if not MCP_TOOL_NAME.match(n):
+                    problems.append(f"{where}.tools.{k} has an invalid tool name: {json.dumps(n)}")
 
 
 def _access_v1(at: str, body: dict, problems: list[str]) -> None:
     extra = sorted(set(body) - {"version", "default", "groups"})
     if extra:
         problems.append(f"{at}: unknown keys {extra}")
-    if body.get("default", "deny") not in ("deny", "allow"):
+    # JavaScript's `?? "deny"`: null means the default too.
+    if body.get("default") not in (None, "deny", "allow"):
         problems.append(f'{at}.default must be "deny" or "allow"')
     groups = body.get("groups")
     if not isinstance(groups, list):
@@ -248,11 +255,15 @@ def _access_v1(at: str, body: dict, problems: list[str]) -> None:
         if "rate_limit" in g:
             rl = g["rate_limit"]
             rpm = rl.get("requests_per_minute") if _is_obj(rl) else None
-            if not (isinstance(rpm, int) and not isinstance(rpm, bool) and rpm >= 1):
+            # Number.isInteger: 5.0 is an integer.
+            integral = isinstance(rpm, int) or (
+                isinstance(rpm, float) and math.isfinite(rpm) and rpm.is_integer()
+            )
+            if not (integral and not isinstance(rpm, bool) and rpm >= 1):
                 problems.append(
                     f"{where}.rate_limit.requests_per_minute must be a positive integer"
                 )
-            elif rl.get("per", "user") not in ("user", "group"):
+            elif rl.get("per") not in (None, "user", "group"):
                 problems.append(f'{where}.rate_limit.per must be "user" or "group"')
         if "mcp" in g:
             _mcp(f"{where}.mcp", g["mcp"], problems)
