@@ -1133,6 +1133,77 @@ class GatewaySecurityEvent(Base):
     )
 
 
+class TraceSpan(Base):
+    """One span of an agent trace (#385), stored by the OTLP trace receiver
+    (``collector.otel_ingest`` / ``collector.traces``) and read through
+    ``GET /partner/v1/traces``.
+
+    Metadata only: ids, name, kind, status, timings and an allowlist of
+    GenAI attributes (operation, provider, models, tool name, token counts).
+    No prompt, completion, tool argument or result text, span events or
+    status messages are ever stored. ``user_id_hash`` is the span's user id
+    attribute hashed with the tenant's salt, as on ``ai_usage_events``;
+    ``session_id`` is ``gen_ai.conversation.id``. Both are cleared by user
+    erasure. One row per (tenant, trace, span), so a resent span is stored
+    once. Rows older than the tenant's retention period are purged with its
+    usage events.
+    """
+
+    __tablename__ = "trace_spans"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    trace_id = Column(Text, nullable=False)
+    span_id = Column(Text, nullable=False)
+    parent_span_id = Column(Text)
+    name = Column(Text, nullable=False)
+    kind = Column(Text)
+    status = Column(Text, nullable=False)
+    error_type = Column(Text)
+    start_time = Column(TIMESTAMP(timezone=True), nullable=False)
+    end_time = Column(TIMESTAMP(timezone=True))
+    duration_ms = Column(Integer)
+    received_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    service_name = Column(Text)
+    environment = Column(Text)
+    operation = Column(Text)
+    provider = Column(Text)
+    request_model = Column(Text)
+    response_model = Column(Text)
+    tool_name = Column(Text)
+    tokens_in = Column(Integer)
+    tokens_out = Column(Integer)
+    session_id = Column(Text)
+    user_id_hash = Column(Text)
+    # Set while the span's trace has no GenAI span yet (collector.traces):
+    # never returned by the API, deleted after this time unless the trace
+    # gains one.
+    pending_until = Column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "trace_id", "span_id", name="ux_trace_spans_span"),
+        Index("ix_trace_spans_tenant_start", "tenant_id", "start_time"),
+        Index(
+            "ix_trace_spans_tenant_user",
+            "tenant_id",
+            "user_id_hash",
+            postgresql_where=text("user_id_hash IS NOT NULL"),
+        ),
+        Index(
+            "ix_trace_spans_tenant_session",
+            "tenant_id",
+            "session_id",
+            postgresql_where=text("session_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_trace_spans_pending",
+            "tenant_id",
+            "pending_until",
+            postgresql_where=text("pending_until IS NOT NULL"),
+        ),
+    )
+
+
 def _rollup_count(name: str) -> Column:
     return Column(name, BigInteger, nullable=False, default=0, server_default="0")
 

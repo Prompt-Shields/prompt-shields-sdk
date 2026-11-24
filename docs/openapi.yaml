@@ -128,6 +128,7 @@ components:
             audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events, list it from `/audit`, or pull it from `/siem/audit` (never granted by default)
             evidence:read: Pull per-call routing evidence as NDJSON from `/siem/calls` (never granted by default)
             security-events:read: List the gateway security events stored for the tenant from `/security-events` (never granted by default)
+            traces:read: List the tenant's agent traces and read one trace's spans from `/traces` (never granted by default)
             mcp:read: Read observed MCP servers and tools, with each server's asset and owner, and their daily tool-call metering (never granted by default)
             learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
             learner:review: Accept or reject routing learner recommendations, with reviewer and comment (never granted by default)
@@ -1763,6 +1764,123 @@ components:
           description: Opaque; pass as `cursor` for the next page
       required: [has_more, next_cursor]
 
+    TraceSpan:
+      type: object
+      description: |
+        One stored span of an agent trace. Metadata only: never prompt,
+        completion, tool argument or result text, span events or status
+        messages.
+      properties:
+        span_id:
+          type: string
+          description: 16 lowercase hex characters
+        parent_span_id:
+          type: [string, 'null']
+          description: The parent span's id (it may not be stored, e.g. a span of the app's own tracer that was never exported here)
+        name: {type: string}
+        kind:
+          type: [string, 'null']
+          description: '`internal`, `server`, `client`, `producer` or `consumer`'
+        status:
+          type: string
+          description: '`unset`, `ok` or `error`'
+        error_type:
+          type: [string, 'null']
+          description: The span's `error.type` attribute
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: [string, 'null']
+          format: date-time
+        duration_ms: {type: [integer, 'null']}
+        service_name:
+          type: [string, 'null']
+          description: The exporter's `service.name`
+        environment: {type: [string, 'null']}
+        operation:
+          type: [string, 'null']
+          description: '`gen_ai.operation.name` (`chat`, `execute_tool`, `invoke_agent`, ...)'
+        provider:
+          type: [string, 'null']
+          description: '`gen_ai.provider.name` (or `gen_ai.system`), lowercased'
+        request_model: {type: [string, 'null']}
+        response_model: {type: [string, 'null']}
+        tool_name:
+          type: [string, 'null']
+          description: '`gen_ai.tool.name`'
+        tokens_in: {type: [integer, 'null']}
+        tokens_out: {type: [integer, 'null']}
+        session_id:
+          type: [string, 'null']
+          description: '`gen_ai.conversation.id`; cleared by user erasure'
+        user_id_hash:
+          type: [string, 'null']
+          description: The span's user id hashed with the tenant's salt (as on usage events); cleared by user erasure
+      required: [span_id, parent_span_id, name, kind, status, error_type, start_time, end_time, duration_ms, service_name, environment, operation, provider, request_model, response_model, tool_name, tokens_in, tokens_out, session_id, user_id_hash]
+
+    TraceSummary:
+      type: object
+      properties:
+        trace_id:
+          type: string
+          description: 32 lowercase hex characters (W3C trace id)
+        root_name:
+          type: [string, 'null']
+          description: Name of the earliest stored span without a stored parent
+        root_service_name: {type: [string, 'null']}
+        start_time:
+          type: [string, 'null']
+          format: date-time
+          description: Start of the earliest stored span
+        end_time:
+          type: [string, 'null']
+          format: date-time
+          description: Latest end of a stored span
+        duration_ms: {type: [integer, 'null']}
+        span_count: {type: integer}
+        error_count: {type: integer}
+        status:
+          type: string
+          description: '`error` when any stored span errored, else `ok`'
+        tokens_in:
+          type: [integer, 'null']
+          description: Sum over the stored spans (the SDK's and the gateway's span of one call are both counted)
+        tokens_out: {type: [integer, 'null']}
+        session_id: {type: [string, 'null']}
+        user_id_hash: {type: [string, 'null']}
+      required: [trace_id, root_name, root_service_name, start_time, end_time, duration_ms, span_count, error_count, status, tokens_in, tokens_out, session_id, user_id_hash]
+
+    Trace:
+      allOf:
+        - $ref: '#/components/schemas/TraceSummary'
+        - type: object
+          properties:
+            spans:
+              type: array
+              description: Every stored span of the trace, in start order
+              items: {$ref: '#/components/schemas/TraceSpan'}
+          required: [spans]
+
+    TracePage:
+      type: object
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/TraceSummary'}
+        meta: {$ref: '#/components/schemas/TracePageMeta'}
+      required: [data, meta]
+
+    TracePageMeta:
+      type: object
+      properties:
+        has_more: {type: boolean}
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque; pass as `cursor` for the next page
+      required: [has_more, next_cursor]
+
     SecurityEventIngestResult:
       type: object
       properties:
@@ -2637,8 +2755,8 @@ components:
           description: |
             Rows changed per table (`ai_usage_events`; `usage_rollups`, the
             hourly and daily rollup rows, when the user's hash is known;
-            `gateway_security_events`; for a `user_id` also `call_feedback`
-            and `mcp_tool_usage`); zeros on a repeat
+            `gateway_security_events`; `trace_spans`; for a `user_id` also
+            `call_feedback` and `mcp_tool_usage`); zeros on a repeat
         audit_event_id:
           type: string
           format: uuid
@@ -4758,9 +4876,12 @@ paths:
         OTLP/HTTP traces, JSON (`application/json`) or protobuf
         (`application/x-protobuf`), at most 2000 spans and 4 MiB. GenAI
         spans (`gen_ai.*` attributes) become usage events and assets; MCP
-        `tools/call` spans become MCP tool usage; other spans are ignored.
-        GenAI spans without a provider are rejected and counted in
-        `partialSuccess`. The tenant is the ingest key's. Limited per tenant
+        `tools/call` spans become MCP tool usage; other spans are not
+        metered. The spans of traces with a GenAI or MCP span (ids, parent,
+        name, kind, status, timings and GenAI metadata, never content) are
+        also kept for `GET /partner/v1/traces` unless the operator sets
+        `PS_TRACE_STORE_ENABLED=false`. GenAI spans without a provider are
+        rejected and counted in `partialSuccess`. The tenant is the ingest key's. Limited per tenant
         (`PS_OTEL_TRACES_RATE_LIMIT_PER_MINUTE`, default 600 requests/minute,
         or the tenant's `ingest_rate_limits.otel_traces`), counted apart from
         `/ingest/events`.
@@ -6738,6 +6859,109 @@ paths:
           description: Invalid `cursor`
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/traces:
+    get:
+      operationId: listTraces
+      tags: [Sync]
+      summary: List the tenant's agent traces
+      description: |
+        One summary per trace with a stored span starting in
+        `[since, until)` (default: the last 24 hours) that matches the
+        filters, newest first. Spans come from `POST /ingest/otel/v1/traces`
+        (the SDK's `opentelemetry` extra, the gateway, any OTel GenAI
+        exporter); only traces with at least one GenAI or MCP span are kept.
+        Requires `traces:read`.
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+          description: '`meta.next_cursor` of the previous page'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: First span start to include (default 24 hours before `until`)
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Span start before which to stop (exclusive; default now)
+        - name: session_id
+          in: query
+          schema:
+            type: string
+            maxLength: 256
+          description: Only traces with a span of this `gen_ai.conversation.id`
+        - name: user_id_hash
+          in: query
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+          description: Only traces with a span of this user (the salted hash, as on usage events)
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ok, error]
+          description: '`error`: traces with an errored span; `ok`: the others'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      security:
+        - OAuth2: [traces:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: One page of trace summaries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TracePage'
+        '400':
+          description: Invalid `cursor`, or `since` not before `until`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/traces/{trace_id}:
+    get:
+      operationId: getTrace
+      tags: [Sync]
+      summary: Get one agent trace with its spans
+      description: |
+        Every stored span of the trace, in start order, with the trace's
+        summary. Requires `traces:read`.
+      parameters:
+        - name: trace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{32}$'
+      security:
+        - OAuth2: [traces:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The trace
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trace'
+        '400':
+          description: Not a valid trace id
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /partner/v1/siem/calls:
     get:
