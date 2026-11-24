@@ -262,6 +262,14 @@ from collector.rbac_admin import router as rbac_admin_router
 app.include_router(rbac_admin_router)
 app.include_router(rbac_partner_router)
 
+# Central governance policies (#340): admin CRUD/versioning (admin:policies)
+# and the gateway pull (/api/v1/policy/effective, ingest key policy:read)
+from collector.policies_api import gateway_router as policy_gateway_router
+from collector.policies_api import router as policies_admin_router
+
+app.include_router(policies_admin_router)
+app.include_router(policy_gateway_router)
+
 # Operator surface: tenants, retention purge and tenant erasure (PS_ADMIN_TOKEN)
 from collector.operator_admin import router as operator_admin_router
 

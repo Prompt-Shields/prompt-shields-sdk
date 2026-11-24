@@ -73,6 +73,7 @@
         "guides/security-events",
         "guides/observability",
         "guides/gateway-oidc",
+        "guides/central-policy",
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",

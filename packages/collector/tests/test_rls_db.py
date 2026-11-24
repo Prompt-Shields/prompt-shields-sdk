@@ -41,6 +41,8 @@ from db.models import (
     Membership,
     PartnerAuditLog,
     PartnerCredential,
+    Policy,
+    PolicyVersion,
     Principal,
     Project,
     ProviderCredential,
@@ -300,6 +302,26 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                 team_id=team.id,
                 project_id=project.id,
                 role="viewer",
+                created_by="operator",
+            )
+        )
+        policy = Policy(
+            tenant_id=tenant_id,
+            name=f"policy-{name}",
+            scope="team",
+            team_id=team.id,
+            active_version=1,
+            created_by="operator",
+        )
+        s.add(policy)
+        await s.flush()
+        s.add(
+            PolicyVersion(
+                tenant_id=tenant_id,
+                policy_id=policy.id,
+                version=1,
+                document={"schema": "ps-policy.v1", "sections": {}},
+                sha256="0" * 64,
                 created_by="operator",
             )
         )

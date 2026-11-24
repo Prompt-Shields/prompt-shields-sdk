@@ -12,8 +12,8 @@ Every tenant admin route declares one scope from `ADMIN_SCOPES` with
   - a tenant ingest key (the key the SDK sends), only while
     ``PS_ADMIN_REQUIRE_SCOPED_TOKENS=false``: the scopes in
     ``TENANT_KEY_SCOPES``, i.e. every admin scope but member management
-    (#338): ``admin:members`` is never reachable with
-    an ingest key. Only a key holding every ingest key scope (tenant_keys
+    (#338) and governance policies (#340): ``admin:members`` and
+    ``admin:policies`` are never reachable with an ingest key. Only a key holding every ingest key scope (tenant_keys
     ALL_KEY_SCOPES: every key from before scopes existed, #341) gets in; a
     narrowed key, such as a new ``ingest:write``-only key, is refused (403).
 
@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -98,12 +99,20 @@ ADMIN_SCOPES: dict[str, str] = {
         "Manage principals, teams, projects and role memberships (granting a "
         "role needs every admin scope it carries; the owner role needs an owner)"
     ),
+    "admin:policies": (
+        "Create, version, activate and delete governance policies (tenant, "
+        "team or project); every change is audited"
+    ),
 }
 
 # What a full-scope tenant ingest key reaches while
 # PS_ADMIN_REQUIRE_SCOPED_TOKENS is off: every admin scope but member
-# management (#338), which only admin tokens get.
-TENANT_KEY_SCOPES: frozenset[str] = frozenset(ADMIN_SCOPES) - {"admin:members"}
+# management (#338) and governance policies (#340), which only admin
+# tokens get.
+TENANT_KEY_SCOPES: frozenset[str] = frozenset(ADMIN_SCOPES) - {
+    "admin:members",
+    "admin:policies",
+}
 
 READ_SCOPE = "admin:read"
 _READ_METHODS = frozenset({"GET", "HEAD"})
@@ -387,10 +396,16 @@ async def cap_child_expiry(
     return expires_at
 
 
-async def live_descendants(db: AsyncSession, parent: AdminToken) -> list[AdminToken]:
+async def live_descendants(
+    db: AsyncSession,
+    parent: AdminToken,
+    skip: Callable[[AdminToken], Awaitable[bool]] | None = None,
+) -> list[AdminToken]:
     """Every live token that ``parent`` created, and the tokens those
     created, and so on (linked by ``created_by = token:<token_prefix>``):
-    what revoking ``parent`` revokes with it. Changes nothing."""
+    what revoking ``parent`` revokes with it. Changes nothing. A live token
+    for which ``skip`` returns True is left out with every token below it
+    (a self-revoke leaves an owner's tokens live, #379)."""
     live: list[AdminToken] = []
     seen = {parent.id}
     frontier = [parent.token_prefix]
@@ -412,6 +427,8 @@ async def live_descendants(db: AsyncSession, parent: AdminToken) -> list[AdminTo
             if child.id in seen:
                 continue
             seen.add(child.id)
+            if child.revoked_at is None and skip is not None and await skip(child):
+                continue
             # Walk through already revoked tokens too: their children may
             # still be live.
             frontier.append(child.token_prefix)
@@ -421,11 +438,14 @@ async def live_descendants(db: AsyncSession, parent: AdminToken) -> list[AdminTo
 
 
 async def revoke_descendants(
-    db: AsyncSession, parent: AdminToken, now: datetime
+    db: AsyncSession,
+    parent: AdminToken,
+    now: datetime,
+    skip: Callable[[AdminToken], Awaitable[bool]] | None = None,
 ) -> list[AdminToken]:
     """Revoke every token ``live_descendants`` returns. Returns the tokens
     revoked here. Flushes nothing; the caller audits and commits."""
-    revoked = await live_descendants(db, parent)
+    revoked = await live_descendants(db, parent, skip)
     for child in revoked:
         child.revoked_at = now
     return revoked

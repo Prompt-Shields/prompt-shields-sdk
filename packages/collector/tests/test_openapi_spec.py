@@ -28,6 +28,7 @@ from collector import (
     operator_admin,
     operator_auth,
     partner_admin,
+    policies_api,
     provider_credentials_api,
     provider_usage_admin,
     rbac,
@@ -166,6 +167,10 @@ def test_webhook_schemas_match_serializers():
         ("UpdateProjectRequest", rbac_admin.UpdateProjectBody),
         ("CreateMembershipRequest", rbac_admin.CreateMembershipBody),
         ("UpdateMembershipRequest", rbac_admin.UpdateMembershipBody),
+        ("CreatePolicyRequest", policies_api.CreatePolicyBody),
+        ("UpdatePolicyRequest", policies_api.UpdatePolicyBody),
+        ("CreatePolicyVersionRequest", policies_api.CreateVersionBody),
+        ("ActivatePolicyRequest", policies_api.ActivateBody),
     ],
 )
 def test_request_bodies_match_models(schema, model):
@@ -344,6 +349,7 @@ ADMIN_ROUTERS = (
     siem_export.router,
     operator_admin.router,
     user_erasure.router,
+    policies_api.router,
 )
 
 
@@ -709,6 +715,43 @@ def test_security_event_schemas_match_serializers():
     assert op["security"][0] == {"OAuth2": ["security-events:read"]}
     for path in ("/ingest/security-events", "/ingest/otel/v1/logs"):
         assert SPEC["paths"][path]["post"]["security"] == [{"TenantApiKey": []}]
+
+
+def test_policy_schemas_match_serializers():
+    now = datetime.now(UTC)
+    policy = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="default",
+        description=None,
+        scope="tenant",
+        team_id=None,
+        project_id=None,
+        active_version=1,
+        created_by="token:abc",
+        created_at=now,
+        updated_at=None,
+    )
+    keys = set(policies_api.serialize_policy(policy))
+    assert _props("Policy") == keys == set(SCHEMAS["Policy"]["required"])
+    assert _props("PolicyWithDocument") == keys | {"active_document"}
+    version = SimpleNamespace(
+        policy_id=uuid.uuid4(),
+        version=1,
+        sha256="0" * 64,
+        document={"schema": "ps-policy.v1", "sections": {}},
+        comment=None,
+        created_by="token:abc",
+        created_at=now,
+    )
+    keys = set(policies_api.serialize_version_summary(version))
+    assert _props("PolicyVersionSummary") == keys == set(
+        SCHEMAS["PolicyVersionSummary"]["required"]
+    )
+    assert _props("PolicyVersion") == set(policies_api.serialize_version(version))
+    bundle = policies_api.policy_doc.build_bundle(None, {}, {})
+    assert set(SCHEMAS["PolicyBundle"]["required"]) == set(bundle)
+    assert set(SCHEMAS["EffectivePolicy"]["required"]) == set(bundle["tenant"])
+    assert SCHEMAS["PolicyBundle"]["properties"]["schema"]["const"] == bundle["schema"]
 
 
 def test_otel_traces_ingest_documents_its_rate_limit():

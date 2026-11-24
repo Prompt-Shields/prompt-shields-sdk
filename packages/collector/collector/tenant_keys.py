@@ -21,9 +21,15 @@ Scopes (#341)
 Each key carries scopes (``tenant_api_keys.scopes``, ``KEY_SCOPES``):
 ``ingest:write`` (the /ingest routes and OTLP/Kong/MCP/learner/feedback
 ingest), ``registry:read`` (the /api/v1/registry reads and
-/telemetry/loss) and ``registry:attest`` (POST attestations). Keys that
-existed before migration 037, and a legacy key on the tenant row, hold all
-three, so nothing breaks on upgrade. A key issued since holds
+/telemetry/loss), ``registry:attest`` (POST attestations) and
+``policy:read`` (the gateway's policy pull, GET /api/v1/policy/effective,
+#340). Keys that existed before migration 037, and a legacy key on the
+tenant row, hold the first three (``ALL_KEY_SCOPES``), so nothing breaks on
+upgrade; holding them is what makes a key "full". ``policy:read`` is never
+granted implicitly (not by migration, not to a legacy key): the compiled
+policy names the tenant's teams, projects and identity-provider groups, and
+ingest keys also live in SDK clients, so the gateway's key is issued with it
+explicitly. A key issued since holds
 ``ingest:write`` unless more are asked for. Only a key holding every scope
 can act on the tenant admin API (collector.admin_auth), because that is
 what an ingest key could do before scopes existed.
@@ -59,13 +65,24 @@ STATUSES = ("active", "expired", "revoked")
 INGEST_WRITE = "ingest:write"
 REGISTRY_READ = "registry:read"
 REGISTRY_ATTEST = "registry:attest"
+POLICY_READ = "policy:read"
 KEY_SCOPES: dict[str, str] = {
     INGEST_WRITE: "Send usage, OTLP, Kong, MCP, learner and feedback events",
     REGISTRY_READ: "Read the tenant registry (/api/v1/registry) and /telemetry/loss",
     REGISTRY_ATTEST: "Record attestations on registry assets",
+    POLICY_READ: (
+        "Read the tenant's compiled governance policy (GET /api/v1/policy/effective); "
+        "the gateway's policy pull credential"
+    ),
 }
-# What keys from before scopes existed (and legacy tenant-row keys) hold.
-ALL_KEY_SCOPES: frozenset[str] = frozenset(KEY_SCOPES)
+# The scopes every key held before scopes existed (#341). A key holding
+# all of them is a "full" key: it may reach the tenant admin API while
+# PS_ADMIN_REQUIRE_SCOPED_TOKENS is off (collector.admin_auth). Frozen:
+# scopes added later (policy:read, #340) do not change what "full" means.
+ALL_KEY_SCOPES: frozenset[str] = frozenset({INGEST_WRITE, REGISTRY_READ, REGISTRY_ATTEST})
+# What a legacy tenant-row key holds: the scopes from before #340, not
+# policy:read (issued explicitly, to the gateway's key only).
+LEGACY_KEY_SCOPES: frozenset[str] = ALL_KEY_SCOPES
 # What a newly issued key holds unless more are asked for.
 DEFAULT_KEY_SCOPES: tuple[str, ...] = (INGEST_WRITE,)
 
@@ -175,7 +192,7 @@ async def adopt_legacy_key(db: AsyncSession, tenant_id: UUID) -> TenantApiKey | 
         key_hash=tenant.api_key_hash,
         key_hint=None,
         origin="legacy",
-        scopes=list(KEY_SCOPES),
+        scopes=ordered_scopes(LEGACY_KEY_SCOPES),
         created_at=tenant.created_at or datetime.now(UTC),
     )
     tenant.api_key_prefix = None
@@ -271,8 +288,8 @@ class KeyCandidate:
     tenant_disabled: bool
     # tenant_api_keys.id; None for a legacy key on the tenant row.
     key_id: UUID | None = None
-    # What the key may do (#341); a legacy tenant-row key holds every scope.
-    scopes: frozenset[str] = ALL_KEY_SCOPES
+    # What the key may do (#341); a legacy tenant-row key holds LEGACY_KEY_SCOPES.
+    scopes: frozenset[str] = LEGACY_KEY_SCOPES
 
 
 async def find_candidate(db: AsyncSession, plaintext: str) -> KeyCandidate | None:
