@@ -147,9 +147,11 @@ function describe(policy: CentralPolicy): string {
   ];
   if (policy.route) parts.push('route policy');
   if (policy.access) parts.push('access policy');
+  if (policy.guardrails)
+    parts.push(`${policy.guardrails.rules.length} guardrail rules`);
   if (policy.teams || policy.projects)
     parts.push(
-      `${policy.teams} team / ${policy.projects} project policies (validated, not applied)`
+      `${policy.teams} team / ${policy.projects} project policies (validated; only their guardrails applied)`
     );
   if (policy.ignored.length)
     parts.push(`not enforced here: ${policy.ignored.join(', ')}`);

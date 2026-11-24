@@ -119,6 +119,30 @@
           "type": "string",
           "maxLength": 128
         },
+        "ps.guardrail.rule_id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Central-policy guardrails (#349): the id of the rule that applied (hook_id ps.policy)."
+        },
+        "ps.guardrail.action": {
+          "enum": ["deny", "redact", "log"],
+          "description": "Central-policy guardrails (#349): what the rule did with the findings."
+        },
+        "ps.guardrail.category": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Central-policy guardrails (#349): the finding category (a PII category, a secret kind, or prompt_injection)."
+        },
+        "ps.guardrail.count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Central-policy guardrails (#349): findings of this rule and category in the request or response."
+        },
+        "ps.policy_version": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The central policy version the rule came from, e.g. default@3+team-eu@2 (#340)."
+        },
         "ps.guardrail.hook_id": {
           "type": "string",
           "maxLength": 128
@@ -263,6 +287,30 @@
         "gen_ai.request.model": {
           "type": "string",
           "maxLength": 128
+        },
+        "ps.guardrail.rule_id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Central-policy guardrails (#349): the id of the rule that applied (hook_id ps.policy)."
+        },
+        "ps.guardrail.action": {
+          "enum": ["deny", "redact", "log"],
+          "description": "Central-policy guardrails (#349): what the rule did with the findings."
+        },
+        "ps.guardrail.category": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Central-policy guardrails (#349): the finding category (a PII category, a secret kind, or prompt_injection)."
+        },
+        "ps.guardrail.count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Central-policy guardrails (#349): findings of this rule and category in the request or response."
+        },
+        "ps.policy_version": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The central policy version the rule came from, e.g. default@3+team-eu@2 (#340)."
         },
         "ps.guardrail.hook_id": {
           "type": "string",
@@ -410,6 +458,30 @@
         "gen_ai.request.model": {
           "type": "string",
           "maxLength": 128
+        },
+        "ps.guardrail.rule_id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Central-policy guardrails (#349): the id of the rule that applied (hook_id ps.policy)."
+        },
+        "ps.guardrail.action": {
+          "enum": ["deny", "redact", "log"],
+          "description": "Central-policy guardrails (#349): what the rule did with the findings."
+        },
+        "ps.guardrail.category": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Central-policy guardrails (#349): the finding category (a PII category, a secret kind, or prompt_injection)."
+        },
+        "ps.guardrail.count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Central-policy guardrails (#349): findings of this rule and category in the request or response."
+        },
+        "ps.policy_version": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The central policy version the rule came from, e.g. default@3+team-eu@2 (#340)."
         },
         "ps.guardrail.hook_id": {
           "type": "string",

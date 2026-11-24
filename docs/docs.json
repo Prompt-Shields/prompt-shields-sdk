@@ -74,6 +74,7 @@
         "guides/observability",
         "guides/gateway-oidc",
         "guides/central-policy",
+        "guides/guardrails",
         "guides/audit-trail",
         "guides/model-catalog",
         "guides/routing",
