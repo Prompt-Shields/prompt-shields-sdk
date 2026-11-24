@@ -10,6 +10,13 @@
  * - refuses a URL that fails `isSafePluginEgressURL` (metadata, loopback,
  *   private and reserved addresses, internal TLDs; only hosts listed in
  *   TRUSTED_CUSTOM_HOSTS are exempt, localhost is never trusted by default);
+ * - on Node, resolves the host and refuses it when any address is
+ *   loopback, link-local, cloud metadata or otherwise non-routable (IPv6
+ *   forms embedding one included), then pins the connection to the checked
+ *   addresses, so a public name pointing at 169.254.169.254 or DNS
+ *   rebinding cannot reach them (#377; `src/utils/egressGuard.ts`).
+ *   Private addresses are not refused by this step; TRUSTED_CUSTOM_HOSTS
+ *   entries skip it;
  * - sends with `redirect: 'manual'` and treats any 3xx as a failure, so an
  *   allowed host cannot bounce the request (and its headers) to an internal
  *   one;
@@ -20,7 +27,11 @@
  * like any other network error (its `failOnError` / fail-open behaviour is
  * unchanged).
  */
-import { isSafePluginEgressURL } from '../src/middlewares/requestValidator';
+import {
+  isSafePluginEgressURL,
+  isTrustedPluginHost,
+} from '../src/middlewares/requestValidator';
+import { isEgressRefused, withEgressGuard } from '../src/utils/egressGuard';
 import { isRedirectResponse } from '../src/utils/fetch';
 
 /** Default cap on a plugin response body (guardrail answers are small). */
@@ -52,13 +63,15 @@ function hostOf(url: string): string {
   }
 }
 
+function refusedError(url: string): PluginEgressError {
+  return new PluginEgressError(
+    `Guardrail request to ${hostOf(url)} refused: internal, metadata and private hosts are not allowed (see TRUSTED_CUSTOM_HOSTS)`
+  );
+}
+
 /** Throw unless `url` may be reached by a guardrail plugin. */
 export function assertPluginEgressURL(url: string): void {
-  if (!isSafePluginEgressURL(url)) {
-    throw new PluginEgressError(
-      `Guardrail request to ${hostOf(url)} refused: internal, metadata and private hosts are not allowed (see TRUSTED_CUSTOM_HOSTS)`
-    );
-  }
+  if (!isSafePluginEgressURL(url)) throw refusedError(url);
 }
 
 async function readCapped(
@@ -113,15 +126,30 @@ export async function pluginRequest(
     allowInternalHost = false,
   } = options;
   if (!allowInternalHost) assertPluginEgressURL(url);
+  let guardedInit = init;
+  if (!allowInternalHost && !isTrustedPluginHost(url)) {
+    try {
+      guardedInit = await withEgressGuard(url, init, 'local');
+    } catch (err) {
+      if (isEgressRefused(err)) throw refusedError(url);
+      throw err;
+    }
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const response = await fetch(url, {
-      ...init,
-      redirect: 'manual',
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...guardedInit,
+        redirect: 'manual',
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (isEgressRefused(err)) throw refusedError(url);
+      throw err;
+    }
     if (isRedirectResponse(response)) {
       await response.body?.cancel().catch(() => {});
       throw new PluginEgressError(
