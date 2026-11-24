@@ -533,7 +533,7 @@ describe('psRateLimit middleware', () => {
     expect(next.headers.get('x-ratelimit-remaining-tokens')).toBe('888');
   });
 
-  test('a stream the client abandons releases its lease, keeping the estimate', async () => {
+  test('a stream the client abandons releases its lease and settles its usage up to the cut', async () => {
     const spy = spyStore();
     setRateLimitStores({ primaryFactory: () => spy.store });
     setLocalRateLimits(
@@ -562,7 +562,10 @@ describe('psRateLimit middleware', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(spy.calls.settle).toHaveLength(1);
     const [adjustments, leaseKeys] = spy.calls.settle[0];
-    expect(adjustments).toEqual([]); // no reported usage: the estimate stays
+    // No reported usage: the usage up to the cut is estimated (#389), the
+    // request's input and no output, so the reservation is adjusted to it.
+    expect(adjustments).toHaveLength(1);
+    expect(adjustments[0].delta).toBeLessThan(0);
     expect(leaseKeys).toHaveLength(1);
     expect((await chat(app, { stream: false })).status).toBe(200);
   });

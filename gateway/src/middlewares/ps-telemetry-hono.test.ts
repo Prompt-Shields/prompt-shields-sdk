@@ -90,7 +90,7 @@ describe('psTelemetry (Hono adapter)', () => {
     expect(sent.events[0].environment).toBe('production');
   });
 
-  test('still emits (without usage) for a streaming response', async () => {
+  test('still emits, with estimated usage, for a streaming response without usage', async () => {
     const app = makeApp((c) => {
       c.header('content-type', 'text/event-stream');
       return c.body('data: {}\n\n');
@@ -104,7 +104,10 @@ describe('psTelemetry (Hono adapter)', () => {
     await flush();
 
     expect(sent.events[0].source).toBe('gateway');
-    expect(sent.events[0].tokens_in).toBeUndefined();
+    // No usage in the stream: estimated from the request (#389).
+    expect(sent.events[0].tokens_in).toBeGreaterThan(0);
+    expect(sent.events[0].tokens_out).toBe(0);
+    expect(sent.events[0].usage_source).toBe('estimated');
     expect(sent.events[0].stream_truncated).toBe(true);
   });
 

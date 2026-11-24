@@ -116,6 +116,11 @@ class IngestEvent(BaseModel):
     attempts: list[dict] | None = None
     stream_truncated: bool | None = None
     stream_cancelled: bool | None = None
+    # Where the token counts came from (#389): "provider", or "estimated"
+    # when the SDK or gateway estimated any of them (a stream without
+    # usage). Older SDKs send only tokens_estimated: true, read as
+    # "estimated". Lenient like the route fields.
+    usage_source: str | None = None
     # Cost attribution (#347; collector/cost_attribution.py): the tenant's
     # team and project (id or exact name, resolved at ingest; unknown ones
     # are dropped) and up to 20 cost tags. Lenient like the route fields.
@@ -133,6 +138,8 @@ class IngestEvent(BaseModel):
         data = canonical_event(data)
         if not isinstance(data, dict):
             return data
+        if data.get("usage_source") is None and data.get("tokens_estimated") is True:
+            data = {**data, "usage_source": USAGE_SOURCE_ESTIMATED}
         bad = [k for k in SANITISED_FIELDS if k in data and not is_storable(data[k])]
         if not bad:
             return data
@@ -295,6 +302,11 @@ class IngestEvent(BaseModel):
     def _budget_state(cls, value: Any) -> str | None:
         return _lenient_choice(value, BUDGET_STATES)
 
+    @field_validator("usage_source", mode="before")
+    @classmethod
+    def _usage_source(cls, value: Any) -> str | None:
+        return _lenient_choice(value, USAGE_SOURCES)
+
     @field_validator("budget_action", mode="before")
     @classmethod
     def _budget_action(cls, value: Any) -> str | None:
@@ -428,6 +440,10 @@ SENSITIVITY_SOURCES = frozenset({"declared", "pii_escalated", "default"})
 # lower-case. budget_action "blocked" is accepted for an emitter that reports
 # refused calls; the SDK and gateway send no event for those today.
 BUDGET_STATES = frozenset({"ok", "warn", "unknown", "exceeded"})
+# usage_source (#389).
+USAGE_SOURCE_PROVIDER = "provider"
+USAGE_SOURCE_ESTIMATED = "estimated"
+USAGE_SOURCES = frozenset({USAGE_SOURCE_PROVIDER, USAGE_SOURCE_ESTIMATED})
 BUDGET_ACTIONS = frozenset({"none", "downgraded", "blocked"})
 # budget.v1 ids are tokens: ^[a-z0-9][a-z0-9._-]*$
 BUDGET_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
@@ -549,6 +565,7 @@ LENIENT_FIELDS = (
     "call_id",
     "outcome_signals",
     "outcome_signals_version",
+    "usage_source",
 ) + (
     ROUTE_FIELDS
     + BUDGET_CACHE_FIELDS
@@ -870,6 +887,7 @@ async def _store_events(db, tenant_id, events: list[IngestEvent]) -> int:
             call_id=event.call_id,
             outcome_signals=event.outcome_signals,
             outcome_signals_version=event.outcome_signals_version,
+            usage_source=event.usage_source,
             **{
                 name: getattr(event, name)
                 for name in ROUTE_FIELDS

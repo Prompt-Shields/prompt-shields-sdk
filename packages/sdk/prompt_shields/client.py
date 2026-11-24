@@ -615,6 +615,8 @@ class _CompletionsNamespace:
             event.update(stream_fields)
             if adapter_fields.get("tokens_estimated"):
                 event["tokens_estimated"] = True
+            if adapter_fields.get("usage_source"):
+                event["usage_source"] = adapter_fields["usage_source"]
             if event_hook is not None:
                 event_hook(event)
             # OTLP export (#386), before the SDK span ends: an exporter may put its
@@ -631,7 +633,9 @@ class _CompletionsNamespace:
             return ShieldsStream(
                 response,
                 StreamAccumulator(
-                    cloud_platforms.stream_vendor(self._parent._vendor), messages
+                    cloud_platforms.stream_vendor(self._parent._vendor),
+                    messages,
+                    model,
                 ),
                 on_finish,
                 start,

@@ -107,6 +107,12 @@ export interface TogetherAIChatCompletionStreamChunk {
     };
     finish_reason: TOGETHER_AI_FINISH_REASON;
   }[];
+  // Sent on the last chunk (PS fork #389: passed through to the client).
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  } | null;
 }
 
 export const TogetherAIErrorResponseTransform: (
@@ -272,6 +278,9 @@ export const TogetherAIChatCompleteStreamChunkTransform: (
           finish_reason: finishReason,
         },
       ],
+      // PS fork (#389): Together reports usage on the last chunk; it was
+      // dropped here, so streamed Together calls had no token counts.
+      ...(parsedChunk.usage ? { usage: parsedChunk.usage } : {}),
     })}` + '\n\n'
   );
 };

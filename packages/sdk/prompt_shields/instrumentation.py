@@ -1587,6 +1587,8 @@ def _stream_event(call: dict, adapter_fields: dict, stream_fields: dict,
     event.update(stream_fields)
     if adapter_fields.get("tokens_estimated"):
         event["tokens_estimated"] = True
+    if adapter_fields.get("usage_source"):
+        event["usage_source"] = adapter_fields["usage_source"]
     attach_outcome_signals(event, model=call["model"], messages=call["messages"],
                            request=call.get("kwargs"),
                            reasons=adapter_fields.get("finish_reasons") or [])
@@ -1666,6 +1668,7 @@ class _ResponsesAccumulator(StreamAccumulator):
                 self.tokens_in = fields["tokens_in"]
             if fields["tokens_out"] is not None:
                 self.tokens_out = fields["tokens_out"]
+                self._output_final = True
             if fields["tokens_cached"] is not None:
                 self.tokens_cached = fields["tokens_cached"]
             if fields["tokens_reasoning"] is not None:
@@ -1675,10 +1678,10 @@ class _ResponsesAccumulator(StreamAccumulator):
                 getattr(event, "response", None), "incomplete_details"), "reason"))
         elif etype == "response.refusal.done":
             self._finish_reason("refusal")
-        elif etype == "response.output_text.delta":
-            delta = getattr(event, "delta", None)
-            if isinstance(delta, str):
-                self.output_chars += len(delta)
+        elif etype in ("response.output_text.delta",
+                       "response.function_call_arguments.delta",
+                       "response.reasoning_summary_text.delta"):
+            self._text(getattr(event, "delta", None))
         elif etype == "response.output_item.added":
             item = getattr(event, "item", None)
             if getattr(item, "type", None) == "function_call":
@@ -1700,5 +1703,5 @@ def _accumulator(call: dict) -> StreamAccumulator:
     elif vendor in cloud_platforms.CLAUDE_PLATFORM_VENDORS:
         vendor = "anthropic"
     if call["api"] == "responses":
-        return _ResponsesAccumulator(vendor, call["messages"])
-    return StreamAccumulator(vendor, call["messages"])
+        return _ResponsesAccumulator(vendor, call["messages"], call.get("model"))
+    return StreamAccumulator(vendor, call["messages"], call.get("model"))

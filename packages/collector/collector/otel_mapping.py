@@ -68,6 +68,8 @@ class GenAISpan:
     # The span's W3C trace id (lowercase hex), stored as the usage event's
     # trace_id so the event links to its trace (#385).
     trace_id: str | None = None
+    # ps.usage_source (#389): "provider" or "estimated" (Prompt Shields spans).
+    usage_source: str | None = None
 
     @property
     def model(self) -> str | None:
@@ -228,7 +230,12 @@ def map_span(span: dict, resource_attrs: dict[str, Any]) -> GenAISpan | None:
         environment=environment,
         session_id=_str(attrs.get("gen_ai.conversation.id")),
         trace_id=normalize_id(span.get("traceId"), 16),
+        usage_source=_usage_source(attrs.get("ps.usage_source")),
     )
+
+
+def _usage_source(value: Any) -> str | None:
+    return value if value in ("provider", "estimated") else None
 
 
 _COUNT_ATTRIBUTES = (
