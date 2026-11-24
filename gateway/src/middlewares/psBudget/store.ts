@@ -44,7 +44,8 @@ export interface BudgetStore {
   reserve(args: ReserveArgs): Promise<ReserveResult>;
   /**
    * Drops the reservation and adds `actual` to the counter (with the shared
-   * TTL rule: set on the period's first write, never extended).
+   * TTL rule: set on the period's first write, never extended). Resolves
+   * with the counter's value after the write (threshold notifications).
    */
   settle(
     key: string,
@@ -52,7 +53,7 @@ export interface BudgetStore {
     amount: number,
     actual: number,
     ttlSeconds: number
-  ): Promise<void>;
+  ): Promise<number>;
 }
 
 const member = (id: string, amount: number) => `${id}|${amount}`;
@@ -88,16 +89,18 @@ return {1, tostring(spent), tostring(reserved)}
 `;
 
 // KEYS: counter, reservations. ARGV: member, actual, ttl seconds.
-// The increment is the shared one (schemas/budget/README.md).
+// The increment is the shared one (schemas/budget/README.md). -> the
+// counter's value after the write (the SDK's RedisBudgetStore runs the same).
 const SETTLE_LUA = `
 redis.call('ZREM', KEYS[2], ARGV[1])
+local v = redis.call('GET', KEYS[1]) or '0'
 if tonumber(ARGV[2]) > 0 then
-  redis.call('INCRBYFLOAT', KEYS[1], ARGV[2])
+  v = redis.call('INCRBYFLOAT', KEYS[1], ARGV[2])
   if redis.call('TTL', KEYS[1]) < 0 then
     redis.call('EXPIRE', KEYS[1], ARGV[3])
   end
 end
-return 1
+return v
 `;
 
 type BudgetRedis = Redis & {
@@ -111,7 +114,7 @@ type BudgetRedis = Redis & {
     k1: string,
     k2: string,
     ...argv: (string | number)[]
-  ): Promise<number>;
+  ): Promise<string>;
 };
 
 export class RedisBudgetStore implements BudgetStore {
@@ -166,14 +169,15 @@ export class RedisBudgetStore implements BudgetStore {
     amount: number,
     actual: number,
     ttlSeconds: number
-  ): Promise<void> {
-    await this.client.psBudgetSettle(
+  ): Promise<number> {
+    const v = await this.client.psBudgetSettle(
       key,
       reservationsKey(key),
       member(id, amount),
       actual,
       ttlSeconds
     );
+    return Number(v) || 0;
   }
 }
 
@@ -227,18 +231,21 @@ export class MemoryBudgetStore implements BudgetStore {
     _amount: number,
     actual: number,
     ttlSeconds: number
-  ): Promise<void> {
+  ): Promise<number> {
     const res = this.reservations.get(key);
     res?.delete(id);
     if (res && !res.size) this.reservations.delete(key);
-    if (!(actual > 0)) return;
     this.usage(key, 0); // drop an expired counter first
     const c = this.counters.get(key);
-    if (c) c.spent += actual;
-    else
-      this.counters.set(key, {
-        spent: actual,
-        expiresAt: this.clock() + ttlSeconds * 1000,
-      });
+    if (!(actual > 0)) return c?.spent ?? 0;
+    if (c) {
+      c.spent += actual;
+      return c.spent;
+    }
+    this.counters.set(key, {
+      spent: actual,
+      expiresAt: this.clock() + ttlSeconds * 1000,
+    });
+    return actual;
   }
 }
