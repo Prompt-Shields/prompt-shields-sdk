@@ -33,7 +33,7 @@ def test_every_dimension_has_a_vector():
     assert {v["dimension"] for v in VECTORS} == {
         "base", "cache_read", "cache_write", "cache_write_1h", "service_tier",
         "long_context", "audio_tokens", "tool_fee", "provider_reported", "reasoning",
-        "usage_units",
+        "usage_units", "regional_endpoint",
     }
 
 

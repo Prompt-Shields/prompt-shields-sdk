@@ -258,3 +258,15 @@ def image_pricing(
                 for size, price in sizes.items()
             }
     return rates
+
+
+def regional_endpoint_premium(catalog: dict | None = None) -> dict[tuple[str, str], float]:
+    """``regional_endpoint_premium`` per USD model, keyed ``(provider,
+    model)``: the fraction a cloud platform's regional endpoints charge
+    above its global endpoint for the model (e.g. 0.1 for 10%), as
+    ``pricing.REGIONAL_ENDPOINT_PREMIUM``."""
+    return {
+        (entry["provider"], entry["model"]): float(entry["regional_endpoint_premium"])
+        for entry in _usd_entries(catalog)
+        if "regional_endpoint_premium" in entry
+    }

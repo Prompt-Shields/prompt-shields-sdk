@@ -2,14 +2,18 @@
 
 Public surface:
     Sync clients:
-        ShieldsClient        — generic; pass vendor="openai" | "anthropic"
+        ShieldsClient        — generic; pass vendor="openai" | "anthropic" |
+                               "google-vertex-ai" | "aws-bedrock"
         ShieldsOpenAI        — typed convenience for OpenAI
         ShieldsAnthropic     — typed convenience for Anthropic
+        ShieldsAnthropicVertex / ShieldsAnthropicBedrock — Claude on
+                               Vertex AI / Amazon Bedrock
 
     Async clients:
         AsyncShieldsClient   — generic
         AsyncShieldsOpenAI   — typed convenience
         AsyncShieldsAnthropic — typed convenience
+        AsyncShieldsAnthropicVertex / AsyncShieldsAnthropicBedrock
 
     Routing (opt-in; the clients above never pick a model):
         ShieldsRouter        — picks the model per call under a route policy
@@ -51,6 +55,8 @@ Public surface:
 
 from prompt_shields.async_client import (
     AsyncShieldsAnthropic,
+    AsyncShieldsAnthropicBedrock,
+    AsyncShieldsAnthropicVertex,
     AsyncShieldsClient,
     AsyncShieldsOpenAI,
 )
@@ -71,6 +77,8 @@ from prompt_shields.budgets import (
 )
 from prompt_shields.client import (
     ShieldsAnthropic,
+    ShieldsAnthropicBedrock,
+    ShieldsAnthropicVertex,
     ShieldsClient,
     ShieldsOpenAI,
 )
@@ -115,6 +123,8 @@ __all__ = [
     "FEEDBACK_REASONS",
     "AsyncRoutedStream",
     "AsyncShieldsAnthropic",
+    "AsyncShieldsAnthropicBedrock",
+    "AsyncShieldsAnthropicVertex",
     "AsyncShieldsClient",
     "AsyncShieldsOpenAI",
     "AsyncShieldsRouter",
@@ -140,6 +150,8 @@ __all__ = [
     "RoutedStream",
     "RouterError",
     "ShieldsAnthropic",
+    "ShieldsAnthropicBedrock",
+    "ShieldsAnthropicVertex",
     "ShieldsClient",
     "ShieldsOpenAI",
     "ShieldsRouter",

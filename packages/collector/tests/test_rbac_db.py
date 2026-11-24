@@ -491,6 +491,131 @@ async def test_deleting_a_principal_revokes_its_credentials(env):
     assert got["status"] == "revoked" and got["principal_id"] is None
 
 
+async def _status(c, boot, kind: str, row: dict) -> str:
+    resp = await c.get(f"{A}/{kind}/{row['id']}", headers=H(boot))
+    assert resp.status_code == 200, resp.text
+    return resp.json()["status"]
+
+
+async def _remove_principal(c, token, pid, how: str):
+    if how == "disable":
+        return await c.patch(f"{A}/principals/{pid}", headers=H(token), json={"disabled": True})
+    return await c.delete(f"{A}/principals/{pid}", headers=H(token))
+
+
+async def _principal_audit(engine, tid, how: str, pid) -> AuditEvent:
+    async with _admin(engine)() as s:
+        return (
+            await s.execute(
+                select(AuditEvent).where(
+                    AuditEvent.tenant_id == tid,
+                    AuditEvent.action == f"principal.{how}",
+                    AuditEvent.target_id == str(pid),
+                )
+            )
+        ).scalar_one()
+
+
+@pytest.mark.parametrize("how", ["disable", "delete"])
+async def test_removing_a_principal_revokes_what_its_tokens_created(env, how):
+    """Disabling or deleting a principal revokes every credential its
+    tokens created, directly or not, bound to someone else or unbound
+    (#396); the principal's own token is only suspended by a disable."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    pid = await _member(c, boot, "admin")
+    other = await _member(c, boot, "developer")
+    tok = await _token_for(c, boot, pid)
+    t = tok["token"]
+    child = await _post(c, t, "/tokens", {"name": "child", "scopes": ["admin:tokens", "admin:read"]})
+    grandchild = await _post(c, child["token"], "/tokens", {"name": "gc", "scopes": ["admin:read"]})
+    bound = await _token_for(c, t, other, scopes=["admin:read"])
+    key = await _post(c, t, "/api-keys", {"name": "sdk"})
+    cred = await _post(c, t, "/partner-credentials", {"partner_name": "bi-tool"})
+    unrelated = await _post(c, boot, "/tokens", {"name": "unrelated", "scopes": ["admin:read"]})
+    unrelated_key = await _post(c, boot, "/api-keys", {"name": "other-sdk"})
+
+    resp = await _remove_principal(c, boot, pid, how)
+    assert resp.status_code in (200, 204), resp.text
+
+    for row in (child, grandchild, bound):
+        assert await _status(c, boot, "tokens", row) == "revoked"
+        assert (await c.get(A + "/teams", headers=H(row["token"]))).status_code == 401
+    assert await _status(c, boot, "api-keys", key) == "revoked"
+    assert await _status(c, boot, "partner-credentials", cred) == "revoked"
+    assert (await c.get("/partner/v1/assets", headers=H(cred["api_key"]))).status_code == 401
+    assert await _status(c, boot, "tokens", unrelated) == "active"
+    assert await _status(c, boot, "api-keys", unrelated_key) == "active"
+    assert await _status(c, boot, "tokens", tok) == ("active" if how == "disable" else "revoked")
+    assert (await c.get(A + "/teams", headers=H(t))).status_code == 401
+
+    row = await _principal_audit(engine, tid, how, pid)
+    assert set(row.details["revoked_token_ids"]) >= {child["id"], grandchild["id"], bound["id"]}
+    assert row.details["revoked_api_key_ids"] == [key["id"]]
+    assert row.details["partner_credentials_revoked"] == [cred["id"]]
+    assert "cascade_skipped" not in row.details
+
+    if how == "disable":
+        # Re-enabling brings back the principal's own token, not what it made.
+        resp = await c.patch(f"{A}/principals/{pid}", headers=H(boot), json={"disabled": False})
+        assert resp.status_code == 200
+        assert (await c.get(A + "/teams", headers=H(t))).status_code == 200
+        assert await _status(c, boot, "tokens", child) == "revoked"
+        assert await _status(c, boot, "api-keys", key) == "revoked"
+
+
+@pytest.mark.parametrize("how", ["disable", "delete"])
+async def test_removing_a_principal_leaves_owner_credentials_to_an_owner(env, how):
+    """A caller that cannot manage owners leaves live the owner-bound tokens
+    the principal's tokens created (and what they created) and owner-bound
+    partner credentials, and the audit row names them (#374, #382, #396)."""
+    c, boot, engine, tid = env["c"], env["boot"], env["engine"], env["tid"]
+    caller = (await _token_for(c, boot, await _member(c, boot, "admin")))["token"]
+    pid = await _member(c, boot, "admin")
+    t = (await _token_for(c, boot, pid))["token"]
+    promoted = await _member(c, boot, "admin")
+    owner_child = await _token_for(c, t, promoted, scopes=["admin:tokens", "admin:read"])
+    below = await _post(c, owner_child["token"], "/tokens", {"name": "below", "scopes": ["admin:read"]})
+    owner_cred = await _partner_for(c, t, promoted)
+    plain = await _post(c, t, "/tokens", {"name": "plain", "scopes": ["admin:read"]})
+    resp = await c.patch(
+        f"{A}/memberships/{await _tenant_mid(c, boot, promoted)}",
+        headers=H(boot),
+        json={"role": "owner"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await _remove_principal(c, caller, pid, how)
+    assert resp.status_code in (200, 204), resp.text
+
+    assert await _status(c, boot, "tokens", plain) == "revoked"
+    assert await _status(c, boot, "tokens", owner_child) == "active"
+    assert await _status(c, boot, "tokens", below) == "active"
+    assert await _status(c, boot, "partner-credentials", owner_cred) == "active"
+    row = await _principal_audit(engine, tid, how, pid)
+    assert row.details["cascade_skipped"] == [owner_child["id"]]
+    assert row.details["partner_credentials_skipped"] == [owner_cred["id"]]
+    assert plain["id"] in row.details["revoked_token_ids"]
+    assert below["id"] not in row.details["revoked_token_ids"]
+
+
+async def test_removing_a_principal_as_an_owner_skips_nothing(env):
+    c, boot = env["c"], env["boot"]
+    pid = await _member(c, boot, "admin")
+    t = (await _token_for(c, boot, pid))["token"]
+    owner = await _member(c, boot, "owner")
+    # Bound to an owner by a token of a (then) owner, as after a demotion.
+    await c.patch(
+        f"{A}/memberships/{await _tenant_mid(c, boot, pid)}", headers=H(boot), json={"role": "owner"}
+    )
+    owner_child = await _token_for(c, t, owner, scopes=["admin:read"])
+    await c.patch(
+        f"{A}/memberships/{await _tenant_mid(c, boot, pid)}", headers=H(boot), json={"role": "admin"}
+    )
+    resp = await _remove_principal(c, boot, pid, "disable")
+    assert resp.status_code == 200, resp.text
+    assert await _status(c, boot, "tokens", owner_child) == "revoked"
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Escalation and owners
 # ──────────────────────────────────────────────────────────────────────

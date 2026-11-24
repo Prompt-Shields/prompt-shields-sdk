@@ -39,9 +39,15 @@ Further pricing dimensions (#71):
 - Non-token units (`usage_units` + `usage_unit_type`, as the gateway emits
   them): OCR pages, speech characters, transcription seconds, rerank search
   units, and generated images by quality and size. See `estimate_unit_cost`.
+- Claude on Google Vertex AI and Amazon Bedrock (#388): priced at Anthropic
+  list prices through `PRICING_VENDOR_FALLBACK` (the platform's model ids
+  normalised by `claude_pricing_candidates`), plus the catalog's
+  `REGIONAL_ENDPOINT_PREMIUM` when the call's `endpoint_scope` is
+  "regional".
 """
 
 import math
+import re
 
 from prompt_shields import catalog as _catalog
 
@@ -111,12 +117,95 @@ AUDIO_PRICING: dict[tuple[str, str], tuple[float, float]] = _catalog.audio_prici
 # (vendor, model) entry is looked up under the fallback vendor, cache
 # multipliers included. Azure OpenAI global standard deployments are billed
 # at OpenAI list prices.
+#
+# Fallbacks chain: a vendor's fallback may have one of its own (Claude on
+# Bedrock: the SDK's `aws-bedrock` -> the `bedrock` catalog rows -> Anthropic
+# list prices). Claude on Vertex AI and Bedrock is billed at Anthropic list
+# prices on the global endpoint; a regional endpoint adds
+# REGIONAL_ENDPOINT_PREMIUM.
 PRICING_VENDOR_FALLBACK: dict[str, str] = {
     "azure_openai": "openai",
     # The gateway's provider slugs for Azure OpenAI and Mistral La Plateforme.
     "azure-openai": "openai",
     "mistral-ai": "mistral",
+    # Claude through the Anthropic SDK's AnthropicVertex / AnthropicBedrock
+    # clients (the SDK's vendors) and the gateway's provider slugs.
+    "google-vertex-ai": "anthropic",
+    "vertex-ai": "anthropic",
+    "aws-bedrock": "bedrock",
+    "bedrock": "anthropic",
 }
+
+# Fraction a regional endpoint costs above the global one, keyed by the
+# (vendor, model) the call is priced at (catalog `regional_endpoint_premium`).
+# Applied to the token cost of the default table only, for the cloud
+# platforms below, and only when the call's `endpoint_scope` is "regional".
+REGIONAL_ENDPOINT_PREMIUM: dict[tuple[str, str], float] = (
+    _catalog.regional_endpoint_premium()
+)
+REGIONAL_PREMIUM_VENDORS: tuple[str, ...] = (
+    "aws-bedrock", "bedrock", "google-vertex-ai", "vertex-ai",
+)
+ENDPOINT_SCOPES = ("global", "regional")
+
+
+def _fallback_chain(vendor: str):
+    """`vendor`, then each vendor it falls back to (no cycles)."""
+    seen = set()
+    while vendor not in seen:
+        yield vendor
+        seen.add(vendor)
+        if vendor not in PRICING_VENDOR_FALLBACK:
+            return
+        vendor = PRICING_VENDOR_FALLBACK[vendor]
+
+
+# Claude model ids on the cloud platforms, normalised to Anthropic's:
+# Bedrock `us.anthropic.claude-sonnet-4-5-20250929-v1:0` (an optional
+# cross-region inference profile prefix, `anthropic.`, a `-vN[:M]` version)
+# and Vertex `claude-sonnet-4-5@20250929` (`@` before the snapshot date;
+# `@latest` / `@default` aliases are dropped).
+_CLAUDE_PROFILE_PREFIX = re.compile(r"^(?:us|us-gov|eu|apac|au|ca|jp|in|global)\.")
+_CLAUDE_VERSION_SUFFIX = re.compile(r"-v\d+(?::\d+)?$")
+_CLAUDE_AT_DATE = re.compile(r"@(\d{8})$")
+_CLAUDE_AT_ALIAS = re.compile(r"@[A-Za-z][A-Za-z0-9_-]*$")
+_CLAUDE_DATE = re.compile(r"-\d{8}$")
+
+
+def normalise_claude_model(model: str | None) -> str | None:
+    """Anthropic's id for a Claude model id from Vertex AI or Bedrock, or
+    None when `model` is not a Claude id. An inference profile ARN
+    (`arn:aws:bedrock:...:inference-profile/us.anthropic.claude-...`) is read
+    from its last path segment."""
+    if not isinstance(model, str) or not model:
+        return None
+    name = model.rsplit("/", 1)[-1] if model.startswith("arn:") else model
+    name = _CLAUDE_PROFILE_PREFIX.sub("", name)
+    name = name.removeprefix("anthropic.")
+    if not name.startswith("claude-"):
+        return None
+    name = _CLAUDE_AT_DATE.sub(r"-\1", name)
+    name = _CLAUDE_AT_ALIAS.sub("", name)
+    return _CLAUDE_VERSION_SUFFIX.sub("", name)
+
+
+def claude_pricing_candidates(candidates: list[str]) -> list[str]:
+    """`candidates`, then for each Claude id among them: the id without its
+    Bedrock inference profile prefix (or ARN), as the platform's own rates
+    may key it, then normalised to Anthropic's (`normalise_claude_model`)
+    and without its snapshot date, so a Vertex or Bedrock id is priced at
+    the Anthropic model's rates when the platform has none of its own."""
+    out = [c for c in candidates if isinstance(c, str) and c]
+    for name in list(out):
+        base = normalise_claude_model(name)
+        if base is None:
+            continue
+        profile = name.rsplit("/", 1)[-1] if name.startswith("arn:") else name
+        for extra in (_CLAUDE_PROFILE_PREFIX.sub("", profile), base,
+                      _CLAUDE_DATE.sub("", base)):
+            if extra not in out:
+                out.append(extra)
+    return out
 
 # Non-token usage units (#71), named as the gateway's ps-telemetry
 # `usageUnits()` emits `usage_unit_type`, plus "images" for image generation.
@@ -169,11 +258,11 @@ def _lookup_rates(
     price catalog (#7/#8) plugs in here.
     """
     table = pricing_table if pricing_table is not None else DEFAULT_PRICING
-    rates = table.get((vendor, model))
-    if rates is None and vendor in PRICING_VENDOR_FALLBACK:
-        vendor = PRICING_VENDOR_FALLBACK[vendor]
-        rates = table.get((vendor, model))
-    return (vendor, rates) if rates is not None else None
+    for pricing_vendor in _fallback_chain(vendor):
+        rates = table.get((pricing_vendor, model))
+        if rates is not None:
+            return pricing_vendor, rates
+    return None
 
 
 def has_price(vendor: str, model: str | None, pricing_table: dict | None = None) -> bool:
@@ -251,8 +340,13 @@ def estimate_cost(
     tokens_audio_out: int | None = None,
     web_search_requests: int | None = None,
     service_tier: str | None = None,
+    endpoint_scope: str | None = None,
 ) -> float | None:
     """Estimate USD cost for a single call.
+
+    `endpoint_scope` ("global" or "regional") is where a cloud platform
+    served the call: "regional" adds the model's REGIONAL_ENDPOINT_PREMIUM
+    for the vendors in REGIONAL_PREMIUM_VENDORS (default table only).
 
     Returns None when:
     - model is None
@@ -322,7 +416,14 @@ def estimate_cost(
         + audio_out * audio_out_rate
     ) / 1000.0
     fees = (web_search_requests or 0) * WEB_SEARCH_FEE.get(pricing_vendor, 0.0)
-    return round(token_cost * tier + fees, 6)
+    regional = 1.0
+    if (
+        endpoint_scope == "regional"
+        and pricing_table is None
+        and vendor in REGIONAL_PREMIUM_VENDORS
+    ):
+        regional = 1.0 + REGIONAL_ENDPOINT_PREMIUM.get((pricing_vendor, model), 0.0)
+    return round(token_cost * tier * regional + fees, 6)
 
 
 def _unit_rate(
@@ -384,14 +485,14 @@ def estimate_unit_cost(
     ):
         return None
 
-    rate = _unit_rate(
-        pricing_table, vendor, model, usage_unit_type, image_quality, image_size
-    )
-    if rate is None and vendor in PRICING_VENDOR_FALLBACK:
-        vendor = PRICING_VENDOR_FALLBACK[vendor]
+    rate = None
+    for pricing_vendor in _fallback_chain(vendor):
         rate = _unit_rate(
-            pricing_table, vendor, model, usage_unit_type, image_quality, image_size
+            pricing_table, pricing_vendor, model, usage_unit_type, image_quality,
+            image_size,
         )
+        if rate is not None:
+            break
     if rate is None:
         return None
 
@@ -411,6 +512,7 @@ PRICING_DIMENSIONS = (
     "tokens_audio_out",
     "web_search_requests",
     "service_tier",
+    "endpoint_scope",
 )
 
 
@@ -462,6 +564,7 @@ USAGE_DETAIL_FIELDS = (
     "tokens_audio_out",
     "web_search_requests",
     "service_tier",
+    "endpoint_scope",
     "usage_units",
     "usage_unit_type",
 )

@@ -235,6 +235,55 @@ async def test_series_and_showback_by_team_project_service_and_tag(env):
     assert {g["key"] for g in sbt.json()["data"]} == {"prod", "dev"}
 
 
+async def test_langgraph_nodes_as_cost_tags(env):
+    """#388: the SDK's LangChain handler tags each model call inside a
+    LangGraph graph with its node (`tags: {"langgraph_node": ...}`, the
+    object form). The usage series and showback break usage down per node,
+    and the Vertex AI / Bedrock fields the SDK adds do not stop ingest."""
+    async with env["factory"]() as db:
+        await db.execute(
+            update(Tenant)
+            .where(Tenant.id == env["a"])
+            .values(settings={"cost_tag_keys": ["env", "langgraph_node"]})
+        )
+        await db.commit()
+    sdk_fields = {
+        "vendor": "google-vertex-ai", "model": "claude-sonnet-4-5@20250929",
+        "served_model": "claude-sonnet-4-5-20250929", "source": "sdk",
+        "framework": "langchain", "model_family": "anthropic",
+        "region": "europe-west1", "served_jurisdiction": "EEA",
+        "cloud_project": "my-project", "endpoint_scope": "regional",
+        "cost_source": "pricing_table",
+    }
+    await _ingest([
+        _ev(**sdk_fields, tokens_in=1200, tokens_out=800, cost=0.0172,
+            tags={"langgraph_node": "draft"}),
+        _ev(**sdk_fields, tokens_in=1200, tokens_out=150, cost=0.006435,
+            tags={"langgraph_node": "review"}),
+        _ev(**sdk_fields, tokens_in=1200, tokens_out=150, cost=0.006435,
+            tags={"langgraph_node": "review"}),
+    ])
+    rows = await _events(env)
+    assert {(r.served_jurisdiction, r.framework) for r in rows} == {("EEA", "langchain")}
+    assert sorted(r.tags["langgraph_node"] for r in rows) == ["draft", "review", "review"]
+    await _refresh(env)
+    async with _client() as c:
+        r = await c.get(SERIES, params={"group_by": "tag:langgraph_node"}, headers=env["h"])
+        sb = await c.get(
+            SHOWBACK, params={"group_by": "tag:langgraph_node", "period": PERIOD},
+            headers=env["h"],
+        )
+    assert r.status_code == 200, r.text
+    by_node = {p["key"]: p for p in r.json()["data"]}
+    assert by_node["draft"]["requests"] == 1
+    assert by_node["review"]["requests"] == 2
+    assert sb.status_code == 200, sb.text
+    showback = {g["key"]: g for g in sb.json()["data"]}
+    assert showback["draft"]["tokens_out"] == 800
+    assert showback["review"]["tokens_out"] == 300
+    assert Decimal(showback["review"]["cost_usd"]) == Decimal("0.012870")
+
+
 async def test_moving_a_project_reattributes_future_spend_only(env, monkeypatch):
     monkeypatch.setattr(settings, "admin_token", "op-secret")
     await _ingest([_ev(cost=1.0, project="checkout")])
