@@ -370,6 +370,7 @@ SECTIONS: dict[str, Section] = {
         "Reversible pseudonymisation of model calls at the gateway (off unless "
         "enabled; categories; what happens to calls it cannot pseudonymise)",
         {1: _pseudonymisation_v1},
+    ),
     "rate_limits": Section(
         "Request and token rate limits (rpm, tpm, tpd, concurrency) per tenant, "
         "virtual key, team, project or user, enforced by the gateway",
