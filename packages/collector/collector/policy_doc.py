@@ -64,7 +64,7 @@ tenant in one document, so a gateway needs one request (and one ETag)::
 
     {
       "schema": "ps-policy-bundle.v1",
-      "tenant":   {"version": "default@3", "sections": {...}},
+      "tenant":   {"version": "default@3", "sections": {...}, "required": [...]},
       "teams":    {"<team id>":    {"name": ..., "version": ..., "sections": {...}}},
       "projects": {"<project id>": {"name": ..., "team_id": ..., "version": ..., "sections": {...}}}
     }
@@ -73,7 +73,9 @@ tenant in one document, so a gateway needs one request (and one ETag)::
 (``default@3+team-eu@2``); the gateway records it as ``policy_version`` in
 telemetry. ``teams`` and ``projects`` list only those with an active policy
 of their own (or, for a project, whose team has one). The bundle's ETag is
-the SHA-256 of its canonical JSON.
+the SHA-256 of its canonical JSON. ``required`` (only when not empty) lists
+the sections a gateway must enforce to apply the bundle at all (see
+``REQUIRED_WHEN``).
 """
 
 from __future__ import annotations
@@ -336,6 +338,35 @@ class ActivePolicy:
         return f"{self.name}@{self.version}"
 
 
+# Sections a gateway must not silently ignore (#350): when one of these is in
+# an effective policy and its predicate holds, the effective policy lists it
+# in ``required``, and a gateway that does not enforce it refuses the whole
+# bundle (keeping its last good policy, logged as an error) instead of, say,
+# forwarding the original values an enabled ``pseudonymisation`` section was
+# meant to replace. Gateways since #350 check ``required``; the #340 puller
+# never shipped in a release without it.
+REQUIRED_WHEN: dict[str, Callable[[Any], bool]] = {
+    "pseudonymisation": lambda body: isinstance(body, dict) and body.get("enabled") is True,
+}
+
+# Sections the gateway applies from the tenant-wide policy only (it does not
+# apply team and project policies yet): refused in team and project policies,
+# so a team never believes it has a protection that nothing enforces.
+TENANT_ONLY_SECTIONS = frozenset({"pseudonymisation"})
+
+
+def tenant_only_problems(document: Mapping[str, Any] | None, scope: str) -> list[str]:
+    """Problems with ``document`` as the document of a ``scope`` policy."""
+    if scope == "tenant":
+        return []
+    sections = (document or {}).get("sections") or {}
+    return [
+        f"$.sections.{name}: applied tenant-wide only (gateways do not apply team "
+        f"and project policies yet); set it in the tenant policy"
+        for name in sorted(TENANT_ONLY_SECTIONS & set(sections))
+    ]
+
+
 def compile_effective(layers: Iterable[ActivePolicy | None]) -> dict:
     """The effective policy of ``layers`` (most general first, None for a
     level without an active policy): sections replaced whole, later wins."""
@@ -346,7 +377,11 @@ def compile_effective(layers: Iterable[ActivePolicy | None]) -> dict:
             continue
         sections.update(layer.sections)
         labels.append(layer.label)
-    return {"version": "+".join(labels) or None, "sections": sections}
+    out: dict[str, Any] = {"version": "+".join(labels) or None, "sections": sections}
+    required = sorted(n for n, when in REQUIRED_WHEN.items() if n in sections and when(sections[n]))
+    if required:
+        out["required"] = required
+    return out
 
 
 def build_bundle(

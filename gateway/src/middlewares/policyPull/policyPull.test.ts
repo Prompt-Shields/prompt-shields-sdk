@@ -146,6 +146,29 @@ describe('parsePolicyBundle', () => {
       ).toThrow(PolicyBundleError);
   });
 
+  test('a required section this gateway does not enforce refuses the bundle', () => {
+    const p = parsePolicyBundle({
+      ...bundle({ pseudonymisation: { version: 1, enabled: true } }),
+    });
+    expect(p.pseudonymisation?.enabled).toBe(true);
+    const required = (req: unknown) => {
+      const b: any = bundle({
+        pseudonymisation: { version: 1, enabled: true },
+        guardrails: { version: 1 },
+      });
+      b.tenant.required = req;
+      return b;
+    };
+    expect(parsePolicyBundle(required(['pseudonymisation'])).ignored).toEqual([
+      'guardrails',
+    ]);
+    for (const bad of [['guardrails'], 'pseudonymisation', [1]])
+      expect(() => parsePolicyBundle(required(bad))).toThrow(PolicyBundleError);
+    expect(() => parsePolicyBundle(required(['guardrails']))).toThrow(
+      /does not enforce \["guardrails"\]/
+    );
+  });
+
   test('team and project entries are validated and counted', () => {
     const eff = { name: 'x', version: 'a', sections: { access: ACCESS } };
     const p = parsePolicyBundle(

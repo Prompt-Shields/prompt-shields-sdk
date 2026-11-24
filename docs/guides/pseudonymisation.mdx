@@ -205,8 +205,16 @@ in brackets):
 - The response carries `x-ps-pseudonymised: <n>`, the number of distinct
   values replaced (a count only). Error responses and responses fetched later
   (`GET /v1/responses/{id}`) keep the placeholders.
-- **Upgrade gateways first.** A gateway older than this ignores the section
-  and forwards original values.
+- **Gateway config:** a request whose `x-portkey-config` sets prompt fields
+  (`messages`, `system`, `input`, ...) through `override_params` is refused,
+  since those would be merged in after pseudonymisation.
+- **The `/log/stream` admin tail** gets the answer as the provider sent it
+  (placeholders), not the restored one.
+- **Upgrade gateways first.** The collector lists an enabled section in the
+  bundle's `required`; a gateway that does not enforce it refuses the bundle
+  and keeps its last good policy (so it does not pseudonymise), and logs an
+  error each time the bundle changes. Watch for `[PS Policy]` errors after
+  enabling it. The section is accepted in the tenant policy only.
 
 Enabling it in production is gated on the security sign-off of the detector's
 recall (#35).

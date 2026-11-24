@@ -10,7 +10,7 @@ import {
 } from './config';
 import { CLOSE, OPEN, Pseudonymisation } from './core';
 import { PyJsonError, pyDumps, pyLoads } from './pyjson';
-import { ChunkRestorer } from './stream';
+import { ChunkRestorer, restoreSSE } from './stream';
 
 const EMAIL = 'kari@example.no';
 const tok = (s: string) => `${OPEN}${s}${CLOSE}`;
@@ -246,6 +246,24 @@ describe('linear time on hostile input (ReDoS)', () => {
       for (let i = 0; i < text.length; i += 997) r.feed(text.slice(i, i + 997));
       r.flush();
     });
+  });
+
+  test('SSE: a long event in small chunks is not searched again and again', async () => {
+    const event = `data: {"choices":[{"delta":{"content":"${'x'.repeat(2_000_000)} ${tok('EMAIL_1')}"}}]}\n\n`;
+    const bytes = new TextEncoder().encode(event);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < bytes.length; i += 64)
+          controller.enqueue(bytes.slice(i, i + 64));
+        controller.close();
+      },
+    });
+    const t0 = Date.now();
+    const out = await new Response(restoreSSE(body, p, () => {})).text();
+    // Quadratic (searching and copying the whole buffer per chunk) took
+    // about 50 s here; linear takes well under a second when the host is idle.
+    expect(Date.now() - t0).toBeLessThan(20000);
+    expect(out.endsWith(` ${EMAIL}"}}]}\n\n`)).toBe(true);
   });
 
   test.each([

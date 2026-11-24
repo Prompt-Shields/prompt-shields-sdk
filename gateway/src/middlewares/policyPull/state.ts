@@ -79,6 +79,24 @@ function parseEffective(at: string, raw: unknown): ParsedSections {
     throw new PolicyBundleError(`${at}.version must be a string or null`);
   if (!isObject(raw.sections))
     throw new PolicyBundleError(`${at}.sections must be an object`);
+  // Sections the collector marks as required (#350): ones that must not be
+  // silently ignored, such as an enabled `pseudonymisation`. A gateway that
+  // does not enforce one refuses the whole bundle (the last good policy
+  // stays) instead of forwarding what the section was meant to protect.
+  if (raw.required !== undefined) {
+    if (
+      !Array.isArray(raw.required) ||
+      raw.required.some((r: unknown) => typeof r !== 'string')
+    )
+      throw new PolicyBundleError(`${at}.required must be an array of names`);
+    const unknown = (raw.required as string[]).filter(
+      (r) => !ENFORCED_SECTIONS[r]
+    );
+    if (unknown.length)
+      throw new PolicyBundleError(
+        `${at}.required: this gateway does not enforce ${JSON.stringify(unknown)}; upgrade it`
+      );
+  }
   const out: ParsedSections = { ignored: [] };
   for (const [name, body] of Object.entries(raw.sections)) {
     const where = `${at}.sections.${name}`;

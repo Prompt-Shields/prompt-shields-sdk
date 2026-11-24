@@ -25,6 +25,7 @@ import { Context, Next } from 'hono';
 import { isMcpProxyPath } from '../../mcp/paths';
 import { centralPseudonymisation } from '../policyPull/state';
 import { PseudonymisationSettings, pseudonymisationFromEnv } from './config';
+import { UNRESTORED_RESPONSE_KEY } from './contextKeys';
 import { Pseudonymisation, Surface } from './core';
 import { restoreSSE } from './stream';
 
@@ -78,6 +79,45 @@ function refuse(c: Context, message: string): Response {
 const isObj = (v: unknown): v is Record<string, any> =>
   !!v && typeof v === 'object' && !Array.isArray(v);
 
+// Body fields that carry the prompt (what pseudonymiseBody walks).
+const PROMPT_FIELDS = [
+  'messages',
+  'system',
+  'prediction',
+  'input',
+  'instructions',
+  'prompt',
+];
+
+/**
+ * True when the request's gateway config (x-portkey-config) sets prompt
+ * fields through `override_params` at any target: those are merged into
+ * the upstream body below this middleware, so they would reach the
+ * provider unreplaced.
+ */
+export function configOverridesPrompt(header: string | undefined): boolean {
+  if (!header) return false;
+  let config: unknown;
+  try {
+    config = JSON.parse(header);
+  } catch {
+    return false; // not an inline config: the handler rejects or ignores it
+  }
+  const stack: [unknown, number][] = [[config, 0]];
+  while (stack.length) {
+    const [node, depth] = stack.pop() as [unknown, number];
+    if (depth > 32 || !node || typeof node !== 'object') continue;
+    if (!Array.isArray(node)) {
+      for (const key of ['override_params', 'overrideParams']) {
+        const op = (node as Record<string, any>)[key];
+        if (isObj(op) && PROMPT_FIELDS.some((f) => f in op)) return true;
+      }
+    }
+    for (const v of Object.values(node)) stack.push([v, depth + 1]);
+  }
+  return false;
+}
+
 /** Settings in force for this request. */
 export type SettingsProvider = () => PseudonymisationSettings | undefined;
 
@@ -109,6 +149,11 @@ export function psPseudonymise(
         return refuse(c, `${method} ${path} cannot be pseudonymised`);
       return next();
     }
+    if (strict && configOverridesPrompt(c.req.header('x-portkey-config')))
+      return refuse(
+        c,
+        'override_params in the gateway config cannot set prompt fields (messages, system, input, ...)'
+      );
     const contentType = (c.req.header('content-type') || '').toLowerCase();
     if (!contentType.includes('application/json')) {
       if (strict) return refuse(c, 'the request body must be JSON');
@@ -183,11 +228,16 @@ export function psPseudonymise(
         );
       } else if (resType.includes('application/json')) {
         let parsed: unknown;
+        let text: string;
         try {
-          parsed = await res.clone().json();
+          text = await res.clone().text();
+          parsed = JSON.parse(text);
         } catch {
           return;
         }
+        // For layers above this one that must not see original values
+        // (the /log/stream tail): the answer as the provider sent it.
+        c.set(UNRESTORED_RESPONSE_KEY as any, text);
         pseudo.restoreResponse(parsed);
         out = new Response(JSON.stringify(parsed), res);
       }

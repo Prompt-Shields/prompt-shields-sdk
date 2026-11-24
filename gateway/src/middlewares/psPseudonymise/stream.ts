@@ -256,7 +256,7 @@ function synthetic(key: string, last: Json, text: string): Json {
 // An event larger than this without a boundary is passed through as it is
 // (unrestored: the client sees placeholders, never another value).
 const MAX_EVENT_CHARS = 4 << 20;
-const BOUNDARY = /\r\n\r\n|\n\n|\r\r/;
+const BOUNDARY = /\r\n\r\n|\n\n|\r\r/g;
 
 // An extra event: Anthropic and Responses streams name every event after
 // its `type`; Chat Completions streams have data lines only.
@@ -326,7 +326,11 @@ export function restoreSSE(
   const encoder = new TextEncoder();
   const restorer = new ChunkRestorer(owner);
   const state = { named: false };
-  let buffer = '';
+  // Text after the last complete event, kept in pieces: a long event that
+  // arrives in small chunks is neither copied nor searched again per chunk.
+  let pieces: string[] = [];
+  let pendingChars = 0;
+  let tail = ''; // the last 3 characters of the pieces
   let finished = false;
   const done = () => {
     if (finished) return;
@@ -338,10 +342,11 @@ export function restoreSSE(
     }
   };
 
-  // Complete events in `buffer`, restored; the incomplete tail stays.
-  const drain = (): string => {
+  // Complete events in `buffer`, restored; returns them and the rest.
+  const drainAll = (buffer: string): [string, string] => {
     let out = '';
     while (true) {
+      BOUNDARY.lastIndex = 0;
       const m = BOUNDARY.exec(buffer);
       if (!m) break;
       const block = buffer.slice(0, m.index);
@@ -350,11 +355,35 @@ export function restoreSSE(
         .map((b) => b + m[0])
         .join('');
     }
-    if (buffer.length > MAX_EVENT_CHARS) {
-      out += buffer;
-      buffer = '';
+    return [out, buffer];
+  };
+
+  // `text` appended; complete events restored and returned.
+  const push = (text: string): string => {
+    if (!text) return '';
+    // Only the new text, plus the 3 characters before it (a boundary is at
+    // most 4), can hold a boundary not seen yet.
+    BOUNDARY.lastIndex = 0;
+    if (!BOUNDARY.test(tail + text)) {
+      pieces.push(text);
+      pendingChars += text.length;
+      tail = (tail + text).slice(-3);
+      // Too long without a boundary: passed through as it is.
+      return pendingChars <= MAX_EVENT_CHARS ? '' : rest();
     }
+    const [out, left] = drainAll(pieces.join('') + text);
+    pieces = left ? [left] : [];
+    pendingChars = left.length;
+    tail = left.slice(-3);
     return out;
+  };
+
+  const rest = (): string => {
+    const raw = pieces.join('');
+    pieces = [];
+    pendingChars = 0;
+    tail = '';
+    return raw;
   };
 
   return new ReadableStream<Uint8Array>({
@@ -369,22 +398,19 @@ export function restoreSSE(
           return;
         }
         if (result.done) {
-          buffer += decoder.decode();
-          let out = drain();
+          let out = push(decoder.decode());
           // Held-back text, then whatever trailing bytes had no boundary.
           out += restorer
             .finish()
             .map((e) => serialize(e, state.named) + '\n\n')
             .join('');
-          out += buffer;
-          buffer = '';
+          out += rest();
           if (out) controller.enqueue(encoder.encode(out));
           controller.close();
           done();
           return;
         }
-        buffer += decoder.decode(result.value, { stream: true });
-        const out = drain();
+        const out = push(decoder.decode(result.value, { stream: true }));
         if (out) {
           controller.enqueue(encoder.encode(out));
           return;

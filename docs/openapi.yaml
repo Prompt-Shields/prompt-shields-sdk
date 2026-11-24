@@ -3348,6 +3348,15 @@ components:
           description: Section name -> section, each taken whole from the most specific active policy that has it
           additionalProperties:
             type: object
+        required:
+          type: array
+          items:
+            type: string
+          description: |
+            Sections a gateway must enforce to apply the bundle at all (today
+            an enabled `pseudonymisation`); a gateway that does not enforce
+            one refuses the bundle and keeps its last good policy. Present
+            only when not empty.
       required: [version, sections]
 
     PolicyBundle:

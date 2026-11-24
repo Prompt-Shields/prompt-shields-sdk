@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { PseudonymisationSettings } from './config';
 import { CLOSE, OPEN } from './core';
 import { PSEUDONYMISED_HEADER, psPseudonymise } from './index';
+import { UNRESTORED_RESPONSE_KEY } from './contextKeys';
 
 const EMAIL = 'kari@example.no';
 const PHONE = '555-123-4567';
@@ -410,6 +411,63 @@ describe('psPseudonymise: on', () => {
       200
     );
     expect(seen.raw).toContain(EMAIL);
+  });
+
+  test('refuses prompt fields set through the config override_params', async () => {
+    const { app, seen } = makeApp(ON, (c) => c.json({}));
+    const send = (config: unknown) =>
+      app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-portkey-config': JSON.stringify(config),
+        },
+        body: JSON.stringify(chatBody),
+      });
+    for (const config of [
+      { override_params: { messages: [{ role: 'user', content: EMAIL }] } },
+      {
+        strategy: { mode: 'fallback' },
+        targets: [
+          { provider: 'openai' },
+          { override_params: { system: EMAIL } },
+        ],
+      },
+    ]) {
+      const res = await send(config);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as any).error.code).toBe(
+        'pseudonymisation_unsupported'
+      );
+    }
+    expect(seen.raw).toBeUndefined();
+    // Other overrides (the model, sampling) are fine.
+    const ok = await send({ override_params: { model: 'gpt-4o-mini' } });
+    expect(ok.status).toBe(200);
+    noOriginals(seen.raw);
+  });
+
+  test('layers above see the restored answer, and the unrestored one under a key', async () => {
+    const app = new Hono();
+    let kept: unknown;
+    app.use('*', async (c, next) => {
+      await next();
+      kept = c.get(UNRESTORED_RESPONSE_KEY as never);
+    });
+    app.use(
+      '*',
+      psPseudonymise(() => ON, {})
+    );
+    app.post('*', (c) =>
+      c.json({ choices: [{ message: { content: `mail ${E1}` } }] })
+    );
+    const res = await post(app, '/v1/chat/completions', chatBody);
+    expect(((await res.json()) as any).choices[0].message.content).toBe(
+      `mail ${EMAIL}`
+    );
+    expect(typeof kept).toBe('string');
+    expect(kept).toContain(E1);
+    noOriginals(kept as string);
   });
 
   test('categories limit what is replaced', async () => {

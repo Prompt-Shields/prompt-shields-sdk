@@ -2,6 +2,7 @@ import { Context } from 'hono';
 import { getRuntimeKey } from 'hono/adapter';
 import { redactString } from '../../utils/redact';
 import { findPiiSpans, piiPlaceholder, redactPii } from '../router/pii';
+import { UNRESTORED_RESPONSE_KEY } from '../psPseudonymise/contextKeys';
 
 let logId = 0;
 const MAX_RESPONSE_LENGTH = 100000;
@@ -210,9 +211,15 @@ async function processLog(c: Context, start: number) {
 
   let response: unknown;
   try {
+    // PS fork (#350): with pseudonymisation on, c.res holds the restored
+    // answer (original values); the log gets the answer as the provider
+    // sent it (placeholders), kept by psPseudonymise.
+    const unrestored = c.get(UNRESTORED_RESPONSE_KEY as any);
     response = requestOptionsArray[0].requestParams?.stream
       ? { message: 'The response was a stream.' }
-      : await c.res.clone().json();
+      : typeof unrestored === 'string'
+        ? JSON.parse(unrestored)
+        : await c.res.clone().json();
   } catch (error) {
     console.error('Error processing log:', error);
   }

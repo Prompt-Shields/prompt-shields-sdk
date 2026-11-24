@@ -171,6 +171,9 @@ async def _add_version(
     document: dict,
     comment: str | None,
 ) -> PolicyVersion:
+    problems = policy_doc.tenant_only_problems(document, policy.scope)
+    if problems:
+        raise _problem(422, "Unprocessable Entity", problems)
     current = (
         await db.execute(
             select(func.max(PolicyVersion.version)).where(PolicyVersion.policy_id == policy.id)
@@ -274,6 +277,9 @@ async def create_policy(
     db = request.state.db
     tid = principal.tenant_id
     document = _validated(body.document) if body.document is not None else None
+    problems = policy_doc.tenant_only_problems(document, body.scope)
+    if problems:
+        raise _problem(422, "Unprocessable Entity", problems)
     if body.team_id is not None:
         team = (
             await db.execute(select(Team.id).where(Team.id == body.team_id, Team.tenant_id == tid))

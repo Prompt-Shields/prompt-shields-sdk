@@ -191,8 +191,13 @@ loopback or private address must be listed in `TRUSTED_CUSTOM_HOSTS`.
   (from SSO/SCIM group mapping or virtual keys).
 - Sections for rate-limit policies, prices and guardrails (#344, #348,
   #349).
-- Upgrade gateways before you enable `pseudonymisation`: a gateway that does
-  not know the section ignores it, and would forward original values.
+- Upgrade gateways before you enable `pseudonymisation`. An enabled section
+  is listed in the effective policy's `required`, and a gateway that does not
+  enforce a required section refuses the whole bundle (logged as an error)
+  and keeps its last good policy: it does not pseudonymise, and it stops
+  taking policy changes until it is upgraded. A `pseudonymisation` section is
+  accepted in the tenant policy only (422 in a team or project policy), since
+  gateways do not apply team and project policies yet.
 - A gateway that starts while the collector is down uses its local settings
   until the first successful pull; the last good policy is not persisted
   across restarts.
