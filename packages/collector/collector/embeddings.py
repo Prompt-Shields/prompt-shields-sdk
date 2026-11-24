@@ -6,11 +6,12 @@ Backends (``PS_EMBEDDINGS_BACKEND``):
 - ``openai``: POSTs asset metadata to an OpenAI-compatible ``/embeddings`` API.
   ``PS_EMBEDDINGS_OPENAI_BASE_URL`` points it at another provider (e.g. an EU
   endpoint). Data leaves the box. The base URL's host is resolved and every
-  address checked before each request (`collector.egress`, private networks
-  allowed for internal providers, but never loopback, link-local or a cloud
-  metadata address), and the connection is pinned to the checked address so
-  DNS rebinding cannot redirect it. Redirects are not followed and proxy
-  settings from the environment are ignored.
+  address checked before each request (`collector.egress`; private networks
+  and loopback allowed for internal providers and sidecars, but never a
+  link-local or cloud metadata address), and the connection is pinned to the
+  checked address so DNS rebinding cannot redirect it. Redirects are not
+  followed. A proxy named by the environment (``HTTPS_PROXY``, honouring
+  ``NO_PROXY``) is still used; the request then goes through it unpinned.
 - ``local``: computes embeddings in-process with fastembed (ONNX, no torch).
   Install with ``pip install 'prompt-shields-collector[local-embeddings]'``.
   Asset metadata never leaves the box; only the model weights are downloaded,
@@ -27,10 +28,12 @@ with ``python -m collector.reembed``.
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
 import os
 import threading
 import time
+import urllib.request
 from typing import Protocol
 
 import httpx
@@ -67,14 +70,55 @@ def fit_to_column(vector: list[float]) -> list[float]:
     return [float(v) for v in vector] + [0.0] * (EMBEDDING_DIM - len(vector))
 
 
+def _embeddings_address_allowed(addr: str) -> bool:
+    """Private networks and this host's loopback (an Ollama or vLLM sidecar
+    on ``localhost``, allowed before #377) are admitted; link-local, cloud
+    metadata, unspecified, broadcast and multicast addresses (and IPv6 forms
+    embedding one) are refused."""
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return False
+    if egress.ip_is_public(ip, allow_private=True, allow_local=False):
+        return True
+    # 127.0.0.0/8, ::1 and ::ffff:127.x only (not NAT64 / 6to4 forms).
+    v4 = ip.ipv4_mapped if ip.version == 6 else ip
+    return ip.is_loopback or (v4 is not None and v4.is_loopback)
+
+
+def _check_embeddings_addresses(addresses: list[str]) -> str:
+    if not addresses:
+        raise egress.AddressNotAllowed("no address")
+    for addr in addresses:
+        if not _embeddings_address_allowed(addr):
+            raise egress.AddressNotAllowed("link-local or cloud metadata address")
+    return addresses[0].split("%", 1)[0]
+
+
+def _env_proxy_for(url: httpx.URL) -> str | None:
+    """The proxy the environment (``HTTPS_PROXY`` / ``HTTP_PROXY`` /
+    ``ALL_PROXY``, honouring ``NO_PROXY``) names for ``url``, if any."""
+    proxies = urllib.request.getproxies_environment()
+    proxy = proxies.get(url.scheme) or proxies.get("all")
+    if not proxy:
+        return None
+    if urllib.request.proxy_bypass_environment(url.host, proxies):
+        return None
+    return proxy
+
+
 class OpenAIEmbedder:
     """OpenAI or any OpenAI-compatible ``/embeddings`` endpoint. Sends data off-box.
 
     The base URL comes from operator config, so it may name an internal
-    provider (private addresses are admitted), but it must never reach this
-    host or its cloud metadata service: loopback, link-local and metadata
+    provider (private addresses and loopback are admitted), but it must
+    never reach the cloud metadata service: link-local and metadata
     addresses (and IPv6 forms embedding them) are refused after resolving
-    the host, and the request is sent to the checked address."""
+    the host, and the request is sent to the checked address. When the
+    environment names a proxy for the URL (``HTTPS_PROXY``, not bypassed by
+    ``NO_PROXY``), the request goes through it unpinned (the proxy connects),
+    and the host is still refused when it resolves here to a refused
+    address."""
 
     def __init__(
         self,
@@ -92,27 +136,40 @@ class OpenAIEmbedder:
         self._resolver = resolver
         self._transport = transport
 
-    async def _pinned(self) -> tuple[httpx.URL, dict, dict]:
+    async def _target(self) -> tuple[httpx.URL, dict, dict, str | None]:
+        """``(url, extra headers, extensions, proxy)`` for the request."""
         url = httpx.URL(self.url)
         if url.scheme not in ("http", "https") or not url.host or url.userinfo:
             raise egress.AddressNotAllowed("base URL must be http(s)://<host>")
         port = url.port or (443 if url.scheme == "https" else 80)
         resolve = self._resolver or egress.resolve_host
-        addresses = await resolve(url.host, port)
-        address = egress.check_addresses(
-            addresses, allow_private=True, allow_local=False
-        )
-        return egress.pin_request(url, address)
+        proxy = _env_proxy_for(url)
+        if proxy:
+            # The proxy resolves and connects. Still refuse a host that is,
+            # or resolves here to, a link-local or metadata address; a name
+            # that only the proxy can resolve is sent on.
+            try:
+                addresses = await resolve(url.host, port)
+            except OSError:
+                addresses = None
+            if addresses is not None:
+                _check_embeddings_addresses(addresses)
+            return url, {}, {}, proxy
+        address = _check_embeddings_addresses(await resolve(url.host, port))
+        target, headers, extensions = egress.pin_request(url, address)
+        return target, headers, extensions, None
 
     async def embed(self, text: str) -> list[float] | None:
         try:
-            target, pin_headers, extensions = await self._pinned()
+            target, pin_headers, extensions, proxy = await self._target()
             async with httpx.AsyncClient(
                 timeout=10.0,
                 transport=self._transport,
                 follow_redirects=False,
-                # The connection must go to the checked address.
+                # Without a proxy the connection must go to the checked
+                # address; the proxy (if any) is chosen above.
                 trust_env=False,
+                proxy=proxy,
             ) as client:
                 resp = await client.post(
                     target,

@@ -245,6 +245,9 @@ async def test_local_backend_backs_off_after_failed_model_load(monkeypatch):
 
 async def test_openai_backend_honours_base_url_and_model(monkeypatch):
     seen = {}
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv(var.lower(), raising=False)
 
     def handler(request):
         seen["url"] = str(request.url)

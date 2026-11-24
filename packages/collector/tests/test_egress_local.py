@@ -233,6 +233,19 @@ def test_egress_default_admits_ipv4_translated_public():
 
 # ── collector embeddings client (OpenAI-compatible base URL, #377) ────
 
+_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY")
+# Loopback stays allowed for the embeddings base URL (an Ollama / vLLM
+# sidecar on localhost worked before #377); link-local and metadata do not.
+EMBED_LOOPBACK = ["127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1"]
+EMBED_REFUSED = [a for a in LOCAL if a not in EMBED_LOOPBACK] + NEVER
+
+
+@pytest.fixture
+def no_env_proxy(monkeypatch):
+    for var in _PROXY_VARS:
+        monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv(var.lower(), raising=False)
+
 
 def _embedder(resolver, seen, base_url="https://embed.example.com/v1"):
     from collector.embeddings import OpenAIEmbedder
@@ -250,22 +263,24 @@ def _embedder(resolver, seen, base_url="https://embed.example.com/v1"):
     )
 
 
-@pytest.mark.parametrize("addr", LOCAL + NEVER)
-async def test_embeddings_refuses_local_and_metadata(addr):
+@pytest.mark.parametrize("addr", EMBED_REFUSED)
+async def test_embeddings_refuses_link_local_and_metadata(addr, no_env_proxy):
     seen = []
     assert await _embedder(_resolver(addr), seen).embed("x") is None
     assert seen == []
 
 
-async def test_embeddings_refuses_when_any_address_is_local():
+async def test_embeddings_refuses_when_any_address_is_metadata(no_env_proxy):
     seen = []
     embedder = _embedder(_resolver("10.0.0.7", "169.254.169.254"), seen)
     assert await embedder.embed("x") is None
     assert seen == []
 
 
-@pytest.mark.parametrize("addr", PRIVATE + ["8.8.8.8"])
-async def test_embeddings_admits_public_and_internal_and_pins(addr):
+@pytest.mark.parametrize("addr", PRIVATE + EMBED_LOOPBACK + ["8.8.8.8"])
+async def test_embeddings_admits_public_internal_loopback_and_pins(
+    addr, no_env_proxy
+):
     seen = []
     assert await _embedder(_resolver(addr), seen).embed("x") == [0.5, 0.25]
     (req,) = seen
@@ -276,7 +291,7 @@ async def test_embeddings_admits_public_and_internal_and_pins(addr):
     assert req.headers["authorization"] == "Bearer sk-test"
 
 
-async def test_embeddings_http_base_url_pins_port():
+async def test_embeddings_http_base_url_pins_port(no_env_proxy):
     seen = []
     embedder = _embedder(
         _resolver("10.0.0.7"), seen, base_url="http://embed.internal:8080/v1/"
@@ -286,7 +301,7 @@ async def test_embeddings_http_base_url_pins_port():
     assert seen[0].headers["host"] == "embed.internal:8080"
 
 
-async def test_embeddings_refuses_ip_literal_metadata_base_url():
+async def test_embeddings_refuses_ip_literal_metadata_base_url(no_env_proxy):
     seen = []
     embedder = _embedder(
         egress.resolve_host, seen, base_url="http://169.254.169.254/latest"
@@ -295,7 +310,7 @@ async def test_embeddings_refuses_ip_literal_metadata_base_url():
     assert seen == []
 
 
-async def test_embeddings_does_not_follow_redirect_to_metadata():
+async def test_embeddings_does_not_follow_redirect_to_metadata(no_env_proxy):
     from collector.embeddings import OpenAIEmbedder
 
     seen = []
@@ -315,3 +330,80 @@ async def test_embeddings_does_not_follow_redirect_to_metadata():
     )
     assert await embedder.embed("x") is None
     assert len(seen) == 1
+
+
+def _capture_client(monkeypatch, seen, clients):
+    from collector import embeddings
+
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"data": [{"embedding": [0.5, 0.25]}]})
+
+    def make(**kw):
+        clients.append(kw)
+        return real_client(
+            **{**kw, "proxy": None, "transport": httpx.MockTransport(handler)}
+        )
+
+    monkeypatch.setattr(embeddings.httpx, "AsyncClient", make)
+
+
+async def test_embeddings_uses_env_proxy_unpinned(monkeypatch, no_env_proxy):
+    from collector.embeddings import OpenAIEmbedder
+
+    seen, clients = [], []
+    _capture_client(monkeypatch, seen, clients)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+
+    async def unresolvable(host, port):
+        raise OSError("only the proxy resolves this name")
+
+    embedder = OpenAIEmbedder(
+        api_key="k",
+        model="m",
+        base_url="https://embed.example.com/v1",
+        resolver=unresolvable,
+    )
+    assert await embedder.embed("x") == [0.5, 0.25]
+    assert clients[0]["proxy"] == "http://proxy.example:3128"
+    assert clients[0]["trust_env"] is False
+    # Not pinned: the proxy connects to the name.
+    assert seen[0].url.host == "embed.example.com"
+
+
+async def test_embeddings_proxy_still_refuses_metadata(monkeypatch, no_env_proxy):
+    from collector.embeddings import OpenAIEmbedder
+
+    seen, clients = [], []
+    _capture_client(monkeypatch, seen, clients)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    for base_url, resolver in (
+        ("http://169.254.169.254/latest", egress.resolve_host),
+        ("https://embed.example.com/v1", _resolver("169.254.169.254")),
+    ):
+        embedder = OpenAIEmbedder(
+            api_key="k", model="m", base_url=base_url, resolver=resolver
+        )
+        assert await embedder.embed("x") is None
+    assert seen == [] and clients == []
+
+
+async def test_embeddings_no_proxy_bypasses_env_proxy(monkeypatch, no_env_proxy):
+    from collector.embeddings import OpenAIEmbedder
+
+    seen, clients = [], []
+    _capture_client(monkeypatch, seen, clients)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "example.com")
+    embedder = OpenAIEmbedder(
+        api_key="k",
+        model="m",
+        base_url="https://embed.example.com/v1",
+        resolver=_resolver("10.0.0.7"),
+    )
+    assert await embedder.embed("x") == [0.5, 0.25]
+    assert clients[0]["proxy"] is None
+    assert seen[0].url.host == "10.0.0.7"
