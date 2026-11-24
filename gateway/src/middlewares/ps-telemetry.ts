@@ -51,6 +51,7 @@ import {
   COST_SOURCE_CACHE,
   COST_SOURCE_PROVIDER_REPORTED,
   costFields,
+  endpointScopeOf,
   pricingCandidates,
   PricingUsage,
   withBedrockBaseModels,
@@ -113,6 +114,10 @@ interface TelemetryEvent {
   // route policy states for the served model there (psServedTarget.ts).
   served_provider?: string;
   served_jurisdiction?: string;
+  // The cloud region of a Vertex AI or Bedrock call (#388): the collector
+  // keeps it on the asset, and a Claude call's price depends on it
+  // (endpointScopeOf).
+  region?: string;
   // Verified savings (#24): the frozen baseline (PS_BASELINE_FILE) and what
   // the call's tokens would have cost on its baseline model, in USD.
   baseline_id?: string;
@@ -405,6 +410,7 @@ export function withCost(
     service_tier: event.service_tier,
     usage_units: event.usage_units,
     usage_unit_type: event.usage_unit_type,
+    endpoint_scope: endpointScopeOf(event.vendor, event.model, event.region),
   };
   const model = event.model === 'unknown' ? undefined : event.model;
   const fields = costFields(event.vendor, model, servedModel, usage);
@@ -482,6 +488,41 @@ export function providerFromHeaders(
     const config = JSON.parse(rawConfig);
     const provider = config?.provider ?? config?.targets?.[0]?.provider;
     return typeof provider === 'string' ? provider : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Gateway providers whose calls carry a cloud region (#388).
+const REGION_HEADERS: Record<string, string> = {
+  'vertex-ai': 'x-portkey-vertex-region',
+  bedrock: 'x-portkey-aws-region',
+};
+const REGION_CONFIG_KEYS: Record<string, string> = {
+  'vertex-ai': 'vertex_region',
+  bedrock: 'aws_region',
+};
+
+/**
+ * The cloud region of a Vertex AI or Bedrock call: its region header, else
+ * the region of its `x-portkey-config` (top level, else its first target).
+ * Undefined for other providers or when unknown.
+ */
+export function cloudRegionOf(
+  vendor: string,
+  headers: Record<string, string | undefined>
+): string | undefined {
+  const header = REGION_HEADERS[vendor];
+  if (!header) return undefined;
+  const direct = headers[header];
+  if (direct) return direct;
+  const rawConfig = headers['x-portkey-config'];
+  if (!rawConfig) return undefined;
+  try {
+    const config = JSON.parse(rawConfig);
+    const configKey = REGION_CONFIG_KEYS[vendor];
+    const region = config?.[configKey] ?? config?.targets?.[0]?.[configKey];
+    return typeof region === 'string' && region ? region : undefined;
   } catch {
     return undefined;
   }
@@ -882,6 +923,8 @@ export function psTelemetry() {
       if (typeof fingerprint === 'string' && fingerprint) {
         event.api_key_fingerprint = fingerprint;
       }
+      const region = cloudRegionOf(vendor, headers);
+      if (region) event.region = region;
 
       if (route) {
         event.requested_model = route.requestedModel;

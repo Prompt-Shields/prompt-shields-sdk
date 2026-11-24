@@ -2,10 +2,12 @@
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from prompt_shields import instrumentation
 from prompt_shields.instrumentation import FrameworkCall, apply_framework_fields
+from prompt_shields.pricing import normalise_claude_model
 from prompt_shields.telemetry import build_atlas_event
 
 logger = logging.getLogger("prompt_shields.integrations")
@@ -45,6 +47,36 @@ def normalize_vendor(provider: Any) -> str:
     if key.startswith("vertex_ai"):
         return "google"
     return _VENDORS.get(key, key)
+
+
+# Characters a collector cost tag value may not hold (collector
+# cost_attribution.TAG_VALUE_RE), and its maximum length.
+_TAG_VALUE_BAD = re.compile(r"[^A-Za-z0-9_.:/@+ -]")
+_TAG_VALUE_MAX = 128
+
+
+def langgraph_tags(metadata: Any) -> dict[str, str] | None:
+    """Cost tags of a model run inside a LangGraph graph (#388): the node
+    that made the call, `{"langgraph_node": <node name>}`, from the
+    `langgraph_node` LangGraph puts in each run's callback metadata. The
+    collector groups usage by it (`group_by=tag:langgraph_node`, with the key
+    in the tenant's cost_tag_keys) and keeps it on every raw event."""
+    if not isinstance(metadata, dict):
+        return None
+    node = metadata.get("langgraph_node")
+    if not isinstance(node, str) or not node:
+        return None
+    value = _TAG_VALUE_BAD.sub("_", node)[:_TAG_VALUE_MAX]
+    return {"langgraph_node": value}
+
+
+def platform_vendor(vendor: str, model: Any) -> str:
+    """Claude through a Google framework provider (`ChatAnthropicVertex`,
+    LangChain's `google_vertexai`) is Claude on Vertex AI (#388), priced as
+    such; anything else keeps `vendor`."""
+    if vendor == "google" and normalise_claude_model(model) is not None:
+        return "google-vertex-ai"
+    return vendor
 
 
 def text_of(content: Any) -> str:
