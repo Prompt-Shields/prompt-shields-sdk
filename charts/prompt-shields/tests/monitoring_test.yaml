@@ -75,6 +75,147 @@ tests:
           path: spec.groups[0].rules[2].annotations.summary
           pattern: '\{\{ \$labels\.sink \}\}'
 
+  - it: renders the latency, error, budget and cost alerts with runbooks
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+    asserts:
+      - equal:
+          path: spec.groups[2].name
+          value: prompt-shields-gateway-slo
+      - equal:
+          path: spec.groups[3].name
+          value: prompt-shields-gateway-spend
+      - lengthEqual:
+          path: spec.groups[2].rules
+          count: 7
+      - lengthEqual:
+          path: spec.groups[3].rules
+          count: 3
+      - equal:
+          path: spec.groups[3].rules[1].alert
+          value: PromptShieldsBudgetExhausted
+      - equal:
+          path: spec.groups[3].rules[1].labels.severity
+          value: critical
+      - matchRegex:
+          path: spec.groups[3].rules[0].expr
+          pattern: '>= 0.8  # threshold'
+      - equal:
+          path: spec.groups[2].rules[0].annotations.runbook_url
+          value: https://github.com/Prompt-Shields/prompt-shields-sdk/blob/main/docs/guides/alert-runbooks.mdx#promptshieldsproviderlatencyp95high
+
+  - it: applies per-alert overrides from values
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.runbookBaseUrl: https://docs.example.internal/runbooks/
+      prometheusRule.rules:
+        PromptShieldsRouteLatencyP95High:
+          threshold: 30
+          minimum: 0.5
+          for: 20m
+          severity: critical
+        PromptShieldsBudgetNearLimit:
+          threshold: 0.9
+          labels:
+            team: finops
+        PromptShieldsGateway5xxRateHigh:
+          enabled: false
+    asserts:
+      - equal:
+          path: spec.groups[2].rules[1].alert
+          value: PromptShieldsRouteLatencyP95High
+      - matchRegex:
+          path: spec.groups[2].rules[1].expr
+          pattern: '> 30  # threshold'
+      - matchRegex:
+          path: spec.groups[2].rules[1].expr
+          pattern: '> 0.5  # minimum'
+      - notMatchRegex:
+          path: spec.groups[2].rules[1].expr
+          pattern: '> 20  # threshold'
+      - equal:
+          path: spec.groups[2].rules[1].for
+          value: 20m
+      - equal:
+          path: spec.groups[2].rules[1].labels.severity
+          value: critical
+      - equal:
+          path: spec.groups[2].rules[1].labels.service
+          value: prompt-shields-gateway
+      - equal:
+          path: spec.groups[2].rules[1].annotations.runbook_url
+          value: https://docs.example.internal/runbooks#promptshieldsroutelatencyp95high
+      # Other alerts keep the file's thresholds.
+      - matchRegex:
+          path: spec.groups[2].rules[0].expr
+          pattern: '> 20  # threshold'
+      - matchRegex:
+          path: spec.groups[3].rules[0].expr
+          pattern: '>= 0.9  # threshold'
+      - equal:
+          path: spec.groups[3].rules[0].labels.team
+          value: finops
+      - equal:
+          path: spec.groups[3].rules[0].labels.severity
+          value: warning
+      - matchRegex:
+          path: spec.groups[3].rules[1].expr
+          pattern: '>= 1  # threshold'
+      - notContains:
+          path: spec.groups[0].rules
+          content:
+            alert: PromptShieldsGateway5xxRateHigh
+          any: true
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 2
+
+  - it: fails on an override for an alert that does not exist
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.rules:
+        PromptShieldsNoSuchAlert:
+          threshold: 1
+    asserts:
+      - failedTemplate:
+          errorPattern: "prometheusRule.rules.PromptShieldsNoSuchAlert: no alert with that name"
+
+  - it: fails on a threshold for an alert without a threshold line
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.rules:
+        PromptShieldsBudgetNearLimit:
+          minimum: 1
+    asserts:
+      - failedTemplate:
+          errorPattern: "prometheusRule.rules.PromptShieldsBudgetNearLimit.minimum: this alert has no"
+
+  - it: fails on a threshold that is not a number
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.rules:
+        PromptShieldsCostSpike:
+          threshold: "3 or vector(1)"
+    asserts:
+      - failedTemplate:
+          errorPattern: "prometheusRule.rules.PromptShieldsCostSpike.threshold: .* is not a non-negative number"
+
+  - it: fails on an unknown override setting
+    template: templates/prometheusrule.yaml
+    set:
+      prometheusRule.enabled: true
+      prometheusRule.rules:
+        PromptShieldsCostSpike:
+          treshold: 5
+    asserts:
+      - failedTemplate:
+          errorPattern: "prometheusRule.rules.PromptShieldsCostSpike.treshold: unknown setting"
+
   - it: ships the three dashboards with the sidecar label
     template: templates/grafana-dashboards.yaml
     set:
@@ -104,6 +245,12 @@ tests:
       - matchRegex:
           path: data["prompt-shields-gateway-traffic.json"]
           pattern: '"uid": "ps-gateway-traffic"'
+      - matchRegex:
+          path: data["prompt-shields-gateway-traffic.json"]
+          pattern: 'ps_gateway_mcp_tool_calls_total'
+      - matchRegex:
+          path: data["prompt-shields-gateway-traffic.json"]
+          pattern: 'ps_gateway_budget_limit_usd'
 
   - it: puts the dashboards in another namespace and uses a custom label
     template: templates/grafana-dashboards.yaml
