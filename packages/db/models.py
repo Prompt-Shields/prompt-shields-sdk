@@ -454,6 +454,9 @@ class Principal(Base):
     display_name = Column(Text)
     # SCIM userName (#339); unique per tenant, compared case-insensitively.
     user_name = Column(Text)
+    # 'admin' (admin API) or 'scim' (SCIM POST /Users, #396): SCIM only
+    # re-identifies, re-enables or deletes principals it provisioned.
+    provisioned_by = Column(Text, nullable=False, default="admin", server_default="admin")
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(TIMESTAMP(timezone=True))
     disabled_at = Column(TIMESTAMP(timezone=True))
@@ -461,6 +464,9 @@ class Principal(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('user', 'service_account')", name="ck_principals_kind"
+        ),
+        CheckConstraint(
+            "provisioned_by IN ('admin', 'scim')", name="ck_principals_provisioned_by"
         ),
         Index(
             "ux_principals_tenant_external_id",
@@ -722,6 +728,42 @@ class OidcLoginState(Base):
     __table_args__ = (
         Index("ux_oidc_login_states_state", "state_hash", unique=True),
         Index("ix_oidc_login_states_tenant", "tenant_id", "expires_at"),
+    )
+
+
+class CredentialCreator(Base):
+    """Who issued a tenant ingest key or partner credential (#396).
+
+    ``created_by`` takes the values of ``AdminToken.created_by``
+    (``operator``, ``token:<lookup prefix>``, ``key:<lookup prefix>``), so
+    disabling a principal can revoke what its tokens created
+    (collector/idp_sync.py). Kept beside the credential tables rather than
+    as a column on them, so reading a credential never depends on this
+    table. Credentials issued before migration 057 have no row.
+    """
+
+    __tablename__ = "credential_creators"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    # 'tenant_api_key' | 'partner_credential'
+    credential_type = Column(Text, nullable=False)
+    credential_id = Column(UUID(as_uuid=True), nullable=False)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "credential_type IN ('tenant_api_key', 'partner_credential')",
+            name="ck_credential_creators_type",
+        ),
+        Index(
+            "ux_credential_creators_credential",
+            "credential_type",
+            "credential_id",
+            unique=True,
+        ),
+        Index("ix_credential_creators_tenant_created_by", "tenant_id", "created_by"),
     )
 
 

@@ -85,7 +85,7 @@ The token (`ps-scim-...`) is shown once and stored hashed. It holds `scim:users`
 
 `/scim/v2/Users` supports create, list (one `eq` filter on `userName`, `externalId`, `id` or `emails.value`), get, replace (`PUT`), `PATCH` and delete. A SCIM User is a principal of kind `user`: `userName`, `externalId` (the IdP subject SSO matches), `displayName` and the primary email are stored. Roles in the payload are ignored.
 
-**Deactivating** a user (`active: false`, by `PATCH` or `PUT`) disables the principal. Every admin token and partner credential issued for it fails on the next request, and its SSO sessions, and every token those or its other tokens created, are revoked. Re-activating restores the principal's own tokens and credentials, not the revoked sessions.
+**Deactivating** a user (`active: false`, by `PATCH` or `PUT`) disables the principal. Every admin token and partner credential issued for it fails on the next request, and its SSO sessions, and every admin token, ingest key, SCIM token and partner credential those or its other tokens created (directly or not), are revoked. Re-activating restores the principal's own tokens and credentials, not the revoked sessions or what they created. Disabling or deleting a principal through the admin API does the same, except that a caller that is not an owner leaves owner-bound or owner-capable tokens, and partner credentials issued for an owner, live and the audit row lists them (`cascade_skipped`, `partner_credentials_skipped`). Ingest keys and partner credentials issued before this release have no recorded creator and are not reached.
 
 ### Groups and roles
 
@@ -103,6 +103,7 @@ Group membership changes in the IdP change team membership, and the tenant-wide 
 
 - Grant `owner`: SCIM carries no roles and a group's roles are never `owner`.
 - Disable the tenant's last enabled owner (409), or re-enable, re-identify (`externalId`) or delete an owner (403). An owner does that through the admin API.
+- Re-enable, re-identify (`externalId`) or delete a user created through the admin API rather than by SCIM (403); an admin does that. SCIM may still deactivate such a user and change its `userName`, `displayName` and email. To hand a user an admin created over to the IdP, set its `external_id` through the admin API.
 - See or change service accounts.
 
 ## Audit

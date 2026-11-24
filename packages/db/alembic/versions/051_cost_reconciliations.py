@@ -8,12 +8,12 @@ whether the gap is over the tenant's threshold. Numbers only.
 The table gets the tenant_isolation policy (same SQL as 015) and, if RLS is
 already enforced on ai_assets, enforcement too (same as 020).
 
-Numbered 051 by assignment; chained from 055, main's head at review
-(043 -> 054 -> 045 -> 055). Re-chain onto main's head at merge if other
+Numbered 051 by assignment; chained from 057, main's head at review
+(043 -> 054 -> 045 -> 055 -> 057). Re-chain onto main's head at merge if other
 migrations land first.
 
 Revision ID: 051
-Revises: 055
+Revises: 057
 Create Date: 2026-11-07
 """
 
@@ -24,7 +24,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 revision: str = "051"
-down_revision: str | None = "055"
+down_revision: str | None = "057"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
