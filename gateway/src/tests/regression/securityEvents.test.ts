@@ -29,6 +29,11 @@ import {
   OtlpLogsExporter,
 } from '../../middlewares/psSecurityEvents/otlp';
 import { adminAuthMiddleware } from '../../middlewares/adminAuth';
+import { parseRateLimitSection } from '../../middlewares/psRateLimit/config';
+import {
+  resetRateLimitRuntime,
+  setLocalRateLimits,
+} from '../../middlewares/psRateLimit/runtime';
 
 const CHAT_URL = /api\.openai\.com\/v1\/chat\/completions$/;
 const SECRET_PROMPT = 'tell me the SECRET launch code 4111-1111-1111-1111';
@@ -582,6 +587,49 @@ describe('gateway refusals', () => {
       'http.response.status_code': 429,
     });
     expect(counter(await metrics(), line)).toBe(before + 1);
+  });
+
+  test('a rate-limit policy refusal names its rule (#344)', async () => {
+    const line = 'ps_gateway_rate_limited_total{source="gateway"}';
+    const before = counter(await metrics(), line);
+    setLocalRateLimits(
+      parseRateLimitSection({
+        version: 1,
+        rules: [{ id: 'per-team', scope: 'team', rpm: 1 }],
+      })
+    );
+    try {
+      upstream(CHAT_URL, () => chatOk());
+      const headers = { ...openai(), 'x-ps-team': 'regression' };
+      const ok = await post(
+        app,
+        '/v1/chat/completions',
+        chatBody('hi'),
+        headers
+      );
+      expect(ok.status).toBe(200);
+      expect(ok.headers.get('x-ratelimit-remaining-requests')).toBe('0');
+      const res = await post(
+        app,
+        '/v1/chat/completions',
+        chatBody('hi'),
+        headers
+      );
+      expect(res.status).toBe(429);
+      expect(res.headers.get('retry-after')).toBeTruthy();
+      const events = await securityEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        'event.name': 'rate_limit.hit',
+        'ps.rate_limit.source': 'gateway',
+        'ps.rate_limit.rule': 'per-team',
+        'ps.rate_limit.scope': 'team',
+        'ps.rate_limit.limit': 'rpm',
+      });
+      expect(counter(await metrics(), line)).toBe(before + 1);
+    } finally {
+      resetRateLimitRuntime();
+    }
   });
 
   test('an oversized body is a payload.rejected event', async () => {
