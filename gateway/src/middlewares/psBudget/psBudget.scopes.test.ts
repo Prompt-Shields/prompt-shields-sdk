@@ -382,13 +382,18 @@ describe('threshold notifications', () => {
       'https://hooks.example.com/budget',
       'https://hooks.example.com/budget',
     ]);
-    const headers = calls[1][1].headers as Record<string, string>;
+    // The two posts run concurrently, so they can arrive in either order.
+    const exceeded = calls.find(
+      (c) => JSON.parse(c[1].body as string).threshold === 'exceeded'
+    )!;
+    expect(exceeded).toBeDefined();
+    const headers = exceeded[1].headers as Record<string, string>;
     expect(headers['Prompt-Shields-Event-Type']).toBe(
       'budget.threshold_crossed'
     );
     const sig = headers['Prompt-Shields-Signature'];
     const [, t, v1] = sig.match(/^t=(\d+),v1=([0-9a-f]{64})$/)!;
-    const body = calls[1][1].body as string;
+    const body = exceeded[1].body as string;
     expect(
       createHmac('sha256', 's3cret').update(`${t}.${body}`).digest('hex')
     ).toBe(v1);
