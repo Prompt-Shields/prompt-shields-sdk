@@ -154,6 +154,17 @@ jobs:
     name: Gateway
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      # Budget and rate-limit stores against a real Redis (*.redis.test.ts).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: gateway
@@ -195,6 +206,13 @@ jobs:
           mapfile -t config_ignores < <(node --input-type=module -e \
             "const { integrationTests } = await import('./tests/jest/integrationSuites.js'); for (const p of integrationTests) console.log(p);")
           npx jest --ci --testPathIgnorePatterns '/node_modules/' "${config_ignores[@]}" "${known_failing[@]}"
+      - name: Jest (Redis stores)
+        # The budget and rate-limit Redis suites from the integration config
+        # (they need only Redis, not vendor credentials), including the
+        # 3 replicas + 1 Redis rate-limit load test (#344).
+        env:
+          PS_TEST_REDIS_URL: redis://localhost:6379/15
+        run: npx jest --ci -c jest.integration.config.js 'src/middlewares/ps(Budget|RateLimit)/'
       - run: npm run build
 
   partner-ts:

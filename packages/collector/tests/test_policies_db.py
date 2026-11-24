@@ -321,6 +321,7 @@ async def test_invalid_documents_are_refused_with_every_problem(env):
             "route": {"version": 1, "policy": {"schema_version": "route-policy.v1"}},
             "access": {"version": 2},
             "rate_limits": {"version": 1},
+            "prices": {"version": 1},
             "bogus": {"version": 1},
         },
     }
@@ -331,7 +332,8 @@ async def test_invalid_documents_are_refused_with_every_problem(env):
     problems = resp.json()["detail"]["detail"]
     assert any("route.policy is missing" in x for x in problems)
     assert any("access.version" in x for x in problems)
-    assert any("reserved for rate-limit policies" in x for x in problems)
+    assert any("rate_limits.rules must be an array" in x for x in problems)
+    assert any("reserved for model prices" in x for x in problems)
     assert any("bogus: unknown section" in x for x in problems)
     # Nothing was created.
     assert (await c.get(A + "/policies", headers=H(boot))).json()["data"] == []
