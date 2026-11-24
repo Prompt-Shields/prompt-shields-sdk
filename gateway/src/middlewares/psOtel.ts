@@ -9,6 +9,13 @@
  * OTLP/HTTP JSON. The collector's `/ingest/otel/v1/traces` reads the same
  * names (`packages/collector/collector/otel_mapping.py`).
  *
+ * Retries and fallbacks (#390): when the gateway made upstream attempts for
+ * the call (psAttempts), the span carries `ps.attempt.count` and
+ * `ps.fallback_chain`, and one `ps.attempt` span event per recorded attempt
+ * (attempt number, provider, model, HTTP status, latency, error class; no
+ * content, no error message). The span stays one CLIENT span per request,
+ * so an OTLP consumer that bills GenAI spans still sees one billed call.
+ *
  * Privacy: prompt and completion content (`gen_ai.input.messages`,
  * `gen_ai.output.messages`, `gen_ai.system_instructions`) is only attached
  * when `PS_OTEL_CAPTURE_CONTENT=true` (or the standard
@@ -40,6 +47,12 @@ import {
   StreamSummary,
 } from './psStreamObserver';
 import { telemetryDroppedTotal } from './psMetrics/security';
+import {
+  AttemptRecord,
+  attemptCountOf,
+  attemptEndTimesOf,
+  attemptsOf,
+} from './psAttempts';
 import { isSafeUpstreamURL } from './requestValidator';
 import { guardedUpstreamFetch } from '../utils/egressFetch';
 
@@ -405,6 +418,36 @@ export interface SpanInput {
     sensitivitySource?: string;
   };
   captureContent?: boolean;
+  /** Upstream attempts for the call (psAttempts), oldest first. */
+  attempts?: AttemptRecord[];
+  /** Epoch ms at which each attempt ended, index-aligned with `attempts`. */
+  attemptEndMs?: number[];
+  /** Total attempts, including any beyond the recorded ones. */
+  attemptCount?: number;
+}
+
+/** OTLP span events for the call's upstream attempts (#390). */
+export function attemptEvents(input: SpanInput): any[] {
+  const attempts = input.attempts || [];
+  return attempts.map((a, i) => {
+    const end = input.attemptEndMs?.[i];
+    const at =
+      typeof end === 'number' && Number.isFinite(end) ? end : input.endMs;
+    return {
+      timeUnixNano: nanos(Math.min(Math.max(at, input.startMs), input.endMs)),
+      name: 'ps.attempt',
+      attributes: toOtlpAttributes({
+        'ps.attempt.number': a.attempt,
+        'gen_ai.provider.name': a.provider
+          ? semconvProviderName(a.provider)
+          : undefined,
+        'gen_ai.request.model': a.model,
+        'http.response.status_code': a.status,
+        'error.type': a.error_class,
+        'ps.attempt.latency_ms': a.latency_ms,
+      }),
+    };
+  });
 }
 
 export interface BuiltSpan {
@@ -479,6 +522,15 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     'ps.stream': input.stream ? true : undefined,
     'ps.stream.truncated': input.stream?.truncated || undefined,
     'ps.stream.cancelled': input.stream?.cancelled || undefined,
+    // Retries and fallbacks (#390), as the telemetry event's fields.
+    'ps.attempt.count': input.attempts?.length
+      ? Math.max(input.attemptCount ?? 0, input.attempts.length)
+      : undefined,
+    'ps.fallback_chain': input.attempts?.length
+      ? input.attempts
+          .map((a) => a.error_class)
+          .filter((e): e is string => typeof e === 'string')
+      : undefined,
   };
   // Numeric attributes only take finite numbers (clients send anything).
   for (const k of Object.keys(attrs)) {
@@ -505,6 +557,8 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     status: errorType ? { code: 2, message: errorType } : { code: 0 },
   };
   if (parent) span.parentSpanId = parent.parentSpanId;
+  const events = attemptEvents(input);
+  if (events.length) span.events = events;
   return { span, environment: ps.environment };
 }
 
@@ -726,6 +780,9 @@ export function psOtel(
         responseBody,
         route: c.get('psRoute'),
         captureContent: config.captureContent,
+        attempts: attemptsOf(c).map((a) => ({ ...a })),
+        attemptEndMs: [...attemptEndTimesOf(c)],
+        attemptCount: attemptCountOf(c),
       };
       const emit = (input: SpanInput) => {
         const built = buildGenAISpan(input);

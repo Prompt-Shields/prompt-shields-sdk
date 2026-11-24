@@ -64,6 +64,10 @@ params, `gen_ai.response.model`/`id`/`finish_reasons` (normalised to `stop`,
 `error.type`. `X-PS-*` business context goes to `ps.*` span attributes and
 `X-PS-Environment` to the `deployment.environment.name` resource attribute.
 An inbound `traceparent` makes the span a child of the caller's span.
+When the call made upstream attempts (retries, fallbacks; psAttempts), the
+span has `ps.attempt.count`, `ps.fallback_chain` and one `ps.attempt` span
+event per attempt (number, provider, model, status, latency, `error.type`),
+still one span per call (#390; docs/guides/fallbacks-and-retries.mdx).
 
 - `PS_OTEL_ENDPOINT` — full traces URL, e.g. `http://collector:8000/ingest/otel/v1/traces`
 - `PS_OTEL_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` — `k=v,k2=v2`; when the endpoint comes from `PS_OTEL_ENDPOINT`, `PS_API_KEY` is sent as a bearer token unless an `Authorization` header is given. It is never added for an endpoint taken from `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.

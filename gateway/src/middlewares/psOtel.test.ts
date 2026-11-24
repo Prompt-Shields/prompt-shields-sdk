@@ -269,6 +269,63 @@ describe('buildGenAISpan', () => {
   test('non-LLM paths produce no span', () => {
     expect(buildGenAISpan({ ...base, path: '/v1/files' })).toBeUndefined();
   });
+
+  test('no attempt attributes or events without attempts (#390)', () => {
+    const { span } = buildGenAISpan({ ...base, attempts: [] })!;
+    expect(span.events).toBeUndefined();
+    const a = attrsOf(span);
+    expect(a['ps.attempt.count']).toBeUndefined();
+    expect(a['ps.fallback_chain']).toBeUndefined();
+  });
+
+  test('one ps.attempt event per attempt, within the span (#390)', () => {
+    const { span } = buildGenAISpan({
+      ...base,
+      attempts: [
+        {
+          attempt: 1,
+          provider: 'openai',
+          model: 'gpt-4o',
+          status: 429,
+          latency_ms: 40,
+          error_class: 'rate_limited',
+        },
+        { attempt: 2, provider: 'azure-openai', latency_ms: 9 },
+        { attempt: 3, provider: 'bedrock', status: 200, latency_ms: 100 },
+      ],
+      // Second time missing; first before the span start (clamped).
+      attemptEndMs: [base.startMs - 5, NaN, base.startMs + 200],
+      attemptCount: 40,
+    })!;
+    const a = attrsOf(span);
+    expect(a['ps.attempt.count']).toBe(40);
+    expect(a['ps.fallback_chain']).toEqual(['rate_limited']);
+    expect(span.events.map((e: any) => e.name)).toEqual([
+      'ps.attempt',
+      'ps.attempt',
+      'ps.attempt',
+    ]);
+    expect(span.events.map((e: any) => e.timeUnixNano)).toEqual([
+      span.startTimeUnixNano,
+      span.endTimeUnixNano,
+      `${base.startMs + 200}000000`,
+    ]);
+    const ev = span.events.map((e: any) => attrsOf(e));
+    expect(ev[0]).toEqual({
+      'ps.attempt.number': 1,
+      'gen_ai.provider.name': 'openai',
+      'gen_ai.request.model': 'gpt-4o',
+      'http.response.status_code': 429,
+      'error.type': 'rate_limited',
+      'ps.attempt.latency_ms': 40,
+    });
+    // No status (no response came back): left out, not zero.
+    expect(ev[1]).toEqual({
+      'ps.attempt.number': 2,
+      'gen_ai.provider.name': 'azure.ai.openai',
+      'ps.attempt.latency_ms': 9,
+    });
+  });
 });
 
 describe('helpers', () => {
