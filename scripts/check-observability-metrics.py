@@ -2,8 +2,10 @@
 """Check that the shipped dashboards and alert rules use real metric names.
 
 Collects the metric names the code registers (gateway psMetrics registry,
+including the budget and MCP metrics registered elsewhere in gateway/src,
 collector prometheus_client), expands them to the series Prometheus scrapes
-(`_total`, `_bucket`/`_sum`/`_count`), then fails when a `ps_*` name in
+(`_total`, `_bucket`/`_sum`/`_count`; a histogram's own name is also
+accepted, for prose), then fails when a `ps_*` name in
 deploy/grafana, deploy/prometheus or the Helm chart's copies is not one of
 them. Also fails when the chart's copies differ from deploy/.
 
@@ -19,6 +21,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GATEWAY = ROOT / "gateway" / "src" / "middlewares" / "psMetrics"
+# Metrics registered in the same registry outside psMetrics/.
+GATEWAY_EXTRA = [
+    ROOT / "gateway" / "src" / "middlewares" / "psBudget" / "metrics.ts",
+    ROOT / "gateway" / "src" / "mcp" / "telemetry.ts",
+]
 COLLECTOR = ROOT / "packages" / "collector" / "collector" / "metrics.py"
 CHECKED = [ROOT / "deploy" / "grafana", ROOT / "deploy" / "prometheus"]
 CHART_FILES = ROOT / "charts" / "prompt-shields" / "files"
@@ -30,14 +37,14 @@ COPIES = {
 for dash in (ROOT / "deploy" / "grafana" / "dashboards").glob("*.json"):
     COPIES[dash] = CHART_FILES / "dashboards" / dash.name
 
-GATEWAY_RE = re.compile(r"new (Counter|Histogram)\(\s*'(ps_[a-z0-9_]+)'")
+GATEWAY_RE = re.compile(r"new (Counter|Histogram|Gauge)\(\s*'(ps_[a-z0-9_]+)'")
 COLLECTOR_RE = re.compile(r"\b(Counter|Histogram)\(\s*\"(ps_[a-z0-9_]+)\"")
 USED_RE = re.compile(r"\b(ps_(?:gateway|collector)_[a-z0-9_]+)")
 
 
 def series(kind: str, name: str, prometheus_client: bool) -> set[str]:
     if kind == "Histogram":
-        return {f"{name}_bucket", f"{name}_sum", f"{name}_count"}
+        return {name, f"{name}_bucket", f"{name}_sum", f"{name}_count"}
     if prometheus_client:
         base = name.removesuffix("_total")
         return {f"{base}_total"}
@@ -46,7 +53,7 @@ def series(kind: str, name: str, prometheus_client: bool) -> set[str]:
 
 def known() -> set[str]:
     names: set[str] = set()
-    for ts in GATEWAY.glob("*.ts"):
+    for ts in [*GATEWAY.glob("*.ts"), *GATEWAY_EXTRA]:
         if ts.name.endswith(".test.ts"):
             continue
         for kind, name in GATEWAY_RE.findall(ts.read_text()):

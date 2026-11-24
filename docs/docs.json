@@ -73,6 +73,7 @@
         "guides/admin-sso-scim",
         "guides/security-events",
         "guides/observability",
+        "guides/alert-runbooks",
         "guides/gateway-oidc",
         "guides/central-policy",
         "guides/gateway-rate-limits",
