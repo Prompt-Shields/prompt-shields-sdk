@@ -63,7 +63,7 @@ only its SHA-256. Fields:
 | `team_id`, `project_id` | Where calls are attributed. A project carries its team (its current team, if it moves). Fixed at issue: issue a new key to change them. |
 | `principal_id` | The person or service account the key belongs to. While the principal is disabled the key does not resolve; deleting the principal revokes the key. Calls without an OIDC subject report `user_id` = `principal:<id>` (hashed by the collector like any user id). |
 | `credential_ids` | The pool, in order (1-20 credentials of the tenant). |
-| `allowed_models` | Model names or globs (`*`, `?`, `[...]`); `null` or omitted: any model. Checked on the model each target is actually sent, after routing and `override_params`. |
+| `allowed_models` | Model names or globs (`*`, `?`, `[...]`); `null` or omitted: any model. Checked on the model each target is actually sent, after routing and `override_params`, on every endpoint that names one. A key with `allowed_models` cannot call routes whose model the gateway cannot check: `POST /v1/batches` and the `/v1/proxy` / catch-all pass-through (except GET and DELETE), 403. |
 | `strategy` | `round_robin` (rotate the first credential per call) or `least_recently_limited` (credentials that never got 429 first, then the one limited longest ago). |
 
 `PATCH /virtual-keys/{id}` changes the name, pool, models, strategy and
@@ -76,7 +76,9 @@ Every change is on the audit trail (`virtual_key.*`).
 
 Issue the gateway an ingest key with `virtual-keys:resolve` (never granted
 implicitly; it returns decrypted provider keys, so give it to the gateway
-only):
+only). Issuing or rotating such a key takes an admin token holding
+`admin:keys`, `admin:inference-credentials` and `admin:virtual-keys`;
+`admin:keys` alone, or an ingest key, gets 403:
 
 ```bash
 curl -X POST "$COLLECTOR/api/v1/admin/api-keys" \

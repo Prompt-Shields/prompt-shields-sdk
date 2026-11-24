@@ -305,6 +305,42 @@ async def test_scopes_admin_tokens_only_and_resolve_never_implicit(env):
     assert resp.status_code == 422 and out["key"] not in resp.text
 
 
+async def test_only_vault_and_virtual_key_admins_mint_resolver_keys(env, monkeypatch):
+    """An ingest key with virtual-keys:resolve returns decrypted inference
+    keys, so admin:keys alone (or an ingest key while scoped tokens are
+    off) cannot issue or rotate one."""
+    c, tid = env["c"], env["tid"]
+    body = {"name": "gw-x", "scopes": ["virtual-keys:resolve"]}
+    keys_only = await _token(c, tid, ["admin:keys"])
+    resp = await c.post(A + "/api-keys", headers=H(keys_only), json=body)
+    assert resp.status_code == 403, resp.text
+    assert "admin:inference-credentials" in resp.json()["detail"]["detail"]
+    for held in (["admin:keys", "admin:virtual-keys"], ["admin:keys", "admin:inference-credentials"]):
+        tok = await _token(c, tid, held)
+        assert (await c.post(A + "/api-keys", headers=H(tok), json=body)).status_code == 403
+    # Rotating the gateway's resolver key returns a new secret: same rule.
+    row_id = (
+        await _post(c, env["tok"], A + "/api-keys", {"name": "gw-r", "scopes": body["scopes"]})
+    )["id"]
+    resp = await c.post(A + f"/api-keys/{row_id}/rotate", headers=H(keys_only))
+    assert resp.status_code == 403
+    enough = await _token(
+        c, tid, ["admin:keys", "admin:virtual-keys", "admin:inference-credentials"]
+    )
+    assert (await c.post(A + "/api-keys", headers=H(enough), json=body)).status_code == 201
+    assert (await c.post(A + f"/api-keys/{row_id}/rotate", headers=H(enough))).status_code == 200
+    # Other scopes are unaffected.
+    plain = {"name": "sdk", "scopes": ["ingest:write", "policy:read"]}
+    assert (await c.post(A + "/api-keys", headers=H(keys_only), json=plain)).status_code == 201
+    # A full legacy ingest key, admitted while scoped tokens are off, is refused.
+    monkeypatch.setattr(settings, "admin_require_scoped_tokens", False)
+    resp = await c.post(
+        A + "/api-keys", headers=H("ps-test-key-12345"), json={**body, "name": "gw-y"}
+    )
+    assert resp.status_code == 403
+    assert "needs an admin token" in resp.json()["detail"]["detail"]
+
+
 # ── resolution ────────────────────────────────────────────────────────
 
 

@@ -84,6 +84,7 @@ from collector.admin_auth import (
     live_descendants,
     require_admin,
     require_full_admin,
+    require_sensitive_key_scopes,
     revoke_descendants,
     serialize_token,
     unknown_scopes,
@@ -529,6 +530,7 @@ async def create_api_key(
             f"Unknown scopes: {bad}. Allowed: {list(tenant_keys.KEY_SCOPES)}",
         )
     await require_full_admin(request, principal, body.scopes)
+    await require_sensitive_key_scopes(request, principal, body.scopes)
     db = request.state.db
     await _adopt(request, principal)
     try:
@@ -603,6 +605,7 @@ async def rotate_api_key(
     db = request.state.db
     row = await _get_key(request, principal.tenant_id, key_id)
     await require_full_admin(request, principal, row.scopes or ())
+    await require_sensitive_key_scopes(request, principal, row.scopes or ())
     grace = body.grace_period_seconds if body else 0
     try:
         key = tenant_keys.rotate_key(row, timedelta(seconds=grace))
