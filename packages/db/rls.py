@@ -68,6 +68,10 @@ TENANT_TABLES: dict[str, str] = {
     "projects": "tenant_id",
     "memberships": "tenant_id",
     "inference_credentials": "tenant_id",
+    "tenant_oidc_configs": "tenant_id",
+    "oidc_login_states": "tenant_id",
+    "scim_tokens": "tenant_id",
+    "idp_group_roles": "tenant_id",
     "policies": "tenant_id",
     "policy_versions": "tenant_id",
 }

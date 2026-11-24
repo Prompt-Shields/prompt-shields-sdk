@@ -13,10 +13,10 @@ Narrower tokens are unchanged. Downgrade removes the scope from every
 token and drops the table.
 
 Revision ID: 044
-Revises: 054
+Revises: 045, 054
 Create Date: 2026-11-07
 
-Chained from main's head at merge (054); re-chain at merge if another
+Chained from main's heads at merge (045 and 054, which both follow 043); re-chain at merge if another
 migration lands first.
 """
 
@@ -27,7 +27,9 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "044"
-down_revision: str | None = "054"
+# Also a merge point: main had two heads (045 SSO/SCIM and 054 policy soft
+# delete, both from 043) when this was chained.
+down_revision: str | tuple[str, ...] | None = ("045", "054")
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
