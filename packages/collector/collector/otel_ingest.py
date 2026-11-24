@@ -167,6 +167,7 @@ async def write_spans(db: AsyncSession, tenant_id: UUID, spans: list[GenAISpan])
             served_model=_bounded_model(span.served_model),
             api_surface=_bounded_label(span.api_surface),
             trace_id=span.trace_id,
+            usage_source=span.usage_source,
         )
         db.add(usage_event)
         await record_event_flows(

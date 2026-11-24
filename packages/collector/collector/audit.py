@@ -187,9 +187,14 @@ async def purge_expired(db, retention_days: int, now: datetime | None = None) ->
     if retention_days <= 0:
         raise ValueError("retention_days must be positive")
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
-    result = await db.execute(
-        delete(PartnerAuditLog).where(PartnerAuditLog.timestamp < cutoff)
-    )
+    from collector import payload_policy  # late: keeps this module light
+
+    conditions = [PartnerAuditLog.timestamp < cutoff]
+    held = await payload_policy.held_tenant_ids(db)
+    if held:
+        # Legal hold (#352) pauses purges for the tenant.
+        conditions.append(PartnerAuditLog.tenant_id.not_in(held))
+    result = await db.execute(delete(PartnerAuditLog).where(*conditions))
     deleted = result.rowcount or 0
     # The purge run itself goes on the system chain of the admin audit
     # trail (collector.audit_trail). Late import: audit_trail imports this.

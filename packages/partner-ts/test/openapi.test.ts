@@ -385,6 +385,8 @@ const SCHEMAS: Record<string, string> = {
   SecurityEventRow: 'SecurityEventRow',
   SecurityEventPageMeta: 'SecurityEventPageMeta',
   SecurityEventPage: 'SecurityEventPage',
+  // Logged call payloads (client.calls).
+  CallPayload: 'CallPayload',
   // Agent traces (client.traces).
   TraceSpan: 'TraceSpan',
   TraceSummary: 'TraceSummary',
@@ -488,6 +490,16 @@ const UNMAPPED_SCHEMAS = new Set([
   'PriceOverride',
   'EffectivePolicy',
   'PolicyBundle',
+  // Payload logging (#352): the tenant admin setting, legal hold and the
+  // ingest-key route are not wrapped; the mode is a string enum checked
+  // through CallPayload.mode.
+  'PayloadLoggingMode',
+  'PayloadLoggingSettings',
+  'PutPayloadLoggingRequest',
+  'LegalHold',
+  'PutLegalHoldRequest',
+  'PayloadIngestRequest',
+  'PayloadIngestResult',
   // Inference credential vault (#342): tenant admin routes, not wrapped.
   'InferenceCredential',
   'CreateInferenceCredentialRequest',
@@ -723,6 +735,14 @@ const OPERATIONS: Record<string, Operation> = {
   'GET /partner/v1/traces': { methods: ['traces.list', 'traces.listPage'], params: 'ListTracesParams' },
   'GET /partner/v1/traces/{trace_id}': { methods: ['traces.get'] },
   'POST /ingest/security-events': NOT_WRAPPED,
+  // Payload logging (#352): client.calls; the setting, legal hold and
+  // ingest are not wrapped.
+  'GET /partner/v1/calls/{call_id}': { methods: ['calls.get'] },
+  'GET /api/v1/admin/payload-logging': NOT_WRAPPED,
+  'PUT /api/v1/admin/payload-logging': NOT_WRAPPED,
+  'GET /api/v1/admin/legal-hold': NOT_WRAPPED,
+  'PUT /api/v1/admin/legal-hold': NOT_WRAPPED,
+  'POST /ingest/payloads': NOT_WRAPPED,
   'POST /ingest/otel/v1/logs': NOT_WRAPPED,
   'POST /ingest/otel/v1/traces': NOT_WRAPPED,
   'POST /api/v1/admin/connectors/splunk-hec/sync': NOT_WRAPPED,
@@ -1009,6 +1029,8 @@ describe('docs/openapi.yaml drift check', () => {
     }
     expect(skipped.sort()).toEqual([
       'Attestation.value', // any JSON value: `unknown` in the type, no `type` in the spec
+      'CallPayload.request', // the logged body, any JSON
+      'CallPayload.response',
     ]);
   });
 

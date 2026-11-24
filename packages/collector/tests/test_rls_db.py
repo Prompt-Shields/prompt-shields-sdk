@@ -39,6 +39,7 @@ from db.models import (
     AuditEvent,
     Base,
     CallFeedback,
+    CallPayload,
     CostReconciliation,
     CredentialCreator,
     DataFlow,
@@ -253,6 +254,7 @@ async def _seed(factory, tenant_id, name: str, partner_key: str) -> None:
                     name="auth.failure",
                     occurred_at=datetime.now(UTC),
                 ),
+                CallPayload(tenant_id=tenant_id, call_id=f"seed-{name}", mode="metadata"),
                 UsageRollupHourly(
                     tenant_id=tenant_id,
                     bucket_start=datetime(2026, 1, 1, 12, tzinfo=UTC),

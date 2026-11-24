@@ -1,0 +1,17 @@
+{
+  "description": "Where Prompt Shields asks for stream usage with stream_options.include_usage (#389). gateway_providers: gateway provider ids that forward stream_options verbatim and return the OpenAI chunk stream unchanged (gateway/src/middlewares/psStreamUsage.ts DEFAULT_PROVIDERS). sdk_hosts: API hosts the SDK's OpenAI client adds it for (prompt_shields/streaming.py STREAM_USAGE_HOSTS); a leading '.' matches any subdomain. Azure OpenAI (provider azure-openai, *.openai.azure.com) only from azure_min_api_version on, or the dateless v1 API. Both add more with PS_STREAM_INCLUDE_USAGE_HOSTS (exact hostnames, e.g. a vLLM server).",
+  "gateway_providers": ["openai", "azure-openai"],
+  "azure_min_api_version": "2024-07-01",
+  "sdk_hosts": [
+    "api.openai.com",
+    ".openai.azure.com",
+    ".cognitiveservices.azure.com",
+    "api.groq.com",
+    "api.together.xyz",
+    "api.together.ai",
+    "api.fireworks.ai",
+    "api.deepseek.com",
+    "api.x.ai",
+    "openrouter.ai"
+  ]
+}

@@ -634,6 +634,8 @@ export function buildGenAISpan(input: SpanInput): BuiltSpan | undefined {
     'ps.stream': input.stream ? true : undefined,
     'ps.stream.truncated': input.stream?.truncated || undefined,
     'ps.stream.cancelled': input.stream?.cancelled || undefined,
+    // #389: whether the token counts are the provider's or estimated.
+    'ps.usage_source': input.stream?.usageSource,
     // Retries and fallbacks (#390), as the telemetry event's fields.
     // Only set when the call was retried or fell back (attemptTotal > 1).
     'ps.attempt.count': retried(input) ? attemptTotal(input) : undefined,

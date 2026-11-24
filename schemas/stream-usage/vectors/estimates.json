@@ -1,0 +1,705 @@
+{
+ "description": "Shared token-estimate vectors (#389). `expected` is the exact output of the estimate algorithm (schemas/stream-usage/README.md) that the SDK and the gateway must both return. `reference` is the count of the named tokenizer, for the accuracy check.",
+ "vectors": [
+  {
+   "name": "english_prose/o200k",
+   "family": "o200k",
+   "text": "The city council voted on Tuesday to extend the pilot program for another eighteen months, citing strong ridership numbers and a drop in downtown congestion. Officials said the shuttle routes, which connect the train station with the hospital district and the university campus, carried more than 40,000 passengers in the first quarter alone. Critics, however, argued that the budget had grown faster than expected and that smaller neighborhoods on the east side were still underserved. The mayor promised a detailed review before any permanent decision is made, and asked the transportation department to publish monthly reports so residents can follow the costs and the results.",
+   "expected": 131,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 119
+   }
+  },
+  {
+   "name": "english_prose/cl100k",
+   "family": "cl100k",
+   "text": "The city council voted on Tuesday to extend the pilot program for another eighteen months, citing strong ridership numbers and a drop in downtown congestion. Officials said the shuttle routes, which connect the train station with the hospital district and the university campus, carried more than 40,000 passengers in the first quarter alone. Critics, however, argued that the budget had grown faster than expected and that smaller neighborhoods on the east side were still underserved. The mayor promised a detailed review before any permanent decision is made, and asked the transportation department to publish monthly reports so residents can follow the costs and the results.",
+   "expected": 131,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 120
+   }
+  },
+  {
+   "name": "chat_markdown/o200k",
+   "family": "o200k",
+   "text": "Sure! Here's a quick overview of how to get started:\n\n1. **Install the package** using your package manager of choice.\n2. **Create a configuration file** in the root of your project. You can copy the example from the docs.\n3. **Run the setup command** – it will check your environment and tell you if anything is missing.\n\nA few tips:\n- Keep your API keys in environment variables, never in the code itself.\n- If you're behind a proxy, set `HTTPS_PROXY` before running the setup.\n- Use the `--verbose` flag when something goes wrong; the extra output usually points straight at the problem.\n\nLet me know if you'd like a more detailed walkthrough for any of these steps!",
+   "expected": 159,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 150
+   }
+  },
+  {
+   "name": "chat_markdown/cl100k",
+   "family": "cl100k",
+   "text": "Sure! Here's a quick overview of how to get started:\n\n1. **Install the package** using your package manager of choice.\n2. **Create a configuration file** in the root of your project. You can copy the example from the docs.\n3. **Run the setup command** – it will check your environment and tell you if anything is missing.\n\nA few tips:\n- Keep your API keys in environment variables, never in the code itself.\n- If you're behind a proxy, set `HTTPS_PROXY` before running the setup.\n- Use the `--verbose` flag when something goes wrong; the extra output usually points straight at the problem.\n\nLet me know if you'd like a more detailed walkthrough for any of these steps!",
+   "expected": 159,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 150
+   }
+  },
+  {
+   "name": "python_code/o200k",
+   "family": "o200k",
+   "text": "import asyncio\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass RateLimiter:\n    \"\"\"Token bucket limiter shared by all workers.\"\"\"\n\n    capacity: int\n    refill_per_second: float\n    tokens: float = field(init=False)\n    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)\n\n    def __post_init__(self) -> None:\n        self.tokens = float(self.capacity)\n        self._last = asyncio.get_event_loop().time()\n\n    async def acquire(self, cost: int = 1) -> None:\n        async with self._lock:\n            while True:\n                now = asyncio.get_event_loop().time()\n                elapsed = now - self._last\n                self._last = now\n                self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_per_second)\n                if self.tokens >= cost:\n                    self.tokens -= cost\n                    return\n                await asyncio.sleep((cost - self.tokens) / self.refill_per_second)\n",
+   "expected": 214,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 204
+   }
+  },
+  {
+   "name": "python_code/cl100k",
+   "family": "cl100k",
+   "text": "import asyncio\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass RateLimiter:\n    \"\"\"Token bucket limiter shared by all workers.\"\"\"\n\n    capacity: int\n    refill_per_second: float\n    tokens: float = field(init=False)\n    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)\n\n    def __post_init__(self) -> None:\n        self.tokens = float(self.capacity)\n        self._last = asyncio.get_event_loop().time()\n\n    async def acquire(self, cost: int = 1) -> None:\n        async with self._lock:\n            while True:\n                now = asyncio.get_event_loop().time()\n                elapsed = now - self._last\n                self._last = now\n                self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_per_second)\n                if self.tokens >= cost:\n                    self.tokens -= cost\n                    return\n                await asyncio.sleep((cost - self.tokens) / self.refill_per_second)\n",
+   "expected": 214,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 207
+   }
+  },
+  {
+   "name": "typescript_code/o200k",
+   "family": "o200k",
+   "text": "export async function fetchWithRetry(\n  url: string,\n  init: RequestInit = {},\n  retries = 3\n): Promise<Response> {\n  let lastError: unknown;\n  for (let attempt = 0; attempt <= retries; attempt++) {\n    try {\n      const res = await fetch(url, init);\n      if (res.status < 500 && res.status !== 429) return res;\n      lastError = new Error(`upstream returned ${res.status}`);\n    } catch (err) {\n      lastError = err;\n    }\n    const delay = Math.min(1000 * 2 ** attempt, 8000);\n    await new Promise((resolve) => setTimeout(resolve, delay));\n  }\n  throw lastError instanceof Error ? lastError : new Error(String(lastError));\n}\n",
+   "expected": 171,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 165
+   }
+  },
+  {
+   "name": "typescript_code/cl100k",
+   "family": "cl100k",
+   "text": "export async function fetchWithRetry(\n  url: string,\n  init: RequestInit = {},\n  retries = 3\n): Promise<Response> {\n  let lastError: unknown;\n  for (let attempt = 0; attempt <= retries; attempt++) {\n    try {\n      const res = await fetch(url, init);\n      if (res.status < 500 && res.status !== 429) return res;\n      lastError = new Error(`upstream returned ${res.status}`);\n    } catch (err) {\n      lastError = err;\n    }\n    const delay = Math.min(1000 * 2 ** attempt, 8000);\n    await new Promise((resolve) => setTimeout(resolve, delay));\n  }\n  throw lastError instanceof Error ? lastError : new Error(String(lastError));\n}\n",
+   "expected": 171,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 164
+   }
+  },
+  {
+   "name": "json_data/o200k",
+   "family": "o200k",
+   "text": "{\n  \"orders\": [\n    {\n      \"id\": \"ord_8f2a91\",\n      \"customer\": {\n        \"name\": \"Maria Lopez\",\n        \"email\": \"maria.lopez@example.com\"\n      },\n      \"items\": [\n        {\n          \"sku\": \"TSHIRT-BLK-M\",\n          \"qty\": 2,\n          \"price\": 19.99\n        },\n        {\n          \"sku\": \"MUG-WHT\",\n          \"qty\": 1,\n          \"price\": 9.5\n        }\n      ],\n      \"status\": \"shipped\",\n      \"created_at\": \"2026-03-14T09:21:07Z\"\n    },\n    {\n      \"id\": \"ord_8f2a92\",\n      \"customer\": {\n        \"name\": \"Jonas Weber\",\n        \"email\": \"jonas@example.org\"\n      },\n      \"items\": [\n        {\n          \"sku\": \"HOODIE-GRY-L\",\n          \"qty\": 1,\n          \"price\": 49.0\n        }\n      ],\n      \"status\": \"pending\",\n      \"created_at\": \"2026-03-14T10:02:44Z\"\n    }\n  ],\n  \"page\": 1,\n  \"has_more\": false\n}",
+   "expected": 264,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 273
+   }
+  },
+  {
+   "name": "json_data/cl100k",
+   "family": "cl100k",
+   "text": "{\n  \"orders\": [\n    {\n      \"id\": \"ord_8f2a91\",\n      \"customer\": {\n        \"name\": \"Maria Lopez\",\n        \"email\": \"maria.lopez@example.com\"\n      },\n      \"items\": [\n        {\n          \"sku\": \"TSHIRT-BLK-M\",\n          \"qty\": 2,\n          \"price\": 19.99\n        },\n        {\n          \"sku\": \"MUG-WHT\",\n          \"qty\": 1,\n          \"price\": 9.5\n        }\n      ],\n      \"status\": \"shipped\",\n      \"created_at\": \"2026-03-14T09:21:07Z\"\n    },\n    {\n      \"id\": \"ord_8f2a92\",\n      \"customer\": {\n        \"name\": \"Jonas Weber\",\n        \"email\": \"jonas@example.org\"\n      },\n      \"items\": [\n        {\n          \"sku\": \"HOODIE-GRY-L\",\n          \"qty\": 1,\n          \"price\": 49.0\n        }\n      ],\n      \"status\": \"pending\",\n      \"created_at\": \"2026-03-14T10:02:44Z\"\n    }\n  ],\n  \"page\": 1,\n  \"has_more\": false\n}",
+   "expected": 264,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 275
+   }
+  },
+  {
+   "name": "tool_args_compact/o200k",
+   "family": "o200k",
+   "text": "{\"query\":\"quarterly revenue by region 2025\",\"filters\":{\"region\":[\"EMEA\",\"APAC\"],\"min_amount\":10000},\"limit\":25,\"sort\":\"desc\"}",
+   "expected": 38,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 37
+   }
+  },
+  {
+   "name": "tool_args_compact/cl100k",
+   "family": "cl100k",
+   "text": "{\"query\":\"quarterly revenue by region 2025\",\"filters\":{\"region\":[\"EMEA\",\"APAC\"],\"min_amount\":10000},\"limit\":25,\"sort\":\"desc\"}",
+   "expected": 38,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 36
+   }
+  },
+  {
+   "name": "sql/o200k",
+   "family": "o200k",
+   "text": "SELECT c.region,\n       date_trunc('month', o.created_at) AS month,\n       count(*) AS orders,\n       sum(o.total_amount) AS revenue,\n       avg(o.total_amount) FILTER (WHERE o.status = 'completed') AS avg_completed\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nWHERE o.created_at >= now() - interval '12 months'\n  AND c.is_test = false\nGROUP BY 1, 2\nHAVING count(*) > 10\nORDER BY month DESC, revenue DESC\nLIMIT 100;",
+   "expected": 127,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 116
+   }
+  },
+  {
+   "name": "sql/cl100k",
+   "family": "cl100k",
+   "text": "SELECT c.region,\n       date_trunc('month', o.created_at) AS month,\n       count(*) AS orders,\n       sum(o.total_amount) AS revenue,\n       avg(o.total_amount) FILTER (WHERE o.status = 'completed') AS avg_completed\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nWHERE o.created_at >= now() - interval '12 months'\n  AND c.is_test = false\nGROUP BY 1, 2\nHAVING count(*) > 10\nORDER BY month DESC, revenue DESC\nLIMIT 100;",
+   "expected": 127,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 116
+   }
+  },
+  {
+   "name": "german_prose/o200k",
+   "family": "o200k",
+   "text": "Die Bundesregierung hat am Mittwoch einen Gesetzentwurf vorgelegt, der die Digitalisierung der öffentlichen Verwaltung beschleunigen soll. Bürgerinnen und Bürger sollen künftig die meisten Behördengänge online erledigen können, von der Ummeldung des Wohnsitzes bis zur Beantragung eines Reisepasses. Kritiker bemängeln jedoch, dass viele Kommunen weder über ausreichend Personal noch über die nötige technische Infrastruktur verfügen. Der Städtetag forderte zusätzliche Mittel und einen verbindlichen Zeitplan.",
+   "expected": 97,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 100
+   }
+  },
+  {
+   "name": "german_prose/cl100k",
+   "family": "cl100k",
+   "text": "Die Bundesregierung hat am Mittwoch einen Gesetzentwurf vorgelegt, der die Digitalisierung der öffentlichen Verwaltung beschleunigen soll. Bürgerinnen und Bürger sollen künftig die meisten Behördengänge online erledigen können, von der Ummeldung des Wohnsitzes bis zur Beantragung eines Reisepasses. Kritiker bemängeln jedoch, dass viele Kommunen weder über ausreichend Personal noch über die nötige technische Infrastruktur verfügen. Der Städtetag forderte zusätzliche Mittel und einen verbindlichen Zeitplan.",
+   "expected": 132,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 139
+   }
+  },
+  {
+   "name": "french_prose/o200k",
+   "family": "o200k",
+   "text": "Le gouvernement a présenté mercredi un plan destiné à rénover les écoles les plus anciennes du pays. Selon le ministère, près d'un établissement sur trois a besoin de travaux importants, notamment pour améliorer l'isolation thermique et l'accessibilité. Les syndicats d'enseignants ont salué l'initiative, tout en rappelant que le manque de personnel reste le problème principal. Les premiers chantiers devraient commencer à la rentrée prochaine.",
+   "expected": 99,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 87
+   }
+  },
+  {
+   "name": "french_prose/cl100k",
+   "family": "cl100k",
+   "text": "Le gouvernement a présenté mercredi un plan destiné à rénover les écoles les plus anciennes du pays. Selon le ministère, près d'un établissement sur trois a besoin de travaux importants, notamment pour améliorer l'isolation thermique et l'accessibilité. Les syndicats d'enseignants ont salué l'initiative, tout en rappelant que le manque de personnel reste le problème principal. Les premiers chantiers devraient commencer à la rentrée prochaine.",
+   "expected": 131,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 120
+   }
+  },
+  {
+   "name": "spanish_prose/o200k",
+   "family": "o200k",
+   "text": "El equipo de investigación publicó ayer los resultados de un estudio que analizó durante cinco años la calidad del agua en los ríos de la región. Los científicos detectaron una mejora clara desde que se cerraron dos plantas industriales, aunque advierten que los niveles de nitratos siguen siendo altos en las zonas agrícolas. Las autoridades locales anunciaron nuevas ayudas para los agricultores que reduzcan el uso de fertilizantes.",
+   "expected": 85,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 81
+   }
+  },
+  {
+   "name": "spanish_prose/cl100k",
+   "family": "cl100k",
+   "text": "El equipo de investigación publicó ayer los resultados de un estudio que analizó durante cinco años la calidad del agua en los ríos de la región. Los científicos detectaron una mejora clara desde que se cerraron dos plantas industriales, aunque advierten que los niveles de nitratos siguen siendo altos en las zonas agrícolas. Las autoridades locales anunciaron nuevas ayudas para los agricultores que reduzcan el uso de fertilizantes.",
+   "expected": 105,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 105
+   }
+  },
+  {
+   "name": "chinese/o200k",
+   "family": "o200k",
+   "text": "人工智能技术正在迅速改变各行各业的工作方式。许多企业开始使用大型语言模型来处理客户服务、文档摘要和数据分析等任务。然而，专家提醒，企业在部署这些系统时必须重视数据安全和隐私保护，并建立清晰的使用规范。同时，员工也需要接受相关培训，以便更好地理解模型的能力和局限性。",
+   "expected": 84,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 85
+   }
+  },
+  {
+   "name": "chinese/cl100k",
+   "family": "cl100k",
+   "text": "人工智能技术正在迅速改变各行各业的工作方式。许多企业开始使用大型语言模型来处理客户服务、文档摘要和数据分析等任务。然而，专家提醒，企业在部署这些系统时必须重视数据安全和隐私保护，并建立清晰的使用规范。同时，员工也需要接受相关培训，以便更好地理解模型的能力和局限性。",
+   "expected": 133,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 137
+   }
+  },
+  {
+   "name": "japanese/o200k",
+   "family": "o200k",
+   "text": "新しいサービスは来月から全国で利用できるようになります。利用者はスマートフォンのアプリから予約や支払いを行うことができ、待ち時間を大幅に短縮できる見込みです。運営会社は、個人情報の取り扱いについても十分な対策を講じていると説明しています。",
+   "expected": 77,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 78
+   }
+  },
+  {
+   "name": "japanese/cl100k",
+   "family": "cl100k",
+   "text": "新しいサービスは来月から全国で利用できるようになります。利用者はスマートフォンのアプリから予約や支払いを行うことができ、待ち時間を大幅に短縮できる見込みです。運営会社は、個人情報の取り扱いについても十分な対策を講じていると説明しています。",
+   "expected": 122,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 128
+   }
+  },
+  {
+   "name": "korean/o200k",
+   "family": "o200k",
+   "text": "오늘 회의에서는 다음 분기 마케팅 전략과 신제품 출시 일정에 대해 논의했습니다. 팀원들은 온라인 광고 예산을 늘리고, 고객 피드백을 더 적극적으로 반영하자는 의견을 냈습니다. 다음 주까지 각 부서는 세부 계획을 정리해서 공유하기로 했습니다.",
+   "expected": 68,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 69
+   }
+  },
+  {
+   "name": "korean/cl100k",
+   "family": "cl100k",
+   "text": "오늘 회의에서는 다음 분기 마케팅 전략과 신제품 출시 일정에 대해 논의했습니다. 팀원들은 온라인 광고 예산을 늘리고, 고객 피드백을 더 적극적으로 반영하자는 의견을 냈습니다. 다음 주까지 각 부서는 세부 계획을 정리해서 공유하기로 했습니다.",
+   "expected": 133,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 133
+   }
+  },
+  {
+   "name": "russian/o200k",
+   "family": "o200k",
+   "text": "Компания объявила о запуске новой платформы для онлайн-обучения, которая будет доступна студентам и преподавателям уже в следующем семестре. По словам разработчиков, система поддерживает видеолекции, интерактивные задания и автоматическую проверку тестов. Первые отзывы пользователей оказались в основном положительными.",
+   "expected": 70,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 69
+   }
+  },
+  {
+   "name": "russian/cl100k",
+   "family": "cl100k",
+   "text": "Компания объявила о запуске новой платформы для онлайн-обучения, которая будет доступна студентам и преподавателям уже в следующем семестре. По словам разработчиков, система поддерживает видеолекции, интерактивные задания и автоматическую проверку тестов. Первые отзывы пользователей оказались в основном положительными.",
+   "expected": 126,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 125
+   }
+  },
+  {
+   "name": "csv_numbers/o200k",
+   "family": "o200k",
+   "text": "date,region,units,revenue,margin\n2026-01-01,north,1204,38211.50,0.214\n2026-01-01,south,987,30102.75,0.198\n2026-01-02,north,1311,41890.00,0.221\n2026-01-02,south,1045,32480.25,0.203\n2026-01-03,north,1150,36740.10,0.209\n2026-01-03,south,1102,34005.90,0.207\n2026-01-04,north,1398,44612.35,0.226\n2026-01-04,south,1009,31377.40,0.195",
+   "expected": 170,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 176
+   }
+  },
+  {
+   "name": "csv_numbers/cl100k",
+   "family": "cl100k",
+   "text": "date,region,units,revenue,margin\n2026-01-01,north,1204,38211.50,0.214\n2026-01-01,south,987,30102.75,0.198\n2026-01-02,north,1311,41890.00,0.221\n2026-01-02,south,1045,32480.25,0.203\n2026-01-03,north,1150,36740.10,0.209\n2026-01-03,south,1102,34005.90,0.207\n2026-01-04,north,1398,44612.35,0.226\n2026-01-04,south,1009,31377.40,0.195",
+   "expected": 170,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 176
+   }
+  },
+  {
+   "name": "markdown_doc/o200k",
+   "family": "o200k",
+   "text": "# Deployment guide\n\n## Prerequisites\n\nYou need Docker 24 or later and access to the container registry. Make sure the `deploy` role is attached to your account.\n\n## Steps\n\n```bash\ndocker compose pull\ndocker compose up -d --remove-orphans\ndocker compose logs -f gateway\n```\n\n> **Note:** the first start runs database migrations and can take a few minutes.\n\n## Rollback\n\nIf the health check fails, run `./scripts/rollback.sh <previous-tag>` and open an incident in the tracker.",
+   "expected": 111,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 111
+   }
+  },
+  {
+   "name": "markdown_doc/cl100k",
+   "family": "cl100k",
+   "text": "# Deployment guide\n\n## Prerequisites\n\nYou need Docker 24 or later and access to the container registry. Make sure the `deploy` role is attached to your account.\n\n## Steps\n\n```bash\ndocker compose pull\ndocker compose up -d --remove-orphans\ndocker compose logs -f gateway\n```\n\n> **Note:** the first start runs database migrations and can take a few minutes.\n\n## Rollback\n\nIf the health check fails, run `./scripts/rollback.sh <previous-tag>` and open an incident in the tracker.",
+   "expected": 111,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 111
+   }
+  },
+  {
+   "name": "technical_urls/o200k",
+   "family": "o200k",
+   "text": "To configure single sign-on, open https://admin.example.com/settings/sso and paste the metadata URL from your identity provider (for example https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml). The callback URL is https://app.example.com/auth/saml/callback. After saving, use the \"Test connection\" button; errors are logged under /var/log/app/sso.log with the request ID shown in the UI.",
+   "expected": 110,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 98
+   }
+  },
+  {
+   "name": "technical_urls/cl100k",
+   "family": "cl100k",
+   "text": "To configure single sign-on, open https://admin.example.com/settings/sso and paste the metadata URL from your identity provider (for example https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml). The callback URL is https://app.example.com/auth/saml/callback. After saving, use the \"Test connection\" button; errors are logged under /var/log/app/sso.log with the request ID shown in the UI.",
+   "expected": 110,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 95
+   }
+  },
+  {
+   "name": "log_output/o200k",
+   "family": "o200k",
+   "text": "2026-11-20T08:14:02.311Z INFO  [gateway] listening on 0.0.0.0:8787 (pid=4121)\n2026-11-20T08:14:05.902Z WARN  [router] policy file /etc/ps/routes.yaml not found, using defaults\n2026-11-20T08:15:11.004Z INFO  [proxy] POST /v1/chat/completions 200 812ms provider=openai model=gpt-4o-mini\n2026-11-20T08:15:12.557Z ERROR [proxy] POST /v1/chat/completions 502 30001ms provider=azure-openai error=\"upstream timeout\"\n2026-11-20T08:15:12.559Z INFO  [retry] attempt=2 target=openai delay_ms=250",
+   "expected": 190,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 191
+   }
+  },
+  {
+   "name": "log_output/cl100k",
+   "family": "cl100k",
+   "text": "2026-11-20T08:14:02.311Z INFO  [gateway] listening on 0.0.0.0:8787 (pid=4121)\n2026-11-20T08:14:05.902Z WARN  [router] policy file /etc/ps/routes.yaml not found, using defaults\n2026-11-20T08:15:11.004Z INFO  [proxy] POST /v1/chat/completions 200 812ms provider=openai model=gpt-4o-mini\n2026-11-20T08:15:12.557Z ERROR [proxy] POST /v1/chat/completions 502 30001ms provider=azure-openai error=\"upstream timeout\"\n2026-11-20T08:15:12.559Z INFO  [retry] attempt=2 target=openai delay_ms=250",
+   "expected": 190,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 191
+   }
+  },
+  {
+   "name": "assistant_long_reply/o200k",
+   "family": "o200k",
+   "text": "Great question. The short answer is that caching helps most when many requests share a long, identical prefix, such as a system prompt with detailed instructions or a large document that several questions refer to.\n\nWhen a request arrives, the provider checks whether the beginning of the prompt matches something it has processed recently. If it does, those tokens are read from the cache instead of being computed again, which is both faster and cheaper. The rest of the prompt, the part that changes from request to request, is processed normally.\n\nThere are a few practical consequences. First, put the stable content at the start and the variable content at the end. Second, keep the cached part byte-for-byte identical: even a changed timestamp or a reordered list breaks the match. Third, remember that caches expire after a few minutes of inactivity, so the savings depend on traffic patterns as well as prompt design.\n\nIn our measurements, a support assistant with a 6,000-token system prompt saw its average input cost fall by roughly 70 percent after we reorganised the prompt this way.",
+   "expected": 232,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 212
+   }
+  },
+  {
+   "name": "assistant_long_reply/cl100k",
+   "family": "cl100k",
+   "text": "Great question. The short answer is that caching helps most when many requests share a long, identical prefix, such as a system prompt with detailed instructions or a large document that several questions refer to.\n\nWhen a request arrives, the provider checks whether the beginning of the prompt matches something it has processed recently. If it does, those tokens are read from the cache instead of being computed again, which is both faster and cheaper. The rest of the prompt, the part that changes from request to request, is processed normally.\n\nThere are a few practical consequences. First, put the stable content at the start and the variable content at the end. Second, keep the cached part byte-for-byte identical: even a changed timestamp or a reordered list breaks the match. Third, remember that caches expire after a few minutes of inactivity, so the savings depend on traffic patterns as well as prompt design.\n\nIn our measurements, a support assistant with a 6,000-token system prompt saw its average input cost fall by roughly 70 percent after we reorganised the prompt this way.",
+   "expected": 232,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 214
+   }
+  },
+  {
+   "name": "emoji_social/o200k",
+   "family": "o200k",
+   "text": "Just finished my first marathon!!! 🏃‍♀️🎉 4:12:37 — not fast, but I didn't stop once 💪 Huge thanks to everyone who cheered at mile 20, you have no idea how much that helped ❤️ #marathon #running #goals",
+   "expected": 60,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 61
+   }
+  },
+  {
+   "name": "emoji_social/cl100k",
+   "family": "cl100k",
+   "text": "Just finished my first marathon!!! 🏃‍♀️🎉 4:12:37 — not fast, but I didn't stop once 💪 Huge thanks to everyone who cheered at mile 20, you have no idea how much that helped ❤️ #marathon #running #goals",
+   "expected": 62,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 62
+   }
+  },
+  {
+   "name": "support_reply/o200k",
+   "family": "o200k",
+   "text": "Thanks for reaching out, and sorry for the trouble with your invoice. I checked your account and the duplicate charge from March 3 has already been reversed; it can take three to five business days to appear on your statement. If it still isn't there by next Friday, reply to this email with a screenshot and I'll escalate it to our billing team right away.",
+   "expected": 78,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 74
+   }
+  },
+  {
+   "name": "support_reply/cl100k",
+   "family": "cl100k",
+   "text": "Thanks for reaching out, and sorry for the trouble with your invoice. I checked your account and the duplicate charge from March 3 has already been reversed; it can take three to five business days to appear on your statement. If it still isn't there by next Friday, reply to this email with a screenshot and I'll escalate it to our billing team right away.",
+   "expected": 78,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 74
+   }
+  },
+  {
+   "name": "go_code/o200k",
+   "family": "o200k",
+   "text": "func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {\n\tctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)\n\tdefer cancel()\n\tif err := s.db.PingContext(ctx); err != nil {\n\t\thttp.Error(w, \"database unavailable\", http.StatusServiceUnavailable)\n\t\treturn\n\t}\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\t_ = json.NewEncoder(w).Encode(map[string]string{\"status\": \"ok\"})\n}\n",
+   "expected": 113,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 101
+   }
+  },
+  {
+   "name": "go_code/cl100k",
+   "family": "cl100k",
+   "text": "func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {\n\tctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)\n\tdefer cancel()\n\tif err := s.db.PingContext(ctx); err != nil {\n\t\thttp.Error(w, \"database unavailable\", http.StatusServiceUnavailable)\n\t\treturn\n\t}\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\t_ = json.NewEncoder(w).Encode(map[string]string{\"status\": \"ok\"})\n}\n",
+   "expected": 113,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 100
+   }
+  },
+  {
+   "name": "italian/o200k",
+   "family": "o200k",
+   "text": "La nuova linea ferroviaria collegherà le due città in meno di un'ora, riducendo notevolmente i tempi di viaggio per migliaia di pendolari. I lavori dovrebbero concludersi entro la fine del prossimo anno, anche se alcuni comitati locali hanno chiesto ulteriori verifiche sull'impatto ambientale.",
+   "expected": 61,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 70
+   }
+  },
+  {
+   "name": "italian/cl100k",
+   "family": "cl100k",
+   "text": "La nuova linea ferroviaria collegherà le due città in meno di un'ora, riducendo notevolmente i tempi di viaggio per migliaia di pendolari. I lavori dovrebbero concludersi entro la fine del prossimo anno, anche se alcuni comitati locali hanno chiesto ulteriori verifiche sull'impatto ambientale.",
+   "expected": 65,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 89
+   }
+  },
+  {
+   "name": "yaml_config/o200k",
+   "family": "o200k",
+   "text": "server:\n  port: 8080\n  read_timeout: 30s\n  write_timeout: 30s\ndatabase:\n  url: postgres://app:secret@db.internal:5432/app?sslmode=require\n  max_open_conns: 20\nfeatures:\n  - name: new_checkout\n    enabled: true\n    rollout_percent: 25\n  - name: dark_mode\n    enabled: false",
+   "expected": 83,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 88
+   }
+  },
+  {
+   "name": "yaml_config/cl100k",
+   "family": "cl100k",
+   "text": "server:\n  port: 8080\n  read_timeout: 30s\n  write_timeout: 30s\ndatabase:\n  url: postgres://app:secret@db.internal:5432/app?sslmode=require\n  max_open_conns: 20\nfeatures:\n  - name: new_checkout\n    enabled: true\n    rollout_percent: 25\n  - name: dark_mode\n    enabled: false",
+   "expected": 83,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 88
+   }
+  },
+  {
+   "name": "chinese_tech/o200k",
+   "family": "o200k",
+   "text": "在部署之前，请先确认数据库连接字符串是否正确，并检查防火墙是否允许端口5432的访问。如果启动失败，可以查看日志文件中的错误信息，通常会给出具体原因。",
+   "expected": 47,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 42
+   }
+  },
+  {
+   "name": "chinese_tech/cl100k",
+   "family": "cl100k",
+   "text": "在部署之前，请先确认数据库连接字符串是否正确，并检查防火墙是否允许端口5432的访问。如果启动失败，可以查看日志文件中的错误信息，通常会给出具体原因。",
+   "expected": 73,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 62
+   }
+  },
+  {
+   "name": "reasoning_math/o200k",
+   "family": "o200k",
+   "text": "Let x be the number of tickets sold at $12 and y the number sold at $8. We know x + y = 450 and 12x + 8y = 4,640. Multiplying the first equation by 8 gives 8x + 8y = 3,600, so subtracting yields 4x = 1,040 and x = 260. Therefore y = 190: the theater sold 260 full-price tickets and 190 discounted ones.",
+   "expected": 105,
+   "reference": {
+    "tokenizer": "o200k_base",
+    "tokens": 102
+   }
+  },
+  {
+   "name": "reasoning_math/cl100k",
+   "family": "cl100k",
+   "text": "Let x be the number of tickets sold at $12 and y the number sold at $8. We know x + y = 450 and 12x + 8y = 4,640. Multiplying the first equation by 8 gives 8x + 8y = 3,600, so subtracting yields 4x = 1,040 and x = 260. Therefore y = 190: the theater sold 260 full-price tickets and 190 discounted ones.",
+   "expected": 105,
+   "reference": {
+    "tokenizer": "cl100k_base",
+    "tokens": 102
+   }
+  },
+  {
+   "name": "edge/empty/o200k",
+   "family": "o200k",
+   "text": "",
+   "expected": 0
+  },
+  {
+   "name": "edge/empty/cl100k",
+   "family": "cl100k",
+   "text": "",
+   "expected": 0
+  },
+  {
+   "name": "edge/single_space/o200k",
+   "family": "o200k",
+   "text": " ",
+   "expected": 1
+  },
+  {
+   "name": "edge/single_space/cl100k",
+   "family": "cl100k",
+   "text": " ",
+   "expected": 1
+  },
+  {
+   "name": "edge/newlines/o200k",
+   "family": "o200k",
+   "text": "\n\n\n",
+   "expected": 1
+  },
+  {
+   "name": "edge/newlines/cl100k",
+   "family": "cl100k",
+   "text": "\n\n\n",
+   "expected": 1
+  },
+  {
+   "name": "edge/camel_case/o200k",
+   "family": "o200k",
+   "text": "fetchWithRetry(url)",
+   "expected": 6
+  },
+  {
+   "name": "edge/camel_case/cl100k",
+   "family": "cl100k",
+   "text": "fetchWithRetry(url)",
+   "expected": 6
+  },
+  {
+   "name": "edge/digits/o200k",
+   "family": "o200k",
+   "text": "x = 1234567",
+   "expected": 6
+  },
+  {
+   "name": "edge/digits/cl100k",
+   "family": "cl100k",
+   "text": "x = 1234567",
+   "expected": 6
+  },
+  {
+   "name": "edge/tab_indent/o200k",
+   "family": "o200k",
+   "text": "\tctx := 1\n\treturn",
+   "expected": 6
+  },
+  {
+   "name": "edge/tab_indent/cl100k",
+   "family": "cl100k",
+   "text": "\tctx := 1\n\treturn",
+   "expected": 6
+  },
+  {
+   "name": "edge/glued_punct/o200k",
+   "family": "o200k",
+   "text": "self._last.tokens",
+   "expected": 5
+  },
+  {
+   "name": "edge/glued_punct/cl100k",
+   "family": "cl100k",
+   "text": "self._last.tokens",
+   "expected": 5
+  },
+  {
+   "name": "edge/spaced_punct/o200k",
+   "family": "o200k",
+   "text": "say \"hi\" (now)",
+   "expected": 7
+  },
+  {
+   "name": "edge/spaced_punct/cl100k",
+   "family": "cl100k",
+   "text": "say \"hi\" (now)",
+   "expected": 7
+  },
+  {
+   "name": "edge/punct_newline/o200k",
+   "family": "o200k",
+   "text": "end.\n\nNext:\n    item",
+   "expected": 6
+  },
+  {
+   "name": "edge/punct_newline/cl100k",
+   "family": "cl100k",
+   "text": "end.\n\nNext:\n    item",
+   "expected": 6
+  },
+  {
+   "name": "edge/accented/o200k",
+   "family": "o200k",
+   "text": "café über naïve",
+   "expected": 3
+  },
+  {
+   "name": "edge/accented/cl100k",
+   "family": "cl100k",
+   "text": "café über naïve",
+   "expected": 6
+  },
+  {
+   "name": "edge/cyrillic/o200k",
+   "family": "o200k",
+   "text": "Привет мир",
+   "expected": 2
+  },
+  {
+   "name": "edge/cyrillic/cl100k",
+   "family": "cl100k",
+   "text": "Привет мир",
+   "expected": 4
+  },
+  {
+   "name": "edge/cjk_mix/o200k",
+   "family": "o200k",
+   "text": "数据库5432，请检查。",
+   "expected": 7
+  },
+  {
+   "name": "edge/cjk_mix/cl100k",
+   "family": "cl100k",
+   "text": "数据库5432，请检查。",
+   "expected": 9
+  },
+  {
+   "name": "edge/hangul/o200k",
+   "family": "o200k",
+   "text": "안녕하세요 세계",
+   "expected": 5
+  },
+  {
+   "name": "edge/hangul/cl100k",
+   "family": "cl100k",
+   "text": "안녕하세요 세계",
+   "expected": 9
+  },
+  {
+   "name": "edge/emoji/o200k",
+   "family": "o200k",
+   "text": "ok 👍🏽 done 🎉",
+   "expected": 7
+  },
+  {
+   "name": "edge/emoji/cl100k",
+   "family": "cl100k",
+   "text": "ok 👍🏽 done 🎉",
+   "expected": 7
+  },
+  {
+   "name": "edge/long_word/o200k",
+   "family": "o200k",
+   "text": "internationalization antidisestablishmentarianism",
+   "expected": 13
+  },
+  {
+   "name": "edge/long_word/cl100k",
+   "family": "cl100k",
+   "text": "internationalization antidisestablishmentarianism",
+   "expected": 13
+  }
+ ]
+}

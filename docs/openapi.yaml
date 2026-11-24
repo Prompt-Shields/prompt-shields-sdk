@@ -137,6 +137,7 @@ components:
             audit:read: Receive the tenant's admin audit trail as `audit.*` webhook events, list it from `/audit`, or pull it from `/siem/audit` (never granted by default)
             evidence:read: Pull per-call routing evidence as NDJSON from `/siem/calls` (never granted by default)
             security-events:read: List the gateway security events stored for the tenant from `/security-events` (never granted by default)
+            logs:read: Read a call's logged request and response payload from `/calls/{call_id}`; every read is audited (never granted by default)
             traces:read: List the tenant's agent traces and read one trace's spans from `/traces` (never granted by default)
             mcp:read: Read observed MCP servers and tools, with each server's asset and owner, and their daily tool-call metering (never granted by default)
             learner:read: List routing learner snapshots and recommendations, with projected and realised savings (never granted by default)
@@ -2880,6 +2881,173 @@ components:
         - admin:policies
         - admin:inference-credentials
 
+    PayloadLoggingMode:
+      type: string
+      enum: ['off', metadata, redacted, full]
+      description: |
+        `off` stores nothing (the default); `metadata` stores route, status,
+        error flag and sizes; `redacted` also stores the request and
+        response with PII replaced by category placeholders; `full` stores
+        them as sent (owner only).
+
+    PayloadLoggingSettings:
+      type: object
+      properties:
+        mode:
+          $ref: '#/components/schemas/PayloadLoggingMode'
+        sample_rate:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Share of calls kept, decided per call id
+        on_error_only:
+          type: boolean
+          description: Keep only calls with `error` or a status of 400 or more
+        routes:
+          type: array
+          items:
+            type: string
+          description: Routes logged (exact, or a prefix ending in `*`); empty logs every route
+        retention_days:
+          type: integer
+          description: Days payloads are kept (`PS_PAYLOAD_RETENTION_DAYS_DEFAULT`, 30, unless set)
+      required: [mode, sample_rate, on_error_only, routes, retention_days]
+
+    PutPayloadLoggingRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          $ref: '#/components/schemas/PayloadLoggingMode'
+        sample_rate:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 1
+        on_error_only:
+          type: boolean
+          default: false
+        routes:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            pattern: '^[\x21-\x7e]{1,256}$'
+          default: []
+        retention_days:
+          type: integer
+          minimum: 1
+          maximum: 36500
+          nullable: true
+          description: Payload retention in days; null or absent uses the default
+      required: [mode]
+
+    LegalHold:
+      type: object
+      properties:
+        legal_hold:
+          type: boolean
+        since:
+          type: string
+          format: date-time
+          nullable: true
+      required: [legal_hold, since]
+
+    PutLegalHoldRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+      required: [enabled]
+
+    PayloadIngestRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        call_id:
+          type: string
+          pattern: '^[A-Za-z0-9_.:-]{1,128}$'
+          description: The call's id, as on its usage event
+        route:
+          type: string
+          maxLength: 256
+          description: The gateway route, e.g. `/v1/chat/completions`
+        status_code:
+          type: integer
+          minimum: 100
+          maximum: 599
+        error:
+          type: boolean
+          default: false
+        user_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: The end user's id; stored only as the tenant-salted hash
+        request:
+          description: The request body (any JSON)
+        response:
+          description: The response body (any JSON)
+      required: [call_id]
+
+    PayloadIngestResult:
+      type: object
+      properties:
+        call_id:
+          type: string
+        stored:
+          type: boolean
+        mode:
+          $ref: '#/components/schemas/PayloadLoggingMode'
+        reason:
+          type: string
+          nullable: true
+          enum: ['off', not_sampled, not_error, route_not_logged, duplicate, encryption_unavailable, null]
+          description: Why the payload was not stored (null when it was)
+        redactions:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Spans replaced per category (`email`, `card`, `iban`, `ssn`, `phone`, `ip_address`)
+      required: [call_id, stored, mode, reason, redactions]
+
+    CallPayload:
+      type: object
+      properties:
+        call_id:
+          type: string
+        mode:
+          $ref: '#/components/schemas/PayloadLoggingMode'
+        received_at:
+          type: string
+          format: date-time
+        route:
+          type: string
+          nullable: true
+        status_code:
+          type: integer
+          nullable: true
+        error:
+          type: boolean
+        request_bytes:
+          type: integer
+          description: Size of the request as sent (before redaction)
+        response_bytes:
+          type: integer
+        redactions:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Spans replaced per category, never the values
+        request:
+          nullable: true
+          description: The logged request (redacted in `redacted` mode); null in `metadata` mode
+        response:
+          nullable: true
+          description: The logged response; null in `metadata` mode
+      required: [call_id, mode, received_at, route, status_code, error, request_bytes, response_bytes, redactions, request, response]
+
     EraseUserRequest:
       type: object
       additionalProperties: false
@@ -5180,6 +5348,76 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /ingest/payloads:
+    post:
+      operationId: ingestPayload
+      tags: [Ingest]
+      summary: Log one call's request and response payload (payload logging)
+      description: |
+        One model call's request and response, stored as the tenant's
+        payload logging setting (`/api/v1/admin/payload-logging`) says:
+        nothing while it is `off` (the default), sizes and status only in
+        `metadata`, PII replaced with category placeholders before anything
+        is written in `redacted`, as sent in `full`. Content is stored
+        encrypted with a per-tenant key. The setting is read on every
+        request, so turning logging off stops writes at once. A call id
+        already stored is not stored again. `user_id` is stored only as the
+        tenant-salted hash. While the mode is `full` the response carries
+        `x-ps-logging: full`. The tenant is the ingest key's. Counts against
+        the tenant's `events` ingest limit, apart from `/ingest/events`.
+      security:
+        - TenantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PayloadIngestRequest'
+      responses:
+        '202':
+          description: Accepted; `stored` says whether it was written, `reason` why not
+          headers:
+            x-ps-logging:
+              description: '`full` while the tenant logs full payloads'
+              schema:
+                type: string
+                enum: [full]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadIngestResult'
+        '400':
+          description: An invalid field (named, its value never echoed), or a body that is not JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: The body exceeds 4 MiB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Not JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: The tenant's ingest rate limit (`PS_RATE_LIMIT_PER_MINUTE` or `ingest_rate_limits.events`) is exhausted
+          headers:
+            Retry-After:
+              description: Seconds until the limit resets
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /ingest/otel/v1/traces:
     post:
       operationId: ingestOtelTraces
@@ -7214,6 +7452,46 @@ paths:
           description: Invalid `cursor`
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /partner/v1/calls/{call_id}:
+    get:
+      operationId: getCallPayload
+      tags: [Sync]
+      summary: Get one call's logged payload
+      description: |
+        The request and response logged for one call when the tenant had
+        payload logging on: in `redacted` mode with PII replaced by
+        category placeholders, in `metadata` mode without content
+        (`request` and `response` are null). A payload past the tenant's
+        payload retention is not returned, unless the tenant is on legal
+        hold. Every read, found or not, writes a `payload.read` row to the
+        tenant's audit trail before the body is returned; if that write
+        fails the read fails with 503. Requires `logs:read`.
+      parameters:
+        - name: call_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_.:-]{1,128}$'
+      security:
+        - OAuth2: [logs:read]
+        - PartnerApiKey: []
+      responses:
+        '200':
+          description: The logged payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallPayload'
+        '400':
+          description: Invalid `call_id`
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No payload is stored for this call (never logged, purged or past retention)
+        '503':
+          description: The read could not be audited, so nothing is returned
 
   /partner/v1/security-events:
     get:
@@ -10592,6 +10870,122 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/AdminForbidden'
+
+  /api/v1/admin/payload-logging:
+    get:
+      operationId: getPayloadLogging
+      tags: [Admin]
+      summary: Get the tenant's payload logging setting
+      description: |
+        The tenant's payload logging setting; `off` when it was never set.
+        `retention_days` is the effective payload retention.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:privacy
+      responses:
+        '200':
+          description: The setting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadLoggingSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    put:
+      operationId: putPayloadLogging
+      tags: [Admin]
+      summary: Set the tenant's payload logging setting
+      description: |
+        Replaces the setting. `full` may only be turned on by a tenant owner
+        (an admin token issued for a principal with the tenant-wide `owner`
+        role, or an unbound token holding every admin scope); anyone with
+        `admin:privacy` may turn logging down or off. `redacted` and `full`
+        need the collector's encryption keyring (`PS_WEBHOOK_SECRET_KEYS`).
+        Every change writes a `payload_logging.set` row to the tenant's
+        audit trail.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:privacy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutPayloadLoggingRequest'
+      responses:
+        '200':
+          description: The new setting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadLoggingSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '409':
+          description: '`redacted` or `full` without `PS_WEBHOOK_SECRET_KEYS` on the collector'
+        '422':
+          description: Invalid setting
+
+  /api/v1/admin/legal-hold:
+    get:
+      operationId: getLegalHold
+      tags: [Admin]
+      summary: Get the tenant's legal hold
+      description: Whether the tenant is on legal hold, and since when.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:privacy
+      responses:
+        '200':
+          description: The legal hold
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalHold'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+    put:
+      operationId: putLegalHold
+      tags: [Admin]
+      summary: Place or lift the tenant's legal hold
+      description: |
+        While the tenant is on legal hold every retention purge skips it
+        (usage events, rollups, payloads, audit logs), and payloads past
+        their retention stay readable. Erasure (tenant or end user) still
+        runs. Every call writes a `tenant.legal_hold.set` row to the
+        tenant's audit trail.
+      security:
+        - TenantApiKey: []
+        - AdminToken: []
+      x-admin-scope: admin:privacy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutLegalHoldRequest'
+      responses:
+        '200':
+          description: The legal hold now
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalHold'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdminForbidden'
+        '422':
+          description: Missing or invalid `enabled`
 
   /api/v1/admin/asset-lifecycle/sweep:
     post:

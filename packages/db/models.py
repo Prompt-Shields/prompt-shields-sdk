@@ -258,6 +258,9 @@ class AIUsageEvent(Base):
     # client disconnected before the stream ended.
     stream_truncated = Column(Boolean)
     stream_cancelled = Column(Boolean)
+    # Where tokens_in / tokens_out came from (#389): "provider", or
+    # "estimated" when the SDK or gateway estimated any of them.
+    usage_source = Column(Text)
     # Cost attribution (#347), all optional; see collector/cost_attribution.py.
     # team_id / project_id: the tenant's team and project (#338) the call is
     # attributed to, resolved at ingest (no foreign key: events outlive a
@@ -1250,6 +1253,55 @@ class GatewaySecurityEvent(Base):
         Index("ix_gateway_security_events_tenant_received", "tenant_id", "received_at", "id"),
         Index(
             "ix_gateway_security_events_tenant_user",
+            "tenant_id",
+            "user_id_hash",
+            postgresql_where=text("user_id_hash IS NOT NULL"),
+        ),
+    )
+
+
+class CallPayload(Base):
+    """A logged request/response payload of one model call (#352), written
+    by ``collector.payload_logging`` when the tenant turned payload logging
+    on (off by default).
+
+    ``mode`` is the tenant's mode when the payload was written:
+    ``metadata`` (sizes, route and status only; ``ciphertext`` NULL),
+    ``redacted`` (PII spans replaced with category placeholders before
+    encryption) or ``full``. ``ciphertext`` is the JSON ``{"request": ...,
+    "response": ...}`` sealed with AES-256-GCM under a key derived per
+    tenant (collector.secret_keyring, bound to tenant and call id);
+    ``storage`` names where it lives (``database``: in ``ciphertext``).
+    ``redactions`` counts replaced spans per category, never values.
+    ``user_id_hash`` is the end user's id hashed with the tenant's salt,
+    as ``ai_usage_events.user_id_hash`` is, so erasure by user finds it.
+    One row per (tenant, ``call_id``). Purged after the tenant's payload
+    retention (default 30 days) unless the tenant is on legal hold.
+    """
+
+    __tablename__ = "call_payloads"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    call_id = Column(Text, nullable=False)
+    received_at = Column(TIMESTAMP(timezone=True), nullable=False, default=utcnow)
+    mode = Column(Text, nullable=False)
+    route = Column(Text)
+    status_code = Column(Integer)
+    is_error = Column(Boolean, nullable=False, default=False)
+    request_bytes = Column(Integer, nullable=False, default=0)
+    response_bytes = Column(Integer, nullable=False, default=0)
+    redactions = Column(JSONB, nullable=False, default=dict)
+    storage = Column(Text, nullable=False, default="database")
+    key_id = Column(Text)
+    ciphertext = Column(Text)
+    user_id_hash = Column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "call_id", name="ux_call_payloads_call"),
+        Index("ix_call_payloads_tenant_received", "tenant_id", "received_at"),
+        Index(
+            "ix_call_payloads_tenant_user",
             "tenant_id",
             "user_id_hash",
             postgresql_where=text("user_id_hash IS NOT NULL"),
